@@ -121,6 +121,64 @@ DEV_LANE_PARALLELISM = CONFIG["parallelism"]["devLane"]
 # convention" in references/operations.md.
 HUMAN_ASSIGNEE = CONFIG["humanAssignee"]
 
+# Everything below is tunable per repo via the optional `pipeline` block in the
+# config; every key has the default shown here so an older config keeps working.
+_PIPELINE_DEFAULTS = {
+    "labels": {"standing": "epic:standing", "legacy": "epic:legacy",
+               "architected": "epic:architected"},
+    "branches": {"issuePrefix": "issue-", "epicPrefix": "epic-", "gateSuffix": "-gate-"},
+    "worktrees": {"root": "/tmp", "devPrefix": "sdlc-dev-", "epicPrefix": "sdlc-epic-",
+                  "reviewPrefix": "sdlc-review-"},
+    "gates": {"skipConfidenceThreshold": 95},
+    "escalation": {"replaceAt": 3, "needsHumanAt": 6},
+    # `{docRoot}` is formatted with the config's `docRoot` at load time, so the
+    # default lands next to the committed docs of the driven repo (e.g.
+    # `docs/sdlc/retro-watermark`) rather than inside the skill checkout.
+    "retro": {"everyClosedIssues": 5,
+              "watermarkFile": "{docRoot}/retro-watermark"},
+    "continuous": {"cycleCap": 8},
+    "models": {"product": "opus", "architecture": "opus", "arch-review": "opus",
+               "lld": "sonnet", "lld-review": "opus", "development": "sonnet",
+               "testing": "sonnet", "pr-review": "opus"},
+    "docTemplates": "_templates",
+}
+
+
+def _pipeline_config() -> dict:
+    """Merge the config's `pipeline` block over `_PIPELINE_DEFAULTS`, one level deep."""
+    merged = {}
+    user = CONFIG.get("pipeline", {}) or {}
+    for key, default in _PIPELINE_DEFAULTS.items():
+        if isinstance(default, dict):
+            merged[key] = {**default, **(user.get(key) or {})}
+        else:
+            merged[key] = user.get(key, default)
+    merged["retro"]["watermarkFile"] = merged["retro"]["watermarkFile"].format(docRoot=DOC_ROOT)
+    return merged
+
+
+PIPELINE = _pipeline_config()
+LABELS = PIPELINE["labels"]
+ISSUE_BRANCH_PREFIX = PIPELINE["branches"]["issuePrefix"]
+EPIC_BRANCH_PREFIX = PIPELINE["branches"]["epicPrefix"]
+# Joins an epic branch name to the gate stage it is carrying a doc for:
+# `epic-<n>` + `-gate-` + `product` -> `epic-5-gate-product`. See `epic_gate_branch`.
+GATE_BRANCH_SUFFIX = PIPELINE["branches"]["gateSuffix"]
+ESCALATION = PIPELINE["escalation"]
+
+
+def issue_branch(number: int) -> str:
+    """The per-child working branch (default `issue-<n>`)."""
+    return f"{ISSUE_BRANCH_PREFIX}{number}"
+
+
+def issue_number_from_branch(branch: str) -> Optional[int]:
+    """Inverse of `issue_branch`; None for any branch that isn't one."""
+    if not branch.startswith(ISSUE_BRANCH_PREFIX):
+        return None
+    rest = branch[len(ISSUE_BRANCH_PREFIX):]
+    return int(rest) if rest.isdigit() else None
+
 # Native GitHub Issue Types (Task/Bug/Feature) and the org-provisioned "Priority"
 # issue field replace the old epic/bug/type:bug/priority:pX labels -- see
 # "Issue taxonomy" in references/operations.md. IDs looked up once via GraphQL introspection
@@ -413,18 +471,22 @@ class GitHub:
         out = self._run(["gh", "pr", "view", str(number), "--repo", self.repo, "--json", fields])
         return json.loads(out)
 
-    def path_on_main(self, path: str) -> bool:
-        """Whether `path` exists on `main`, checked GitHub-side so it is correct
-        regardless of what any local checkout or worktree currently holds.
+    def path_on_ref(self, path: str, ref: str = "main") -> bool:
+        """Whether `path` exists on branch `ref`, checked GitHub-side so it is
+        correct regardless of what any local checkout or worktree currently holds.
 
-        Backs the "docs must reach main" item in `cmd_check_epics_closeable`.
-        An epic's `architecture.md` that lives only on its `epic-<n>` branch is
-        reachable only by SHA, and a SHA quoted from an old comment can resolve
-        to a superseded draft -- which is exactly how #209's `pr-review` raised
-        a citation finding against an unreachable commit that `development` then
-        had to disprove twice (2026-08-20, see references/history.md)."""
+        Backs the "docs are on the epic branch" item in `cmd_check_epics_closeable`
+        (`ref=epic-<n>`). An epic's `architecture.md` that never merged off its
+        gate sub-branch is reachable only by SHA, and a SHA quoted from an old
+        comment can resolve to a superseded draft -- which is exactly how #209's
+        `pr-review` raised a citation finding against an unreachable commit that
+        `development` then had to disprove twice (2026-08-20, see
+        references/history.md). Since 2026-09-06 the epic branch, not `main`, is
+        where a merged epic gate lands the doc, so that is the ref checked for an
+        open epic; `close-epic`'s final merge is what carries it to `main`."""
         try:
-            self._run(["gh", "api", f"repos/{self.repo}/contents/{path}?ref=main", "--jq", ".sha"])
+            self._run(["gh", "api", f"repos/{self.repo}/contents/{path}?ref={ref}",
+                       "--jq", ".sha"])
             return True
         except GhError:
             return False
@@ -549,7 +611,7 @@ def is_epic_standing(issue: dict) -> bool:
     """True for a permanent umbrella epic (a standing backlog epic) that is never proposed for
     closing, even when momentarily empty of open children -- marked with the
     `epic:standing` label. See "Epic closing" in references/epics.md."""
-    return has_label(issue, "epic:standing")
+    return has_label(issue, LABELS["standing"])
 
 
 def is_epic_legacy(issue: dict) -> bool:
@@ -559,7 +621,7 @@ def is_epic_legacy(issue: dict) -> bool:
     itself and every one of its children -- no per-issue flow, no epic-level
     flow, nothing. Applied by hand to an epic the operator has decided is out
     of this pipeline's scope entirely."""
-    return has_label(issue, "epic:legacy")
+    return has_label(issue, LABELS["legacy"])
 
 
 def is_epic_architected(issue: dict) -> bool:
@@ -569,7 +631,7 @@ def is_epic_architected(issue: dict) -> bool:
     label rather than a comment marker so `next-action` can read it straight off
     the bulk `issue_list()` fetch (which includes labels) instead of an extra
     per-epic `issue_view` call. See "Epic-level stages" in references/epics.md."""
-    return has_label(issue, "epic:architected")
+    return has_label(issue, LABELS["architected"])
 
 
 def default_stage(issue: dict, parent_epic: Optional[dict] = None) -> str:
@@ -675,7 +737,7 @@ _LOCAL_CI_MARKER = re.compile(
 
 # Suite keys a `local-ci` attestation may carry, one per required GHA workflow that
 # went main-only. Kept in step with the `suite` field on REQUIRED_WORKFLOWS below.
-LOCAL_CI_SUITES = ("backend", "frontend")
+LOCAL_CI_SUITES = tuple(dict.fromkeys(w["suite"] for w in CONFIG["requiredWorkflows"]))
 
 
 def local_ci_suites_attested(comments: list, head_sha: str) -> set:
@@ -833,7 +895,19 @@ def epic_branch(epic: int) -> str:
     `product.md`/`architecture.md`, then each child's `issue-<n>`. At epic close
     it takes one merge *from* `origin/main`, gets verified as a whole, and is
     merged to `main` as a single integration."""
-    return f"epic-{epic}"
+    return f"{EPIC_BRANCH_PREFIX}{epic}"
+
+
+def epic_gate_branch(epic: int, stage: str) -> str:
+    """The short-lived sub-branch an epic-level gate doc is authored on (default
+    `epic-<n>-gate-<stage>`, e.g. `epic-5-gate-product`), cut from
+    `origin/epic-<n>`. `open-gate --unit epic` opens it against `epic-<n>`, the
+    human merges it (squash is fine -- the sub-branch is disposable), and the doc
+    lands on the epic branch; `epic-<n>` itself only ever reaches `main` at
+    `close-epic`, unsquashed. Decided 2026-09-06 (references/history.md) --
+    before that an epic's gate PR went `epic-<n>` -> `main` directly. A
+    standing-epic child's gate still runs on `issue-<n>` -> `main`."""
+    return f"{epic_branch(epic)}{GATE_BRANCH_SUFFIX}{stage}"
 
 
 def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
@@ -1291,7 +1365,7 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
             skipped.append({"issue": number, "reason": f"pr-review already recorded "
                                                         f"{outcome[1]!r} for this round"})
             continue
-        branch = f"issue-{number}"
+        branch = issue_branch(number)
         prs = gh.pr_list_for_branch(branch)
         if not prs:
             skipped.append({"issue": number, "reason": f"no open PR on {branch}"})
@@ -1349,7 +1423,7 @@ def read_footprint(repo_path: str, issue: int, runner: Runner = _default_runner)
     for doc in ("lld.md", "architecture.md"):
         try:
             text = runner(["git", "-C", repo_path, "show",
-                            f"origin/issue-{issue}:{DOC_ROOT}/issue-{issue}/{doc}"])
+                            f"origin/{issue_branch(issue)}:{DOC_ROOT}/issue-{issue}/{doc}"])
         except GhError:
             continue
         footprint = parse_footprint(text)
@@ -1388,6 +1462,48 @@ def worktree_path_for_branch(branch: str, runner: Runner = _default_runner,
         elif line == f"branch refs/heads/{branch}" and path is not None:
             return path
     return None
+
+
+def worktree_path(unit: str, number: int) -> str:
+    """Where the orchestrator keeps this unit's worktree, from `pipeline.worktrees`
+    (default `/tmp/sdlc-dev-<n>` for a child, `/tmp/sdlc-epic-<n>` for an epic)."""
+    w = PIPELINE["worktrees"]
+    prefix = w["epicPrefix"] if unit == "epic" else w["devPrefix"]
+    return os.path.join(w["root"], f"{prefix}{number}")
+
+
+def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: str = ".",
+                     runner: Runner = _default_runner) -> dict:
+    """Stand up the unit's worktree the one correct way, so the orchestrator never
+    hand-types `git worktree add` (SKILL.md, "Deterministic control plane").
+
+    * Branch already checked out somewhere -> no-op, returns that path.
+    * `origin/<branch>` exists (a resume, or a later stage) -> `-B <branch>
+      origin/<branch>`: the pushed tip, never fresh off `main` (the 2026-09-04
+      resume-base bug -- see references/parallelism.md, "Resume base").
+    * Otherwise a first touch -> `-b <branch>` off the unit's integration base
+      (`origin/epic-<parent>` for a normal-epic child, `origin/main` for a
+      standing-epic child, a parentless issue, or an epic's own branch).
+    Always fetches first so every origin ref read is current."""
+    branch = epic_branch(number) if unit == "epic" else issue_branch(number)
+    path = worktree_path(unit, number)
+    existing = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
+    if existing:
+        return {"created": False, "path": existing, "branch": branch,
+                "reason": "branch already checked out in a live worktree"}
+    runner(["git", "-C", repo_path, "fetch", "origin"])
+    on_origin = runner(["git", "-C", repo_path, "branch", "-r", "--list",
+                        f"origin/{branch}"]).strip()
+    if on_origin:
+        base = f"origin/{branch}"
+        runner(["git", "-C", repo_path, "worktree", "add", path, "-B", branch, base])
+        resumed = True
+    else:
+        base = f"origin/{integration_base(gh, number, unit)}"
+        runner(["git", "-C", repo_path, "worktree", "add", path, "-b", branch, base])
+        resumed = False
+    return {"created": True, "path": path, "branch": branch, "base": base,
+            "resumed": resumed}
 
 
 def release_worktree(branch: str, runner: Runner = _default_runner,
@@ -1545,9 +1661,9 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
     active_branches = active_worktree_branches(repo_path, runner=runner)
     active_footprints = []
     for branch in sorted(active_branches):
-        if not branch.startswith("issue-") or not branch[len("issue-"):].isdigit():
+        number = issue_number_from_branch(branch)
+        if number is None:
             continue
-        number = int(branch[len("issue-"):])
         fp = read_footprint(repo_path, number, runner=runner)
         if fp:
             active_footprints.append((number, fp))
@@ -1556,7 +1672,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
     selected_footprints = list(active_footprints)
     for issue in sorted(children, key=sort_key):
         number = issue["number"]
-        branch = f"issue-{number}"
+        branch = issue_branch(number)
         if branch in active_branches:
             skipped.append({"issue": number, "reason": "already active in its own worktree"})
             continue
@@ -1611,9 +1727,9 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
     # as a full lane and silently starved the invocation.
     occupied, stale = [], []
     for branch in sorted(active_branches):
-        if not branch.startswith("issue-") or not branch[len("issue-"):].isdigit():
+        number = issue_number_from_branch(branch)
+        if number is None:
             continue
-        number = int(branch[len("issue-"):])
         issue = by_number.get(number)
         if issue is None or issue["state"] != "OPEN":
             stale.append({"branch": branch, "reason": "issue is closed or not found"})
@@ -1822,10 +1938,19 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
                    runner: Runner = _default_runner) -> dict:
     stage = doc.rsplit(".", 1)[0]  # "product.md" -> "product", "architecture.md" -> "architecture"
     branch = f"{unit}-{issue}"
-    repo_path = resolve_repo_path(repo_path, branch, runner=runner)
+    # A standing-epic child's gate is `issue-<n>` -> `main`. An epic-level gate is
+    # authored on a disposable sub-branch cut from the epic branch and opened
+    # against it -- `epic-<n>-gate-<stage>` -> `epic-<n>` -- so the doc lands on
+    # the epic branch when the human merges (squash or not), and `epic-<n>` alone
+    # ever merges to `main`, unsquashed, at `close-epic`. See `epic_gate_branch`.
+    if unit == "epic":
+        head, base = epic_gate_branch(issue, stage), epic_branch(issue)
+    else:
+        head, base = branch, "main"
+    repo_path = resolve_repo_path(repo_path, head, runner=runner)
     sha = git_rev_parse_head(repo_path, runner=runner)
     pr_number = gh.pr_create(
-        base="main", head=branch,
+        base=base, head=head,
         title=f"{title} — {doc} for review (#{issue})",
         body=_GATE_PR_BODY.format(issue=issue, next_stage=next_stage),
         draft=False,
@@ -1838,13 +1963,14 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
         f"⏸️ Awaiting human review — see #{pr_number}. Merge it to approve and continue to "
         f"`{next_stage}`, or leave review comments on it for anything that needs to change "
         f"(leave it unmerged — the pipeline picks up your comments and revises the doc "
-        f"automatically). Run `/sdlc-next` again once you've merged it, or any time after "
+        f"automatically). Run `/sdlc-pipeline` again once you've merged it, or any time after "
         f"leaving comments if you'd like the revision done sooner.\n\n"
         f"<!-- gate-pr: {stage}:{pr_number} -->\n"
         f"<!-- stage-transition: {stage}->human-review:{stage} @ {timestamp} -->"
     )
     gh.issue_comment(issue, comment)
-    return {"issue": issue, "unit": unit, "gate_pr": pr_number, "stage": stage, "sha": sha}
+    return {"issue": issue, "unit": unit, "gate_pr": pr_number, "stage": stage, "sha": sha,
+            "head": head, "base": base}
 
 
 def git_reconcile_branch(repo_path: str, branch: str, base: str = "main",
@@ -1861,10 +1987,14 @@ def git_reconcile_branch(repo_path: str, branch: str, base: str = "main",
     would try to replay commits `main` already has under different SHAs, producing
     spurious conflicts or duplicated diffs. A merge has no such problem -- it only
     ever looks at current tree content, never shared ancestry -- so it's the only
-    safe way to keep a branch current here. Gate PRs, by contrast, are never
-    squash-merged (see "Passing a gate" in references/gates.md) specifically so a later
-    `git_reconcile_branch` merge of `main` back into that same branch is a clean
-    no-op, not a phantom diff.
+    safe way to keep a branch current here. A per-issue gate PR (`issue-<n>` ->
+    `main`), by contrast, is never squash-merged (see "Passing a gate" in
+    references/gates.md) specifically so a later `git_reconcile_branch` merge of
+    `main` back into that same branch is a clean no-op, not a phantom diff. An
+    epic-level gate never touches `main` at all: its sub-branch merges into
+    `epic-<n>` (squash allowed -- the sub-branch is disposable), and `cmd_pass_gate`
+    then calls this with `base=epic-<n>` so the epic worktree just fast-forwards
+    to `origin/epic-<n>`.
 
     `checkout` here relies on `runner` raising on a nonzero exit (the default
     `_default_runner` does) so a checkout collision -- e.g. this exact branch
@@ -1899,7 +2029,7 @@ def git_reconcile_branch(repo_path: str, branch: str, base: str = "main",
         if not conflicted:
             raise
         runner(["git", "-C", repo_path, "merge", "--abort"])
-        raise MergeConflict(conflicted)
+        raise MergeConflict(conflicted, base=base)
     runner(["git", "-C", repo_path, "push", "origin", branch])
 
 
@@ -1910,10 +2040,11 @@ class MergeConflict(GhError):
     one except `cmd_sync_branch`) still gets the existing "operational
     failure, exit 1" behavior via `main()`'s generic `except GhError`."""
 
-    def __init__(self, files: list):
-        super().__init__(f"merge conflict reconciling with origin/main on {len(files)} file(s): "
-                          f"{', '.join(files)}")
+    def __init__(self, files: list, base: str = "main"):
+        super().__init__(f"merge conflict reconciling with origin/{base} on {len(files)} "
+                          f"file(s): {', '.join(files)}")
         self.files = files
+        self.base = base
 
 
 def cmd_sync_branch(gh: GitHub, repo_path: Optional[str], issue: int, unit: str = "issue",
@@ -2020,7 +2151,7 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], issue: int,
                           f"integrate into main, not an epic branch"}
     epic = epic_branch(parent_number)
     doc_path = f"{DOC_ROOT}/issue-{issue}/lld.md"
-    src_ref = f"origin/issue-{issue}"
+    src_ref = f"origin/{issue_branch(issue)}"
     epic_path = resolve_repo_path(repo_path, epic, runner=runner)
     runner(["git", "-C", epic_path, "fetch", "origin"])
     runner(["git", "-C", epic_path, "checkout", epic])
@@ -2049,7 +2180,7 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], issue: int,
         raise
     gh.issue_comment(issue,
         f"📄 Published `lld.md` to `{epic}` (`{sha}`) — the low-level design is now durable "
-        f"on the epic branch, independent of `issue-{issue}`, and siblings pick it up on "
+        f"on the epic branch, independent of `{issue_branch(issue)}`, and siblings pick it up on "
         f"their next `sync-branch`.\n\n"
         f"<!-- lld-doc-published: {epic}:{sha} @ {timestamp} -->")
     return {"issue": issue, "merged": True, "epic_branch": epic, "commit": sha}
@@ -2066,11 +2197,11 @@ def _complete_epic_architecture(gh: GitHub, epic_number: int, note: str) -> dict
     this is exactly what a second Gate B round from a deviation found mid-`lld`
     does. See "Epic-level stages" in references/epics.md."""
     gh.clear_stage_and_status_fields(epic_number)
-    gh.issue_edit(epic_number, add_labels=["epic:architected"])
+    gh.issue_edit(epic_number, add_labels=[LABELS["architected"]])
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     gh.issue_comment(epic_number,
         f"🏗️ Epic architecture phase complete — {note} Child issues become eligible for "
-        f"`lld` onward starting the next `/sdlc-next` pass.\n\n"
+        f"`lld` onward starting the next `/sdlc-pipeline` pass.\n\n"
         f"<!-- stage-transition: epic-architecture->children @ {timestamp} -->")
     return {"issue": epic_number, "unit": "epic", "epic_architecture_complete": True}
 
@@ -2098,7 +2229,7 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
     which fires in real time the instant a human merges the gate PR on GitHub,
     with no agent running at all) must NOT make that same claim -- it only
     advances the Stage field and clears Pipeline Status back to unset, leaving the
-    next actual `/sdlc-next` run to claim the stage for real, whenever that turns
+    next actual `/sdlc-pipeline` run to claim the stage for real, whenever that turns
     out to be. Without this distinction, a CI-driven gate merge looks identical to
     a crashed-mid-stage issue (Pipeline Status stuck at in-progress with a stale
     "picking this up" comment nobody acted on) -- `next-action`'s `resume` outcome
@@ -2117,8 +2248,16 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
         raise GhError(f"issue #{issue}'s gate-pr marker says this gate belongs to stage="
                        f"{actual_stage!r}, not stage={stage!r} -- pass next-action's own 'stage' "
                        f"field verbatim; it is the gate's owning doc-stage, not a target you pick")
-    repo_path = resolve_repo_path(repo_path, f"{unit}-{issue}", runner=runner)
-    git_reconcile_branch(repo_path, f"{unit}-{issue}", runner=runner)
+    branch = f"{unit}-{issue}"
+    repo_path = resolve_repo_path(repo_path, branch, runner=runner)
+    # A merged per-issue gate landed on `main`, so the issue branch reconciles
+    # with `origin/main`. A merged epic gate landed on `epic-<n>` itself (its head
+    # was the `epic-<n>-gate-<stage>` sub-branch), so the epic worktree reconciles
+    # with `origin/epic-<n>` -- `main` is not involved until `close-epic`. The
+    # epic's integration base is still `main`; `sync-branch --unit epic` keeps
+    # using it. See "The epic integration branch" in references/epics.md.
+    git_reconcile_branch(repo_path, branch,
+                          base=epic_branch(issue) if unit == "epic" else "main", runner=runner)
     if unit == "epic" and stage == "architecture":
         return _complete_epic_architecture(
             gh, issue, f"human review confirmed for `architecture.md` — merged via #{gate_pr}.")
@@ -2133,7 +2272,7 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
     else:
         gh.issue_comment(issue,
             f"✅ Human review confirmed for `{stage}.md` — merged via #{gate_pr} — "
-            f"Stage advanced to `{next_stage}`. Pick up with `/sdlc-next` whenever "
+            f"Stage advanced to `{next_stage}`. Pick up with `/sdlc-pipeline` whenever "
             f"you're ready to run this stage.\n\n"
             f"<!-- stage-transition: human-review:{stage}->{next_stage} @ {timestamp} -->")
         gh.set_stage_field(issue, next_stage)
@@ -2141,7 +2280,7 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
     return {"issue": issue, "unit": unit, "next_stage": next_stage, "claimed": live}
 
 
-GATE_B_SKIP_CONFIDENCE_THRESHOLD = 95
+GATE_B_SKIP_CONFIDENCE_THRESHOLD = PIPELINE["gates"]["skipConfidenceThreshold"]
 
 
 def cmd_skip_gate(gh: GitHub, issue: int, stage: str, confidence: int, summary: str,
@@ -2178,13 +2317,20 @@ def cmd_skip_gate(gh: GitHub, issue: int, stage: str, confidence: int, summary: 
 
 
 _CLOSES_ISSUE_RE = re.compile(r"\bCloses #\d+", re.IGNORECASE)
-# Matches both gate-branch shapes: `issue-<n>` (a per-issue gate on a
-# standing-epic child) and `epic-<n>` (an epic-level Gate A/B -- see
-# "Human-review gates" in references/gates.md). group(1) is the unit ("issue"/"epic"),
-# group(2) the number. Before 2026-08-20 this only matched `issue-<n>`, so the
-# real-time backstop silently skipped every epic gate merge/close and the
-# Feedback Received flip never fired for an epic gate.
-_GATE_BRANCH_RE = re.compile(r"^(issue|epic)-(\d+)$")
+# Matches both gate-branch head shapes: `issue-<n>` (a per-issue gate on a
+# standing-epic child, opened against `main`) and `epic-<n>-gate-<stage>` (an
+# epic-level Gate A/B sub-branch, opened against `epic-<n>` -- see "Human-review
+# gates" in references/gates.md and `epic_gate_branch`). Exactly one of the
+# `issue_n`/`epic_n` groups is set; `stage` is set only for the epic shape. A bare
+# `epic-<n>` head is deliberately *not* a gate any more -- that is the epic's
+# own integration PR (`close-epic`), and matching it would let a merged epic
+# close fire the gate backstop. Before 2026-08-20 this only matched `issue-<n>`;
+# from then until 2026-09-06 it also matched the bare `epic-<n>` head an epic
+# gate used to be opened from (see references/history.md).
+_GATE_BRANCH_RE = re.compile(
+    rf"^(?:{re.escape(ISSUE_BRANCH_PREFIX)}(?P<issue_n>\d+)"
+    rf"|{re.escape(EPIC_BRANCH_PREFIX)}(?P<epic_n>\d+){re.escape(GATE_BRANCH_SUFFIX)}"
+    rf"(?P<stage>product|architecture))$")
 # GitHub's own convention for a bot account's login (e.g. "github-actions[bot]") --
 # used by `cmd_mark_feedback_received` to ignore automated comments/reviews (most
 # importantly this workflow's own prior runs, and any other bot integration on the
@@ -2216,17 +2362,22 @@ def _match_open_gate(gh: GitHub, pr: dict, pr_number: int) -> tuple:
     `(issue_number, marker_stage, status, unit)` on a clean match -- `status` is the
     issue's exact current Pipeline Status value, for a caller (like
     `cmd_mark_feedback_received`) that needs to distinguish the two pending states;
-    `unit` is "issue" (an `issue-<n>` head branch) or "epic" (an `epic-<n>` head
-    branch, i.e. an epic-level Gate A/B) -- or raises `_NotAGate(reason)`."""
-    if pr.get("baseRefName") != "main":
-        raise _NotAGate(f"PR #{pr_number} base is {pr.get('baseRefName')!r}, not main")
-
+    `unit` is "issue" (an `issue-<n>` head branch, based on `main`) or "epic" (an
+    `epic-<n>-gate-<stage>` head branch based on `epic-<n>`, i.e. an epic-level
+    Gate A/B) -- or raises `_NotAGate(reason)`."""
     m = _GATE_BRANCH_RE.match(pr.get("headRefName") or "")
     if not m:
         raise _NotAGate(f"PR #{pr_number} head branch {pr.get('headRefName')!r} is not "
-                         f"an issue-<n> or epic-<n> branch")
-    unit = m.group(1)
-    issue_number = int(m.group(2))
+                         f"an issue-<n> or epic-<n>-gate-<stage> branch")
+    if m.group("issue_n") is not None:
+        unit, issue_number = "issue", int(m.group("issue_n"))
+        expected_base = "main"
+    else:
+        unit, issue_number = "epic", int(m.group("epic_n"))
+        expected_base = epic_branch(issue_number)
+    if pr.get("baseRefName") != expected_base:
+        raise _NotAGate(f"PR #{pr_number} base is {pr.get('baseRefName')!r}, not "
+                         f"{expected_base}")
 
     if _CLOSES_ISSUE_RE.search(pr.get("body") or ""):
         raise _NotAGate(f"PR #{pr_number} body contains 'Closes #' -- this is the "
@@ -2248,6 +2399,12 @@ def _match_open_gate(gh: GitHub, pr: dict, pr_number: int) -> tuple:
     if marker_pr != pr_number:
         raise _NotAGate(f"issue #{issue_number}'s open gate marker points at PR "
                          f"#{marker_pr}, not #{pr_number} -- not the currently open gate")
+    if unit == "epic" and m.group("stage") != marker_stage:
+        # The marker is the authority on which stage a gate belongs to; a head
+        # branch named for the other stage is not the gate the epic is waiting on.
+        raise _NotAGate(f"PR #{pr_number} head branch {pr.get('headRefName')!r} is a "
+                         f"{m.group('stage')} gate branch but epic #{issue_number}'s open "
+                         f"gate marker is for stage {marker_stage!r}")
 
     return issue_number, marker_stage, status, unit
 
@@ -2257,13 +2414,13 @@ def cmd_auto_pass_gate(gh: GitHub, repo_path: str, pr_number: int,
     """Entry point for `.github/workflows/gate-auto-advance.yml` -- reacts to any
     closed PR in the repo (merged or not) and, if (and only if) it recognizes it as a
     currently-open gate PR (see "Human-review gates" in references/gates.md), drives the same
-    deterministic field mutation a human running `/sdlc-next` by hand would reach --
+    deterministic field mutation a human running `/sdlc-pipeline` by hand would reach --
     but never the "claim this stage now" side effect, since no agent is actually
     about to run:
     - **Merged** -> calls `cmd_pass_gate` with `live=False`: advances the Stage
       field but leaves Pipeline Status unset (not in-progress) and skips the start
       comment, since nothing is actually about to work this stage in real time --
-      that only happens once a live `/sdlc-next` run claims it for real. See
+      that only happens once a live `/sdlc-pipeline` run claims it for real. See
       `cmd_pass_gate`'s own `live` docstring for why this distinction exists.
     - **Closed without merging** -> calls the same `cmd_mark_needs_human` logic --
       see "Edge cases" under "Human-review gates" in references/gates.md: a bare close carries
@@ -2271,7 +2428,7 @@ def cmd_auto_pass_gate(gh: GitHub, repo_path: str, pr_number: int,
       a guess.
 
     Either way, this fires the moment the human acts, instead of waiting for the next
-    manual `/sdlc-next` invocation to notice via `check-gate`. This is a real-time
+    manual `/sdlc-pipeline` invocation to notice via `check-gate`. This is a real-time
     backstop alongside that existing detection, not a replacement for it --
     `next-action` stays fully idempotent: once this has already advanced the fields
     (or marked the issue needs-human), it simply finds nothing left to do there.
@@ -2279,8 +2436,8 @@ def cmd_auto_pass_gate(gh: GitHub, repo_path: str, pr_number: int,
     Deliberately conservative: this fires for *every* closed PR in the repo (the
     workflow can't filter more precisely at the trigger level), so every branch below
     that isn't a clean, unambiguous gate-PR match returns a `skipped` result with no
-    mutation, never an error -- a still-open PR, a non-`main`-base, non-`issue-<n>`-
-    headed, or `Closes #`-carrying (development) PR is all completely normal traffic
+    mutation, never an error -- a still-open PR, a wrong-base, non-gate-headed, or
+    `Closes #`-carrying (development / epic-integration) PR is all completely normal traffic
     here, not a problem to surface. Uses `dict.get("ok", ...)` for its result
     convention (checked by `main()` below to set the exit code) rather than raising
     GhError on a mismatch -- unlike every other subcommand, a "not a gate PR" outcome
@@ -2305,8 +2462,8 @@ def cmd_auto_pass_gate(gh: GitHub, repo_path: str, pr_number: int,
 
     try:
         if merged:
-            # `unit` comes off the head branch (`issue-<n>` vs `epic-<n>`), so a
-            # merged epic-level Gate B correctly routes through
+            # `unit` comes off the head branch (`issue-<n>` vs
+            # `epic-<n>-gate-<stage>`), so a merged epic-level Gate B correctly routes through
             # `_complete_epic_architecture` instead of advancing the epic to a
             # stage it never runs.
             result = cmd_pass_gate(gh, repo_path, issue_number, pr_number, marker_stage,
@@ -2422,14 +2579,14 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str)
     for one branch. Reported as a structured exit-0 result with
     `created: False`, not an error -- an already-open PR is the normal, correct
     state to continue from."""
-    existing = gh.pr_list_for_branch(f"issue-{issue}")
+    existing = gh.pr_list_for_branch(issue_branch(issue))
     if existing:
         pr_number = existing[0]["number"]
         return {"issue": issue, "pr": pr_number, "created": False,
-                "reason": f"PR #{pr_number} is already open on issue-{issue} -- "
+                "reason": f"PR #{pr_number} is already open on {issue_branch(issue)} -- "
                           f"reusing it rather than opening a duplicate"}
     base = integration_base(gh, issue)
-    pr_number = gh.pr_create(base=base, head=f"issue-{issue}", title=title,
+    pr_number = gh.pr_create(base=base, head=issue_branch(issue), title=title,
                               body=f"{body}\n\nCloses #{issue}", draft=True)
     gh.set_stage_field(issue, "testing")
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2620,11 +2777,11 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
     `sync-branch` (merges origin/main in, pushing re-triggers CI), wait for
     green, re-run `merge-pr`."""
     base = integration_base(gh, issue)
-    behind = gh.branch_behind_by(f"issue-{issue}", base=base)
+    behind = gh.branch_behind_by(issue_branch(issue), base=base)
     if behind:
         return {"pr": pr_number, "issue": issue, "merged": False, "behind_base": behind,
                 "base": base,
-                "reason": f"branch issue-{issue} is {behind} commit(s) behind {base} -- CI ran "
+                "reason": f"branch {issue_branch(issue)} is {behind} commit(s) behind {base} -- CI ran "
                           f"on a stale base; run sync-branch, wait for fresh CI green, then "
                           f"re-run merge-pr"}
     missing = missing_pipeline_evidence(gh.issue_view(issue).get("comments", []))
@@ -2663,14 +2820,14 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
     # unpushed/dirty guards in release_worktree should be no-ops.
     return {"pr": pr_number, "issue": issue, "merged": True, "issue_closed": issue_closed,
             "config_changed": touches_pipeline_config(files),
-            "worktree": release_worktree(f"issue-{issue}", base_repo=repo_path, runner=gh._run)}
+            "worktree": release_worktree(issue_branch(issue), base_repo=repo_path, runner=gh._run)}
 
 
 def _release_unit_worktree(issue: int, base_repo: str = ".",
                             runner: Runner = _default_runner) -> dict:
     """Release whichever of `issue-<n>` / `epic-<n>` currently has a worktree --
     parking commands take a unit number without knowing which kind it is."""
-    for branch in (f"issue-{issue}", f"epic-{issue}"):
+    for branch in (issue_branch(issue), epic_branch(issue)):
         result = release_worktree(branch, runner=runner, base_repo=base_repo)
         if result.get("released") or result.get("reason") != "no worktree":
             return {**result, "branch": branch}
@@ -2718,7 +2875,7 @@ def cmd_mark_todo(gh: GitHub, issue: int) -> dict:
     board instead of a blank field, before anything else has claimed it. Skips
     cleanly (no mutation) if the issue already has any Pipeline Status value --
     covers the workflow re-firing, or `issues: opened` landing after some other
-    process (e.g. a fast first `/sdlc-next` claim) already set a real status;
+    process (e.g. a fast first `/sdlc-pipeline` claim) already set a real status;
     never clobber an already-meaningful value with `todo`."""
     fields = gh.issue_fields(issue)
     current = PIPELINE_STATUS_FIELD_NAMES.get(fields.get("Pipeline Status"))
@@ -2767,7 +2924,8 @@ def cmd_mark_issue_closed(gh: GitHub, issue: int) -> dict:
 # the trigger is a watermark ("5 or more closed since the last retro") instead of
 # the old `count % 5 == 0`, which both skipped whenever two issues closed between
 # checks and fired forever once the count query capped out.
-RETRO_WATERMARK_FILE = os.path.join(".claude", "skills", "sdlc-next", "retro-watermark")
+RETRO_WATERMARK_FILE = PIPELINE["retro"]["watermarkFile"]
+RETRO_EVERY = PIPELINE["retro"]["everyClosedIssues"]
 
 
 def cmd_retro_check(gh: GitHub, repo_path: str = ".", mark_done: bool = False) -> dict:
@@ -2781,11 +2939,12 @@ def cmd_retro_check(gh: GitHub, repo_path: str = ".", mark_done: bool = False) -
             watermark = int(f.read().strip() or 0)
     count = gh.closed_issue_count()
     if mark_done:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w") as f:
             f.write(f"{count}\n")
         return {"closed_count": count, "watermark": count, "marked_done": True}
     return {"closed_count": count, "watermark": watermark,
-            "run_retro": count - watermark >= 5}
+            "run_retro": count - watermark >= RETRO_EVERY}
 
 
 def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
@@ -2830,6 +2989,8 @@ def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
                 counts["total_clean"] += 1
                 counts["rework_since_last_clean"] = 0
     return {"issue": issue,
+            "thresholds": {"replace_at": ESCALATION["replaceAt"],
+                           "needs_human_at": ESCALATION["needsHumanAt"]},
             "pr_review_rework_since_last_clean": rework_since_clean,
             "pr_review_total_rework": total_rework,
             "pr_review_total_clean": total_clean,
@@ -2899,15 +3060,22 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
             results.append({"epic": epic["number"], "title": epic["title"], "already_notified": True})
             continue
         open_dependents = sorted({d for c in children for d in gh.blocking(c["number"])})
+        # An epic's gate PRs land its docs on `epic-<n>` (the gate sub-branch merges
+        # there, not to `main` -- see `epic_gate_branch`); `close-epic`'s final
+        # merge is what carries them to `main`. So for a still-open epic the branch
+        # to check is the epic branch, GitHub-side.
+        branch = epic_branch(epic["number"])
         missing_docs = [f"{DOC_ROOT}/epic-{epic['number']}/{name}"
                         for name in ("product.md", "architecture.md")
-                        if not gh.path_on_main(f"{DOC_ROOT}/epic-{epic['number']}/{name}")]
+                        if not gh.path_on_ref(f"{DOC_ROOT}/epic-{epic['number']}/{name}", branch)]
         docs_line = (
-            f"- [ ] {len(missing_docs)} epic doc(s) never reached `main` "
-            f"({', '.join(f'`{d}`' for d in missing_docs)}) — land them before closing, or they stay "
-            "reachable only by branch ref\n"
+            f"- [ ] {len(missing_docs)} epic doc(s) never reached `{branch}` "
+            f"({', '.join(f'`{d}`' for d in missing_docs)}) — merge their gate PRs before "
+            "closing, or they stay reachable only by an unmerged gate branch ref and never "
+            "reach `main`\n"
             if missing_docs else
-            "- [x] This epic's `product.md` and `architecture.md` are both on `main` (auto-verified)\n"
+            f"- [x] This epic's `product.md` and `architecture.md` are both on `{branch}` "
+            "(auto-verified) — `close-epic`'s merge carries them to `main`\n"
         )
         dependents_line = (
             f"- [ ] {len(open_dependents)} still-open issue(s) reference/depend on a closed child of this epic "
@@ -2933,7 +3101,8 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
         gh.issue_comment(epic["number"], checklist)
         gh.issue_edit(epic["number"], add_assignees=[HUMAN_ASSIGNEE])
         results.append({"epic": epic["number"], "title": epic["title"], "notified": True,
-                         "open_dependents": open_dependents, "docs_missing_from_main": missing_docs})
+                         "open_dependents": open_dependents,
+                         "docs_missing_from_epic_branch": missing_docs})
     return {"closeable_epics": results}
 
 
@@ -3078,6 +3247,15 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
     p.set_defaults(func=lambda a: cmd_verify_exit(
         GitHub(), a.repo_path, a.issue, a.expect_stage, a.pr, a.unit))
+    p = sub.add_parser("worktree-add",
+                        help="Create (or find) the unit's worktree: resumes from "
+                             "origin/<branch> when it exists, else branches off the "
+                             "integration base")
+    p.add_argument("number", type=int)
+    p.add_argument("--unit", choices=["issue", "epic"], default="issue")
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.set_defaults(func=lambda a: cmd_worktree_add(GitHub(), a.number, a.unit, a.repo_path))
+
     p = sub.add_parser("sync-branch")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
@@ -3135,6 +3313,15 @@ def main(argv: Optional[list] = None) -> int:
                     help="Record the current closed count as the new watermark "
                          "(commit the file with the retro's own commit)")
     p.set_defaults(func=lambda a: cmd_retro_check(GitHub(), a.repo_path, a.mark_done))
+    p = sub.add_parser("show-config",
+                        help="Print the effective pipeline tunables (config `pipeline` "
+                             "block merged over defaults) plus repo/docRoot/parallelism")
+    p.set_defaults(func=lambda a: {"repo": REPO, "docRoot": DOC_ROOT,
+                                   "parallelism": CONFIG["parallelism"],
+                                   "requiredWorkflows": CONFIG["requiredWorkflows"],
+                                   "localCiSuites": list(LOCAL_CI_SUITES),
+                                   **PIPELINE})
+
     p = sub.add_parser("pairing-counts",
                         help="Marker-derived escalation-valve bounce counts for one issue "
                              "(pr-review rework since last clean, sync-conflict count)")

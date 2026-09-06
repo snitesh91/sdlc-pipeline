@@ -6,11 +6,16 @@ rules, the commenting discipline, the rework model, and every stage's exit actio
 (A stage agent's prompt also spells out, verbatim, its own doc path and worktree —
 those are issue-specific and not in this file.)
 
+Everything repo-specific — the exact lint/build/test commands, where they must run
+(host or container), suite names, memory flags, port numbers — lives in the driven
+repo's own `CLAUDE.md` and in the stage's agent definition, never here. Where this file
+says "the repo's own commands", that is where to look.
+
 ## Per-issue docs (the source of record)
 
-Each child issue gets a folder `docs/sdlc/issue-<n>/`, committed on the
+Each child issue gets a folder `<docRoot>/issue-<n>/`, committed on the
 `issue-<n>` branch and merged into `main` with the eventual squash-merge. (A normal
-epic's own phase writes into `docs/sdlc/epic-<n>/` instead — see
+epic's own phase writes into `<docRoot>/epic-<n>/` instead — see
 `references/epics.md`, "Doc layout at the epic level".) Up to three predefined files:
 
 | File | Written by | Required? |
@@ -42,17 +47,17 @@ are both read by a **human** at a gate, but they are not the same kind of docume
 do not follow the same rules. `development.md` and `lld.md` have **no** human gate and
 can stay as technical as the work demands; `lld.md` has no altitude requirement at all.
 
-Start both from the matching skeleton in `docs/sdlc/_templates/` — copy it in,
+Start both from the matching skeleton in `<docRoot>/<pipeline.docTemplates>/` (default `_templates`) — copy it in,
 fill the sections in order, delete the template's instructional HTML comments.
 
-### `product.md` is an IRD — requirements only
+### `product.md` is a requirements document — requirements only
 
-It follows the house style of your repo's requirements docs; **read IRD-002
-before writing one**, it is the worked example. Section order comes from
-`product.template.md`: Background, Goals, Functional Scope, User Experience,
-Non-Functional Requirements, Constraints, Acceptance Criteria, Out of Scope, Open
-Questions, Decisions Log. A section with nothing in it is dropped rather than kept as
-`N/A` filler — the one exception is Open Questions, which stays as "None".
+It follows the house style of the repo's own requirements docs; **if the repo's
+`CLAUDE.md` or doc conventions name a worked example, read it before writing one**.
+Section order comes from `product.template.md`: Background, Goals, Functional Scope,
+User Experience, Non-Functional Requirements, Constraints, Acceptance Criteria, Out of
+Scope, Open Questions, Decisions Log. A section with nothing in it is dropped rather
+than kept as `N/A` filler — the one exception is Open Questions, which stays as "None".
 
 Four rules, each of which a real document has broken:
 
@@ -63,13 +68,14 @@ Four rules, each of which a real document has broken:
   handoff comment, which is where a pipeline reader is already looking.
 - **Requirements state observable behaviour; they never choose the technology.**
   "Alert channels can be added or removed by configuration, with no application
-  change" is a requirement. "Alerts go out through GCP Cloud Monitoring email
-  notification channels" is an architecture decision wearing a requirement's clothes,
-  and it forecloses the options the architecture stage exists to weigh. Name the
-  capability, the observable behaviour, and the bound; leave platform, vendor, service
-  and mechanism to `architecture.md`. A genuine constraint the business or the operator
-  has already fixed goes under **Constraints**, written as the constraint itself ("must
-  run with no persistent agent host"), not as the product that satisfies it.
+  change" is a requirement. "Alerts go out through the cloud provider's managed
+  monitoring email channels" is an architecture decision wearing a requirement's
+  clothes, and it forecloses the options the architecture stage exists to weigh. Name
+  the capability, the observable behaviour, and the bound; leave platform, vendor,
+  service and mechanism to `architecture.md`. A genuine constraint the business or the
+  operator has already fixed goes under **Constraints**, written as the constraint
+  itself ("must run with no persistent agent host"), not as the product that satisfies
+  it.
 - **No hedging layer and no meta-commentary.** No TL;DR box, no "this is a hypothesis"
   preamble, no confidence disclaimer, no "what changed versus the previous version"
   section. Uncertainty is expressed where it lives — in the specific requirement, or in
@@ -101,8 +107,9 @@ override every section in it:
 - **Depth goes down, not in.** Anything an `lld` would decide — exact files, schemas,
   grep commands, edge-case enumerations, test surfaces — is not in this document. A
   decision that genuinely needs long analysis gets a sub-page at
-  `docs/sdlc/<unit>/decision-<slug>.md`, linked in one line. (This is the one
-  sanctioned split; design content still never goes to `your repo's architecture docs`.)
+  `<docRoot>/<unit>/decision-<slug>.md`, linked in one line. (This is the one
+  sanctioned split; design content still never goes to the repo's own general
+  architecture-docs tree.)
 
 Within that:
 
@@ -139,19 +146,17 @@ Within that:
   `architecture.md` `parse_footprint` is ever pointed at. **Both are omitted entirely
   from an epic-level doc**: per-child footprints live in each child's `lld.md`, and
   implementation depth is that `lld`'s job — putting it in the epic doc duplicates it
-  at the wrong altitude, which is how epic #98's doc reached 20k words.
+  at the wrong altitude, which is how one epic-level doc grew to many times its useful
+  length (see `references/history.md`).
 
 See "Review altitude" under `arch-review` below for how this shapes review findings.
 
 ## Citation discipline — every stage, not just `testing`
 
 Every stage in this pipeline cites the codebase and the docs, and **every stage has
-shipped a wrong citation.** In one cycle (epic #110, 2026-08-20): `lld` cited two
-epic-doc line numbers that an addendum had shifted 19 lines; `development` cited
-`account.spec.ts:438` for a test at `:448`; and `pr-review` raised a blocking finding
-against `origin/epic-110:architecture.md:87-99` after resolving the branch from a SHA
-in an old comment link — an **unreachable draft commit**, superseded an hour after it
-was written. `development` had to disprove that one twice before it was withdrawn.
+shipped a wrong citation** — line numbers shifted by an addendum, a test cited ten
+lines off, a blocking review finding raised against an unreachable draft commit
+resolved from a SHA in an old comment link (see `references/history.md`).
 
 The rules that came out of it:
 
@@ -169,26 +174,26 @@ The rules that came out of it:
   you resolved and how, so a reviewer can reproduce it.
 - **To check what a commit changed, use `git show <sha> --stat` or three-dot
   `git diff origin/main...<branch>` — never a two-dot range.** A two-dot range that
-  spans a merge of `origin/main` attributes every merged commit to the agent:
-  `git diff 3fee947 b3a518e --stat` reported 4 files where #245's agent reported 1, and
-  a "you touched files you shouldn't have" correction was nearly sent on that basis.
-  The agent was right; the check was wrong.
+  spans a merge of `origin/main` attributes every merged commit to the agent, and a
+  "you touched files you shouldn't have" correction has been nearly sent on exactly
+  that basis when the agent was right and the check was wrong (see
+  `references/history.md`).
 - **A stale citation in a doc that is about to merge is a real finding**, not a nit —
-  it merges into `main` as a record that actively misleads the next reader. That was
-  the blocking finding on #209's `development.md`, which still documented a locator the
+  it merges into `main` as a record that actively misleads the next reader. That has
+  been a blocking finding on a `development.md` that still documented a locator the
   `testing` stage had empirically disproved.
 - **A citation can be correct when written and wrong when merged — nothing re-checks
-  it after a merge.** #274 shipped six stale line numbers, and **four of them were
-  broken by that PR's own merge commit**, which pulled sibling #284's script rewrites
-  onto the branch after the docs were authored. One was operator-facing and reached
-  `main`. Every stage had verified them honestly; every one drifted afterwards.
+  it after a merge.** A merge commit that pulls a sibling's refactor onto the branch
+  after the docs were authored breaks every line number that pointed into the
+  refactored files, and every stage will have verified them honestly (see
+  `references/history.md`).
 
-  So, concretely: **in a document that ships — a runbook, an HLD, anything under
-  your repo's doc/ops trees — prefer the grep-anchored quote alone and drop
-  the line number.** A quote survives a sibling's refactor; a number does not, and
-  correcting numbers just resets a clock that the next `scripts/**` edit restarts.
-  Keep line numbers where they are genuinely a working aid — a stage's own evidence
-  log, a review comment — and treat them there as hints, per the first rule above.
+  So, concretely: **in a document that ships — a runbook, an HLD, anything under the
+  repo's doc/ops trees — prefer the grep-anchored quote alone and drop the line
+  number.** A quote survives a sibling's refactor; a number does not, and correcting
+  numbers just resets a clock that the next sibling edit restarts. Keep line numbers
+  where they are genuinely a working aid — a stage's own evidence log, a review comment
+  — and treat them there as hints, per the first rule above.
 
   For the same reason, **when `sync-branch` pulls a sibling's work onto a branch whose
   docs cite that sibling's files, re-check those citations before the PR merges.** It
@@ -196,15 +201,15 @@ The rules that came out of it:
 
 ## Compile-checking is not verification
 
-`playwright test --list`, `tsc --noEmit`, and a lint pass tell you the code *parses*.
-They cannot tell you a test **ran**, and a skipped test is indistinguishable from a
-passing one in a `--list` output.
+A test runner's `--list`/dry-run mode, a type-check, and a lint pass tell you the code
+*parses*. They cannot tell you a test **ran**, and a skipped test is indistinguishable
+from a passing one in a `--list` output.
 
-This is not hypothetical: #209's two new E2E tests shipped with a locator
-(`li p.font-semibold`) that also matched `OrderStatusTracker`'s always-rendered step
-labels and yielded `NaN`. `development`'s `--list` check was clean. The tests skip
-under `make e2e` (a pre-existing credential gap), so they would have merged broken and
-silently stayed broken. `testing` caught it only by executing them for real.
+This is not hypothetical: new end-to-end tests have shipped with a locator that matched
+the wrong element and yielded `NaN`, past a clean `--list` check, in a suite where they
+skipped under the repo's default e2e invocation — they would have merged broken and
+silently stayed broken; `testing` caught it only by executing them for real (see
+`references/history.md`).
 
 So: **no stage may report a test as covering an acceptance criterion unless it observed
 that test execute.** If it could not run, say so plainly, name the reason, and say
@@ -213,54 +218,54 @@ of trusting a coverage claim that was never true.
 
 ## Establish a number by running the thing, not by modelling it
 
-The dominant defect class of epic #156 — at least eighteen confidently-stated, wrong
-measurements across six children and the epic's own architecture — had one shape every
-time: **a number produced by a grep that models a rule, rather than by running the
-rule.** Every blocking finding in that epic was found by building the change and
-running the real tool; none was found by reading. Three rules, each from a real
-incident:
+The dominant defect class of one whole epic — over a dozen confidently-stated, wrong
+measurements across its children and its own architecture — had one shape every time:
+**a number produced by a grep that models a rule, rather than by running the rule.**
+Every blocking finding in that epic was found by building the change and running the
+real tool; none was found by reading (see `references/history.md`). Three rules, each
+from a real incident:
 
-- **Run the rule, don't regex-model it.** #236's `lld` counted violations with a
-  counting grep carrying a `*.module` exemption that the shipped `eslint.config.mjs`
-  did not have — the exemption existed only in the grep and in the AC prose. Applied as
-  designed it would have banned **8 legitimate Nest DI imports** and shipped a CI-red
-  PR, and the obvious late fix would have invalidated the barrel cycle analysis the
-  same doc rested on. The same applies to prose rules: #245's `lld` shipped a criterion
-  whose meaning lived only in the design doc, which — applied as written — wrongly
-  exempted three real files. **If the artifact is executable (a lint config, a script,
-  a test, a build), apply the change in a scratch copy and run it. Report that output.**
+- **Run the rule, don't regex-model it.** A counting grep that carries an exemption the
+  shipped lint config does not have produces a number that is true of the grep and
+  false of the codebase; applied as designed it bans legitimate imports and ships a
+  CI-red PR, and the obvious late fix invalidates whatever analysis rested on the
+  count. The same applies to prose rules: a criterion whose meaning lives only in the
+  design doc will, applied as written, exempt files it should not. **If the artifact is
+  executable (a lint config, a script, a test, a build), apply the change in a scratch
+  copy and run it. Report that output.**
 - **Scope the search to the whole tree, not to the module you are thinking about.**
-  `src/database/database.module.ts` was missed **twice**, by #235 and #236, for the
-  identical reason: a grep scoped to `src/modules/` in a repo whose composition file
-  lives in `src/database/`. #236's version would have broken `npx eslint` on `main`'s
-  own composition file. Anchor the pattern to the *symbol*, not to a path prefix you
-  assume: `from '[^']*sellers/` found what `from '(\.\./)+sellers/` could not.
+  The same composition file has been missed twice, by two siblings, for the identical
+  reason: a grep scoped to the directory the agent was thinking about, in a repo whose
+  composition file lives one directory over. Anchor the pattern to the *symbol*, not to
+  a path prefix you assume — a pattern that matches the imported module name wherever
+  it appears finds what a relative-path pattern cannot.
 - **Prove the detector detects before reporting an absence.** A "0 cycles", "0
   violations", "no diff" result is worth exactly as much as the demonstration that the
-  check *can* go non-zero. The move used repeatedly and well on #236 is the **positive
-  control**: flip `ProductVariant` to route through the barrel, watch a new 16-file SCC
-  appear, revert, watch it go. Four separate agents ran that control on the same claim,
-  which is why it is trustworthy.
+  check *can* go non-zero. The move that works is the **positive control**: introduce
+  one deliberate instance of the thing you are checking for, watch the count go
+  non-zero, revert, watch it go back. A claim that several separate agents have each
+  run that control on is trustworthy; one that none has is not.
 
-**Vacuous-pass tells** — a check that passed because it examined nothing. All four were
-hit live on #156:
+**Vacuous-pass tells** — a check that passed because it examined nothing. All four have
+been hit live:
 
-- A **stale `tsbuildinfo`** made `tsc` emit 92 files instead of 533 and **exit 0**. Two
-  different agents hit it. Clear build state and assert the emit count before using it.
-- A graph built with **too narrow an edge pattern** gave the barrels zero outgoing edges
-  and a vacuous "0 cycles" — indistinguishable from a real clean result. Assert
-  non-vacuity (edge count, node count) before reading a graph result.
-- **Structurally skipped tests.** `frontend/Makefile` never forwarded
-  `E2E_SELLER_*`, so ~35 seller/data-entry tests skipped on *every run this repo has
-  ever done*, and a before/after comparison "matched" over them. **A skip is not a
-  cover** — count executed tests, not listed ones.
-- **A mutation that discriminates nothing.** #236's `testing` mutated a permission both
-  roles already held, stayed green, and correctly called that *a bad discriminator, not
-  a finding about the test*. If a mutation stays green, first ask whether it was a real
+- A **stale incremental-build cache** made the compiler emit a fraction of the tree and
+  **exit 0**. Two different agents hit it. Clear build state and assert the emit count
+  before using it.
+- A graph built with **too narrow an edge pattern** gave the nodes under test zero
+  outgoing edges and a vacuous "0 cycles" — indistinguishable from a real clean result.
+  Assert non-vacuity (edge count, node count) before reading a graph result.
+- **Structurally skipped tests.** A harness that never forwards the credentials a
+  subset of tests needs skips that subset on *every run the repo has ever done*, and a
+  before/after comparison "matches" over them. **A skip is not a cover** — count
+  executed tests, not listed ones.
+- **A mutation that discriminates nothing.** A mutation of a permission both roles
+  already hold stays green, and the correct reading is *a bad discriminator, not a
+  finding about the test*. If a mutation stays green, first ask whether it was a real
   mutation.
 
-**Your own tooling gets the same scrutiny as any other claim.** Two agents on #236
-caught false positives in scripts they had just written, before treating the output as
+**Your own tooling gets the same scrutiny as any other claim.** Agents have caught
+false positives in scripts they had just written, before treating the output as
 evidence, and said so in the handoff. That is the bar.
 
 ## Commenting discipline
@@ -291,8 +296,9 @@ script wherever a script command owns the transition (`open-dev-pr`,
 
 **Issue comments are status updates, not the source of record** — the real detail
 lives in committed artifacts (the doc files, commits, the issue body for durable
-requirements). Pipeline tooling (`.claude/skills/`, `_bmad/`) is tracked in the repo:
-when a stage touches it, commit that change with the related code.
+requirements). Pipeline tooling (this skill, the agent definitions, and any sibling
+tooling the repo tracks alongside them) is tracked in the repo: when a stage touches
+it, commit that change with the related code.
 
 ## Rework and blockers — resume the responsible stage's agent
 
@@ -323,24 +329,24 @@ the responsible stage (via `SendMessage` to its tracked ID) with the specific fi
 it is written down now: **a finding lands on the issue that will act on it**, not in the
 thread of the PR that is closing. In order of preference —
 
-1. **The sibling that owns the surface**, if one is open. #235's `pr-review` found that
-   `offer.entity.ts`'s eslint override silently voids any pattern added to the base
-   block; posting it on **#236** made it half of #236's design instead of a note in a
-   merged PR.
+1. **The sibling that owns the surface**, if one is open. A `pr-review` finding about a
+   config override that silently voids a sibling's planned change, posted on *that
+   sibling*, becomes half of the sibling's design instead of a note in a merged PR.
 2. **The epic**, when no single child owns it and it must be settled before the epic
    closes.
-3. **The standing backlog epic** via `create-issue --parent <standing-epic-number>`, for anything real
-   but out of this epic's scope. #250 came out of #238's `lld` correctly refusing to
-   file three backend IT/unit findings into an e2e issue.
+3. **The standing backlog epic** (the one labelled with the config's
+   `pipeline.labels.standing` label) via `create-issue --parent <standing-epic-number>`,
+   for anything real but out of this epic's scope — an `lld` is right to refuse to file
+   findings against another component into the issue it is designing.
 
 **Never leave it only in a closing PR's thread or in a comment on an issue that is
-about to close.** That is a finding deleted: the
-`scripts/check-controller-protection.mjs` coverage gap lived only inside #243's review
-comment on an already-closed issue, where #236–#238 would never have seen it, and
-survived only because one reviewer noticed and carried it to all three by hand. This is
-not the "spin off a ticket instead of fixing it" path (`SKILL.md`: everything found
-*before merge on this unit* is still fixed inline by resuming the responsible stage) —
-it is where the residue goes once this unit is done with it.
+about to close.** That is a finding deleted: a coverage gap that lives only inside a
+review comment on an already-closed issue is invisible to every sibling that needs it,
+and survives only if one reviewer happens to notice and carry it over by hand (see
+`references/history.md`). This is not the "spin off a ticket instead of fixing it" path
+(`SKILL.md`: everything found *before merge on this unit* is still fixed inline by
+resuming the responsible stage) — it is where the residue goes once this unit is done
+with it.
 
 **When the original agent cannot be resumed, the replacement still starts from the
 existing work — never from zero.** The resume-the-owner rule above assumes the owning
@@ -351,9 +357,9 @@ across turn boundaries").
 
 A fresh agent has none of that context, and its default behaviour is to do the stage
 from the beginning. That is the wrong output twice over: it burns the stage's cost again,
-and it can silently discard work that already passed review. On #238 and #251 the
-replacement agents had to be told by hand what was already committed; nothing in the
-process required it.
+and it can silently discard work that already passed review. Replacement agents have had
+to be told by hand what was already committed; nothing in the process required it (see
+`references/history.md`).
 
 So a replacement dispatch must carry, explicitly:
 
@@ -375,22 +381,23 @@ the stage will be redone.
 
 **Rework rounds are scoped, not repeated from zero.** A confirming round that
 re-derives the whole original review costs roughly 3× the wall clock for no extra
-rigour — one measured pass took 277s against the original's 913s, and still found a
-blocking issue. The resume message should:
+rigour — a measured scoped pass ran in under a third of the original round's time and
+still found a blocking issue. The resume message should:
 
 - **Enumerate what the prior round settled** and say plainly "accept these, do not
   re-run" — the inventory, the measurements, the fits-vs-deviates call, the overlap
   enumeration, whichever apply.
 - **Scope the new pass to the delta**, plus a regression check that the delta could not
-  have disturbed what was accepted. Prove it, don't assume it: every good scoped round
-  on #156 opened with `git diff --stat origin/main` showing the change was doc-only.
+  have disturbed what was accepted. Prove it, don't assume it: a good scoped round
+  opens with `git diff --stat origin/main` showing the change was doc-only.
 - **Re-derive fully when the delta is code**, or when it touches the premise an earlier
   conclusion rested on. A doc-only delta cannot move a suite result; a code delta can.
 
 **Escalation valve, per stage pairing**: each recurring problem gets its own counter
 (e.g. `arch-review` <-> `architecture`, `testing`/`pr-review` <-> `development`,
-`sync-branch-conflict` <-> `development`). The valve has **two stages and a ceiling of
-six bounces — 3 with the incumbent agent, then 3 with a replacement**:
+`sync-branch-conflict` <-> `development`). The valve has **two stages and a ceiling** —
+`pipeline.escalation.replaceAt` bounces with the incumbent agent (default 3), then a
+replacement up to `needsHumanAt` (default 6); `pairing-counts` echoes both:
 
 - **Bounces 1–3** — resume the pairing's own tracked agent, as always.
 - **At the third bounce without resolution** — do *not* park. **Retire the incumbent
@@ -461,16 +468,16 @@ structural change. That is exactly what the context-reset replacement is for, an
 the third bounce swaps the agent instead of parking the unit. So:
 
 - **A reviewer whose new finding is another instance of a class already bounced says
-  so, in the verdict.** #234's round 2 did (*"REWORK for one new blocking finding **of
-  the same silent-skip class**"*); #243's round 2 went further and named the escalation
-  shape in advance (*"If a third round produces another, that is an escalation candidate
-  on the pattern … rather than a routine bounce"*).
-- **The orchestrator's resume message then asks for the class, not the case.** Both
-  units settled within one round of that: #234's `development` restructured so the route
-  set is derived live and an unknown decorator fails instead of passing — *"fixes the
-  bounced class at the root, not at the symptom"*; #243's `lld` deleted a citation that
-  was correct *today* because the shape rots, and swept a fourth instance before it
-  could exist.
+  so, in the verdict** — "REWORK for one new blocking finding *of the same
+  silent-skip class*" — and, better, names the escalation shape in advance: "if a third
+  round produces another, that is an escalation candidate on the pattern rather than a
+  routine bounce".
+- **The orchestrator's resume message then asks for the class, not the case.** Units
+  handled that way have settled within one round: a `development` that restructures so
+  the guarded set is derived live and an unknown case fails instead of passing ("fixes
+  the bounced class at the root, not at the symptom"); an `lld` that deletes a citation
+  which is correct *today* because its shape rots, and sweeps the next instance before
+  it can exist (see `references/history.md`).
 - **A same-class third bounce triggers the context-reset replacement even though the
   instance is new** — the class, not the instance, is what the replacement is told to
   close. A same-class *sixth* bounce is the escalation, and the `mark-needs-human`
@@ -499,23 +506,29 @@ human-review gate, which the orchestrator does after the agent returns (see
 `references/gates.md`). Exit actions update the same issue's fields in place — never
 a new issue for a normal handoff.
 
+Worktree paths below use the config's `pipeline.worktrees` defaults
+(`<root>/<epicPrefix><n>` → `/tmp/sdlc-epic-<n>`, `<root>/<devPrefix><n>` →
+`/tmp/sdlc-dev-<n>`); see `references/parallelism.md`.
+
 - **`product` done, `unit: "epic"`** — In the epic's own worktree
   (`/tmp/sdlc-epic-<n>`), on `epic-<n>` created from `main` (first stage to
-  touch it). Write `docs/sdlc/epic-<n>/product.md` as an IRD covering the whole
-  epic, per Document altitude — organised by **functional area, never by child issue**.
-  Children are the architecture stage's output; a product document that names them is
-  either pre-empting that decomposition or reporting on it, and the requirement is the
-  same whoever ends up implementing it. Commit, push. Update the epic's body with a
-  pointer + brief summary. Set the epic's Effort, and each child's if the epic already
-  has children. Then the orchestrator opens Gate A (`open-gate ... --doc product.md --next-stage
-  architecture --unit epic`) — never set the Stage field to `Architecture` directly.
+  touch it). Write `<docRoot>/epic-<n>/product.md` as a requirements document covering
+  the whole epic, per Document altitude — organised by **functional area, never by
+  child issue**. Children are the architecture stage's output; a product document that
+  names them is either pre-empting that decomposition or reporting on it, and the
+  requirement is the same whoever ends up implementing it. Commit, push. Update the
+  epic's body with a pointer + brief summary. Set the epic's Effort, and each child's
+  if the epic already has children. Then the orchestrator opens Gate A
+  (`open-gate ... --doc product.md --next-stage architecture --unit epic`) — never set
+  the Stage field to `Architecture` directly.
 
 - **`product` done, `unit: "issue"` (standing-epic child)** — Create `issue-<n>` from
-  `main`. Write `issue-<n>/product.md` as an IRD with full requirements and acceptance
-  criteria, per Document altitude. Commit, push. Update the issue body with a pointer
-  + summary. Set Effort (if `High`, strongly consider splitting via `create-issue`).
-  Priority normally lives on the epic; set it on the child only to jump the sibling
-  queue. Then Gate A opens — never set Stage to `Architecture` directly.
+  `main`. Write `issue-<n>/product.md` as a requirements document with full
+  requirements and acceptance criteria, per Document altitude. Commit, push. Update the
+  issue body with a pointer + summary. Set Effort (if `High`, strongly consider
+  splitting via `create-issue`). Priority normally lives on the epic; set it on the
+  child only to jump the sibling queue. Then Gate A opens — never set Stage to
+  `Architecture` directly.
 
 - **`architecture` done, `unit: "epic"`** — Continue on `epic-<n>` in the epic's
   worktree. Write
@@ -533,10 +546,11 @@ a new issue for a normal handoff.
   `Architecture` while `arch-review` runs.
 
 - **`arch-review`** — Orchestrator posts `start-comment <n> --role arch-review`, then
-  spawns a fresh Opus subagent of type `sdlc-design-review` reviewing
-  `architecture.md` (and `product.md`) against the real codebase. Instruct it to end
-  its handoff comment with `<!-- arch-review-confidence: N -->` (0-100; only
-  meaningful on a clean verdict; report low confidence if it found anything).
+  spawns a fresh subagent of type `sdlc-design-review` (model per the config's
+  `pipeline.models`) reviewing `architecture.md` (and `product.md`) against the real
+  codebase. Instruct it to end its handoff comment with
+  `<!-- arch-review-confidence: N -->` (0-100; only meaningful on a clean verdict;
+  report low confidence if it found anything).
 
   **Review altitude — structural soundness, not implementation pre-specification.**
   Check component boundaries, data/control flow, security and permission logic, major
@@ -562,7 +576,8 @@ a new issue for a normal handoff.
   decision hidden by brevity is the more serious finding; brevity is not the goal,
   altitude is.
   For an epic-level review, also check across children: overlapping or conflicting
-  subsection scope is a structural finding (the exact #99/#107 pattern).
+  subsection scope is a structural finding (a recurring pattern — see
+  `references/history.md`).
 
   - **Clean, confidence > threshold** → `skip-gate` per `references/gates.md` ("Gate B
     confidence skip") — issue: continue straight into `development`; epic: epic
@@ -574,7 +589,7 @@ a new issue for a normal handoff.
   - **Deeper/requirements-level problem** → resume the `product` agent instead.
 
 - **`lld` (normal-epic child) done** — In the child's worktree on `issue-<n>` (create
-  if first stage). Read the epic's `docs/sdlc/epic-<parent>/architecture.md`
+  if first stage). Read the epic's `<docRoot>/epic-<parent>/architecture.md`
   as the design source of truth; the **first move** is the fits-vs-deviates call
   (`references/epics.md`, "Epic-level deviation escalation"). If it fits → write
   `issue-<n>/lld.md` (no altitude requirement): exact files/functions to touch, how it
@@ -584,10 +599,10 @@ a new issue for a normal handoff.
   `lld.md`; follow the deviation escalation.
 
 - **`lld-review`** — Orchestrator posts `start-comment <n> --role lld-review`, then
-  spawns a fresh Opus subagent exactly as `arch-review` (same Review altitude, same
-  confidence-marker
-  instruction), reviewing `lld.md` against the epic's `architecture.md` and the real
-  codebase — including footprint parseability and overlap vs active siblings.
+  spawns a fresh subagent exactly as `arch-review` (same agent type, same Review
+  altitude, same confidence-marker instruction), reviewing `lld.md` against the epic's
+  `architecture.md` and the real codebase — including footprint parseability and
+  overlap vs active siblings.
 
   - **Clean (any confidence)** → **no gate, ever** — `lld-review` is the only review
     a normal-epic child's design gets, deliberately. After `record-design-review`,
@@ -615,12 +630,12 @@ a new issue for a normal handoff.
   ```
 
   This is the design-side twin of `record-pr-review`, and it exists because the valve
-  could not see the pairing that fires it most. On epic #98 the `lld-review` <-> `lld`
-  pairing ran roughly nine tenths of the epic's review rounds and tripped the
-  context-reset replacement on three of four children, while `pairing-counts` tracked
-  only `pr-review` and sync conflicts — so the strike count lived in one
-  orchestrator's head and any crashed session, or any continuous-mode agent, would
-  have resumed it at zero. `pairing-counts` now reports these per role under
+  could not see the pairing that fires it most: `lld-review` <-> `lld` has run the
+  large majority of an epic's review rounds and tripped the context-reset replacement
+  on most of its children while `pairing-counts` tracked only `pr-review` and sync
+  conflicts — so the strike count lived in one orchestrator's head, and any crashed
+  session or continuous-mode agent would have resumed it at zero (see
+  `references/history.md`). `pairing-counts` now reports these per role under
   `design_review`; read it before deciding whether a bounce is routine.
 
   **The confidence marker does not substitute for this.** `skip-gate` reads
@@ -629,11 +644,10 @@ a new issue for a normal handoff.
 
   **State your axis coverage in the handoff.** A design review that fans out to
   parallel axes must say, in its own comment, **how many it launched and how many had
-  returned when it formed the verdict** — and if it dropped one, which. On #274 a
-  review posted CLEAN with **zero of three axes returned**; the two that landed
-  afterwards carried the worst defect of that round, and the issue came within one
-  orchestrator decision of moving to `development` on it. The reviewer disclosed it
-  itself, which is the only reason it was caught. Treat an unqualified claim of
+  returned when it formed the verdict** — and if it dropped one, which. A review has
+  posted CLEAN with none of its axes returned; the ones that landed afterwards carried
+  the worst defect of that round, and only the reviewer's own disclosure caught it
+  before the unit moved on (see `references/history.md`). Treat an unqualified claim of
   coverage as unverified: ask for the count.
 
 - **`development` done** — Implement with TDD per repo conventions, in the child's
@@ -664,15 +678,15 @@ a new issue for a normal handoff.
   and report the specific question in your final message — never create issues or
   change fields yourself; the orchestrator resumes the right earlier stage.
 
-  **Three completion gates — all three before `open-dev-pr`, not after.** Each exists
+  **Completion gates — all of them before `open-dev-pr`, not after.** Each exists
   because it was skipped once and something shipped broken:
 
   1. **Every risk flagged by the design doc is closed against the real system, not
      mocked away.** A unit test against a mock does not close an integration risk — it
-     tests the mock. Close it against a real Postgres (the `test:it` suites run against
-     one), a real HTTP call, the real queue. If it genuinely cannot be closed here,
-     say so explicitly in `development.md` and name what would close it; do not let
-     the mock stand in for the answer.
+     tests the mock. Close it against a real database (the repo's integration suites
+     run against one), a real HTTP call, the real queue. If it genuinely cannot be
+     closed here, say so explicitly in `development.md` and name what would close it;
+     do not let the mock stand in for the answer.
   2. **"Manually verified" claims cite evidence, not assertion.** A terminal
      transcript, a log excerpt, a response body, or numbered repro steps someone else
      can re-run. The words "manually verified" with nothing attached are treated as
@@ -686,16 +700,14 @@ a new issue for a normal handoff.
      each AC, name the file in that list which satisfies it. An AC whose satisfying
      file is not in the diff is not done.
 
-     Added 2026-08-28. On #284 this stage reported the build complete across ten
-     commits, and it was not: the design's validators had been written and
-     unit-tested, and **wired into none of the four entrypoints**. `grep -ln
-     "gcp_require_valid_dry_run" scripts/*.sh` returned nothing, and no entrypoint
-     file appeared in the diff at all. The commit messages read as a finished build;
-     the diff did not. It was caught only because the next agent checked the ACs
-     against the diff instead of the summary — one stage later, and after `testing`
-     would already have been dispatched at a design that could not have passed it.
-     This is the same class `lld-review` had spent a full round closing one level
-     down: *a unit test of a function in isolation cannot prove the call site exists.*
+     Added 2026-08-28: this stage has reported a build complete across many commits
+     when the design's validators had been written and unit-tested but **wired into
+     none of the entrypoints** — no entrypoint file appeared in the diff at all. The
+     commit messages read as a finished build; the diff did not, and it was caught
+     only because the next agent checked the ACs against the diff instead of the
+     summary (see `references/history.md`). This is the same class `lld-review` closes
+     one level down: *a unit test of a function in isolation cannot prove the call
+     site exists.*
 
 - **`testing`** — `open-dev-pr` already set Stage=`Testing` and posted development's
   handoff; that is not testing's start comment. Orchestrator posts
@@ -716,17 +728,18 @@ a new issue for a normal handoff.
   **The mandate: independent verification.** `development.md`'s numbers are an input
   to check, never evidence. Whatever it reports, verify all of this yourself:
   - **Run the exact commands it claims were run** and confirm the output matches the
-    reported numbers. Report *your* numbers. Backend commands run in Docker only —
-    `make lint`, `make build`, `npm run test:it` inside the container; never `npm` or
-    `nest` on the host. Frontend: `make lint`, `make typecheck`, `make build`; `make e2e`
-    from the workspace root when the change touches a user-facing flow — **scoped to
-    the specs covering the surfaces this child moved**, not the whole suite (operator
-    policy, 2026-08-22; the full suite runs once at epic close — see
-    `references/epics.md`, "Epic closing"). `make e2e` is not a known-broken suite:
-    the committed config works, and the reasons earlier attempts failed are in
-    `references/parallelism.md`, "`make e2e` works". Any command that can outlast the
-    default tool-call timeout needs `run_in_background` or an explicit ≥600s outer
-    timeout.
+    reported numbers. Report *your* numbers. Use the repo's own lint/build/test
+    commands as documented in its `CLAUDE.md` and the `sdlc-testing` agent definition,
+    in the environment the repo mandates for them (inside its container when it says
+    so — never the host-side equivalent). Run the end-to-end suite when the change
+    touches a user-facing flow — **scoped to the specs covering the surfaces this
+    child moved**, not the whole suite (operator policy, 2026-08-22; the full suite
+    runs once at epic close — see `references/epics.md`, "Epic closing"). The e2e
+    suite is not a known-broken suite: the committed harness config is presumed to
+    work, and a failure is a finding to root-cause, not a reason to route around it —
+    see `references/parallelism.md`, "The e2e suite is not known-broken". Any command
+    that can outlast the default tool-call timeout needs `run_in_background` or an
+    explicit ≥600s outer timeout.
   - **Confirm each acceptance criterion has at least one test that would fail if the
     criterion were violated** — a behaviour test, not an existence test. Map criterion
     → test file and test name, one line each. A criterion with no such test is a
@@ -734,7 +747,7 @@ a new issue for a normal handoff.
   - **Mutation-check the guards that matter.** Deliberately break the behaviour under
     test, confirm the test goes red, revert. State the mutation you made and what went
     red. A test that stays green against deliberately broken code is a decoration, not
-    a guard — this check has repeatedly separated the two on this repo.
+    a guard — this check has repeatedly separated the two.
   - **Cite evidence, never assertion.** Every claim carries a command and its real
     output, or a grep-anchored quote (`grep -n "<literal>" <path>`). **Never cite a
     `file:line` you have not opened in this session** — fabricated citations have
@@ -758,7 +771,7 @@ a new issue for a normal handoff.
   ### Commands run
   | Command | Where | Result |
   |---|---|---|
-  | `<exact command>` | backend container / frontend / root | 142 passed, 0 failed |
+  | `<exact command>` | <container / package dir / repo root> | 142 passed, 0 failed |
 
   ### Acceptance criteria coverage
   | Criterion | Test | Mutation-checked? |
@@ -772,16 +785,17 @@ a new issue for a normal handoff.
   PASS | FAIL — <what the evidence above proves>
   ```
 
-  - **Pass** → first, for **each main-only suite this round actually re-ran**
-    (backend and/or frontend — see the independent-verification commands above),
-    `sdlc_next.py record-local-ci --pr <pr> --suite backend|frontend --sha <HEAD>`,
+  - **Pass** → first, for **each main-only required suite this round actually re-ran**
+    (the suite keys come from the config's `requiredWorkflows[].suite` — see the
+    independent-verification commands above),
+    `sdlc_next.py record-local-ci --pr <pr> --suite <suite> --sha <HEAD>`,
     where `<HEAD>` is the tested worktree's `git rev-parse HEAD`. This is the
-    merge-gate stand-in for the GHA check that no longer runs on a child PR (both
-    suites went main-only for cost — see `references/operations.md`, "Local-CI
-    attestation"). Skip it only for a suite you did **not** run (e.g. a
-    backend-only change never ran the frontend suite, and its tree isn't touched so
-    the gate won't ask for it). A stale attestation from a prior head does not count,
-    so run this on the **current** head, after the last push. Then
+    merge-gate stand-in for the GHA check that no longer runs on a child PR (a
+    required suite that went main-only for cost — see `references/operations.md`,
+    "Local-CI attestation"). Skip it only for a suite you did **not** run (e.g. a
+    change confined to one suite's `prefixes` never ran the other suite, and its tree
+    isn't touched so the gate won't ask for it). A stale attestation from a prior head
+    does not count, so run this on the **current** head, after the last push. Then
     `sdlc_next.py handoff-to-pr-review <n> --pr <pr> --summary "..."` —
     **always**, including after rework (the marker is the review queue; never
     hand-type it). Then either continue straight into `pr-review` in this invocation
@@ -793,20 +807,21 @@ a new issue for a normal handoff.
     exception is the valve's own context-reset replacement at the third bounce).
     Valve pairing. The comment is not optional on this branch: the PASS path posts one
     through `handoff-to-pr-review` and the FAIL path posts nothing by default, so a
-    failing round is the one round the pipeline silently loses. On #232 a 29-minute
-    `testing` round produced a FAIL verdict and live probe evidence between two
-    identical start comments and left **no trace on the issue**; `pr-review` then
-    blocked because the evidence existed nowhere. Before delegating any next stage,
-    confirm the previous stage left a comment — if it didn't, get one.
+    failing round is the one round the pipeline silently loses — a long `testing`
+    round has produced a FAIL verdict and live probe evidence and left **no trace on
+    the issue**, and `pr-review` then blocked because the evidence existed nowhere
+    (see `references/history.md`). Before delegating any next stage, confirm the
+    previous stage left a comment — if it didn't, get one.
 
 - **`pr-review`** — Orchestrator posts `start-comment <n> --role pr-review`, spawns a
-  fresh Opus subagent of type `sdlc-pr-review` reviewing the PR diff adversarially: real
-  bugs, security, correctness; verify `development.md`'s claims and `testing`'s handoff
-  comment against the actual diff and by re-running the suite. Check CI via `sdlc_next.py pr-checks
-  <pr>`. May be one of up to `PR_REVIEW_PARALLELISM` concurrent reviews, each in its
-  own detached worktree (`references/parallelism.md`). Whatever the verdict, the
-  **last** action before merging or resuming anyone: `sdlc_next.py record-pr-review
-  <n> --pr <pr> --outcome clean|rework --summary "..."`.
+  fresh subagent of type `sdlc-pr-review` (model per the config's `pipeline.models`)
+  reviewing the PR diff adversarially: real bugs, security, correctness; verify
+  `development.md`'s claims and `testing`'s handoff comment against the actual diff
+  and by re-running the suite. Check CI via `sdlc_next.py pr-checks <pr>`. May be one
+  of up to `PR_REVIEW_PARALLELISM` concurrent reviews, each in its own detached
+  worktree (`references/parallelism.md`). Whatever the verdict, the **last** action
+  before merging or resuming anyone: `sdlc_next.py record-pr-review <n> --pr <pr>
+  --outcome clean|rework --summary "..."`.
   - **Clean review** → `sdlc_next.py merge-pr <pr> --issue <n>` — marks ready,
     squash-merges, deletes the branch, posts the audit-trail comment and (if the
     issue auto-closed) the closing confirmation. It re-checks CI internally and
@@ -817,9 +832,9 @@ a new issue for a normal handoff.
     `merge-pr` (see `references/parallelism.md`, "Merge-time freshness gate").
   - **`status: missing-checks`** → never poll it (no GHA run is coming on a child
     PR). Two causes, distinguished by whether the named suite is a main-only one:
-    - **backend/frontend suite not yet attested for this head** (the common case,
-      not a defect) → `testing` passed but didn't run `record-local-ci`, or a rework
-      push staled a prior attestation. Fix: run
+    - **a required suite not yet attested for this head** (the common case, not a
+      defect) → `testing` passed but didn't run `record-local-ci`, or a rework push
+      staled a prior attestation. Fix: run
       `record-local-ci --pr <pr> --suite <suite> --sha <HEAD>` on the current head
       (re-running the suite first if the diff changed since it last passed), then
       re-check. Do **not** `mark-needs-human` for this.

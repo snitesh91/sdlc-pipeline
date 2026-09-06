@@ -711,9 +711,11 @@ def test_check_epics_closeable_posts_checklist_flags_open_dependents_and_assigns
         {"data": {"repository": {"issue": {"blocking": {"nodes": [{"number": 21, "state": "OPEN"}]}}}}})
     responses[tuple(["gh", "api", "graphql", "-f", f"query={_BLOCKING_QUERY.format(n=11)}"])] = json.dumps(
         {"data": {"repository": {"issue": {"blocking": {"nodes": []}}}}})
-    # Both epic docs already on main -- the happy path for the docs check.
+    # Both epic docs already on the epic branch (their gate PRs merged there --
+    # `epic-94-gate-<stage>` -> `epic-94`; nothing is expected on `main` until
+    # close-epic) -- the happy path for the docs check.
     for name in ("product.md", "architecture.md"):
-        responses[("gh", "api", f"repos/{REPO}/contents/docs/sdlc/epic-94/{name}?ref=main",
+        responses[("gh", "api", f"repos/{REPO}/contents/docs/sdlc/epic-94/{name}?ref=epic-94",
                    "--jq", ".sha")] = "abc123\n"
     runner = ScriptedRunner(responses)
     runner.prefix_responses[("gh", "issue", "comment", "94", "--repo", REPO, "--body")] = ""
@@ -723,12 +725,14 @@ def test_check_epics_closeable_posts_checklist_flags_open_dependents_and_assigns
     result = cmd_check_epics_closeable(gh)
     assert result == {"closeable_epics": [
         {"epic": 94, "title": "issue 94", "notified": True, "open_dependents": [21],
-         "docs_missing_from_main": []}
+         "docs_missing_from_epic_branch": []}
     ]}
     comment_calls = [c for c in runner.calls if c[:3] == ["gh", "issue", "comment"]]
     assert len(comment_calls) == 1
     assert "#21" in comment_calls[0][-1]
-    assert "both on `main` (auto-verified)" in comment_calls[0][-1]
+    assert "both on `epic-94` (auto-verified)" in comment_calls[0][-1]
+    # Never asks GitHub about main -- an open epic's docs are not expected there.
+    assert not any("?ref=main" in " ".join(c) for c in runner.calls)
 
 
 def test_touches_pipeline_config_detects_config_changes_and_ignores_product_code():
@@ -744,10 +748,12 @@ def test_touches_pipeline_config_detects_config_changes_and_ignores_product_code
     assert not touches_pipeline_config([".claude/skills/some-other-skill/SKILL.md"])
 
 
-def test_check_epics_closeable_flags_an_epic_doc_that_never_reached_main():
-    """An epic doc living only on its `epic-<n>` branch is reachable only by SHA, and a
-    SHA quoted from an old comment can resolve to a superseded draft -- the #209
-    pr-review incident. The closing checklist has to surface that before the epic closes."""
+def test_check_epics_closeable_flags_an_epic_doc_that_never_reached_the_epic_branch():
+    """An epic doc living only on its unmerged `epic-<n>-gate-<stage>` sub-branch is
+    reachable only by SHA, and a SHA quoted from an old comment can resolve to a
+    superseded draft -- the #209 pr-review incident. Since 2026-09-06 gate PRs land on
+    `epic-<n>` (not `main`), so that is the branch the closing checklist verifies
+    against; close-epic's own merge is what takes the docs to `main`."""
     from sdlc_next import GitHub, cmd_check_epics_closeable, _BLOCKING_QUERY, HUMAN_ASSIGNEE, REPO
     from tests.test_sdlc_next import ScriptedRunner
     issues = [_epic(94), _issue(10, parent=94, state="CLOSED")]
@@ -756,22 +762,22 @@ def test_check_epics_closeable_flags_an_epic_doc_that_never_reached_main():
                "--json", "number,title,labels,body,state,comments")] = json.dumps({"comments": []})
     responses[tuple(["gh", "api", "graphql", "-f", f"query={_BLOCKING_QUERY.format(n=10)}"])] = json.dumps(
         {"data": {"repository": {"issue": {"blocking": {"nodes": []}}}}})
-    responses[("gh", "api", f"repos/{REPO}/contents/docs/sdlc/epic-94/product.md?ref=main",
+    responses[("gh", "api", f"repos/{REPO}/contents/docs/sdlc/epic-94/product.md?ref=epic-94",
                "--jq", ".sha")] = "abc123\n"
     runner = ScriptedRunner(responses)
-    # architecture.md is deliberately unscripted -> path_on_main sees the failure as "absent".
+    # architecture.md is deliberately unscripted -> path_on_ref sees the failure as "absent".
     runner.fail_on.add(("gh", "api",
-                        f"repos/{REPO}/contents/docs/sdlc/epic-94/architecture.md?ref=main",
+                        f"repos/{REPO}/contents/docs/sdlc/epic-94/architecture.md?ref=epic-94",
                         "--jq", ".sha"))
     runner.prefix_responses[("gh", "issue", "comment", "94", "--repo", REPO, "--body")] = ""
     runner.prefix_responses[("gh", "issue", "edit", "94", "--repo", REPO,
                               "--add-assignee", HUMAN_ASSIGNEE)] = ""
     gh = GitHub(runner=runner)
     result = cmd_check_epics_closeable(gh)
-    assert result["closeable_epics"][0]["docs_missing_from_main"] == [
+    assert result["closeable_epics"][0]["docs_missing_from_epic_branch"] == [
         "docs/sdlc/epic-94/architecture.md"]
     body = [c for c in runner.calls if c[:3] == ["gh", "issue", "comment"]][0][-1]
-    assert "1 epic doc(s) never reached `main`" in body
+    assert "1 epic doc(s) never reached `epic-94`" in body
     assert "epic-94/architecture.md" in body
     edit_calls = [c for c in runner.calls if c[:3] == ["gh", "issue", "edit"]]
     assert edit_calls == [["gh", "issue", "edit", "94", "--repo", REPO, "--add-assignee", HUMAN_ASSIGNEE]]
@@ -1101,7 +1107,7 @@ def test_open_gate_creates_pr_sets_status_field_and_posts_marked_comment():
         "⏸️ Awaiting human review — see #40. Merge it to approve and continue to `architecture`, "
         "or leave review comments on it for anything that needs to change (leave it unmerged — "
         "the pipeline picks up your comments and revises the doc automatically). Run "
-        "`/sdlc-next` again once you've merged it, or any time after leaving comments if you'd "
+        "`/sdlc-pipeline` again once you've merged it, or any time after leaving comments if you'd "
         "like the revision done sooner.\n\n"
         "<!-- gate-pr: product:40 -->\n"
     )
@@ -1325,6 +1331,33 @@ _SEARCH_COUNT_ARGV = ("gh", "api",
                        "--jq", ".total_count")
 
 
+def test_retro_watermark_default_is_formatted_with_the_config_doc_root(tmp_path):
+    """`pipeline.retro.watermarkFile` defaults to `{docRoot}/retro-watermark`, resolved
+    against the config's own `docRoot` at load time -- so the watermark lives with the
+    driven repo's committed docs, not inside the skill checkout (where a leaked client
+    value once sat at the skill root)."""
+    from sdlc_next import RETRO_WATERMARK_FILE, _PIPELINE_DEFAULTS, DOC_ROOT
+    assert _PIPELINE_DEFAULTS["retro"]["watermarkFile"] == "{docRoot}/retro-watermark"
+    assert RETRO_WATERMARK_FILE == f"{DOC_ROOT}/retro-watermark" == "docs/sdlc/retro-watermark"
+    cfg = json.loads((Path(__file__).resolve().parents[2] / "sdlc.config.sample.json").read_text())
+    cfg["docRoot"] = "design/pipeline"
+    del cfg["pipeline"]["retro"]["watermarkFile"]  # fall back to the default
+    cfg_path = tmp_path / "sdlc-pipeline.config.json"
+    cfg_path.write_text(json.dumps(cfg))
+    out = subprocess.check_output(
+        [sys.executable, "-c", "import sdlc_next as s; print(s.RETRO_WATERMARK_FILE)"],
+        env={**os.environ, "SDLC_CONFIG": str(cfg_path)},
+        cwd=str(Path(__file__).resolve().parents[1]), text=True).strip()
+    assert out == "design/pipeline/retro-watermark"
+
+
+def test_retro_check_mark_done_creates_the_watermark_parent_directory(tmp_path):
+    from sdlc_next import GitHub, cmd_retro_check, RETRO_WATERMARK_FILE
+    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "3\n"}))
+    assert cmd_retro_check(gh, str(tmp_path), mark_done=True)["marked_done"] is True
+    assert (tmp_path / RETRO_WATERMARK_FILE).read_text().strip() == "3"
+
+
 def test_retro_check_true_when_five_or_more_closed_since_watermark(tmp_path):
     from sdlc_next import GitHub, cmd_retro_check, RETRO_WATERMARK_FILE
     wm = tmp_path / RETRO_WATERMARK_FILE
@@ -1395,6 +1428,7 @@ def test_pairing_counts_derives_bounces_from_markers():
     gh = GitHub(runner=runner)
     assert cmd_pairing_counts(gh, 9) == {
         "issue": 9,
+        "thresholds": {"replace_at": 3, "needs_human_at": 6},
         "pr_review_rework_since_last_clean": 2,
         "pr_review_total_rework": 3,
         "pr_review_total_clean": 1,
@@ -2265,7 +2299,11 @@ def test_epic_mid_second_gate_round_is_still_checked_even_though_architected():
     assert decide_next_action(gh, 92) == {"action": "none", "epic": 92}  # not_satisfied, no other work
 
 
-def test_open_gate_uses_epic_branch_and_doc_path_for_unit_epic():
+def test_open_gate_unit_epic_opens_gate_sub_branch_against_epic_branch():
+    # Since 2026-09-06 an epic-level gate is `epic-<n>-gate-<stage>` -> `epic-<n>`,
+    # never straight to `main` -- the doc lands on the epic branch when merged,
+    # and only `epic-<n>` itself reaches `main`, at close-epic. The issue-comment
+    # doc path is still the epic's own `docs/sdlc/epic-<n>/` folder.
     from sdlc_next import GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, \
         PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
     git_runner = ScriptedRunner({("git", "-C", "/repo", "rev-parse", "HEAD"): "abcd1234\n"})
@@ -2284,21 +2322,83 @@ def test_open_gate_uses_epic_branch_and_doc_path_for_unit_epic():
     result = cmd_open_gate(gh, "/repo", 92, "Seller notifications epic", "product.md",
                             "architecture", "Locked epic-level requirements.", unit="epic",
                             runner=git_runner)
-    assert result == {"issue": 92, "unit": "epic", "gate_pr": 129, "stage": "product", "sha": "abcd1234"}
+    assert result == {"issue": 92, "unit": "epic", "gate_pr": 129, "stage": "product",
+                      "sha": "abcd1234", "head": "epic-92-gate-product", "base": "epic-92"}
     pr_create_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "pr", "create"])
-    assert "epic-92" in pr_create_call
+    assert pr_create_call[pr_create_call.index("--base") + 1] == "epic-92"
+    assert pr_create_call[pr_create_call.index("--head") + 1] == "epic-92-gate-product"
+    assert "main" not in pr_create_call
     comment_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"])
     body = comment_call[comment_call.index("--body") + 1]
     assert "docs/sdlc/epic-92/product.md" in body
 
 
+def test_open_gate_unit_epic_gate_b_uses_architecture_gate_sub_branch():
+    from sdlc_next import GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, \
+        PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
+    git_runner = ScriptedRunner({("git", "-C", "/repo", "rev-parse", "HEAD"): "abcd1234\n"})
+    node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=5)}")
+    status_mutation_argv = ("gh", "api", "graphql", "-f",
+        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_5', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['awaiting-human-review'])}")
+    gh_runner = ScriptedRunner({
+        node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_5"}}}}),
+        status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 5}}}}),
+    })
+    gh_runner.prefix_responses = {
+        ("gh", "pr", "create"): "https://github.com/owner/repo/pull/130\n",
+        ("gh", "issue", "comment", "5"): "",
+    }
+    gh = GitHub(runner=gh_runner)
+    result = cmd_open_gate(gh, "/repo", 5, "Seller notifications epic", "architecture.md",
+                            "development", "Locked the design.", unit="epic", runner=git_runner)
+    assert result["head"] == "epic-5-gate-architecture"
+    assert result["base"] == "epic-5"
+    pr_create_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "pr", "create"])
+    assert pr_create_call[pr_create_call.index("--base") + 1] == "epic-5"
+    assert pr_create_call[pr_create_call.index("--head") + 1] == "epic-5-gate-architecture"
+
+
+def test_open_gate_unit_issue_still_targets_main_from_issue_branch():
+    # Standing-epic child gates are unchanged by the 2026-09-06 epic-gate rerouting.
+    from sdlc_next import GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, \
+        PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
+    git_runner = ScriptedRunner({("git", "-C", "/repo", "rev-parse", "HEAD"): "abcd1234\n"})
+    node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}")
+    status_mutation_argv = ("gh", "api", "graphql", "-f",
+        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['awaiting-human-review'])}")
+    gh_runner = ScriptedRunner({
+        node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
+        status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
+    })
+    gh_runner.prefix_responses = {
+        ("gh", "pr", "create"): "https://github.com/owner/repo/pull/41\n",
+        ("gh", "issue", "comment", "9"): "",
+    }
+    gh = GitHub(runner=gh_runner)
+    result = cmd_open_gate(gh, "/repo", 9, "Fix widget", "architecture.md", "development",
+                            "Design locked.", unit="issue", runner=git_runner)
+    assert result["head"] == "issue-9"
+    assert result["base"] == "main"
+
+
+def test_epic_gate_branch_uses_configured_prefix_and_suffix():
+    from sdlc_next import epic_gate_branch, GATE_BRANCH_SUFFIX, _PIPELINE_DEFAULTS
+    assert _PIPELINE_DEFAULTS["branches"]["gateSuffix"] == "-gate-"
+    assert GATE_BRANCH_SUFFIX == "-gate-"
+    assert epic_gate_branch(5, "product") == "epic-5-gate-product"
+    assert epic_gate_branch(5, "architecture") == "epic-5-gate-architecture"
+
+
 def test_pass_gate_unit_epic_at_architecture_completes_epic_instead_of_claiming_development():
+    # The merged epic gate landed on `epic-92` (its head was the gate sub-branch),
+    # so the epic worktree reconciles with `origin/epic-92` -- `main` is not
+    # involved until close-epic.
     from sdlc_next import GitHub, cmd_pass_gate, _ISSUE_NODE_ID_QUERY, _DELETE_ISSUE_FIELD_VALUE_MUTATION, \
         STAGE_FIELD_ID, PIPELINE_STATUS_FIELD_ID
     git_runner = ScriptedRunner({
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "checkout", "epic-92"): "",
-        ("git", "-C", "/repo", "merge", "origin/main"): "",
+        ("git", "-C", "/repo", "merge", "origin/epic-92"): "",
         ("git", "-C", "/repo", "push", "origin", "epic-92"): "",
     })
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=92)}")
@@ -2322,6 +2422,8 @@ def test_pass_gate_unit_epic_at_architecture_completes_epic_instead_of_claiming_
     result = cmd_pass_gate(gh, "/repo", issue=92, gate_pr=140, stage="architecture",
                             unit="epic", runner=git_runner)
     assert result == {"issue": 92, "unit": "epic", "epic_architecture_complete": True}
+    assert ["git", "-C", "/repo", "merge", "origin/epic-92"] in git_runner.calls
+    assert ["git", "-C", "/repo", "merge", "origin/main"] not in git_runner.calls
     edit_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "edit"])
     assert "epic:architected" in edit_call
     # Never writes a Stage-field value (e.g. "Development") for an epic.
@@ -2429,9 +2531,9 @@ def test_auto_pass_gate_skips_non_main_base():
 
 
 def test_auto_pass_gate_skips_non_gate_branch():
-    # `issue-<n>` and `epic-<n>` are both gate branch shapes now (epic-level
-    # Gate A/B run on `epic-<n>` -- see "Human-review gates"); anything else is
-    # ordinary non-gate traffic and skips cleanly.
+    # `issue-<n>` and `epic-<n>-gate-<stage>` are the two gate branch shapes
+    # (epic-level Gate A/B run on a sub-branch of `epic-<n>` -- see "Human-review
+    # gates"); anything else is ordinary non-gate traffic and skips cleanly.
     from sdlc_next import GitHub, cmd_auto_pass_gate, REPO
     gh_runner = ScriptedRunner({
         ("gh", "pr", "view", "40", "--repo", REPO,
@@ -2442,22 +2544,104 @@ def test_auto_pass_gate_skips_non_gate_branch():
     gh = GitHub(runner=gh_runner)
     result = cmd_auto_pass_gate(gh, "/repo", 40)
     assert result["ok"] is True
-    assert "not an issue-<n> or epic-<n> branch" in result["skipped"]
+    assert "not an issue-<n> or epic-<n>-gate-<stage> branch" in result["skipped"]
+
+
+def test_auto_pass_gate_skips_bare_epic_branch_head_which_is_the_integration_pr():
+    # A merged `epic-<n>` -> `main` PR is close-epic's integration merge, not a
+    # gate (gates moved to `epic-<n>-gate-<stage>` sub-branches on 2026-09-06).
+    # It must skip cleanly on the head shape alone, before any issue lookup.
+    from sdlc_next import GitHub, cmd_auto_pass_gate, REPO
+    gh_runner = ScriptedRunner({
+        ("gh", "pr", "view", "40", "--repo", REPO,
+         "--json", "number,headRefName,baseRefName,state,mergedAt,body"):
+            json.dumps({"number": 40, "headRefName": "epic-92", "baseRefName": "main",
+                        "state": "MERGED", "mergedAt": "2026-09-06T10:00:00Z", "body": ""}),
+    })
+    gh = GitHub(runner=gh_runner)
+    result = cmd_auto_pass_gate(gh, "/repo", 40)
+    assert result["ok"] is True
+    assert "not an issue-<n> or epic-<n>-gate-<stage> branch" in result["skipped"]
+    assert not any(c[:3] == ["gh", "issue", "view"] for c in gh_runner.calls)
+
+
+def test_auto_pass_gate_skips_epic_gate_head_whose_base_is_not_the_epic_branch():
+    # An `epic-<n>-gate-<stage>` head must be based on `epic-<n>`; based on `main`
+    # (or anything else) it is not the gate this pipeline opened.
+    from sdlc_next import GitHub, cmd_auto_pass_gate, REPO
+    gh_runner = ScriptedRunner({
+        ("gh", "pr", "view", "40", "--repo", REPO,
+         "--json", "number,headRefName,baseRefName,state,mergedAt,body"):
+            json.dumps({"number": 40, "headRefName": "epic-7-gate-architecture",
+                        "baseRefName": "main", "state": "MERGED",
+                        "mergedAt": "2026-09-06T10:00:00Z", "body": ""}),
+    })
+    gh = GitHub(runner=gh_runner)
+    result = cmd_auto_pass_gate(gh, "/repo", 40)
+    assert result["ok"] is True
+    assert "not epic-7" in result["skipped"]
+
+
+def test_match_open_gate_derives_unit_epic_and_number_from_gate_sub_branch_head():
+    from sdlc_next import GitHub, _match_open_gate, _GATE_BRANCH_RE, _ISSUE_FIELDS_QUERY, REPO
+    m = _GATE_BRANCH_RE.match("epic-7-gate-architecture")
+    assert m and m.group("epic_n") == "7" and m.group("stage") == "architecture"
+    assert m.group("issue_n") is None
+    m = _GATE_BRANCH_RE.match("issue-9")
+    assert m and m.group("issue_n") == "9" and m.group("epic_n") is None
+    assert _GATE_BRANCH_RE.match("epic-7") is None
+    assert _GATE_BRANCH_RE.match("epic-7-gate-lld") is None
+    fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=7)}")
+    gh_runner = ScriptedRunner({
+        ("gh", "issue", "view", "7", "--repo", REPO,
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": "<!-- gate-pr: architecture:55 -->"}]}),
+        fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
+            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Pipeline Status"},
+             "name": "Awaiting Human Review"},
+        ]}}}}}),
+    })
+    gh = GitHub(runner=gh_runner)
+    pr = {"headRefName": "epic-7-gate-architecture", "baseRefName": "epic-7", "body": ""}
+    assert _match_open_gate(gh, pr, 55) == (7, "architecture", "awaiting-human-review", "epic")
+
+
+def test_match_open_gate_refuses_epic_gate_head_named_for_the_other_stage():
+    # The marker is the authority on the stage; a `-gate-product` head while the
+    # epic's open gate is `architecture` is not the gate the epic is waiting on.
+    from sdlc_next import GitHub, _match_open_gate, _NotAGate, _ISSUE_FIELDS_QUERY, REPO
+    import pytest
+    fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=7)}")
+    gh_runner = ScriptedRunner({
+        ("gh", "issue", "view", "7", "--repo", REPO,
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": "<!-- gate-pr: architecture:55 -->"}]}),
+        fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
+            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Pipeline Status"},
+             "name": "Awaiting Human Review"},
+        ]}}}}}),
+    })
+    gh = GitHub(runner=gh_runner)
+    pr = {"headRefName": "epic-7-gate-product", "baseRefName": "epic-7", "body": ""}
+    with pytest.raises(_NotAGate, match="product gate branch"):
+        _match_open_gate(gh, pr, 55)
 
 
 def test_auto_pass_gate_completes_epic_architecture_for_merged_epic_gate():
-    # A merged epic-level Gate B (head branch `epic-<n>`) must route through
-    # _complete_epic_architecture -- clear the epic's Stage/Pipeline Status,
-    # add epic:architected -- never advance the epic to `development` (epics
-    # don't develop). Before 2026-08-20 the branch regex only matched
-    # `issue-<n>`, so epic gates got no real-time backstop at all.
+    # A merged epic-level Gate B (head branch `epic-<n>-gate-architecture`, base
+    # `epic-<n>`) must route through _complete_epic_architecture -- clear the
+    # epic's Stage/Pipeline Status, add epic:architected -- never advance the
+    # epic to `development` (epics don't develop). Before 2026-08-20 the branch
+    # regex only matched `issue-<n>`, so epic gates got no real-time backstop at
+    # all; from 2026-09-06 the epic gate head is the gate sub-branch and the
+    # reconcile after the merge is against `origin/epic-<n>`, not `main`.
     from sdlc_next import (GitHub, cmd_auto_pass_gate, _ISSUE_NODE_ID_QUERY,
                             _DELETE_ISSUE_FIELD_VALUE_MUTATION, _ISSUE_FIELDS_QUERY,
                             STAGE_FIELD_ID, PIPELINE_STATUS_FIELD_ID, REPO)
     git_runner = ScriptedRunner({
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "checkout", "epic-92"): "",
-        ("git", "-C", "/repo", "merge", "origin/main"): "",
+        ("git", "-C", "/repo", "merge", "origin/epic-92"): "",
         ("git", "-C", "/repo", "push", "origin", "epic-92"): "",
     })
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=92)}")
@@ -2469,7 +2653,8 @@ def test_auto_pass_gate_completes_epic_architecture_for_merged_epic_gate():
     gh_runner = ScriptedRunner({
         ("gh", "pr", "view", "40", "--repo", REPO,
          "--json", "number,headRefName,baseRefName,state,mergedAt,body"):
-            json.dumps({"number": 40, "headRefName": "epic-92", "baseRefName": "main",
+            json.dumps({"number": 40, "headRefName": "epic-92-gate-architecture",
+                        "baseRefName": "epic-92",
                         "state": "MERGED", "mergedAt": "2026-08-20T10:00:00Z",
                         "body": "Doc-only review gate for #92 -- see SKILL.md."}),
         ("gh", "issue", "view", "92", "--repo", REPO,
@@ -2581,7 +2766,7 @@ def test_auto_pass_gate_skips_when_marker_points_at_a_different_pr():
 def test_auto_pass_gate_dispatches_to_pass_gate_for_matching_open_gate():
     # live=False: CI advances the Stage field but must NOT claim in-progress or post
     # a start comment -- no agent is actually about to run this stage in real time,
-    # only the next live `/sdlc-next` invocation claims it for real. See
+    # only the next live `/sdlc-pipeline` invocation claims it for real. See
     # cmd_pass_gate's `live` docstring.
     from sdlc_next import (GitHub, cmd_auto_pass_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
                             _DELETE_ISSUE_FIELD_VALUE_MUTATION, _ISSUE_FIELDS_QUERY, STAGE_FIELD_ID,
@@ -2627,7 +2812,7 @@ def test_auto_pass_gate_marks_needs_human_when_matching_gate_pr_closed_without_m
     # See "Edge cases" under "Human-review gates" in references/gates.md: a human closing a gate
     # PR without merging is exactly as deterministic as merging it -- no judgment
     # needed, just status:needs-human + a comment, so this dispatches to the same
-    # cmd_mark_needs_human logic a manual /sdlc-next run would use.
+    # cmd_mark_needs_human logic a manual /sdlc-pipeline run would use.
     from sdlc_next import (GitHub, cmd_auto_pass_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
                             _ISSUE_FIELDS_QUERY, PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS, REPO)
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}")
@@ -2736,7 +2921,7 @@ def test_mark_feedback_received_skips_empty_body():
 
 def test_mark_feedback_received_skips_when_not_a_tracked_gate():
     # Reuses _match_open_gate -- one representative non-match (a head branch
-    # that is neither issue-<n> nor epic-<n>) proves the sharing works; every
+    # that is neither issue-<n> nor epic-<n>-gate-<stage>) proves the sharing works; every
     # other skip condition it checks is already covered by the auto-pass-gate
     # tests above.
     from sdlc_next import GitHub, cmd_mark_feedback_received, REPO
@@ -2749,13 +2934,13 @@ def test_mark_feedback_received_skips_when_not_a_tracked_gate():
     gh = GitHub(runner=gh_runner)
     result = cmd_mark_feedback_received(gh, 40, author="maintainer", body="please fix this")
     assert result["ok"] is True
-    assert "not an issue-<n> or epic-<n> branch" in result["skipped"]
+    assert "not an issue-<n> or epic-<n>-gate-<stage> branch" in result["skipped"]
 
 
 def test_mark_feedback_received_flips_forward_on_epic_gate_pr():
-    # An epic-level gate PR (head `epic-<n>`) gets the same Feedback Received
-    # flip a per-issue gate does -- it was silently skipped before the branch
-    # matcher learned the epic-<n> shape.
+    # An epic-level gate PR (head `epic-<n>-gate-<stage>`, base `epic-<n>`) gets
+    # the same Feedback Received flip a per-issue gate does -- it was silently
+    # skipped before the branch matcher learned the epic gate shape.
     from sdlc_next import (GitHub, cmd_mark_feedback_received, _ISSUE_NODE_ID_QUERY,
                             _SET_ISSUE_FIELD_MUTATION, _ISSUE_FIELDS_QUERY,
                             PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS, REPO)
@@ -2766,7 +2951,8 @@ def test_mark_feedback_received_flips_forward_on_epic_gate_pr():
     gh_runner = ScriptedRunner({
         ("gh", "pr", "view", "40", "--repo", REPO,
          "--json", "number,headRefName,baseRefName,state,mergedAt,body"):
-            json.dumps({"number": 40, "headRefName": "epic-92", "baseRefName": "main",
+            json.dumps({"number": 40, "headRefName": "epic-92-gate-product",
+                        "baseRefName": "epic-92",
                         "state": "OPEN", "mergedAt": None, "body": ""}),
         ("gh", "issue", "view", "92", "--repo", REPO,
          "--json", "number,title,labels,body,state,comments"):
@@ -3570,3 +3756,64 @@ def test_list_parallel_ready_does_not_count_a_closed_issues_leftover_worktree():
     assert result["active_count"] == 0
     assert result["stale_worktrees"] == [
         {"branch": "issue-150", "reason": "issue is closed or not found"}]
+
+
+def _wt_list_main(repo="."):
+    return {("git", "-C", repo, "worktree", "list", "--porcelain"):
+            "worktree /repo\nHEAD x\nbranch refs/heads/main\n"}
+
+
+def test_worktree_add_first_touch_child_branches_off_epic_branch():
+    from sdlc_next import GitHub, cmd_worktree_add
+    epic = _epic(110, labels=["epic:architected"])
+    child = _issue(185, stage="lld", parent=110)
+    gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])}))
+    runner = ScriptedRunner({
+        **_wt_list_main(),
+        ("git", "-C", ".", "fetch", "origin"): "",
+        ("git", "-C", ".", "branch", "-r", "--list", "origin/issue-185"): "",
+        ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-dev-185", "-b", "issue-185",
+         "origin/epic-110"): "",
+    })
+    assert cmd_worktree_add(gh, 185, runner=runner) == {
+        "created": True, "path": "/tmp/sdlc-dev-185", "branch": "issue-185",
+        "base": "origin/epic-110", "resumed": False}
+
+
+def test_worktree_add_resume_uses_pushed_branch_never_main():
+    from sdlc_next import GitHub, cmd_worktree_add
+    gh = GitHub(runner=ScriptedRunner({}))
+    runner = ScriptedRunner({
+        **_wt_list_main(),
+        ("git", "-C", ".", "fetch", "origin"): "",
+        ("git", "-C", ".", "branch", "-r", "--list", "origin/issue-185"): "  origin/issue-185\n",
+        ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-dev-185", "-B", "issue-185",
+         "origin/issue-185"): "",
+    })
+    result = cmd_worktree_add(gh, 185, runner=runner)
+    assert result["resumed"] is True and result["base"] == "origin/issue-185"
+    assert not any("origin/main" in c for c in runner.calls)
+
+
+def test_worktree_add_epic_unit_branches_off_main_into_epic_path():
+    from sdlc_next import GitHub, cmd_worktree_add
+    gh = GitHub(runner=ScriptedRunner({}))
+    runner = ScriptedRunner({
+        **_wt_list_main(),
+        ("git", "-C", ".", "fetch", "origin"): "",
+        ("git", "-C", ".", "branch", "-r", "--list", "origin/epic-110"): "",
+        ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-epic-110", "-b", "epic-110",
+         "origin/main"): "",
+    })
+    assert cmd_worktree_add(gh, 110, unit="epic", runner=runner)["path"] == "/tmp/sdlc-epic-110"
+
+
+def test_worktree_add_noop_when_branch_already_checked_out():
+    from sdlc_next import GitHub, cmd_worktree_add
+    gh = GitHub(runner=ScriptedRunner({}))
+    runner = ScriptedRunner({("git", "-C", ".", "worktree", "list", "--porcelain"):
+                             "worktree /repo\nHEAD x\nbranch refs/heads/main\n"
+                             "\nworktree /tmp/sdlc-dev-185\nHEAD y\nbranch refs/heads/issue-185\n"})
+    result = cmd_worktree_add(gh, 185, runner=runner)
+    assert result["created"] is False and result["path"] == "/tmp/sdlc-dev-185"
+    assert len(runner.calls) == 1  # no fetch, no add

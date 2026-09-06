@@ -175,9 +175,11 @@ fast-track). `lld`'s first move is deciding whether the fix fits the epic's exis
      comment.
   2. Resume the epic's architecture agent (or spawn fresh if the session ended) with
      the specific deviation. It revises the relevant subsection of the epic's
-     `architecture.md`, commits, and — since Gate B already passed once — opens a
-     **second Gate B round**: `sdlc_next.py open-gate <epic> --title "..."
-     --doc architecture.md --next-stage development --unit epic --summary "..."`.
+     `architecture.md` on a fresh `epic-<n>-gate-architecture` sub-branch (re-cut
+     from the current `origin/epic-<n>`), commits, pushes, and — since Gate B already
+     passed once — opens a **second Gate B round**: `sdlc_next.py open-gate <epic>
+     --title "..." --doc architecture.md --next-stage development --unit epic
+     --summary "..."`.
   3. Once that gate merges, `pass-gate`/`skip-gate --unit epic` re-marks
      `epic:architected` (idempotent), and the paused child becomes pickable again.
   4. Escalation valve: track as its own pairing (`lld` <-> `epic-architecture`); a
@@ -214,9 +216,10 @@ normal paths.
 ## The epic integration branch
 
 A normal epic owns a long-lived branch, `epic-<n>`, cut from `origin/main` when the
-epic starts. **Children branch from it and merge into it**, not into `main`. The branch
-takes one merge *from* `origin/main` at close, is verified as a whole, and merges to
-`main` once.
+epic starts. **Everything the epic produces branches from it and merges into it**, not
+into `main`: its own gate docs (on `epic-<n>-gate-<stage>` sub-branches) and each
+child's `issue-<n>`. The branch takes one merge *from* `origin/main` at close, is
+verified as a whole, and merges to `main` once.
 
 The point is where conflicts surface. Under trunk-based children, every child
 integrates against a `main` that moves under it, and two siblings can each be green
@@ -236,11 +239,19 @@ never from a label or a naming convention. It reads `issue_list`'s GraphQL, beca
 `gh issue view --json` has no `parent` field at all; the first cut read it from
 `issue_view` and every child silently resolved to `main`.
 
-**Gate PRs are unchanged.** They remain `epic-<n>` → `main` and are merged, never
-squashed. That still lands the epic's `product.md`/`architecture.md` on `main` early —
-which `check-epics-closeable` verifies, and which keeps them reachable by name rather
-than by a SHA quoted from an old comment. The close PR then carries only the commits
-added since the last gate, so the two do not fight.
+**Gate PRs follow the same shape** (decided 2026-09-06 — `references/history.md`).
+The epic's `product.md`/`architecture.md` are authored on a sub-branch
+`epic-<n>-gate-<stage>` cut from `origin/epic-<n>`; `open-gate --unit epic` opens it
+against `epic-<n>`; the human merges it (squash is fine — the sub-branch is
+disposable) and the doc lands on the epic branch; `pass-gate --unit epic` fast-forwards
+the epic worktree to `origin/epic-<n>`. Nothing about an epic gate touches `main`.
+Until 2026-09-06 epic gates went `epic-<n>` → `main` unsquashed, specifically so the
+docs were on `main` — reachable by name, not by a SHA quoted from an old comment —
+before any child forced the epic branch there. That guarantee has moved one branch
+over: for a still-open epic the docs are authoritative and reachable by name on
+`origin/epic-<n>`, which is what `check-epics-closeable` now verifies; `close-epic`'s
+final merge is what carries them to `main`, together with everything else the epic
+produced. A standing epic's children still gate `issue-<n>` → `main`, unsquashed.
 
 ## Epic closing
 
@@ -258,10 +269,12 @@ comment and assigns the operator (idempotent — detects its own prior marker):
 2. No child closed as won't-fix in a way that silently shrinks delivered scope
 3. No open issue elsewhere depends on a closed child *(auto-verified via the native
    `blocking` relationship)*
-4. The epic's own `product.md` and `architecture.md` are both on `main`
-   *(auto-verified)* — a doc left on `epic-<n>` is reachable only by SHA, and a SHA
-   quoted from an old comment resolves to whatever draft it pointed at; see
-   `references/history.md`, 2026-08-20
+4. The epic's own `product.md` and `architecture.md` are both on `epic-<n>`
+   *(auto-verified — `docs_missing_from_epic_branch` in the result)* — a doc left
+   on an unmerged `epic-<n>-gate-<stage>` sub-branch is reachable only by SHA, and a
+   SHA quoted from an old comment resolves to whatever draft it pointed at (see
+   `references/history.md`, 2026-08-20); it would also never reach `main`, since
+   `close-epic`'s merge of `epic-<n>` is what lands the docs there
 5. Architecture docs the epic touched reflect final state
 6. Delivered scope matches the epic's stated purpose
 7. Manual testing done — a human end-to-end pass outside the pipeline's coverage

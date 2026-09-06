@@ -17,6 +17,9 @@ SKILL.md                     the orchestration contract (read first)
 references/*.md              on-demand detail (gates, parallelism, stage playbooks, epics, ops, history)
 scripts/sdlc_next.py        the deterministic control plane (all gh/GraphQL/git lives here)
 scripts/tests/              pytest suite (runs offline against the sample config)
+agents/sdlc-*.md            the eight stage-agent definitions — copy into <repo>/.claude/agents/
+workflows/gate-auto-advance.yml  real-time gate backstop — copy into <repo>/.github/workflows/
+templates/*.template.md     product/architecture doc skeletons — copy into <docRoot>/_templates/
 sdlc.config.sample.json     template config — copy into your repo and fill in
 ```
 
@@ -42,22 +45,87 @@ sdlc.config.sample.json     template config — copy into your repo and fill in
    # and the org/project field + option ids via the projectV2 / field queries
    ```
 
-3. **Import the skill into your agent harness.** For Claude Code, symlink it in:
+3. **Import the skill into your repo.** Recommended layout: a git submodule (so CI
+   and every clone get the same pinned version) plus a *repo-relative* symlink for the
+   agent harness, so the link also resolves inside the worktrees the pipeline creates:
 
    ```bash
-   ln -s <path-to>/sdlc-pipeline <your-repo>/.claude/skills/sdlc-pipeline
+   cd <your-repo>
+   git submodule add https://github.com/<skill-owner>/sdlc-pipeline.git .github/sdlc-pipeline
+   ln -s ../../.github/sdlc-pipeline .claude/skills/sdlc-pipeline
+   git add .gitmodules .github/sdlc-pipeline .claude/skills/sdlc-pipeline
    ```
 
-   (Or vendor a copy into the repo — then the skill files themselves version with the
-   repo; see "Config can move under you" in `SKILL.md`.)
+   Commit the symlink (do not gitignore it) — an untracked or absolute link breaks
+   in `/tmp/sdlc-dev-<n>`-style worktrees. The shipped workflow assumes the
+   `.github/sdlc-pipeline` submodule path. Stage agents never hard-code a skill path:
+   they read `$SDLC_DIR/...`, and the orchestrator states `$SDLC_DIR` (the absolute
+   skill path) in every agent prompt; an agent that does not receive it stops and asks.
 
 4. **Per shell**, before running:
 
    ```bash
-   export SDLC="<path-to>/sdlc-pipeline/scripts/sdlc_next.py"
+   export SDLC_DIR="<path-to>/sdlc-pipeline"
+   export SDLC="$SDLC_DIR/scripts/sdlc_next.py"
    export GITHUB_TOKEN=$(cat <your-token-file>)   # classic PAT (ghp_)
    cd <your-repo>
    ```
+
+## Tunables — the `pipeline` config block
+
+Everything that used to be a constant in the script or a number in the prose is a key
+under `pipeline` in the config, each with a default (see `sdlc.config.sample.json`).
+`python3 "$SDLC" show-config` prints the effective values.
+
+| Key | Default | Controls |
+|---|---|---|
+| `parallelism.devLane` / `.prReview` | 3 / 3 | Dev-lane and review-pool caps (top-level, required) |
+| `pipeline.labels.*` | `epic:standing` / `epic:legacy` / `epic:architected` | The three epic labels |
+| `pipeline.branches.issuePrefix` / `.epicPrefix` | `issue-` / `epic-` | Branch naming; also how gate PRs are recognised |
+| `pipeline.worktrees.*` | `/tmp`, `sdlc-dev-`, `sdlc-epic-`, `sdlc-review-` | Where the orchestrator puts worktrees |
+| `pipeline.gates.skipConfidenceThreshold` | 95 | `arch-review` confidence needed to skip Gate B |
+| `pipeline.escalation.replaceAt` / `.needsHumanAt` | 3 / 6 | Bounce counts for the context-reset replacement and `needs-human` |
+| `pipeline.retro.everyClosedIssues` / `.watermarkFile` | 5 / `{docRoot}/retro-watermark` (`{docRoot}` resolves to the config's `docRoot`, e.g. `docs/sdlc/retro-watermark`) | Retro trigger and watermark location (relative to the driven repo) |
+| `pipeline.continuous.cycleCap` | 8 | Merges per unattended run before pausing for the operator |
+| `pipeline.models.<role>` | opus/sonnet per `SKILL.md` table | Model tier passed to each stage's `Agent` call |
+| `pipeline.docTemplates` | `_templates` | Template folder under `docRoot` |
+
+Repo-specific *commands* (lint, test, e2e) are not config — they belong in the
+`sdlc-*` agent definitions and the repo's own `CLAUDE.md`, which every stage agent
+already reads.
+
+## Installing the shipped pieces
+
+`SKILL.md` assumes these exist in the repo you drive. The first three ship here —
+copy them in, then adapt the agents' repo-specific commands (lint, test, e2e) and
+the `<placeholder>` values to your repo:
+
+```bash
+cp -r agents/* <repo>/.claude/agents/                        # the eight sdlc-* stage agents
+cp workflows/gate-auto-advance.yml <repo>/.github/workflows/  # needs secret SDLC_GH_TOKEN (classic PAT)
+mkdir -p <repo>/<docRoot>/_templates && cp templates/*.template.md <repo>/<docRoot>/_templates/
+```
+
+- **Agent definitions** (`agents/`): `sdlc-product`, `sdlc-architecture`,
+  `sdlc-design-review`, `sdlc-lld`, `sdlc-development`, `sdlc-testing`,
+  `sdlc-pr-review`, `sdlc-exploratory`. Each carries persona, procedure, refusal
+  criteria and `tools:` only; pipeline rules stay in `references/stage-playbooks.md`.
+  They reference the skill only as `$SDLC_DIR/...` (see Setup step 3).
+- **`workflows/gate-auto-advance.yml`** calling `auto-pass-gate`, `mark-todo`,
+  `mark-issue-closed` (real-time gate backstop; `next-action` works without it, just
+  later). Assumes the skill is the `.github/sdlc-pipeline` submodule.
+- **Doc templates** (`templates/`) → `<docRoot>/_templates/{product,architecture}.template.md`.
+
+Still external — not in this repository:
+
+- **The `superpowers` plugin** (the `development` agent invokes three of its skills).
+- **GitHub Projects v2 custom issue fields** `Stage`, `Pipeline Status`, `Priority`,
+  `Effort` with the option names the sample config lists, plus issue types
+  Task/Bug/Feature.
+
+`references/stage-playbooks.md` and `references/parallelism.md` still quote the
+origin repo's own commands and limits (`make lint`, `npm run test:it`, `make e2e`,
+Docker memory) as worked examples; substitute your repo's equivalents.
 
 ## Running the tests
 

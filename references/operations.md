@@ -4,7 +4,7 @@ Referenced from `SKILL.md`.
 
 ## Repo access (read this first, every time)
 
-The default `gh` auth (`nisingla_adobe`) has **no access** to `owner/repo`.
+Your default `gh` auth may have **no access** to the configured repo.
 Prefix every `gh` call with the token:
 
 ```bash
@@ -47,8 +47,8 @@ Native Issue Type, the org-provisioned **Priority**/**Effort** issue fields, and
 native `blockedBy` relationship replace the old label taxonomy. The `stage:*`/
 `status:*` labels are **retired** — throughout this skill, `stage:X`/`status:X` is
 compact shorthand for "Stage field = X" / "Pipeline Status field = X", never an
-actual label. Three labels remain, all epic-scoped: `epic:standing`, `epic:legacy`,
-`epic:architected`.
+actual label. Three labels remain, all epic-scoped and renameable via `pipeline.labels`:
+`epic:standing`, `epic:legacy`, `epic:architected` (defaults).
 
 | Category | Mechanism | Meaning |
 |---|---|---|
@@ -99,7 +99,7 @@ one change.
 
 `~/.claude/CLAUDE.md` requires all PRs be drafts, human-promoted. **This pipeline
 carries a standing, narrow exception, scoped only to PRs it opens in
-`owner/repo`, per the operator's direct instruction**: development opens a
+the configured repo, per the operator's direct instruction**: development opens a
 draft PR; once it passes adversarial `pr-review` and CI is green, the pipeline marks
 it ready and merges it. This is separate from the human gates in product/architecture
 — those pause deliberately; this step deliberately doesn't.
@@ -115,8 +115,8 @@ Loud and traceable, never quietly automatic:
 **`merge-pr` is the only merge gate in this repo.** Branch protection and rulesets
 are unavailable (`403 Upgrade to GitHub Pro`); don't go looking. `merge-pr` refuses
 on any non-passing check, on a code-touching PR whose required suite has neither a
-passing GHA check nor a fresh local-CI attestation (`REQUIRED_WORKFLOWS` in
-`sdlc_next.py` — keep in step with the workflows' `name:` fields), **and** — as a
+passing GHA check nor a fresh local-CI attestation (`requiredWorkflows` in
+the config — keep in step with the workflows' `name:` fields), **and** — as a
 structured exit-0 result — on a branch behind `origin/main` (green CI on a stale base
 is meaningless under the parallel lane; see `references/parallelism.md`, "Merge-time
 freshness gate").
@@ -158,7 +158,7 @@ they route differently:
   old attestation). If `testing` passed but skipped the attestation, that's the fix:
   run `record-local-ci`. **Never poll** — no GHA run is coming on a child PR.
 - **A genuine config defect** — a still-required GHA workflow never reported (renamed
-  out of step with `REQUIRED_WORKFLOWS`, disabled, `paths:` mismatch). Route per
+  out of step with the config's `requiredWorkflows`, disabled, `paths:` mismatch). Route per
   `references/stage-playbooks.md` (`pr-review` exit actions); `mark-needs-human`.
 
 Either way `missing-checks` is never a "still running" state — don't poll it.

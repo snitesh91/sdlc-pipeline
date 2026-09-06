@@ -1,5 +1,5 @@
 {
-  "_comment": "Template config for the sdlc-pipeline skill. Copy this into the repo you want to drive as `sdlc-pipeline.config.json` (or `.claude/sdlc-pipeline.config.json`) and replace every value below. The skill itself is generic and ships no real config. The projectFields ids are GitHub Projects-v2 schema ids for YOUR repo — look them up once via `gh api graphql` introspection. See README.md.",
+  "_comment": "Template config for the sdlc-pipeline skill. Copy this into the repo you want to drive as `sdlc-pipeline.config.json` (or `.claude/sdlc-pipeline.config.json`) and replace every value below. The skill itself is generic and ships no real config. The projectFields ids are GitHub Projects-v2 schema ids for YOUR repo \u2014 look them up once via `gh api graphql` introspection. See README.md.",
   "repo": "owner/repo",
   "docRoot": "docs/sdlc",
   "tokenPath": "~/.github-token",
@@ -12,14 +12,22 @@
     {
       "workflow": "Backend CI",
       "suite": "backend",
-      "prefixes": ["backend/"],
-      "files": [".github/workflows/backend-ci.yml"]
+      "prefixes": [
+        "backend/"
+      ],
+      "files": [
+        ".github/workflows/backend-ci.yml"
+      ]
     },
     {
       "workflow": "Frontend CI",
       "suite": "frontend",
-      "prefixes": ["frontend/"],
-      "files": [".github/workflows/frontend-ci.yml"]
+      "prefixes": [
+        "frontend/"
+      ],
+      "files": [
+        ".github/workflows/frontend-ci.yml"
+      ]
     }
   ],
   "projectFields": {
@@ -67,5 +75,49 @@
       "in-progress": "BOARD_IN_PROGRESS_ID",
       "done": "BOARD_DONE_ID"
     }
+  },
+  "pipeline": {
+    "_comment": "Optional. Every key below is shown at its default; omit any you don't need to change. `python3 sdlc_next.py show-config` prints the effective values.",
+    "labels": {
+      "standing": "epic:standing",
+      "legacy": "epic:legacy",
+      "architected": "epic:architected"
+    },
+    "branches": {
+      "issuePrefix": "issue-",
+      "epicPrefix": "epic-",
+      "gateSuffix": "-gate-"
+    },
+    "worktrees": {
+      "root": "/tmp",
+      "devPrefix": "sdlc-dev-",
+      "epicPrefix": "sdlc-epic-",
+      "reviewPrefix": "sdlc-review-"
+    },
+    "gates": {
+      "skipConfidenceThreshold": 95
+    },
+    "escalation": {
+      "replaceAt": 3,
+      "needsHumanAt": 6
+    },
+    "retro": {
+      "everyClosedIssues": 5,
+      "watermarkFile": "{docRoot}/retro-watermark"
+    },
+    "continuous": {
+      "cycleCap": 8
+    },
+    "models": {
+      "product": "opus",
+      "architecture": "opus",
+      "arch-review": "opus",
+      "lld": "sonnet",
+      "lld-review": "opus",
+      "development": "sonnet",
+      "testing": "sonnet",
+      "pr-review": "opus"
+    },
+    "docTemplates": "_templates"
   }
 }

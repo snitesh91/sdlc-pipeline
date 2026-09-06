@@ -1,0 +1,171 @@
+name: sdlc-pipeline Gate Auto-Advance
+
+# Reacts to sdlc-pipeline gate-PR activity in real time -- see "Human-review gates" in
+# .claude/skills/sdlc-pipeline/references/gates.md. Four independent jobs, gated on event type:
+#
+#   auto-advance (pull_request: closed) -- a gate PR closed, either way:
+#     - Merged      -> calls the pipeline's own `pass-gate` logic directly, so the
+#                      issue's native Stage/Pipeline Status fields advance immediately.
+#     - Closed, not
+#       merged      -> calls the pipeline's own `mark-needs-human` logic -- see "Edge
+#                      cases" under "Human-review gates" in references/gates.md: a bare close
+#                      carries no actionable content to revise against, so this is
+#                      status:needs-human, not a guess.
+#
+#   init-todo-status (issues: opened) -- a brand-new issue was filed. GitHub's native
+#     Issue Fields have no schema-level default (checked via GraphQL introspection --
+#     `IssueFieldSingleSelect` exposes no `defaultOption`), so a fresh issue otherwise
+#     shows a blank Pipeline Status until something claims it. Sets it to `Todo`,
+#     skipping cleanly if any Pipeline Status is already set (covers a fast first
+#     `/sdlc-pipeline` claim landing before this job runs, or the job re-firing).
+#
+#   mark-issue-closed (issues: closed) -- see "Epic board Status" in
+#     references/epics.md and "Issue taxonomy" in references/operations.md. Fires for every issue close in the repo, regardless
+#     of cause (a merge-pr squash-merge auto-closing it via Closes #<n>, or a
+#     human closing it directly) -- moved here from cmd_merge_pr 2026-08-20, per
+#     operator instruction, specifically so a human manually closing an issue
+#     gets the same field cleanup a pipeline-driven merge always did, instead of
+#     silently skipping it. Two unconditional writes on every closed issue:
+#     Stage is cleared (meaningless once closed) and Pipeline Status is set to
+#     `Done` (not deleted -- a closed issue now has a real terminal state).
+#     If the closed issue is also an epic (the pipeline never closes one itself
+#     -- a milestone-level human call, see "Epic closing"), this additionally
+#     sets the board's native Status field to `Done`, mirroring
+#     `_maybe_mark_epic_in_progress` in sdlc_next.py doing the same at the other
+#     end (epic-level claim -> `In Progress`).
+#
+# REMOVED 2026-09-04 (operator cost-reduction directive): a fourth job,
+# `flag-feedback-received` (pull_request_review: submitted, issue_comment: created),
+# flipped a gate issue's Pipeline Status to `Feedback Received` the instant a human
+# left a review/comment. It was cut because its two triggers fired a runner on every
+# comment and review anywhere in the repo — a very high volume under this pipeline —
+# for a pure-visibility marker that `next-action` reconstructs idempotently anyway.
+# `mark-feedback-received` still exists in `sdlc_next.py` for manual/local use; only
+# the webhook that drove it on every comment is gone. Restore the job + its two
+# triggers from git history if the real-time flag is wanted back.
+#
+# Each remaining job fires the instant the human acts, instead of waiting for the
+# next manual `/sdlc-pipeline` invocation to notice (via `check-gate` / next-action's own
+# detection).
+#
+# No job-level `if` guard beyond matching this job's own trigger event(s) --
+# `sdlc_next.py auto-pass-gate` does its own gate-PR identification (via the shared
+# `_match_open_gate` helper) and is conservative about it: it only mutates anything
+# for a PR it can positively identify as a currently-open gate PR for some issue, and
+# skips cleanly (exit 0, no red X) for everything else -- the common case, since most
+# PR activity here is unrelated to a gate at all (the pipeline's own development PRs,
+# ordinary code review, etc).
+#
+# Shipped with the sdlc-pipeline skill (workflows/). Every `python3
+# .github/sdlc-pipeline/scripts/sdlc_next.py ...` step below assumes the skill is
+# installed as a git submodule at `.github/sdlc-pipeline`; adjust the path if you
+# vendor it elsewhere.
+#
+# This is a real-time backstop alongside next-action's own gate detection, not a
+# replacement for it -- next-action stays fully idempotent, so it simply finds
+# nothing left to do once a workflow run here has already advanced the fields, or
+# picks up the slack itself if a run didn't happen for some reason (missing secret,
+# workflow disabled, etc).
+
+# ── Trimmed 2026-09-04 (operator cost-reduction directive) ────────────────────
+# The `issue_comment: created` and `pull_request_review: submitted` triggers were
+# REMOVED. Between them they fired a fresh runner (checkout + setup-python +
+# script) on *every comment and review anywhere in the repo* — and this pipeline
+# posts a very high volume of automated comments — while the only job they drove,
+# `flag-feedback-received`, set a pure-visibility `Feedback Received` status that
+# `next-action` already reconstructs idempotently on its own. High spend, no
+# durable state lost. The `flag-feedback-received` job was removed with them.
+#
+# The load-bearing jobs stay: `auto-advance` (pull_request: closed) advances or
+# flags a gate the instant its PR is merged/closed, and the two `issues` jobs
+# initialise/finalise a Pipeline Status. TO RESTORE the real-time feedback flag,
+# re-add the two triggers below and the `flag-feedback-received` job from git
+# history.
+on:
+  pull_request:
+    types: [closed]
+  issues:
+    types: [opened, closed]
+
+jobs:
+  init-todo-status:
+    if: github.event_name == 'issues' && github.event.action == 'opened'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The control-plane script comes from the sdlc-pipeline submodule at
+          # .github/sdlc-pipeline (public repo, so the default token can fetch it).
+          submodules: true
+        # Only one field write via `gh`, no branch work, so the shallow checkout is enough.
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Default this new issue's Pipeline Status to Todo
+        env:
+          GITHUB_TOKEN: ${{ secrets.SDLC_GH_TOKEN }}
+        run: |
+          python3 .github/sdlc-pipeline/scripts/sdlc_next.py mark-todo ${{ github.event.issue.number }}
+
+  mark-issue-closed:
+    if: github.event_name == 'issues' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true   # control-plane script comes from the sdlc-pipeline submodule
+        # A few field writes via `gh`, no branch work, so the shallow checkout is enough.
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Clear Stage, set Pipeline Status Done, and (if an epic) board Status Done
+        env:
+          GITHUB_TOKEN: ${{ secrets.SDLC_GH_TOKEN }}
+        run: |
+          python3 .github/sdlc-pipeline/scripts/sdlc_next.py mark-issue-closed ${{ github.event.issue.number }}
+
+  auto-advance:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true   # control-plane script comes from the sdlc-pipeline submodule
+          # `pass_gate` does a real `git merge origin/main` + push of the gate's
+          # issue-<n>/epic-<n> branch -- needs full history and a token with actual write
+          # access to this repo (see "Repo access" in references/operations.md: the default
+          # workflow-scoped GITHUB_TOKEN can't write the custom Stage/Pipeline
+          # Status issue fields either way, so we authenticate the checkout itself
+          # with the same classic PAT used for every other step below).
+          token: ${{ secrets.SDLC_GH_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Advance or flag this issue's gate if this PR was a currently open sdlc-pipeline gate PR
+        env:
+          # Must be a classic PAT with repo access, same requirements as the
+          # <your-token-file> used locally -- see "Repo access" in
+          # .claude/skills/sdlc-pipeline/references/operations.md. The default github.token /
+          # fine-grained PATs cannot write this repo's custom Stage/Pipeline
+          # Status issue fields.
+          GITHUB_TOKEN: ${{ secrets.SDLC_GH_TOKEN }}
+        run: |
+          python3 .github/sdlc-pipeline/scripts/sdlc_next.py auto-pass-gate --pr ${{ github.event.pull_request.number }}

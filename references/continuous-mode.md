@@ -26,7 +26,7 @@ between units. On **every** wakeup:
    by design. Because tracked-agent bounce counters don't survive between cycle
    agents, each cycle agent runs `sdlc_next.py pairing-counts <issue>` on the unit
    it picks up and counts the returned marker-derived strikes toward the escalation
-   valve's thresholds (3 → context-reset replacement agent, 6 → `needs-human`),
+   valve's thresholds (`thresholds` in its output; default 3 → context-reset replacement agent, 6 → `needs-human`),
    rather than starting every pairing at zero. A count of 3 or more on a marker-backed
    pairing also means the replacement swap has *already* happened — never re-run it.
 2. Wait for that agent's completion notification. Note tersely which unit ran and
@@ -41,8 +41,8 @@ between units. On **every** wakeup:
    - **Otherwise spawn the next cycle agent immediately** once the notification
      arrives and backlog remains, **then** `ScheduleWakeup` with a long fallback
      delay (1200s+) purely as a hang safety net.
-4. **Cycle cap — pause every 8 issues fully driven to a merge.** No tool access to
-   usage-limit state, so this is the proxy safeguard. After the 8th merge:
+4. **Cycle cap — pause every `pipeline.continuous.cycleCap` (default 8) issues fully driven to a merge.** No tool access to
+   usage-limit state, so this is the proxy safeguard. After the cap is hit:
    `ScheduleWakeup stop:true`, checkpoint summary, wait for the operator's
    "continue", reset the counter.
 5. Each wakeup report stays terse: a couple lines on the unit driven and its

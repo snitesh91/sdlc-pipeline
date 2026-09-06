@@ -6,6 +6,13 @@ summary: **the epic's own Product/Architecture phase is strictly sequential; eve
 at the child level fans out in bounded, worktree-isolated pools with mechanically
 computed eligibility.**
 
+Worktree paths in this file are the defaults from the config's `pipeline.worktrees`
+block — `root` (default `/tmp`) joined with `devPrefix` (`sdlc-dev-`), `epicPrefix`
+(`sdlc-epic-`) or `reviewPrefix` (`sdlc-review-`) and the unit number — so
+`/tmp/sdlc-dev-<n>`, `/tmp/sdlc-epic-<n>`, `/tmp/sdlc-review-<n>`. `<repo-root>` is the
+driven repo's shared checkout. Substitute your configured values wherever a path below
+is quoted.
+
 ## Where concurrency exists, and where it never does
 
 | Work | Concurrency | Detail |
@@ -24,15 +31,16 @@ worktree (see "Working on a branch" below), so two invocations never contend for
 checkout. Two invocations targeting the *same* epic would still race on
 GitHub state — don't do that.
 
-Note on the two caps: `DEV_LANE_PARALLELISM` and `PR_REVIEW_PARALLELISM` (both 3) are
-each tuned against Docker test-suite resource pressure, but they are **independent
-pools** — worst case 6 concurrent real-suite runs. `active_count` in
+Note on the two caps: `parallelism.devLane` and `parallelism.prReview` in the config (default 3 each) are
+each tuned against the machine's real resource cap for running test suites (memory
+and CPU available to the containers or processes the suites run in), but they are
+**independent pools** — worst case 6 concurrent real-suite runs. `active_count` in
 `list-parallel-ready` also counts `issue-*` worktrees from *other* epics' invocations
 (it reads `git worktree list` on the shared repo), which makes the dev-lane cap
 effectively machine-global rather than per-epic — deliberate, since the constraint it
-protects (Docker resources) is machine-global too. If concurrent runs start reporting
-resource starvation rather than real defects, lower the caps — don't make reviews
-shallower.
+protects (the machine's suite-running resources) is machine-global too. If concurrent
+runs start reporting resource starvation rather than real defects, lower the caps —
+don't make reviews shallower.
 
 What has *not* come back is the old label-coordinated free-for-all: context-blind
 agents discovering each other through the board. The main agent stays in the loop
@@ -51,7 +59,7 @@ standing-epic child's per-issue `product`/`architecture` flow is untouched; its
 
 ```bash
 python3 "$SDLC" list-parallel-ready <epic> \
-  --repo-path /Users/nisingla/Documents/personal/owner/repo
+  --repo-path <repo-root>
 ```
 
 Returns up to `DEV_LANE_PARALLELISM` new candidates safe to start or resume right now,
@@ -80,7 +88,7 @@ branch existence) reflects current remote state.
 `lld`, or no Stage value yet, with no `origin/issue-<n>` branch) has no committed
 `lld.md` to declare a footprint — the footprint is written *by* the `lld` stage this
 command exists to start, so requiring one would deadlock the lane. Starting `lld`
-itself is safe: it writes only that issue's own `docs/sdlc/issue-<n>/`
+itself is safe: it writes only that issue's own `<docRoot>/issue-<n>/`
 folder, which cannot collide with a sibling; that folder stands in as the child's
 footprint for the call's collision bookkeeping. From the next call onward (branch
 exists), the real committed footprint is required. `lld-review` independently checks
@@ -106,24 +114,26 @@ time. Resume-based rework is unaffected: a review finding on one child resumes o
 that child's own tracked agent, never a sibling's. Once a child reaches `testing`, it
 enters the same `list-ready-for-review` pool as any other child.
 
-## Docker is the real cap — serialize suite-heavy stages
+## The machine's resource cap is the real cap — serialize suite-heavy stages
 
-`DEV_LANE_PARALLELISM` and `PR_REVIEW_PARALLELISM` bound *agents*, not *containers*.
-The binding constraint on this machine is the Docker VM (~7.6 GB, with the dev
-frontend container alone holding ~2.6 GB), and two stages that each run a real suite
-will starve each other well before either cap is reached.
+`DEV_LANE_PARALLELISM` and `PR_REVIEW_PARALLELISM` bound *agents*, not *suite runs*.
+The binding constraint is whatever memory and CPU the machine actually gives the
+containers or processes the suites run in (a container runtime's VM allotment, minus
+whatever the standing dev stack already holds), and two stages that each run a real
+suite will starve each other well before either cap is reached.
 
-Observed twice on 2026-08-20, epic #110: the full backend IT suite
-(`npm run test:it`, 65 suites) was **OOM-killed** when run single-process — once during
-`development` on #186, which then reported its blast radius by grep rather than by
-execution. Two agents independently rediscovered the same workaround.
+This has been observed, not inferred: a full integration suite run single-process has
+been OOM-killed mid-`development`, and the stage then reported its blast radius by grep
+rather than by execution; two agents independently rediscovered the same workaround
+(see `references/history.md`).
 
 The rules, so nobody has to rediscover it a third time:
 
-- **Never run the full backend suite single-process.** Run it in memory-scoped batches
-  — `--memory=3g`, `--runInBand`, against an isolated Postgres on its own Docker
-  network — and record which batch covered which directories, so the batches
-  demonstrably partition the whole tree with no overlap or omission.
+- **Never run a suite that has exceeded the machine's cap single-process.** Run it in
+  memory-scoped batches — the memory flag, the in-band/serial runner flag, and the
+  isolated-database setup are whatever the repo's `CLAUDE.md` and the stage's agent
+  definition document — and record which batch covered which directories, so the
+  batches demonstrably partition the whole tree with no overlap or omission.
 - **Do not start a second suite-running stage while one is live.** `testing` and
   `pr-review` both re-run real suites; so does `development` under TDD. Two children
   may sit in the dev lane concurrently, but hold the second one's *suite-heavy* stage
@@ -136,39 +146,41 @@ The rules, so nobody has to rediscover it a third time:
   remapped ports rather than reusing the shared dev stack, which serves `main` and not
   the branch under test.
 
-### `make e2e` works — the committed config is the working one
+### The e2e suite is not known-broken — the committed config is the working one
 
-Three separate stages on epic #156 (#232, #233, #245) hit `make e2e` failures,
-concluded the suite was broken, and routed around it; one agent was killed outright by
-a stall watchdog doing so. #238's `lld` root-caused it and reproduced the result in
-both directions on the same machine:
+Several stages in one epic hit e2e failures, concluded the suite was broken, and
+routed around it; one agent was killed outright by a stall watchdog doing so. A later
+`lld` root-caused it and reproduced the result in both directions on the same machine:
+the committed harness configuration worked, and the obvious "fix" (switching the
+container's networking mode to reach the host-side dev server another way) was the
+thing that failed — plain HTTP reachability was identical under both, and the real
+discriminator was a protocol upgrade the alternative network path could not complete
+(see `references/history.md`).
 
-- **`--network host` + `localhost:3001` — what is committed — works.** Auth setup
-  completes, 30+ specs execute.
-- **Bridge networking + `host.docker.internal:3001` fails**, and it is the obvious
-  "fix" that fails: Docker Desktop's gVisor network proxy cannot complete the Next dev
-  server's WebSocket upgrade (`ws://host.docker.internal:3001/_next/webpack-hmr`), so
-  the client never hydrates, so the sign-in modal never opens. **Plain HTTP GET returns
-  200 under both** — HTTP reachability is not the discriminator, the WebSocket upgrade
-  is. Do not "fix" the harness in this direction.
+The rules that came out of it:
 
-So: a `make e2e` failure is a finding to investigate, not a known-broken suite to work
-around. If it genuinely cannot run, say which surfaces are therefore unproven — never
-substitute a build or a `--list` (see `references/stage-playbooks.md`,
-"Compile-checking is not verification").
+- **The committed harness config is presumed working.** An e2e failure is a finding to
+  investigate, not a known-broken suite to work around.
+- **Reproduce in both directions before "fixing" the harness.** A change to how the
+  test container reaches the application under test must be shown to pass where the
+  committed config passes; an alternative that returns 200 on a plain GET has proved
+  nothing about the client-side session the specs actually need.
+- If it genuinely cannot run, say which surfaces are therefore unproven — never
+  substitute a build or a `--list` (see `references/stage-playbooks.md`,
+  "Compile-checking is not verification").
 
 **Long commands need an explicit watchdog.** An agent's default ~120s tool-call timeout
-kills `make e2e` long before the harness's own `timeout --foreground 480` applies —
-that is what the stall watchdog fired on. Any stage running `make e2e`, a full IT
-batch, or a Docker image build must use `run_in_background` or an explicit outer
+kills a full e2e run long before the harness's own internal timeout applies — that is
+what the stall watchdog fired on. Any stage running the e2e suite, a full integration
+batch, or a container image build must use `run_in_background` or an explicit outer
 timeout of at least 600s. Tell the agent this in the delegation prompt; it cannot
 discover it without dying first.
 
 ## When an agent dies mid-stage
 
-Three agents died on epic #156 — an API error, the machine sleeping, and a stall
-watchdog at 600s. In all three the work survived because it had been committed, and the
-same recovery worked:
+Agents die mid-stage for reasons unrelated to the work — an API error, the machine
+sleeping, a stall watchdog — and in every recorded case the work survived because it
+had been committed, and the same recovery worked (see `references/history.md`):
 
 1. **Inspect the worktree first, don't ask the agent.** Commits ahead of `origin`,
    `git status --porcelain`, whether a PR already exists.
@@ -176,9 +188,9 @@ same recovery worked:
    failure — and tell it explicitly: **treat nothing as verified; re-run every check
    from scratch.** A half-finished stage's own claims about what it verified are the
    least trustworthy thing in the worktree.
-3. **Never force-push, and never authorise one on the agent's word.** One resumed agent
-   hit a push rejected by an intervening rebase and correctly stopped and asked instead
-   of forcing; `--force-with-lease` was authorised only after the branch was verified a
+3. **Never force-push, and never authorise one on the agent's word.** A resumed agent
+   that hits a push rejected by an intervening rebase should stop and ask instead of
+   forcing; `--force-with-lease` is authorised only after the branch is verified a
    strict content-superset of what it would overwrite. "Push rejected → stop and
    report" is already the standing rule (`SKILL.md`, Step 3) — this is what it looks
    like when it works.
@@ -186,15 +198,11 @@ same recovery worked:
 ### Commit and push after every step — the unit of loss is the unbanked step
 
 "The work survived because it had been committed" is the whole recovery story above,
-and epic #98 turned it from an observation into a rule. That session lost roughly
-fifteen agent turns to a machine that kept sleeping, and the two working styles
-separated cleanly:
-
-- **#274's replacement batched** — investigate everything, then apply one large edit at
-  the end. It lost **everything, three times running**: three full rounds of
-  verification, with the document never once modified. Only its scratch files survived.
-- Switched to **one finding, one commit, one push**, it then landed **seven commits
-  across nine more interruptions and lost nothing.** #284 did the same and carried ten.
+and one epic driven on a machine that kept sleeping turned it from an observation into
+a rule: an agent that batched — investigate everything, then apply one large edit at
+the end — lost everything, repeatedly, while the same agent switched to one finding,
+one commit, one push banked every step across many more interruptions and lost
+nothing (see `references/history.md`).
 
 So when dispatching any stage into an unstable session, say it explicitly: **commit and
 push after each self-contained step; never hold a batch to the end.** Prefer several
@@ -213,12 +221,11 @@ rediscover its own state spends the turn it was given on that instead of on the 
 keep running and **report to the orchestrator** when they finish, minutes later, under
 their own task ids.
 
-Observed 2026-09-03: a `lld-review` on #313 was stopped mid-verification to free the
-lane. One axis returned afterwards carrying ~166k tokens of verified work — a
-byte-identical re-derivation of a shell-generated filter, a `setIamPolicy` sweep across
-thirteen roles with `roles/owner` as a positive control, and every runbook quote checked
-against grep-anchored locators. None of it was in the parent's verdict, because there
-was no verdict.
+This has happened: a design review stopped mid-verification to free the lane had one
+axis return afterwards carrying a large body of fully verified work — a byte-identical
+re-derivation, a permissions sweep with a positive control, every quote checked against
+a grep-anchored locator — none of it in the parent's verdict, because there was no
+verdict (see `references/history.md`).
 
 Two consequences, both the orchestrator's job:
 
@@ -227,9 +234,10 @@ Two consequences, both the orchestrator's job:
   rounds. The next round is told not to re-derive it. Discarding it pays for the same
   work twice.
 - **Check for artifacts after any kill.** A stopped agent never runs its own cleanup.
-  An earlier interrupted review left two empty state objects in live buckets from a
+  An interrupted review has left stray state objects in live cloud resources from a
   probe that had contaminated its own control. Sweep whatever the stage could have
-  touched — buckets, worktrees, cloud resources — before declaring the lane quiet.
+  touched — cloud resources, worktrees, temporary containers — before declaring the
+  lane quiet.
 
 A kill is therefore never instantaneous or free. Prefer letting a review finish when
 the difference is minutes.
@@ -237,17 +245,17 @@ the difference is minutes.
 ### Hold the waiting yourself
 
 A subagent cannot wait across turns: parked on a poll, it burns a full turn per wake
-and re-park, learning nothing. On #275 that pattern consumed ~190k tokens across
-several cycles while a 53-minute e2e run ground on.
+and re-park, learning nothing. That pattern has consumed a large share of a stage's
+token budget across several cycles while an hour-long e2e run ground on (see
+`references/history.md`).
 
 When a stage is genuinely blocked on a long external thing — a container build, a full
 suite, a stack coming healthy — **the orchestrator runs the poll** (`run_in_background`
 with a generous window) and resumes the agent once, with the result. Better still, have
 the agent launch the long job as a **detached, daemon-managed container** so it survives
-the agent's own turn deaths, then hand back the outcome. #275's suite only produced a
-usable artifact once it was run that way, writing its report **under the bind mount**
-rather than to a path inside a `--rm` container, where two earlier runs' output vanished
-with the container.
+the agent's own turn deaths, then hand back the outcome — writing its report **under a
+bind mount** rather than to a path inside an ephemeral (`--rm`) container, where
+earlier runs' output has vanished with the container.
 
 ## Git-conflict handling — layered, not just "shouldn't happen"
 
@@ -287,8 +295,8 @@ with the container.
 `pr-review` is a decoupled pool: any PR that `testing` has passed sits waiting until a
 review agent picks it up, and up to `PR_REVIEW_PARALLELISM` of them can be reviewed at
 once, each in its own worktree. Reviews have **zero** dependency on each other; the
-cap is tuned purely against Docker resource contention (each review re-runs the real
-test suite).
+cap is tuned purely against the machine's suite-running resource contention (each
+review re-runs the real test suite).
 
 ```bash
 python3 "$SDLC" list-ready-for-review <epic>            # up to PR_REVIEW_PARALLELISM PRs
@@ -332,8 +340,8 @@ hand-written forms historically came out mangled (see `references/history.md`).
 2. **One worktree per PR, checked out detached at `origin/issue-<n>`** — deliberately
    **not** a local `issue-<n>` branch:
    ```bash
-   git -C /Users/nisingla/Documents/personal/owner/repo fetch origin
-   git -C /Users/nisingla/Documents/personal/owner/repo worktree add --detach /tmp/sdlc-review-<n> origin/issue-<n>
+   git -C <repo-root> fetch origin
+   git -C <repo-root> worktree add --detach /tmp/sdlc-review-<n> origin/issue-<n>
    ```
    Detached matters: `issue-<n>` must stay free for `development`'s own worktree to
    hold that branch if this review lands findings and rework resumes. A review
@@ -346,10 +354,9 @@ hand-written forms historically came out mangled (see `references/history.md`).
    sequential case.
 4. **Reviews stay empirical, not diff-only.** Each agent re-runs the real test suite
    and independently re-verifies the claims in `development.md` and in `testing`'s
-   handoff comment — that is
-   what caught the IPv6-mapped-address bypass and the seller-status authorization gap
-   (#111/#114/#130). If the suites starve each other, lower `PR_REVIEW_PARALLELISM` —
-   don't make the reviews shallower.
+   handoff comment — that is what has caught real authorization bypasses that a
+   diff-only read passed (see `references/history.md`). If the suites starve each
+   other, lower `PR_REVIEW_PARALLELISM` — don't make the reviews shallower.
 5. Each agent finishes with `record-pr-review`, then the normal outcome handling
    (`references/stage-playbooks.md`, "pr-review").
 6. **Remove each worktree when its review ends**, crash included
@@ -380,9 +387,9 @@ last second code path, and the only remaining way two invocations could collide.
 Created by the epic's first stage:
 
 ```bash
-git -C /Users/nisingla/Documents/personal/owner/repo worktree add /tmp/sdlc-epic-<n> -b epic-<n> origin/main
+git -C <repo-root> worktree add /tmp/sdlc-epic-<n> -b epic-<n> origin/main
 # or, resuming a crashed run / later stage on an existing branch:
-git -C /Users/nisingla/Documents/personal/owner/repo worktree add /tmp/sdlc-epic-<n> epic-<n>
+git -C <repo-root> worktree add /tmp/sdlc-epic-<n> epic-<n>
 ```
 
 The branch is fully done once the epic reaches `epic:architected` — remove the
@@ -391,36 +398,34 @@ from a deviation escalation, which stands the worktree up again on this same bra
 
 **Land the epic's docs on `main` at that point, and delete the branch.** An
 `architecture.md` that lives only on `epic-<n>` is reachable only by SHA, which is how
-#209's `pr-review` came to quote a superseded draft (`references/history.md`,
-2026-08-20). `epic-110` was worse: it had been created as an **orphan** with no merge
-base, so it could never be merged at all and its whole tree was a stale snapshot of the
-repo. Create the epic branch from `origin/main`
-(`worktree add <path> -b epic-<n> origin/main`),
-never as an orphan, and open a docs PR for `epic-<n>/architecture.md` once the epic is
-architected. `check-epics-closeable` reports anything still missing under
-`docs_missing_from_main`, but that fires only at the very end — landing it at
-`epic:architected` is the intended path.
-The shared checkout stays on `main` and is never checked out to a pipeline branch —
-which also means nothing this pipeline runs can collide with it.
+a `pr-review` has come to quote a superseded draft; and an epic branch created as an
+**orphan** with no merge base can never be merged at all — its whole tree is a stale
+snapshot of the repo (see `references/history.md`). Create the epic branch from
+`origin/main` (`worktree add <path> -b epic-<n> origin/main`), never as an orphan, and
+open a docs PR for `epic-<n>/architecture.md` once the epic is architected.
+`check-epics-closeable` reports anything still missing under `docs_missing_from_main`,
+but that fires only at the very end — landing it at `epic:architected` is the intended
+path. The shared checkout stays on `main` and is never checked out to a pipeline
+branch — which also means nothing this pipeline runs can collide with it.
 
 **Branch from `origin/main`, never local `main`.** Both commands above (and the child
 command below) say `origin/main` deliberately. The shared checkout is never checked out
 to a pipeline branch and nothing ever pulls it, so **its local `main` is stale by
-construction** and drifts further for the whole session. On epic #156 the early
-worktrees were created from local `main`, four commits behind — two children started on
-a base that did not contain their own epic's merged `architecture.md`. `sync-branch`
-reconciled it, but only after the branch existed. Fetch first if in doubt; the cost is
-a second.
+construction** and drifts further for the whole session. Worktrees created from local
+`main` have started children on a base several commits behind — one that did not
+contain their own epic's merged `architecture.md`; `sync-branch` reconciled it, but
+only after the branch existed (see `references/history.md`). Fetch first if in doubt;
+the cost is a second.
 
 **Every child issue — normal or standing epic, any stage — gets its own
 `git worktree`**, created the first time any stage touches it (and *before* the
 `claim`, per the ordering rule above):
 
 ```bash
-git -C /Users/nisingla/Documents/personal/owner/repo worktree add /tmp/sdlc-dev-<n> -b issue-<n> origin/epic-<parent>
+git -C <repo-root> worktree add /tmp/sdlc-dev-<n> -b issue-<n> origin/epic-<parent>
 # or, resuming a crashed run / later stage on an existing branch — base it on the
 # PUSHED branch, never fresh off main:
-git -C /Users/nisingla/Documents/personal/owner/repo worktree add /tmp/sdlc-dev-<n> -B issue-<n> origin/issue-<n>
+git -C <repo-root> worktree add /tmp/sdlc-dev-<n> -B issue-<n> origin/issue-<n>
 ```
 
 **Resume base — `origin/issue-<n>` when it exists, never `main`.** A resumed child's
@@ -453,9 +458,9 @@ detached worktrees (step 6 above) and tidy-up when an invocation simply ends.
 **Slot accounting self-heals independently of that.** `list-parallel-ready` does not
 count an `issue-<n>` worktree whose issue is closed, `needs-human`, gate-pending, or
 blocked — it reports those under `stale_worktrees` instead. Both layers exist because
-one didn't hold: on 2026-08-20 #186 was parked `needs-human` with its worktree left on
-disk, the lane read 3/3 full, and the rest of that invocation ran at one-third
-capacity with no error anywhere to notice (see `references/history.md`).
+one didn't hold: a child parked `needs-human` with its worktree left on disk made the
+lane read full, and the rest of that invocation ran at a fraction of capacity with no
+error anywhere to notice (see `references/history.md`).
 
 A crashed session still leaves a worktree behind for the next
 `next-action`/`list-parallel-ready` call to find and reuse. When reusing a leftover
@@ -527,7 +532,7 @@ python3 "$SDLC" merge-lld-doc <n>   # auto-resolves the epic branch's worktree
 
 Run it right after `record-design-review`, before `claim <n> --role development` (see
 `references/stage-playbooks.md`, the `lld-review` exit action). It takes
-`docs/sdlc/issue-<n>/lld.md` verbatim from `origin/issue-<n>` and commits
+`<docRoot>/issue-<n>/lld.md` verbatim from `origin/issue-<n>` and commits
 **only that one file** onto `epic-<parent>` as a doc-only commit, then pushes — not a
 merge of the whole child branch, so none of the child's in-progress code goes with it.
 Two payoffs: the low-level design is durable on the epic branch independent of the

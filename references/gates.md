@@ -29,15 +29,36 @@ confidence skip" below. **What "the next stage" means depends on `--unit`**: for
 epic `epic:architected` and clears its Stage/Pipeline Status entirely, handing off to
 its children's `lld` (see `_complete_epic_architecture` in `sdlc_next.py`).
 
-Each gate is a **small, doc-only PR** (`issue-<n>` → `main`, or `epic-<n>` → `main`),
-not a checkbox. Merging it *is* the approval signal; any review comment on it is
-feedback the pipeline must address before that merge.
+Each gate is a **small, doc-only PR**, not a checkbox. Its shape depends on the unit:
+
+- `--unit issue` (standing-epic child): `issue-<n>` → `main`.
+- `--unit epic`: `epic-<n>-gate-<stage>` → `epic-<n>` — a disposable sub-branch of
+  the epic branch (`epic-5-gate-product`, `epic-5-gate-architecture`; the `-gate-`
+  joiner is `pipeline.branches.gateSuffix`). The epic's gate never targets `main`
+  directly; `epic-<n>` itself reaches `main` once, unsquashed, at `close-epic`.
+  Decided 2026-09-06 — see `references/history.md`.
+
+Merging it *is* the approval signal; any review comment on it is feedback the
+pipeline must address before that merge.
 
 ## Opening a gate
 
 Done by the orchestrator itself — not a subagent — once the doc is committed and
-pushed to `origin/issue-<n>` (or `origin/epic-<n>`); Gate B specifically once
-`arch-review` passes clean on the committed doc:
+pushed to the gate's head branch; Gate B specifically once `arch-review` passes clean
+on the committed doc. **Where the doc is authored** (the exit-action expectation for
+the `product`/`architecture` stages in `references/stage-playbooks.md`):
+
+- Standing-epic child: on `issue-<n>`, pushed to `origin/issue-<n>` — as always.
+- Epic level: on the gate sub-branch `epic-<n>-gate-<stage>`, cut from
+  `origin/epic-<n>` (in the epic's worktree: `git fetch origin && git checkout -b
+  epic-<n>-gate-product origin/epic-<n>`), committed there, pushed to
+  `origin/epic-<n>-gate-<stage>`. Never commit the doc to `epic-<n>` directly — the
+  epic branch only ever receives merges. A second Gate B round (see
+  `references/epics.md`, "Epic-level deviation escalation") reuses the same
+  `epic-<n>-gate-architecture` name, re-cut from the current `origin/epic-<n>`.
+
+`open-gate` opens the PR from that head against the matching base (`main` for an
+issue, `epic-<n>` for an epic) and returns both as `head`/`base`:
 
 ```bash
 python3 "$SDLC" open-gate <n> \
@@ -60,8 +81,15 @@ leak into PR titles, issue comments, or commit messages.)
 This PR is opened **ready for review, not draft** — its whole purpose is immediate
 human review (a narrow, scoped exception to the global draft-PR rule). It carries
 **no `Closes #<n>`** — merging it must not close the tracking issue; only the final
-development PR closes an issue. It is **never squash-merged and never deletes the
-branch** — that branch keeps living through every later stage.
+development PR closes an issue. How it may be merged depends on the unit:
+
+- A per-issue gate (`issue-<n>` → `main`) is **never squash-merged and never deletes
+  the branch** — `issue-<n>` keeps living through every later stage, and a squash
+  would make the next `sync-branch` merge of `main` a phantom diff.
+- An epic gate (`epic-<n>-gate-<stage>` → `epic-<n>`) **may be squash-merged and the
+  sub-branch may be deleted after the merge** — it is disposable; the doc now lives
+  on `epic-<n>`. What must never be squashed or deleted is `epic-<n>` itself, which
+  merges to `main` only at `close-epic`.
 
 Once `open-gate` returns, park this unit and return to Step 1 (see `SKILL.md`,
 "Looping within an invocation"). There is no polling for a gate; it sits at
@@ -82,9 +110,12 @@ python3 "$SDLC" check-gate <issue-number>
 `.github/workflows/gate-auto-advance.yml` calls the same gate logic automatically the
 instant a human closes a gate PR either way — via `auto-pass-gate --pr <n>`, which
 re-derives the issue and owning stage from the `<!-- gate-pr: stage:pr -->` marker,
-**and derives the unit from the head branch** (`issue-<n>` vs `epic-<n>`), so it
-covers per-issue gates and epic-level gates alike: a merged epic Gate B routes through
-`_complete_epic_architecture` (marks `epic:architected`), never through a stage claim.
+**and derives the unit and number from the head branch** (`issue-<n>` based on
+`main`, or `epic-<n>-gate-<stage>` based on `epic-<n>` — a wrong base, a bare
+`epic-<n>` head (the close-epic integration PR), or a head named for the other stage
+than the marker is skipped as not-a-gate), so it covers per-issue gates and epic-level
+gates alike: a merged epic Gate B routes through `_complete_epic_architecture` (marks
+`epic:architected`), never through a stage claim.
 On a merge it calls `pass_gate` with `live=False`: the Stage field advances but the
 stage is deliberately **not** claimed — Pipeline Status is left cleared and no start
 comment posted, because CI firing in real time doesn't mean an agent is about to run
@@ -118,8 +149,9 @@ cutoff. Instruct it to:
 1. Revise `docs/sdlc/<unit>-<n>/<doc>.md` to address each piece of feedback,
    from either channel — or say explicitly in its reply why something shouldn't be
    applied, never silently ignore it.
-2. Commit and push to `origin/<unit>-<n>` — this updates the open gate PR's diff; no
-   new PR.
+2. Commit and push to the gate PR's head branch — `origin/issue-<n>` for an issue,
+   `origin/epic-<n>-gate-<stage>` for an epic — this updates the open gate PR's diff;
+   no new PR.
 3. Reply to each addressed **review thread** summarizing the change, then resolve it
    (`resolveReviewThread` GraphQL mutation on the thread's `id`).
 4. Post one reply **on the PR** addressing the plain comments, ending with a fresh
@@ -150,9 +182,13 @@ python3 "$SDLC" pass-gate <n> \
   --gate-pr <gate-pr-number> --stage product [--unit epic]   # --repo-path optional: worktree auto-resolved
 ```
 
-This reconciles the branch with `main` (merge + push back to origin — the branch
-handed to the next stage is already in sync). It then sets the Stage field to the
-next stage and claims it (Pipeline Status `In Progress`, start comment) — this covers
+This reconciles the unit's branch with wherever the gate just landed (merge + push
+back to origin — the branch handed to the next stage is already in sync): `issue-<n>`
+with `origin/main`, or `epic-<n>` with `origin/epic-<n>` (a fast-forward picking up
+the merged gate sub-branch; `main` is not involved — `sync-branch --unit epic` is what
+still reconciles the epic branch with `origin/main`, its integration base). It then
+sets the Stage field to the next stage and claims it (Pipeline Status `In Progress`,
+start comment) — this covers
 a per-issue gate at either stage *and* an epic's Gate A (which claims `architecture`
 on the epic itself); continue straight into that stage's delegation. The one special
 case: **`--unit epic` at `--stage architecture`** (an epic's Gate B) claims nothing —
@@ -170,7 +206,7 @@ mismatch with `--gate-pr`/`--stage`. Always pass `next-action`'s own
 
 When `arch-review` returns a clean verdict it also reports numeric `confidence`
 (0-100) in a `<!-- arch-review-confidence: N -->` marker.
-`GATE_B_SKIP_CONFIDENCE_THRESHOLD` in `sdlc_next.py` (currently 95) is the single
+`pipeline.gates.skipConfidenceThreshold` in the config (default 95) is the single
 source of truth for the cutoff — never hardcode a different number anywhere.
 
 - **Confidence > threshold** → skip Gate B entirely:
@@ -202,8 +238,9 @@ source of truth for the cutoff — never hardcode a different number anywhere.
   epic-level deviation found by `lld` is the one exception; it deliberately opens a
   *second* Gate B round — see `references/epics.md`, "Epic-level deviation
   escalation".)
-- Never `--delete-branch` when merging a gate PR — the branch keeps being used by
-  every later stage.
+- Never `--delete-branch` when merging a **per-issue** gate PR — `issue-<n>` keeps
+  being used by every later stage. Deleting the **epic gate sub-branch**
+  (`epic-<n>-gate-<stage>`) after its merge is fine; never delete `epic-<n>`.
 
 **Development-section linking, for completeness**: `open-dev-pr` appends `Closes #<n>`
 (auto-links, auto-closes); `open-gate`'s body mentions `#<n>` in plain text (links
