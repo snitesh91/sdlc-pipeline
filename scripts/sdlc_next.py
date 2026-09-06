@@ -447,6 +447,10 @@ class GitHub:
     def issue_comment(self, number: int, body: str):
         self._run(["gh", "issue", "comment", str(number), "--repo", self.repo, "--body", body])
 
+    def issue_close(self, number: int):
+        self._run(["gh", "issue", "close", str(number), "--repo", self.repo,
+                   "--reason", "completed"])
+
     def pr_comment(self, number: int, body: str):
         self._run(["gh", "pr", "comment", str(number), "--repo", self.repo, "--body", body])
 
@@ -559,6 +563,21 @@ class GitHub:
         regardless of which worktree/checkout state any local repo is in."""
         out = self._run(["gh", "api", f"repos/{self.repo}/compare/{base}...{head}",
                           "--jq", ".behind_by"])
+        return int(out.strip())
+
+    def branch_ahead_by(self, head: str, base: str = "main") -> Optional[int]:
+        """How many commits `head` has that `base` lacks -- the mirror of
+        `branch_behind_by`, same REST compare call, other direction. `None` when
+        either ref is absent from origin (the compare 404s), which is a real
+        answer to the only question asked of it: `cmd_open_gate` uses it to prove
+        an epic's gate doc reached its sub-branch, and "the sub-branch was never
+        pushed" and "it carries no commits" are the same defect with the same
+        fix. Added 2026-09-06 retro."""
+        try:
+            out = self._run(["gh", "api", f"repos/{self.repo}/compare/{base}...{head}",
+                              "--jq", ".ahead_by"])
+        except GhError:
+            return None
         return int(out.strip())
 
     def pr_ready(self, number: int):
@@ -1945,6 +1964,25 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
     # ever merges to `main`, unsquashed, at `close-epic`. See `epic_gate_branch`.
     if unit == "epic":
         head, base = epic_gate_branch(issue, stage), epic_branch(issue)
+        # The epic branch is merge-only. If the doc was committed straight onto
+        # `epic-<n>` instead of the sub-branch, the gate is either unpushed or
+        # empty -- and an empty gate PR reads to the human as "nothing to review"
+        # while the design sits unreviewed on the integration branch. Both show up
+        # as the sub-branch having nothing over its base, so refuse loudly here
+        # rather than leaving an orchestrator to notice by eye. Recovery is branch
+        # surgery on a shared branch, so it names the operator explicitly. Added
+        # 2026-09-06 retro, after `architecture.md` reached `epic-345` directly.
+        ahead = gh.branch_ahead_by(head, base=base)
+        if not ahead:
+            detail = ("does not exist on origin" if ahead is None
+                      else f"carries no commits over {base}")
+            raise GhError(
+                f"gate branch {head} {detail} -- an epic's {doc} is authored on that "
+                f"disposable sub-branch, never committed to {base} directly (see "
+                f"\"Opening a gate\" in references/gates.md). If the doc is already "
+                f"committed on {base}, this needs operator approval: move those "
+                f"commits onto {head} (cut from the epic's clean base), force-rewind "
+                f"{base} to it, push both, then re-run open-gate.")
     else:
         head, base = branch, "main"
     repo_path = resolve_repo_path(repo_path, head, runner=runner)
@@ -2812,6 +2850,18 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
                               f"see \"PRs merge automatically\" in the pipeline docs.")
     issue_state = gh.issue_view(issue)["state"]
     issue_closed = issue_state == "CLOSED"
+    if not issue_closed and base != "main":
+        # Merging into an epic branch does NOT fire the PR's `Closes #<n>` -- GitHub
+        # only auto-closes an issue when its PR merges to the default branch. Close
+        # the child explicitly so it cannot linger open: a merged-but-open child
+        # phantom-resumes next-action (it re-delegates a done issue) and blocks the
+        # epic's all-children-closed gate. The reactive gate-auto-advance.yml
+        # `issues: closed` trigger then syncs its Stage/Pipeline Status fields, and
+        # `mark-issue-closed` stays available for the field-sync-only path. Replaces
+        # a two-step (pr-review manually running `gh issue close` after merge) that
+        # a session dying mid-close silently skipped. Added 2026-09-06 retro.
+        gh.issue_close(issue)
+        issue_closed = True
     if issue_closed:
         gh.issue_comment(issue, f"Merged via #{pr_number}.")
     # Merged is the terminal stopping point -- release the worktree here rather

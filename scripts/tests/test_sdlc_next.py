@@ -2313,6 +2313,8 @@ def test_open_gate_unit_epic_opens_gate_sub_branch_against_epic_branch():
     gh_runner = ScriptedRunner({
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_92"}}}}),
         status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 92}}}}),
+        ("gh", "api", "repos/owner/repo/compare/epic-92...epic-92-gate-product",
+         "--jq", ".ahead_by"): "1\n",
     })
     gh_runner.prefix_responses = {
         ("gh", "pr", "create"): "https://github.com/owner/repo/pull/129\n",
@@ -2343,6 +2345,8 @@ def test_open_gate_unit_epic_gate_b_uses_architecture_gate_sub_branch():
     gh_runner = ScriptedRunner({
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_5"}}}}),
         status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 5}}}}),
+        ("gh", "api", "repos/owner/repo/compare/epic-5...epic-5-gate-architecture",
+         "--jq", ".ahead_by"): "2\n",
     })
     gh_runner.prefix_responses = {
         ("gh", "pr", "create"): "https://github.com/owner/repo/pull/130\n",
@@ -3817,3 +3821,137 @@ def test_worktree_add_noop_when_branch_already_checked_out():
     result = cmd_worktree_add(gh, 185, runner=runner)
     assert result["created"] is False and result["path"] == "/tmp/sdlc-dev-185"
     assert len(runner.calls) == 1  # no fetch, no add
+
+
+def test_merge_pr_closes_child_explicitly_when_merged_into_epic_branch():
+    # Merging a child PR into its epic branch does NOT fire the PR's `Closes #<n>`
+    # -- GitHub only auto-closes on the default branch -- so merge-pr must close the
+    # child itself, or it lingers open: phantom-resuming next-action and blocking the
+    # epic's all-children-closed gate. Regression test for the 2026-09-06 retro fix.
+    from sdlc_next import GitHub, cmd_merge_pr
+    from tests.test_sdlc_next import ScriptedRunner
+    import json
+    runner = ScriptedRunner({
+        tuple(_list_argv()): _list_response([
+            _issue(9, parent=90), _issue(90, issue_type="Feature")]),
+        ("gh", "api", "repos/owner/repo/compare/epic-90...issue-9", "--jq", ".behind_by"): "0\n",
+        ("gh", "issue", "view", "9", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"state": "OPEN", "comments": _clean_pipeline_comments()}),
+        ("gh", "pr", "checks", "42", "--repo", "owner/repo",
+         "--json", "name,state,bucket,link,workflow"): json.dumps([{"name": "ci", "bucket": "pass"}]),
+        ("gh", "api", "--paginate", "repos/owner/repo/pulls/42/files", "--jq", ".[].filename"):
+            "docs/sdlc/issue-9/lld.md\n",
+        ("gh", "pr", "view", "42", "--repo", "owner/repo",
+         "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
+        ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch"): "",
+        ("gh", "issue", "close", "9", "--repo", "owner/repo", "--reason", "completed"): "",
+        **_NO_UNIT_WORKTREE,
+    })
+    runner.prefix_responses = {
+        ("gh", "pr", "comment", "42"): "",
+        ("gh", "issue", "comment", "9"): "",
+    }
+    gh = GitHub(runner=runner)
+    result = cmd_merge_pr(gh, 42, issue=9)
+    assert result["merged"] is True and result["issue_closed"] is True
+    assert ["gh", "issue", "close", "9", "--repo", "owner/repo",
+            "--reason", "completed"] in runner.calls
+
+
+def test_merge_pr_does_not_close_the_issue_itself_when_the_base_is_main():
+    # The mirror of the test above: merging to the default branch DOES fire
+    # `Closes #<n>`, so merge-pr must not also issue a close of its own --
+    # ScriptedRunner raises on any unscripted call, so the absence of a scripted
+    # `gh issue close` is what proves it.
+    from sdlc_next import GitHub, cmd_merge_pr
+    from tests.test_sdlc_next import ScriptedRunner
+    import json
+    runner = ScriptedRunner({
+        tuple(_list_argv()): _list_response([_issue(9)]),
+        ("gh", "api", "repos/owner/repo/compare/main...issue-9", "--jq", ".behind_by"): "0\n",
+        ("gh", "issue", "view", "9", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"state": "OPEN", "comments": _clean_pipeline_comments()}),
+        ("gh", "pr", "checks", "42", "--repo", "owner/repo",
+         "--json", "name,state,bucket,link,workflow"): json.dumps([{"name": "ci", "bucket": "pass"}]),
+        ("gh", "api", "--paginate", "repos/owner/repo/pulls/42/files", "--jq", ".[].filename"):
+            "docs/sdlc/issue-9/lld.md\n",
+        ("gh", "pr", "view", "42", "--repo", "owner/repo",
+         "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
+        ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch"): "",
+        **_NO_UNIT_WORKTREE,
+    })
+    runner.prefix_responses = {("gh", "pr", "comment", "42"): ""}
+    gh = GitHub(runner=runner)
+    result = cmd_merge_pr(gh, 42, issue=9)
+    assert result["merged"] is True and result["issue_closed"] is False
+    assert not any(c[:3] == ["gh", "issue", "close"] for c in runner.calls)
+
+
+def test_open_gate_unit_epic_refuses_when_the_gate_sub_branch_was_never_pushed():
+    # The epic branch is merge-only: committing `architecture.md` straight onto
+    # `epic-<n>` (what happened on epic-345) leaves the gate sub-branch absent, so
+    # open-gate must refuse instead of opening a PR from a ref that isn't there.
+    # Regression test for the 2026-09-06 retro guard.
+    from sdlc_next import GitHub, GhError, cmd_open_gate
+    import pytest
+    gh_runner = ScriptedRunner({})
+    gh_runner.fail_on = {("gh", "api", "repos/owner/repo/compare/epic-345...epic-345-gate-architecture",
+                          "--jq", ".ahead_by")}
+    gh = GitHub(runner=gh_runner)
+    with pytest.raises(GhError) as exc:
+        cmd_open_gate(gh, "/repo", 345, "Mobile responsive audit", "architecture.md",
+                       "development", "Locked the design.", unit="epic",
+                       runner=ScriptedRunner({}))
+    msg = str(exc.value)
+    assert "epic-345-gate-architecture does not exist on origin" in msg
+    assert "force-rewind epic-345" in msg
+    # Refused before any write: no PR, no field mutation, no issue comment.
+    assert not any(c[:3] == ["gh", "pr", "create"] for c in gh_runner.calls)
+    assert not any(c[:3] == ["gh", "issue", "comment"] for c in gh_runner.calls)
+
+
+def test_open_gate_unit_epic_refuses_when_the_gate_sub_branch_is_empty():
+    # The sub-branch exists but carries nothing over the epic branch -- the doc
+    # went to `epic-<n>` and the gate PR would read as "nothing to review".
+    from sdlc_next import GitHub, GhError, cmd_open_gate
+    import pytest
+    gh_runner = ScriptedRunner({
+        ("gh", "api", "repos/owner/repo/compare/epic-345...epic-345-gate-architecture",
+         "--jq", ".ahead_by"): "0\n",
+    })
+    gh = GitHub(runner=gh_runner)
+    with pytest.raises(GhError) as exc:
+        cmd_open_gate(gh, "/repo", 345, "Mobile responsive audit", "architecture.md",
+                       "development", "Locked the design.", unit="epic",
+                       runner=ScriptedRunner({}))
+    assert "carries no commits over epic-345" in str(exc.value)
+    assert not any(c[:3] == ["gh", "pr", "create"] for c in gh_runner.calls)
+
+
+def test_open_gate_unit_issue_does_not_consult_the_gate_branch_guard():
+    # The guard is epic-only: a standing-epic child's gate is `issue-<n>` -> `main`,
+    # where the doc genuinely is committed on the head branch. ScriptedRunner raises
+    # on any unscripted call, so the absence of a scripted compare proves it.
+    from sdlc_next import GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, \
+        PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
+    git_runner = ScriptedRunner({("git", "-C", "/repo", "rev-parse", "HEAD"): "abcd1234\n"})
+    node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}")
+    status_mutation_argv = ("gh", "api", "graphql", "-f",
+        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['awaiting-human-review'])}")
+    gh_runner = ScriptedRunner({
+        node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
+        status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
+    })
+    gh_runner.prefix_responses = {
+        ("gh", "pr", "create"): "https://github.com/owner/repo/pull/131\n",
+        ("gh", "issue", "comment", "9"): "",
+    }
+    gh = GitHub(runner=gh_runner)
+    result = cmd_open_gate(gh, "/repo", 9, "Notification prefs", "product.md",
+                            "architecture", "Locked requirements.", runner=git_runner)
+    assert result["head"] == "issue-9" and result["base"] == "main"
+    assert not any("compare" in " ".join(c) for c in gh_runner.calls)

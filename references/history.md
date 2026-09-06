@@ -4,6 +4,46 @@ Provenance for rules that would otherwise read as arbitrary. Newest first. Keep
 entries to a few lines; the rule itself lives in the spine or its reference file —
 this file records *why* and *when*.
 
+## 2026-09-06 — retro: child auto-close on epic-branch merge; epic gate docs must not land on the epic branch
+
+Two findings from the driven repo's epic #348 / #345 runs, ported into the generic
+skill (the epic #348 retro was written against the pre-extraction vendored copy, so
+its fixes reached `main` there as an unmergeable branch — see the third bullet).
+
+- **`merge-pr` left the child issue open when merging into an epic branch.** A PR's
+  `Closes #<n>` only fires on the default branch, so a child squash-merged into
+  `epic-<parent>` stayed OPEN; `mark-issue-closed` only syncs board fields, it does
+  not close the issue. The open child phantom-resumed `next-action` (it re-delegated
+  an already-merged issue) and blocked the epic's all-children-closed gate, forcing
+  `pr-review` into a manual `gh issue close` two-step that a session dying mid-close
+  silently skipped. `cmd_merge_pr` now closes the child itself when `base != "main"`,
+  and the reactive `gate-auto-advance.yml` `issues: closed` job syncs the fields as
+  usual. Lesson: an auto-close that only fires on one base is not an auto-close.
+
+- **An epic's `architecture.md` was committed straight onto `epic-345`.** The
+  2026-09-06 epic-gate rerouting (`epic-<n>-gate-<stage>` → `epic-<n>`) landed in the
+  control plane and in `references/gates.md`, but `references/stage-playbooks.md` and
+  the `product`/`architecture` agent definitions still said "commit and push on
+  `epic-<n>`" — so the first epic to reach Gate B under the new regime faithfully did
+  the old thing, and recovery cost a force-rewind of a shared branch (commits moved to
+  `epic-345-gate-architecture`, `epic-345` rewound to its clean base; no content lost).
+  Fixed in both directions: the three prose sites now name the sub-branch, and
+  `open-gate --unit epic` refuses before any write when the sub-branch is missing from
+  origin or carries no commits over `epic-<n>` (new `GitHub.branch_ahead_by`). The
+  `ahead_by` form is deliberate — a squash-merged gate sub-branch leaves a
+  single-parent commit on `epic-<n>`, so "merge-only" is not detectable by parent
+  count, and `path_on_ref` would false-refuse a second Gate B round where
+  `architecture.md` legitimately already exists on the epic branch. Lesson: a routing
+  change is not landed until every place that tells an agent which branch to commit on
+  agrees with it.
+
+- **Not ported: the epic #348 retro's other two items.** Its `close-epic` attestation
+  fix was already a separate commit upstream of the extraction, and its 105 lines of
+  test repair addressed rot that the extraction pass had independently fixed — the
+  suite here was green at 201 tests before this entry. Only ~16 lines of that retro
+  still mattered. Lesson: a retro branch left unmerged across a repo restructure
+  becomes archaeology, not a patch.
+
 ## 2026-09-06 — SKILL.md slimmed; narrative moved here; generic-skill leaks fixed
 
 `SKILL.md` cut from ~4.4k to ~2.9k words with no rule removed: the concurrency table,

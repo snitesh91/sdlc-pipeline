@@ -57,6 +57,13 @@ the `product`/`architecture` stages in `references/stage-playbooks.md`):
   `references/epics.md`, "Epic-level deviation escalation") reuses the same
   `epic-<n>-gate-architecture` name, re-cut from the current `origin/epic-<n>`.
 
+`open-gate --unit epic` enforces this: it refuses, before any write, when the gate
+sub-branch is missing from origin or carries no commits over `epic-<n>` — the two
+shapes "the doc was committed onto the epic branch instead" takes. Recovery is branch
+surgery on a shared branch (move the commits to the sub-branch, force-rewind
+`epic-<n>`), so it needs operator approval. Added 2026-09-06 — see
+`references/history.md`.
+
 `open-gate` opens the PR from that head against the matching base (`main` for an
 issue, `epic-<n>` for an epic) and returns both as `head`/`base`:
 

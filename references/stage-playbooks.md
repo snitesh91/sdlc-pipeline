@@ -511,12 +511,16 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
 `/tmp/sdlc-dev-<n>`); see `references/parallelism.md`.
 
 - **`product` done, `unit: "epic"`** — In the epic's own worktree
-  (`/tmp/sdlc-epic-<n>`), on `epic-<n>` created from `main` (first stage to
-  touch it). Write `<docRoot>/epic-<n>/product.md` as a requirements document covering
+  (`/tmp/sdlc-epic-<n>`). Create `epic-<n>` from `main` (first stage to touch it),
+  then **author on the gate sub-branch, not on `epic-<n>`**: `git checkout -b
+  epic-<n>-gate-product`. The epic branch only ever receives merges — see "Opening a
+  gate" in `references/gates.md`; `open-gate --unit epic` refuses if the doc did not
+  reach the sub-branch. Write `<docRoot>/epic-<n>/product.md` as a requirements document covering
   the whole epic, per Document altitude — organised by **functional area, never by
   child issue**. Children are the architecture stage's output; a product document that
   names them is either pre-empting that decomposition or reporting on it, and the
-  requirement is the same whoever ends up implementing it. Commit, push. Update the
+  requirement is the same whoever ends up implementing it. Commit; push both
+  `epic-<n>` (empty, at `main`'s tip) and `epic-<n>-gate-product`. Update the
   epic's body with a pointer + brief summary. Set the epic's Effort, and each child's
   if the epic already has children. Then the orchestrator opens Gate A
   (`open-gate ... --doc product.md --next-stage architecture --unit epic`) — never set
@@ -530,8 +534,12 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
   child only to jump the sibling queue. Then Gate A opens — never set Stage to
   `Architecture` directly.
 
-- **`architecture` done, `unit: "epic"`** — Continue on `epic-<n>` in the epic's
-  worktree. Write
+- **`architecture` done, `unit: "epic"`** — In the epic's worktree, on a fresh
+  `epic-<n>-gate-architecture` cut from `origin/epic-<n>` (`git fetch origin && git
+  checkout -b epic-<n>-gate-architecture origin/epic-<n>`) — **never commit to
+  `epic-<n>` directly**, it only receives merges, and `open-gate --unit epic` refuses
+  a gate whose sub-branch carries nothing over it. A second Gate B round reuses the
+  same branch name, re-cut. Write
   `epic-<n>/architecture.md` per Document altitude: one design subsection per child
   plus shared decisions; create/split/merge/modify children here as needed (see
   `references/epics.md`). Commit, push, short handoff comment linking the doc. **Do

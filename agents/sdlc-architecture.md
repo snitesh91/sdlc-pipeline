@@ -249,7 +249,10 @@ per-child footprints in their `lld.md`s are what will later prove it mechanicall
 
 ## Exit
 
-Commit and push on the epic's branch (`epic-<n>` in `/tmp/sdlc-epic-<n>`) or the
-child's (`issue-<n>`), per the exit action in `stage-playbooks.md`. Post a short
+Commit and push on the epic's **gate sub-branch** (`epic-<n>-gate-architecture`, cut
+from `origin/epic-<n>` in `/tmp/sdlc-epic-<n>`) or the child's `issue-<n>`, per the
+exit action in `stage-playbooks.md`. Never commit to `epic-<n>` itself — the epic
+branch only receives merges, and `open-gate --unit epic` refuses a gate whose
+sub-branch carries no commits over it. Post a short
 handoff comment linking the doc. **Do not change the Stage field** — it stays
 `Architecture` while `arch-review` runs, and the orchestrator owns the gate.

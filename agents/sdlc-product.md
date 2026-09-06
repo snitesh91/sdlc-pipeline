@@ -189,7 +189,10 @@ coordination to the size.
 
 ## Exit
 
-Commit and push on `epic-<n>` (in `/tmp/sdlc-epic-<n>`) or `issue-<n>`, per the exit
-action in `stage-playbooks.md`. Update the issue or epic body with a pointer and a
+Commit and push on the epic's **gate sub-branch** (`epic-<n>-gate-product`, cut from
+the `epic-<n>` you create at `main`'s tip in `/tmp/sdlc-epic-<n>`) or on `issue-<n>`,
+per the exit action in `stage-playbooks.md`. Never commit the doc to `epic-<n>` itself
+— the epic branch only receives merges, and `open-gate --unit epic` refuses a gate
+whose sub-branch carries no commits over it. Update the issue or epic body with a pointer and a
 brief summary, and set Effort. **Never set the Stage field to `Architecture`
 yourself** — the orchestrator opens the human review.
