@@ -350,17 +350,28 @@ python3 "$SDLC" retro-check
 ```
 
 `run_retro` is true once `pipeline.retro.everyClosedIssues` (default 5) issues have
-closed since the last retrospective (the committed watermark file at
-`pipeline.retro.watermarkFile`, default `<docRoot>/retro-watermark` inside the driven
-repo — e.g. `docs/sdlc/retro-watermark`). When true: grep the
-recently merged units' handoff comments and docs for recurring friction — bouncing
-pairings (`pairing-counts` gives the marker-backed ones), docs too thin for the next
-stage, dead references, gates too strict or loose. **This file and its references are
-the primary fix target.** Present findings in chat and ask before editing; once
-approved, edit, run `retro-check --mark-done`, commit edits and watermark together,
-and append the dated why to `references/history.md`.
+closed since the last retrospective. The watermark file (`pipeline.retro.watermarkFile`,
+default `<docRoot>/retro-watermark`) is **state of the driven repo**; the fixes go to
+**the skill repo**, which is a separate git repository (`$SDLC_DIR`, typically a
+submodule such as `.github/sdlc-pipeline`). When true: grep the recently merged units'
+handoff comments and docs for recurring friction — bouncing pairings
+(`pairing-counts` gives the marker-backed ones), docs too thin for the next stage, dead
+references, gates too strict or loose. **This file and its references are the primary
+fix target.** Present findings in chat and ask before editing. Once approved:
 
-**A retrospective is authored on its own branch and merged only when the lane is
-quiet** — no live stage agent. Stage agents Read the playbook from their own worktree
-mid-run; merging a skill edit under one changes its instructions between two of its
-own reads. Park the branch and merge at the next quiescent point.
+1. In `$SDLC_DIR`: `git checkout -B retro/<date> origin/main`, edit `SKILL.md` /
+   `references/*` / `agents/*`, append the dated why to `references/history.md`,
+   commit, push the branch, and merge it to the skill's `main` (a PR, or a
+   fast-forward if the operator says so). A skill edit that stays unpushed in the
+   submodule working tree is a failed retro — the next `submodule update` discards it.
+2. A finding about an agent's procedure lands twice: the template in `$SDLC_DIR/agents/`
+   and the driven repo's filled-in copy in `.claude/agents/`.
+3. In the driven repo: bump the submodule to the merged skill commit, run
+   `retro-check --mark-done`, and commit the watermark and the submodule pointer
+   together (message naming the retrospective). That commit is the record of
+   "retro done at skill version X".
+
+**A retrospective is merged only when the lane is quiet** — no live stage agent. Stage
+agents Read the playbook from `$SDLC_DIR` mid-run; bumping the submodule under one
+changes its instructions between two of its own reads. Park the bump and land it at
+the next quiescent point.
