@@ -1,0 +1,71 @@
+{
+  "_comment": "Template config for the sdlc-pipeline skill. Copy this into the repo you want to drive as `sdlc-pipeline.config.json` (or `.claude/sdlc-pipeline.config.json`) and replace every value below. The skill itself is generic and ships no real config. The projectFields ids are GitHub Projects-v2 schema ids for YOUR repo — look them up once via `gh api graphql` introspection. See README.md.",
+  "repo": "owner/repo",
+  "docRoot": "docs/sdlc",
+  "tokenPath": "~/.github-token",
+  "humanAssignee": "maintainer",
+  "parallelism": {
+    "devLane": 3,
+    "prReview": 3
+  },
+  "requiredWorkflows": [
+    {
+      "workflow": "Backend CI",
+      "suite": "backend",
+      "prefixes": ["backend/"],
+      "files": [".github/workflows/backend-ci.yml"]
+    },
+    {
+      "workflow": "Frontend CI",
+      "suite": "frontend",
+      "prefixes": ["frontend/"],
+      "files": [".github/workflows/frontend-ci.yml"]
+    }
+  ],
+  "projectFields": {
+    "issueTypeIds": {
+      "Task": "IT_TASK_ID",
+      "Bug": "IT_BUG_ID",
+      "Feature": "IT_FEATURE_ID"
+    },
+    "priorityFieldId": "PRIORITY_FIELD_ID",
+    "priorityOptionIds": {
+      "Urgent": "PRIORITY_URGENT_ID",
+      "High": "PRIORITY_HIGH_ID",
+      "Medium": "PRIORITY_MEDIUM_ID",
+      "Low": "PRIORITY_LOW_ID"
+    },
+    "effortFieldId": "EFFORT_FIELD_ID",
+    "effortOptionIds": {
+      "High": "EFFORT_HIGH_ID",
+      "Medium": "EFFORT_MEDIUM_ID",
+      "Low": "EFFORT_LOW_ID"
+    },
+    "stageFieldId": "STAGE_FIELD_ID",
+    "stageOptionIds": {
+      "product": "STAGE_PRODUCT_ID",
+      "architecture": "STAGE_ARCHITECTURE_ID",
+      "development": "STAGE_DEVELOPMENT_ID",
+      "testing": "STAGE_TESTING_ID",
+      "pr-review": "STAGE_PR_REVIEW_ID",
+      "lld": "STAGE_LLD_ID"
+    },
+    "pipelineStatusFieldId": "PIPELINE_STATUS_FIELD_ID",
+    "pipelineStatusOptionIds": {
+      "todo": "STATUS_TODO_ID",
+      "in-progress": "STATUS_IN_PROGRESS_ID",
+      "awaiting-human-review": "STATUS_AWAITING_REVIEW_ID",
+      "needs-human": "STATUS_NEEDS_HUMAN_ID",
+      "feedback-received": "STATUS_FEEDBACK_RECEIVED_ID",
+      "done": "STATUS_DONE_ID"
+    },
+    "projectId": "PROJECT_ID",
+    "projectNumber": 1,
+    "statusFieldId": "BOARD_STATUS_FIELD_ID",
+    "statusOptionIds": {
+      "todo": "BOARD_TODO_ID",
+      "in-progress": "BOARD_IN_PROGRESS_ID",
+      "done": "BOARD_DONE_ID"
+    }
+  }
+}
