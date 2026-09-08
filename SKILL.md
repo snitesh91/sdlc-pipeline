@@ -33,27 +33,44 @@ which flags problems in its handoff instead.
 
 ## The lifecycle model
 
-A **normal epic** (neither `epic:standing` nor `epic:legacy`) runs Product and
-Architecture **once, at the epic level**; then each child runs a lighter per-task
-pipeline:
+Which flow an epic runs is set by its **profile** — a label-matched bundle of
+behavioural toggles in the config's `pipeline.profiles` (see `references/epics.md`,
+"Epic profiles", and `references/operations.md`). The skill no longer hardcodes the
+`epic:standing`/`epic:legacy` labels; a client maps labels to profiles and can use
+`epic:standing`, `RTB`, or any label it likes. The three shipped default profiles
+reproduce the historical behaviour.
+
+A **default-profile epic** runs Product and Architecture **once, at the epic level**;
+then each child runs a lighter per-task pipeline:
 
 ```
-epic:  product -> [Gate A, human] -> architecture -> [arch-review] -> [Gate B, human or confidence-skip] -> epic:architected
+epic:  product -> [product-review] -> [Gate A, human] -> architecture -> [arch-review] -> [Gate B, human or confidence-skip] -> epic:architected
 child: lld -> [lld-review, mandatory, no gate] -> development -> testing -> [pr-review] -> auto-merge -> CLOSED
 ```
 
-A **standing epic** (`epic:standing`) never runs an epic-level phase; each child runs
-the full flow on its own issue number:
+A **standing profile** (`epicLevelPhase: false`, e.g. matched to `epic:standing`)
+never runs an epic-level phase; each child runs the full flow on its own issue number:
 
 ```
-product -> [Gate A] -> architecture -> [arch-review] -> [Gate B] -> development -> testing -> [pr-review] -> CLOSED
+product -> [product-review] -> [Gate A] -> architecture -> [arch-review] -> [Gate B] -> development -> testing -> [pr-review] -> CLOSED
 ```
 
-- A standing-epic **bug** enters at `architecture` (`references/epics.md`, "Bug
-  fast-track"). A bug against a normal architected epic starts at `lld` like any child.
-- A **legacy epic** (`epic:legacy`) is skipped entirely, children included.
-- Reviews (`arch-review`, `lld-review`, `pr-review`) run immediately after the stage
-  before them and have no Stage value of their own.
+- **`product-review` is universal** — every unit that runs `product` runs it right
+  after, an adversarial opus review of `product.md`. A blocker bounces `product`
+  (looping until clean, backstopped by the escalation valve); a clean verdict goes to
+  Gate A. See the `product-review` row in the stage table and `references/stage-playbooks.md`.
+- **Gate A is profile-configurable.** A profile with `requiresHumanGateA: false` (a
+  standing/RTB backlog) **auto-passes** Gate A on a clean `product-review` — the unit
+  flows straight to `architecture`, no human. The default profile opens the human Gate A
+  as before. See `references/gates.md`, "Gate A configurability".
+- **The Gate B confidence bar is per-profile** — `gates.skipConfidenceThreshold`
+  (default 95); a standing/RTB profile may lower it (e.g. 90).
+- A standing-profile **bug** enters at `architecture` (`references/epics.md`, "Bug
+  fast-track"). A bug against a default-profile architected epic starts at `lld`.
+- A **legacy profile** (`driven: false`, e.g. matched to `epic:legacy`) is skipped
+  entirely, children included.
+- Reviews (`product-review`, `arch-review`, `lld-review`, `pr-review`) run immediately
+  after the stage before them and have no Stage value of their own.
 - **A normal epic's children are never eligible before the epic is
   `epic:architected`** — enforced by `next-action` and `list-parallel-ready`, even
   while the epic itself is gate-pending, blocked, or needs-human.
@@ -229,6 +246,7 @@ orchestrator-direct review path.
 | Role | Trigger | `subagent_type` | Model | Doc it owns |
 |---|---|---|---|---|
 | `product` | `stage:product` (epic or standing child) | `sdlc-product` | opus | `<unit>-<n>/product.md` |
+| `product-review` | right after `product` | `sdlc-product-review` | opus | none (comment only) — universal; blocker bounces `product`, clean goes to Gate A |
 | `architecture` | `stage:architecture` (epic or standing child) | `sdlc-architecture` | opus | `<unit>-<n>/architecture.md` (epic level also creates/splits children, sets Effort) |
 | `arch-review` | right after `architecture` | `sdlc-design-review` | opus | none (comment only) |
 | `lld` | `stage:lld` (normal-epic child) | `sdlc-lld` | sonnet | `issue-<n>/lld.md` |

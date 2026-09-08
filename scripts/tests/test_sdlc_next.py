@@ -2103,12 +2103,18 @@ def test_skip_gate_sets_fields_comments_and_reclaims_next_stage():
     status_mutation_argv = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['in-progress'])}")
     epic_check_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=9)}")
+    # cmd_skip_gate resolves the Gate B confidence threshold from the child's parent
+    # epic profile -- so it also fetches the parent (#92) to read its labels.
+    epic_check_argv_92 = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=92)}")
     gh_runner = ScriptedRunner({
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
         stage_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
         status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
         epic_check_argv: json.dumps({"data": {"repository": {"issue": {
             "issueType": {"name": "Task"}, "parent": {"number": 92}, "labels": {"nodes": []},
+        }}}}),
+        epic_check_argv_92: json.dumps({"data": {"repository": {"issue": {
+            "issueType": {"name": "Feature"}, "parent": None, "labels": {"nodes": []},
         }}}}),
     })
     gh_runner.prefix_responses = {
@@ -2132,14 +2138,47 @@ def test_skip_gate_sets_fields_comments_and_reclaims_next_stage():
 
 
 def test_skip_gate_refuses_below_threshold():
-    from sdlc_next import GitHub, GhError, cmd_skip_gate
+    from sdlc_next import GitHub, GhError, cmd_skip_gate, _ISSUE_EPIC_CHECK_QUERY
     from tests.test_sdlc_next import ScriptedRunner
-    gh = GitHub(runner=ScriptedRunner())
+    # Default-profile epic -> threshold 95; confidence 95 does not clear it.
+    epic_check_9 = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=9)}")
+    epic_check_92 = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=92)}")
+    gh = GitHub(runner=ScriptedRunner({
+        epic_check_9: json.dumps({"data": {"repository": {"issue": {
+            "issueType": {"name": "Task"}, "parent": {"number": 92}, "labels": {"nodes": []}}}}}),
+        epic_check_92: json.dumps({"data": {"repository": {"issue": {
+            "issueType": {"name": "Feature"}, "parent": None, "labels": {"nodes": []}}}}}),
+    }))
     try:
         cmd_skip_gate(gh, issue=9, stage="architecture", confidence=95, summary="x")
         assert False, "expected GhError"
     except GhError as e:
         assert "threshold" in str(e)
+
+
+def test_skip_gate_threshold_is_per_profile_standing_epic_child_clears_at_91():
+    # A standing/RTB profile lowers skipConfidenceThreshold to 90 (sample config);
+    # a child of that epic clears Gate B at 91 but not at 90.
+    from sdlc_next import GitHub, GhError, cmd_skip_gate, _ISSUE_EPIC_CHECK_QUERY
+    from tests.test_sdlc_next import ScriptedRunner
+
+    epic_check_9 = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=9)}")
+    epic_check_94 = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=94)}")
+    responses = {
+        epic_check_9: json.dumps({"data": {"repository": {"issue": {
+            "issueType": {"name": "Task"}, "parent": {"number": 94},
+            "labels": {"nodes": []}}}}}),
+        epic_check_94: json.dumps({"data": {"repository": {"issue": {
+            "issueType": {"name": "Feature"}, "parent": None,
+            "labels": {"nodes": [{"name": "epic:standing"}]}}}}}),
+    }
+    # At 90 -> refused (90 <= 90); raises before any comment/claim.
+    gh = GitHub(runner=ScriptedRunner(dict(responses)))
+    try:
+        cmd_skip_gate(gh, issue=9, stage="architecture", confidence=90, summary="x")
+        assert False, "expected GhError at the profile threshold"
+    except GhError as e:
+        assert "90 threshold" in str(e)
 
 
 def test_skip_gate_refuses_for_product_stage():
@@ -2437,16 +2476,20 @@ def test_pass_gate_unit_epic_at_architecture_completes_epic_instead_of_claiming_
 
 def test_skip_gate_unit_epic_completes_epic_without_opening_a_gate():
     from sdlc_next import GitHub, cmd_skip_gate, _ISSUE_NODE_ID_QUERY, _DELETE_ISSUE_FIELD_VALUE_MUTATION, \
-        STAGE_FIELD_ID, PIPELINE_STATUS_FIELD_ID
+        _ISSUE_EPIC_CHECK_QUERY, STAGE_FIELD_ID, PIPELINE_STATUS_FIELD_ID
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=92)}")
     del_stage_argv = ("gh", "api", "graphql", "-f",
         f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_92', field_id=STAGE_FIELD_ID)}")
     del_status_argv = ("gh", "api", "graphql", "-f",
         f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_92', field_id=PIPELINE_STATUS_FIELD_ID)}")
+    # unit=epic resolves the threshold from the epic's own profile (default -> 95).
+    epic_check_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=92)}")
     gh_runner = ScriptedRunner({
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_92"}}}}),
         del_stage_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 92}}}}),
         del_status_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 92}}}}),
+        epic_check_argv: json.dumps({"data": {"repository": {"issue": {
+            "issueType": {"name": "Feature"}, "parent": None, "labels": {"nodes": []}}}}}),
     })
     gh_runner.prefix_responses = {
         ("gh", "issue", "edit", "92"): "",
@@ -3955,3 +3998,115 @@ def test_open_gate_unit_issue_does_not_consult_the_gate_branch_guard():
                             "architecture", "Locked requirements.", runner=git_runner)
     assert result["head"] == "issue-9" and result["base"] == "main"
     assert not any("compare" in " ".join(c) for c in gh_runner.calls)
+
+
+# --- Epic profiles + product-review stage + Gate A configurability ---
+
+def test_resolve_profile_matches_standing_label():
+    from sdlc_next import resolve_profile
+    p = resolve_profile({"labels": [{"name": "epic:standing"}]})
+    assert p["name"] == "standing"
+    assert p["epicLevelPhase"] is False
+    assert p["childEntryStage"] == "product"
+    assert p["childrenNeedArchitectedEpic"] is False
+    assert p["closes"] is False
+    # Sample config's standing profile lowers the bar + drops the human Gate A.
+    assert p["gates"]["skipConfidenceThreshold"] == 90
+    assert p["gates"]["requiresHumanGateA"] is False
+
+
+def test_resolve_profile_legacy_wins_over_standing_by_order():
+    from sdlc_next import resolve_profile
+    p = resolve_profile({"labels": [{"name": "epic:standing"}, {"name": "epic:legacy"}]})
+    assert p["name"] == "legacy"
+    assert p["driven"] is False
+
+
+def test_resolve_profile_falls_through_to_default_catch_all():
+    from sdlc_next import resolve_profile
+    p = resolve_profile({"labels": [{"name": "unrelated"}]})
+    assert p["name"] == "default"
+    assert p["epicLevelPhase"] is True
+    assert p["childEntryStage"] == "lld"
+    assert p["gates"]["skipConfidenceThreshold"] == 95
+    assert p["gates"]["requiresHumanGateA"] is True
+
+
+def test_resolve_profile_none_epic_is_default():
+    from sdlc_next import resolve_profile
+    assert resolve_profile(None)["name"] == "default"
+
+
+def test_is_epic_standing_and_legacy_read_from_profile():
+    from sdlc_next import is_epic_standing, is_epic_legacy
+    assert is_epic_standing({"labels": [{"name": "epic:standing"}]}) is True
+    assert is_epic_standing({"labels": []}) is False
+    assert is_epic_legacy({"labels": [{"name": "epic:legacy"}]}) is True
+    assert is_epic_legacy({"labels": []}) is False
+
+
+def test_product_review_is_a_design_review_and_review_role():
+    from sdlc_next import DESIGN_REVIEW_ROLES, REVIEW_ROLES
+    assert "product-review" in DESIGN_REVIEW_ROLES
+    assert "product-review" in REVIEW_ROLES
+
+
+def _epic_check(n, parent=None, labels=()):
+    return (("gh", "api", "graphql", "-f",
+             f"query={__import__('sdlc_next')._ISSUE_EPIC_CHECK_QUERY.format(n=n)}"),
+            json.dumps({"data": {"repository": {"issue": {
+                "issueType": {"name": "Feature" if parent is None else "Task"},
+                "parent": {"number": parent} if parent else None,
+                "labels": {"nodes": [{"name": l} for l in labels]}}}}}))
+
+
+def test_auto_pass_gate_a_refuses_non_product_stage():
+    from sdlc_next import GitHub, GhError, cmd_auto_pass_gate_a
+    from tests.test_sdlc_next import ScriptedRunner
+    gh = GitHub(runner=ScriptedRunner())
+    try:
+        cmd_auto_pass_gate_a(gh, issue=9, stage="architecture", summary="x")
+        assert False, "expected GhError"
+    except GhError as e:
+        assert "product gate" in str(e)
+
+
+def test_auto_pass_gate_a_refuses_when_profile_requires_human():
+    from sdlc_next import GitHub, GhError, cmd_auto_pass_gate_a
+    from tests.test_sdlc_next import ScriptedRunner
+    a9, r9 = _epic_check(9, parent=50)
+    a50, r50 = _epic_check(50)  # default profile -> requiresHumanGateA True
+    gh = GitHub(runner=ScriptedRunner({a9: r9, a50: r50}))
+    try:
+        cmd_auto_pass_gate_a(gh, issue=9, stage="product", summary="x")
+        assert False, "expected GhError"
+    except GhError as e:
+        assert "requiresHumanGateA" in str(e)
+
+
+def test_auto_pass_gate_a_advances_child_of_no_human_profile():
+    from sdlc_next import (GitHub, cmd_auto_pass_gate_a, _ISSUE_NODE_ID_QUERY,
+                            _SET_ISSUE_FIELD_MUTATION, STAGE_FIELD_ID, STAGE_OPTION_IDS,
+                            PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS)
+    from tests.test_sdlc_next import ScriptedRunner
+    a9, r9 = _epic_check(9, parent=94)
+    a94, r94 = _epic_check(94, labels=["epic:standing"])  # requiresHumanGateA False
+    node_id = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}")
+    stage_mut = ("gh", "api", "graphql", "-f",
+        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=STAGE_FIELD_ID, option_id=STAGE_OPTION_IDS['architecture'])}")
+    status_mut = ("gh", "api", "graphql", "-f",
+        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['in-progress'])}")
+    runner = ScriptedRunner({
+        a9: r9, a94: r94,
+        node_id: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
+        stage_mut: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
+        status_mut: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
+    })
+    runner.prefix_responses = {("gh", "issue", "comment", "9"): ""}
+    gh = GitHub(runner=runner)
+    result = cmd_auto_pass_gate_a(gh, issue=9, stage="product", summary="Clean.")
+    assert result == {"issue": 9, "unit": "issue", "next_stage": "architecture",
+                       "auto_passed": True, "profile": "standing"}
+    assert list(stage_mut) in runner.calls
+    comment_calls = [c for c in runner.calls if c[:3] == ["gh", "issue", "comment"]]
+    assert any("Gate A auto-passed" in c[-1] for c in comment_calls)

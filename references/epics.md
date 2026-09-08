@@ -5,11 +5,36 @@ issue — this file owns everything epic-shaped: the epic-level phase, which epi
 exempt, how the epic architect creates/sizes children, the deviation-escalation path,
 the standing-epic bug fast-track, and epic closing/board status.
 
+## Epic profiles
+
+An epic's behaviour is set by its **profile** — a label-matched bundle of toggles in
+`pipeline.profiles` (config; see `references/operations.md`). `resolve_profile(epic)`
+walks the ordered list and returns the first profile whose `match` label is on the epic,
+falling back to the `"*"` catch-all. The skill no longer hardcodes the
+`epic:standing`/`epic:legacy` labels; a client owns the label→behaviour mapping and can
+match `epic:standing`, `RTB`, or anything it likes. The toggles:
+
+| Toggle | Default | Effect when non-default |
+|---|---|---|
+| `driven` | `true` | `false` = **legacy**: pipeline skips the epic and every child |
+| `epicLevelPhase` | `true` | `false` = **standing**: no epic-level product/architecture; each child runs its own full flow |
+| `childEntryStage` | `"lld"` | `"product"` = children enter at `product` (full flow) instead of `lld` |
+| `childrenNeedArchitectedEpic` | `true` | `false` = children eligible without the epic being `epic:architected` |
+| `closes` | `true` | `false` = epic never closes and has no integration branch |
+| `gates.skipConfidenceThreshold` | `95` (global) | per-profile Gate B skip bar |
+| `gates.requiresHumanGateA` | `true` (global) | `false` = Gate A auto-passed (no human) |
+
+The three shipped default profiles reproduce the historical behaviour exactly:
+`legacy` (`driven:false`), `standing` (the four `false`/`product` toggles above), and
+`default` (`"*"`, all defaults). `is_epic_standing()` / `is_epic_legacy()` are now thin
+reads of `epicLevelPhase` / `driven`. **`product-review` runs after `product` in every
+profile** — it is not a per-profile toggle.
+
 ## What runs at the epic level, and what doesn't
 
-A **normal epic** — any open, top-level `Type: Feature` issue that is **not**
-`epic:standing` and **not** `epic:legacy` — runs its own Product and Architecture
-phase, on the epic issue itself, before any of its children are touched:
+A **default-profile epic** — any open, top-level `Type: Feature` issue whose profile has
+`epicLevelPhase: true` (matches no `standing`/`legacy` profile) — runs its own Product
+and Architecture phase, on the epic issue itself, before any of its children are touched:
 
 ```
 epic: stage:product -> [Gate A, epic-scoped] -> stage:architecture -> [arch-review] -> [Gate B, epic-scoped] -> epic:architected
@@ -49,15 +74,18 @@ light pass apart from a standing child's full architecture stage.)
 
 ## Which epics are exempt
 
-- **`epic:standing`** (e.g. a standing backlog epic) — a permanent bug-intake umbrella with no fixed
-  scope to batch-architect; its children run the full per-issue `product` →
-  `architecture` flow (bug fast-track included). See `is_epic_standing` in
-  `sdlc_next.py`.
-- **`epic:legacy`** — **not run by this pipeline at all, in any flow.**
-  `decide_next_action` checks this first — before crash-recovery — and returns
-  `action: "skip"` for the epic and every child. Applied by hand to an epic the
-  operator has decided is out of scope. Wanting a *behavior* for a legacy epic is a
-  sign it shouldn't be `epic:legacy` — use `epic:standing` or leave it normal.
+Both cases are now **profiles** (above), not hardcoded labels:
+
+- **A standing profile** (`epicLevelPhase: false`, shipped matching `epic:standing`) — a
+  permanent bug-intake umbrella with no fixed scope to batch-architect; its children run
+  the full per-issue `product` → `product-review` → `architecture` flow (bug fast-track
+  included). Resolved via `resolve_profile`; `is_epic_standing()` reads it.
+- **A legacy profile** (`driven: false`, shipped matching `epic:legacy`) — **not run by
+  this pipeline at all, in any flow.** `decide_next_action` checks it first — before
+  crash-recovery — and returns `action: "skip"` for the epic and every child. Applied by
+  hand to an epic the operator has decided is out of scope. Wanting a *behaviour* for a
+  legacy epic is a sign it shouldn't match the legacy profile — give it the standing
+  profile's label or leave it on the default.
 
 ## Doc layout at the epic level
 

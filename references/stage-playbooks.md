@@ -564,17 +564,38 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
   requirement is the same whoever ends up implementing it. Commit; push both
   `epic-<n>` (empty, at `main`'s tip) and `epic-<n>-gate-product`. Update the
   epic's body with a pointer + brief summary. Set the epic's Effort, and each child's
-  if the epic already has children. Then the orchestrator opens Gate A
-  (`open-gate ... --doc product.md --next-stage architecture --unit epic`) — never set
-  the Stage field to `Architecture` directly.
+  if the epic already has children. Then the orchestrator runs **`product-review`**
+  (below); only on its clean verdict does Gate A follow. **Do not change the Stage
+  field** — it stays `Product` while `product-review` runs.
 
 - **`product` done, `unit: "issue"` (standing-epic child)** — Create `issue-<n>` from
   `main`. Write `issue-<n>/product.md` as a requirements document with full
   requirements and acceptance criteria, per Document altitude. Commit, push. Update the
   issue body with a pointer + summary. Set Effort (if `High`, strongly consider
   splitting via `create-issue`). Priority normally lives on the epic; set it on the
-  child only to jump the sibling queue. Then Gate A opens — never set Stage to
-  `Architecture` directly.
+  child only to jump the sibling queue. Then the orchestrator runs **`product-review`**
+  (below), and Gate A follows only on a clean verdict. **Do not change the Stage
+  field** — stays `Product` while `product-review` runs.
+
+- **`product-review`** (universal — runs after every `product`) — Orchestrator posts
+  `start-comment <n> --role product-review`, then spawns a fresh subagent of type
+  `sdlc-product-review` (model per `pipeline.models`, default opus) reviewing
+  `product.md` against the real product/codebase for **requirements quality**:
+  acceptance-criteria completeness and testability, scope/decomposition, unstated
+  assumptions, internal consistency. Requirements only — design belongs to
+  `architecture`. There is **no confidence marker** (Gate A is not confidence-gated).
+  Last action, both verdicts: `record-design-review <n> --role product-review
+  --outcome clean|rework`.
+  - **REWORK** → resume the `product` agent to fix the blockers (one thread), then
+    re-review. Loop until clean; the escalation valve tracks the `product-review ↔
+    product` pairing (`pairing-counts`), replacing the agent at `replaceAt` and marking
+    `needs-human` at `needsHumanAt`. Rework rounds are scoped (see "Rework and blockers").
+  - **CLEAN** → the orchestrator resolves the epic's profile and takes Gate A:
+    - `requiresHumanGateA: true` (default profile) → open the human Gate A exactly as
+      before: `open-gate ... --doc product.md --next-stage architecture [--unit epic]`.
+    - `requiresHumanGateA: false` (a standing/RTB profile) → **auto-pass**:
+      `auto-pass-gate-a <n> [--unit epic] --summary "..."` — advances to `architecture`
+      and claims it, no human. See `references/gates.md`, "Gate A configurability".
 
 - **`architecture` done, `unit: "epic"`** — In the epic's worktree, on a fresh
   `epic-<n>-gate-architecture` cut from `origin/epic-<n>` (`git fetch origin && git

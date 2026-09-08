@@ -13,12 +13,20 @@ and applies only to the later, code-carrying PR.
 issue (`--unit issue`, the default). Mechanics are identical at both levels except the
 one Gate B difference called out below.
 
-**Gate A** — between `product` finishing and `architecture` starting, gating
-`product.md`. **Unconditional whenever a `product.md` exists** — always opens, no skip
-path. Product-stage mistakes are the most expensive to catch late. A bug fast-tracked
-straight to `architecture` with no `product.md` has no Gate A to open (see
-`references/epics.md`, "Bug fast-track"); if that path later escalates to product
-after all, the resulting `product.md` still gets a normal Gate A.
+**Gate A** — between `product-review` finishing clean and `architecture` starting,
+gating `product.md`. (The universal `product-review` stage runs first; Gate A is only
+reached on its clean verdict — see `references/stage-playbooks.md`.) **Whether Gate A
+needs a human is a profile decision** — `gates.requiresHumanGateA`, default `true`:
+- `true` (default profile) → a human hard stop, exactly as before: opens the doc-only
+  PR, no confidence skip. Product-stage mistakes are the most expensive to catch late.
+- `false` (a standing/RTB profile) → **auto-passed** by `auto-pass-gate-a` on a clean
+  `product-review`, advancing straight to `architecture` with no human. See "Gate A
+  configurability" below.
+
+A bug fast-tracked straight to `architecture` with no `product.md` has no Gate A to
+open (see `references/epics.md`, "Bug fast-track"); if that path later escalates to
+product after all, the resulting `product.md` runs `product-review` and Gate A per the
+profile.
 
 **Gate B** — between `arch-review` finishing clean and the next stage starting, gating
 `architecture.md`. **Conditional** — skipped automatically when `arch-review` returns
@@ -212,9 +220,12 @@ mismatch with `--gate-pr`/`--stage`. Always pass `next-action`'s own
 ## Gate B confidence skip
 
 When `arch-review` returns a clean verdict it also reports numeric `confidence`
-(0-100) in a `<!-- arch-review-confidence: N -->` marker.
-`pipeline.gates.skipConfidenceThreshold` in the config (default 95) is the single
-source of truth for the cutoff — never hardcode a different number anywhere.
+(0-100) in a `<!-- arch-review-confidence: N -->` marker. The cutoff is
+**per-profile**: `skip-gate` reads the governing epic's profile and uses that profile's
+`gates.skipConfidenceThreshold` (a child resolves via its parent epic), falling back to
+the global `pipeline.gates.skipConfidenceThreshold` (default 95). A standing/RTB profile
+may lower it (e.g. 90). Never hardcode a different number — `skip-gate` reports the
+threshold it applied in its refusal.
 
 - **Confidence > threshold** → skip Gate B entirely:
   ```bash
@@ -232,6 +243,28 @@ source of truth for the cutoff — never hardcode a different number anywhere.
   guess.
 - The skip path only ever applies to Gate B. `skip-gate` refuses (raises) on
   `--stage product`.
+
+## Gate A configurability
+
+Gate A has **no confidence skip** — but whether it requires a human at all is a profile
+decision, `gates.requiresHumanGateA` (default `true`). The orchestrator applies it only
+on a **clean `product-review`**:
+
+- `requiresHumanGateA: true` (the default profile) → open the human Gate A as always:
+  `open-gate ... --doc product.md --next-stage architecture [--unit epic]`.
+- `requiresHumanGateA: false` (a standing/RTB profile) → auto-pass:
+  ```bash
+  python3 "$SDLC" auto-pass-gate-a <n> [--unit epic] --summary "<one sentence>"
+  ```
+  It refuses (raises) if the resolved profile still requires a human — so a mis-set flag
+  fails loud rather than silently skipping a human review. It advances `product ->
+  architecture` and claims `architecture` (both units), leaving a
+  `<!-- gate-a-auto-passed: <profile> -->` marker as the audit trail. An auto-passed
+  Gate A is a **profile decision, not a skipped step** — the marker records that the
+  profile, not a human, signed off.
+
+This is the counterpart to Gate B's confidence skip: Gate B earns its skip per-review
+(confidence), Gate A earns its skip per-profile (policy).
 
 ## Edge cases
 

@@ -129,7 +129,7 @@ _PIPELINE_DEFAULTS = {
     "branches": {"issuePrefix": "issue-", "epicPrefix": "epic-", "gateSuffix": "-gate-"},
     "worktrees": {"root": "/tmp", "devPrefix": "sdlc-dev-", "epicPrefix": "sdlc-epic-",
                   "reviewPrefix": "sdlc-review-"},
-    "gates": {"skipConfidenceThreshold": 95},
+    "gates": {"skipConfidenceThreshold": 95, "requiresHumanGateA": True},
     "escalation": {"replaceAt": 3, "needsHumanAt": 6},
     # `{docRoot}` is formatted with the config's `docRoot` at load time, so the
     # default lands next to the committed docs of the driven repo (e.g.
@@ -137,10 +137,34 @@ _PIPELINE_DEFAULTS = {
     "retro": {"everyClosedIssues": 5,
               "watermarkFile": "{docRoot}/retro-watermark"},
     "continuous": {"cycleCap": 8},
-    "models": {"product": "opus", "architecture": "opus", "arch-review": "opus",
-               "lld": "sonnet", "lld-review": "opus", "development": "sonnet",
-               "testing": "sonnet", "pr-review": "opus"},
+    "models": {"product": "opus", "product-review": "opus", "architecture": "opus",
+               "arch-review": "opus", "lld": "sonnet", "lld-review": "opus",
+               "development": "sonnet", "testing": "sonnet", "pr-review": "opus"},
     "docTemplates": "_templates",
+    # Behavioural profiles, matched to an epic by label (ordered; first hit wins,
+    # `"*"` is the terminal catch-all). Each profile is a bundle of toggles that
+    # used to be hardcoded to the `epic:standing`/`epic:legacy` labels; the client
+    # now owns the label->behaviour mapping. See "Epic profiles" in references/epics.md
+    # and `resolve_profile`. Missing toggles inherit `_PROFILE_TOGGLE_DEFAULTS`; a
+    # profile's `gates` inherit the global `pipeline.gates`.
+    "profiles": [
+        {"name": "legacy", "match": {"label": "epic:legacy"}, "driven": False},
+        {"name": "standing", "match": {"label": "epic:standing"},
+         "epicLevelPhase": False, "childEntryStage": "product",
+         "childrenNeedArchitectedEpic": False, "closes": False},
+        {"name": "default", "match": "*"},
+    ],
+}
+
+# Per-toggle fallbacks a matched profile inherits when it omits a key. `gates`
+# inherit the effective global `pipeline.gates` (resolved in `resolve_profile`),
+# not this dict, so an epic with no explicit profile gates keeps the global bar.
+_PROFILE_TOGGLE_DEFAULTS = {
+    "driven": True,               # False = legacy: pipeline ignores the epic + children
+    "epicLevelPhase": True,       # False = no epic-level product/architecture phase
+    "childEntryStage": "lld",     # "lld" | "product" -- where children enter
+    "childrenNeedArchitectedEpic": True,  # children gated on epic:architected
+    "closes": True,               # epic closes + has an integration branch
 }
 
 
@@ -626,21 +650,55 @@ def is_epic(issue: dict) -> bool:
     return issue_type(issue) == "Feature" and issue.get("parent") is None
 
 
+def resolve_profile(epic_issue: Optional[dict]) -> dict:
+    """Resolve an epic's behavioural profile from `pipeline.profiles`.
+
+    Profiles are an ordered list; the first whose `match` holds against the epic's
+    labels wins, and the `"*"` entry is the terminal catch-all. Toggles the matched
+    profile omits inherit `_PROFILE_TOGGLE_DEFAULTS`; its `gates` inherit the global
+    `pipeline.gates`. The returned dict always carries every toggle plus `name` and a
+    complete `gates` block, so callers never have to guess a default.
+
+    This replaced the old hardcoded `epic:standing`/`epic:legacy` label checks: the
+    client now owns the label->behaviour mapping (it may use `epic:standing`, `RTB`,
+    or any label it likes). See "Epic profiles" in references/epics.md."""
+    labels = label_names(epic_issue) if epic_issue else set()
+    chosen: dict = {}
+    for prof in PIPELINE["profiles"]:
+        match = prof.get("match")
+        if match == "*":
+            chosen = prof
+            break
+        if isinstance(match, dict) and match.get("label") in labels:
+            chosen = prof
+            break
+    merged = {**_PROFILE_TOGGLE_DEFAULTS,
+              **{k: v for k, v in chosen.items() if k not in ("match", "gates")}}
+    merged["name"] = chosen.get("name", "default")
+    merged["gates"] = {**PIPELINE["gates"], **(chosen.get("gates") or {})}
+    return merged
+
+
+def effective_gates(epic_issue: Optional[dict]) -> dict:
+    """The resolved `gates` block (skipConfidenceThreshold, requiresHumanGateA) for
+    the epic's profile -- convenience over `resolve_profile(...)["gates"]`."""
+    return resolve_profile(epic_issue)["gates"]
+
+
 def is_epic_standing(issue: dict) -> bool:
-    """True for a permanent umbrella epic (a standing backlog epic) that is never proposed for
-    closing, even when momentarily empty of open children -- marked with the
-    `epic:standing` label. See "Epic closing" in references/epics.md."""
-    return has_label(issue, LABELS["standing"])
+    """True for an epic that runs no epic-level Product/Architecture phase -- each
+    child runs its own full flow instead. Now a thin read of the epic's profile
+    (`epicLevelPhase == False`); the behaviour bundle lives in `pipeline.profiles`,
+    not in this label check. See "Epic profiles" in references/epics.md."""
+    return not resolve_profile(issue)["epicLevelPhase"]
 
 
 def is_epic_legacy(issue: dict) -> bool:
-    """True for an epic this pipeline no longer drives at all -- see
-    "Which epics are exempt" in references/epics.md. `decide_next_action` checks this
-    first, before anything else, and returns `action: "skip"` for the epic
-    itself and every one of its children -- no per-issue flow, no epic-level
-    flow, nothing. Applied by hand to an epic the operator has decided is out
-    of this pipeline's scope entirely."""
-    return has_label(issue, LABELS["legacy"])
+    """True for an epic this pipeline no longer drives at all (profile `driven ==
+    False`). `decide_next_action` checks this first and returns `action: "skip"` for
+    the epic and every child -- no flow at all. The label->this-behaviour mapping is
+    a client profile now, not a hardcoded `epic:legacy` check."""
+    return not resolve_profile(issue)["driven"]
 
 
 def is_epic_architected(issue: dict) -> bool:
@@ -669,7 +727,7 @@ def default_stage(issue: dict, parent_epic: Optional[dict] = None) -> str:
     `decide_next_action` skips a legacy epic and every one of its children
     before any Stage is ever assigned (see `is_epic_legacy`), so there is no
     behavior to preserve for that case here."""
-    if parent_epic is not None and not is_epic_standing(parent_epic):
+    if parent_epic is not None and resolve_profile(parent_epic)["childEntryStage"] == "lld":
         return "lld"
     if issue_type(issue) == "Bug":
         return "architecture"
@@ -903,7 +961,7 @@ def find_gate_pr(comments: list) -> Optional[tuple]:
     return (stage, pr) if pr is not None else None
 
 
-REVIEW_ROLES = frozenset({"arch-review", "lld-review", "pr-review"})
+REVIEW_ROLES = frozenset({"product-review", "arch-review", "lld-review", "pr-review"})
 
 
 def epic_branch(epic: int) -> str:
@@ -1110,9 +1168,10 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     Every refusal is a structured exit-0 result, never an exception -- "not ready
     yet" is the normal state, not an operational failure."""
     detail = gh.issue_view(epic)
-    if is_epic_standing(detail):
+    if not resolve_profile(detail)["closes"]:
         return {"epic": epic, "merged": False,
-                "reason": "standing epics never close and have no integration branch"}
+                "reason": f"epic profile '{resolve_profile(detail)['name']}' does not close "
+                          "(closes: false) -- no integration branch to merge"}
     branch = epic_branch(epic)
     all_issues = gh.issue_list()
     children = [i for i in all_issues if i.get("parent") and i["parent"]["number"] == epic]
@@ -1291,15 +1350,16 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
         # else: epic-self work is done (architected, no pending gate),
         # needs-human, or blocked on another epic -- fall through to children.
 
-    if not is_epic_standing(epic_issue) and not is_epic_architected(epic_issue):
-        # A normal epic's children are never eligible before the epic itself is
-        # `epic:architected` -- their `lld` works from the epic's approved
-        # architecture.md, which doesn't exist yet. This branch is reached when
-        # epic-self can't advance right now (its gate is open with nothing to
-        # address, it's needs-human, or it's blocked): that parks the whole
+    if resolve_profile(epic_issue)["childrenNeedArchitectedEpic"] \
+            and not is_epic_architected(epic_issue):
+        # A profile whose children need an architected epic (the `default`) never lets
+        # a child run before the epic itself is `epic:architected` -- their `lld` works
+        # from the epic's approved architecture.md, which doesn't exist yet. This branch
+        # is reached when epic-self can't advance right now (its gate is open with
+        # nothing to address, it's needs-human, or it's blocked): that parks the whole
         # epic, not just the epic's own phase. Without this guard, those three
-        # fall-through cases would delegate a child at `lld` against a design
-        # that hasn't been written or approved.
+        # fall-through cases would delegate a child at `lld` against a design that
+        # hasn't been written or approved.
         return {"action": "none", "epic": epic}
 
     for issue in sorted(children, key=sort_key):
@@ -1667,9 +1727,10 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
             "skipped": []}
     if is_epic_legacy(epic_issue):
         return {**base, "note": f"epic #{epic} is epic:legacy -- not driven by this pipeline"}
-    if not is_epic_standing(epic_issue) and not is_epic_architected(epic_issue):
-        # Same guard as decide_next_action's children loop: a normal epic's
-        # children are never eligible before the epic is epic:architected.
+    if resolve_profile(epic_issue)["childrenNeedArchitectedEpic"] \
+            and not is_epic_architected(epic_issue):
+        # Same guard as decide_next_action's children loop: a profile whose children
+        # need an architected epic keeps them out of the lane until epic:architected.
         return {**base, "note": f"epic #{epic} is not epic:architected yet -- its children "
                                  f"are not eligible for the implementation lane"}
     open_issues = [i for i in all_issues if i["state"] == "OPEN"]
@@ -1854,7 +1915,7 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str) -> dict:
     return {"pr": pr, "suite": suite, "sha": sha, "attested": True}
 
 
-DESIGN_REVIEW_ROLES = ("arch-review", "lld-review")
+DESIGN_REVIEW_ROLES = ("product-review", "arch-review", "lld-review")
 
 
 def cmd_record_design_review(gh: GitHub, issue: int, role: str, outcome: str,
@@ -2321,30 +2382,46 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
 GATE_B_SKIP_CONFIDENCE_THRESHOLD = PIPELINE["gates"]["skipConfidenceThreshold"]
 
 
+def _profile_for_unit(gh: GitHub, issue: int, unit: str) -> dict:
+    """The behavioural profile governing `issue`: its own for unit='epic', else its
+    parent epic's (a child inherits its epic's profile -- the profile-selecting label,
+    e.g. `epic:standing`/`RTB`, lives on the epic, not the child). Falls back to the
+    all-defaults profile if the epic can't be resolved."""
+    info = gh.issue_epic_info(issue)
+    if unit != "epic":
+        parent = info.get("parent")
+        info = gh.issue_epic_info(parent["number"]) if parent else None
+    return resolve_profile(info)
+
+
 def cmd_skip_gate(gh: GitHub, issue: int, stage: str, confidence: int, summary: str,
                    unit: str = "issue") -> dict:
     """Skip the Gate B human-review PR entirely when arch-review returned a clean
     verdict with high enough self-reported confidence -- see "Human-review gates" in
-    SKILL.md. Gate A (product) has no skip path; it is an unconditional hard stop.
+    SKILL.md. Gate A (product) has no confidence skip; whether it needs a human at all
+    is a profile decision (`requiresHumanGateA`), applied by `cmd_auto_pass_gate_a`.
 
-    `unit="epic"` completes the epic's Product/Architecture phase directly (see
-    `_complete_epic_architecture`) instead of claiming `development` -- an epic
-    never develops, its children do."""
+    The confidence bar is per-profile: `resolve_profile(epic).gates.skipConfidenceThreshold`
+    (default 95). A standing/RTB profile can lower it (e.g. 90) without touching the
+    global default. `unit="epic"` completes the epic's Product/Architecture phase
+    directly (see `_complete_epic_architecture`) instead of claiming `development` --
+    an epic never develops, its children do."""
     if stage != "architecture":
         raise GhError(f"only the architecture gate (Gate B) may be skipped, got stage={stage!r}")
-    if confidence <= GATE_B_SKIP_CONFIDENCE_THRESHOLD:
+    threshold = _profile_for_unit(gh, issue, unit)["gates"]["skipConfidenceThreshold"]
+    if confidence <= threshold:
         raise GhError(f"confidence {confidence} does not clear the "
-                       f"{GATE_B_SKIP_CONFIDENCE_THRESHOLD} threshold required to skip Gate B")
+                       f"{threshold} threshold required to skip Gate B")
     if unit == "epic":
         return _complete_epic_architecture(
             gh, issue, f"arch-review reported {confidence}% confidence (> "
-                       f"{GATE_B_SKIP_CONFIDENCE_THRESHOLD}% threshold) that `architecture.md` is "
+                       f"{threshold}% threshold) that `architecture.md` is "
                        f"structurally sound — skipped Gate B. {summary}")
     next_stage = STAGE_AFTER_GATE[stage]
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     gh.issue_comment(issue,
         f"⚡ Gate B skipped — arch-review reported {confidence}% confidence "
-        f"(> {GATE_B_SKIP_CONFIDENCE_THRESHOLD}% threshold) that `architecture.md` is "
+        f"(> {threshold}% threshold) that `architecture.md` is "
         f"structurally sound. {summary} Proceeding directly to `{next_stage}` without "
         f"human sign-off, per the confidence-skip policy in \"Human-review gates\" "
         f"(references/gates.md).\n\n"
@@ -2352,6 +2429,38 @@ def cmd_skip_gate(gh: GitHub, issue: int, stage: str, confidence: int, summary: 
         f"<!-- stage-transition: arch-review->{next_stage} @ {timestamp} -->")
     cmd_claim(gh, issue, next_stage)
     return {"issue": issue, "unit": unit, "next_stage": next_stage, "skipped": True, "confidence": confidence}
+
+
+def cmd_auto_pass_gate_a(gh: GitHub, issue: int, stage: str, summary: str,
+                          unit: str = "issue") -> dict:
+    """Advance past Gate A (the product gate) with no human review, when the epic's
+    profile says `requiresHumanGateA: false`. Called by the orchestrator only after a
+    clean `product-review`; it is the configurable counterpart to Gate A's default
+    hard stop. Refuses if the resolved profile still requires a human -- then the
+    orchestrator opens a real gate instead.
+
+    Advances `product -> architecture` and claims `architecture` in the same
+    invocation (both an epic's own product phase and a standing/RTB child's product
+    stage move to `architecture`). See "Gate A configurability" in references/gates.md."""
+    if stage != "product":
+        raise GhError(f"Gate A is the product gate; got stage={stage!r} -- "
+                       f"the architecture gate uses skip-gate, not auto-pass-gate-a")
+    profile = _profile_for_unit(gh, issue, unit)
+    if profile["gates"]["requiresHumanGateA"]:
+        raise GhError(f"profile '{profile['name']}' requires a human at Gate A "
+                       f"(requiresHumanGateA: true) -- open a gate, do not auto-pass")
+    next_stage = STAGE_AFTER_GATE[stage]  # "architecture"
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    gh.issue_comment(issue,
+        f"⚡ Gate A auto-passed — profile '{profile['name']}' needs no human review of "
+        f"`product.md` (requiresHumanGateA: false). {summary} Proceeding directly to "
+        f"`{next_stage}` per the profile's Gate A policy (see \"Gate A configurability\" "
+        f"in references/gates.md).\n\n"
+        f"<!-- gate-a-auto-passed: {profile['name']} -->\n"
+        f"<!-- stage-transition: product-review->{next_stage} @ {timestamp} -->")
+    cmd_claim(gh, issue, next_stage)
+    return {"issue": issue, "unit": unit, "next_stage": next_stage,
+            "auto_passed": True, "profile": profile["name"]}
 
 
 _CLOSES_ISSUE_RE = re.compile(r"\bCloses #\d+", re.IGNORECASE)
@@ -3007,9 +3116,10 @@ def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
     Covers the marker-backed pairings: `pr-review <-> development`
     (`pr-review-outcome` markers; `rework_since_last_clean` resets on every
     clean outcome), `sync-branch-conflict <-> development` (`sync-conflict`
-    markers, total count), and -- since 2026-08-28 -- the two design pairings
-    `arch-review <-> architecture` and `lld-review <-> lld`
-    (`design-review-outcome` markers, reported per role under `design_review`).
+    markers, total count), and -- since 2026-08-28 -- the design pairings
+    `product-review <-> product`, `arch-review <-> architecture` and
+    `lld-review <-> lld` (`design-review-outcome` markers, reported per role under
+    `design_review`).
     `testing <-> development` still leaves no marker and remains the
     orchestrator's own session-scoped count."""
     comments = gh.issue_view(issue).get("comments", [])
@@ -3237,7 +3347,7 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("start-comment")
     p.add_argument("issue", type=int)
     p.add_argument("--role", required=True,
-                   choices=["arch-review", "lld-review", "pr-review", "testing"])
+                   choices=["product-review", "arch-review", "lld-review", "pr-review", "testing"])
     p.set_defaults(func=lambda a: cmd_start_comment(GitHub(), a.issue, a.role))
     p = sub.add_parser("open-gate")
     p.add_argument("issue", type=int)
@@ -3265,6 +3375,14 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--summary", required=True)
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
     p.set_defaults(func=lambda a: cmd_skip_gate(GitHub(), a.issue, a.stage, a.confidence, a.summary, a.unit))
+    p = sub.add_parser("auto-pass-gate-a",
+                        help="Advance past Gate A with no human review when the epic's "
+                             "profile sets requiresHumanGateA:false (after a clean product-review)")
+    p.add_argument("issue", type=int)
+    p.add_argument("--stage", default="product", choices=["product"])
+    p.add_argument("--summary", required=True)
+    p.add_argument("--unit", default="issue", choices=["issue", "epic"])
+    p.set_defaults(func=lambda a: cmd_auto_pass_gate_a(GitHub(), a.issue, a.stage, a.summary, a.unit))
     p = sub.add_parser("auto-pass-gate")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--repo-path", default=".")

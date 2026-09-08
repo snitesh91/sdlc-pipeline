@@ -4,6 +4,30 @@ Provenance for rules that would otherwise read as arbitrary. Newest first. Keep
 entries to a few lines; the rule itself lives in the spine or its reference file —
 this file records *why* and *when*.
 
+## 2026-09-08 — epic profiles + universal product-review stage + configurable Gate A
+
+Operator feature request, built directly (spec/plan ceremony waived). Three changes,
+one theme — move policy the skill hardcoded into client config:
+
+- **Universal `product-review` stage.** Every unit that runs `product` now runs an
+  adversarial opus review of `product.md` right after (new `sdlc-product-review` agent).
+  A blocker bounces `product` and re-reviews until clean, backstopped by the existing
+  escalation valve (the new `product-review ↔ product` pairing rides `pairing-counts`,
+  no new cap). Rationale: `product.md` was the one gate-approved doc with no automated
+  adversarial pass before a human — and, under a no-human-Gate-A profile, before nothing.
+- **Epic profiles.** `epic:standing`/`epic:legacy` were bundles of ~5 hardcoded toggles.
+  They became `pipeline.profiles` — an ordered, label-matched array of toggle bundles
+  (`resolve_profile`), so a client owns the label→behaviour map and may use `epic:standing`,
+  `RTB`, or anything. `is_epic_standing`/`is_epic_legacy` are now thin reads of the
+  `epicLevelPhase`/`driven` toggles; the three shipped default profiles reproduce the old
+  behaviour exactly (206 pre-existing tests unchanged and green).
+- **Gate A configurable + per-profile Gate B bar.** `gates.requiresHumanGateA` (default
+  true) drives whether a clean `product-review` opens the human Gate A or is auto-passed
+  (`auto-pass-gate-a`); `gates.skipConfidenceThreshold` is resolved per-profile in
+  `skip-gate` (a child via its parent epic). This let bookshaw's RTB (#94) run its bug
+  backlog at 90% Gate B and no human Gate A, without touching any other epic — the driven
+  repo opts in by adding a `profiles` block to its own config, on its own submodule bump.
+
 ## 2026-09-06 — retro: child auto-close on epic-branch merge; epic gate docs must not land on the epic branch
 
 Two findings from the driven repo's epic #348 / #345 runs, ported into the generic

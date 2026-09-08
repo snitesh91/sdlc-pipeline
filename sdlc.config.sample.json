@@ -95,7 +95,9 @@
       "reviewPrefix": "sdlc-review-"
     },
     "gates": {
-      "skipConfidenceThreshold": 95
+      "_comment": "Global gate defaults; a profile's own `gates` override these for epics that match it.",
+      "skipConfidenceThreshold": 95,
+      "requiresHumanGateA": true
     },
     "escalation": {
       "replaceAt": 3,
@@ -110,6 +112,7 @@
     },
     "models": {
       "product": "opus",
+      "product-review": "opus",
       "architecture": "opus",
       "arch-review": "opus",
       "lld": "sonnet",
@@ -118,6 +121,35 @@
       "testing": "sonnet",
       "pr-review": "opus"
     },
-    "docTemplates": "_templates"
+    "docTemplates": "_templates",
+    "profiles": [
+      {
+        "_comment": "Ordered; the first whose `match` label is on the epic wins, `\"*\"` is the catch-all. A profile bundles the behaviour that used to be hardcoded to epic:standing/epic:legacy. Missing toggles inherit the shipped defaults; `gates` inherit the global `gates` above.",
+        "name": "legacy",
+        "match": { "label": "epic:legacy" },
+        "driven": false
+      },
+      {
+        "name": "standing",
+        "match": { "label": "epic:standing" },
+        "epicLevelPhase": false,
+        "childEntryStage": "product",
+        "childrenNeedArchitectedEpic": false,
+        "closes": false,
+        "gates": {
+          "_comment": "A standing/RTB backlog: lower the Gate B skip bar and let children through Gate A without a human.",
+          "skipConfidenceThreshold": 90,
+          "requiresHumanGateA": false
+        }
+      },
+      {
+        "name": "default",
+        "match": "*",
+        "epicLevelPhase": true,
+        "childEntryStage": "lld",
+        "childrenNeedArchitectedEpic": true,
+        "closes": true
+      }
+    ]
   }
 }

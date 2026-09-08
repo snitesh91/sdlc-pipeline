@@ -47,8 +47,23 @@ Native Issue Type, the org-provisioned **Priority**/**Effort** issue fields, and
 native `blockedBy` relationship replace the old label taxonomy. The `stage:*`/
 `status:*` labels are **retired** — throughout this skill, `stage:X`/`status:X` is
 compact shorthand for "Stage field = X" / "Pipeline Status field = X", never an
-actual label. Three labels remain, all epic-scoped and renameable via `pipeline.labels`:
-`epic:standing`, `epic:legacy`, `epic:architected` (defaults).
+actual label. `epic:architected` remains a runtime **state** marker (renameable via
+`pipeline.labels.architected`). The old `epic:standing` / `epic:legacy` labels are no
+longer read directly — an epic's behaviour is now a **profile** matched by label in
+`pipeline.profiles` (see below and `references/epics.md`, "Epic profiles"); a client may
+keep those labels or use its own (e.g. `RTB`).
+
+### `pipeline.profiles` — epic behaviour by label
+
+An ordered array; `resolve_profile(epic)` returns the first entry whose `match` (a
+`{ "label": "<name>" }` or the string `"*"` catch-all) holds against the epic's labels.
+Each entry is a bundle of toggles (`driven`, `epicLevelPhase`, `childEntryStage`,
+`childrenNeedArchitectedEpic`, `closes`, and a `gates` block with
+`skipConfidenceThreshold` / `requiresHumanGateA`); omitted toggles inherit shipped
+defaults, and `gates` inherit the global `pipeline.gates`. The shipped defaults reproduce
+the historical `standing` / `legacy` / `default` behaviour. Full field reference and a
+worked example live in `sdlc.config.sample.json`. `product-review` is universal (not a
+profile toggle); its model is `pipeline.models.product-review` (default opus).
 
 | Category | Mechanism | Meaning |
 |---|---|---|
