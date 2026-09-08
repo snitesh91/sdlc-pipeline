@@ -80,6 +80,34 @@ Even a child needing no design decisions beyond the epic's `architecture.md` sti
 an `lld.md` — a short one saying exactly that, with its footprint. Structural
 consistency is the point; the pipeline expects the file to exist.
 
+## If acceptance is a class of surfaces, prove completeness with a sweep
+
+When this child's acceptance is a **class**, not a fixed list — "every interactive
+control ≥44px", "no fixed bar overlaps the nav", "every on-screen file audited for
+readability" — the single most common way the `lld` bounces `lld-review` twice is a
+prose completeness claim: "§3 lists every file", "these two bars are all of them".
+The reviewer's completeness lens will falsify that one instance at a time, and each
+patch just invites the next round. Do not write the claim that way.
+
+Instead, in the `lld` itself:
+
+- **Define the class by a mechanical rule and prove it with a sweep.** A `grep`/`find`
+  anchored to the symbol or attribute (not to a path prefix you assume), the stated
+  partition of what it covers and what is excluded and why, and the command plus its
+  output pasted in. `comm -23 <sorted-find> <sorted-inventory>` returning empty is a
+  sweep; "I checked every file" is not.
+- **State the fix as a rule applied to every swept instance,** so `development` applies
+  it per instance rather than re-judging the class ("every `fixed bottom-0` bar takes
+  `bottom-14 md:bottom-0`", not "fix these two bars").
+- **Cover every dimension the acceptance names.** "44×44px" is two dimensions; a
+  height-only model passes a 44×10px control. Name each as a separate term.
+- **Pin the population as a requirements fact.** If which controls or which dimensions
+  count is ambiguous, that is not a task-local decision you may make — it is a
+  deviation/ambiguity to escalate, not to narrow silently.
+
+Full rule and the incident behind it: `references/stage-playbooks.md`, "A completeness
+claim over a footprint is a sweep, not a list".
+
 ## Check yourself against the siblings
 
 Before finishing, compare your `## Footprint` against the footprints of the epic's

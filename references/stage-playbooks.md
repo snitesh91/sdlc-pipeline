@@ -268,6 +268,48 @@ been hit live:
 false positives in scripts they had just written, before treating the output as
 evidence, and said so in the handoff. That is the bar.
 
+## A completeness claim over a footprint is a sweep, not a list
+
+This is the same rule as "establish a number by running the thing", applied to the
+one place it bounces hardest: a child whose acceptance is a **class of surfaces** —
+"every interactive control is ≥44px", "no fixed bar overlaps the nav", "every
+on-screen file is audited for readability". One whole epic's audit/hardening children
+each cost two predictable `lld-review` ↔ `lld` or `pr-review` ↔ `development` rounds
+to the same failure, every time (see `references/history.md`): the doc asserted
+completeness in prose — "§3 lists every file", "these two bars are all of them" — the
+reviewer's completeness lens found one more instance, the author patched that named
+instance, and the next round found the next one. A prose enumeration is a claim about
+the author's attention, and the reviewer can only falsify it one instance at a time.
+
+For any such child, at **every** stage that touches the class:
+
+- **State completeness as a reproducible sweep, not an instance list.** The `lld`
+  defines the class by a mechanical rule — a `grep`/`find` pattern anchored to the
+  symbol or attribute, plus the stated partition of what the sweep covers and what is
+  excluded and why. Paste the command and its output. "I looked at every file" is not
+  a sweep; `comm -23 <sorted-find> <sorted-inventory>` returning empty is.
+- **Cover every dimension the acceptance names.** If the criterion is "44×44px", a
+  detector that models height only will pass a 44×10px control — a real bounce. Model
+  each dimension the AC states as a separate term, and run a **positive control per
+  dimension** (introduce one deliberate violation on that axis, watch the count go
+  non-zero, revert). A guard that has only ever gone non-zero on one axis does not
+  cover the other.
+- **`development` applies the class rule per instance; it does not re-judge the
+  class.** The `lld` states the rule once ("every `fixed bottom-0` bar this child adds
+  or finds takes `bottom-14 md:bottom-0`"); `development.md` reports that the rule was
+  applied to each swept instance, not merely that the AC "passes". A per-file checklist
+  that `development` works item by item is exactly where a missed-because-unlisted file
+  ships looking identical to an audited-clean one — so the inventory the checklist is
+  built from must be the sweep's output, not a hand-typed list.
+
+The population of the class is a **requirements** fact, not a `development` call. If
+which controls or which dimensions count is ambiguous ("interactive control" —
+icon-only, or text buttons and pagination too?), that is pinned at `architecture`/`lld`
+and escalated when unclear — never narrowed silently at `development`, which
+`pr-review` will (correctly) bounce as an unauthorised scope reduction. A reviewer's
+"same-class, second consecutive bounce" note is the signal to stop patching the next
+named instance and close the class at its root with a sweep.
+
 ## Commenting discipline
 
 The main agent never needs to *read* a comment to decide what happens next — it just

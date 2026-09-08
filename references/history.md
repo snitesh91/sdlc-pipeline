@@ -904,3 +904,28 @@ two children started on a base that did not contain their own epic's merged
 On 2026-08-20 #186 was parked `needs-human` with its worktree left on disk, the lane read
 3/3 full, and the rest of that invocation ran at one-third capacity with no error
 anywhere to notice.
+
+### `stage-playbooks.md`, "A completeness claim over a footprint is a sweep, not a list" (+ the four agent files)
+
+Retro 2026-09-08 (watermark 101→128 already recorded; this run 128→142). Epic #345's
+mobile-hardening children each bounced twice on one failure mode. #421 (C2) and #422
+(C3) bounced `lld-review` twice: the `lld` asserted footprint completeness in prose
+("§3 lists every file", "§4.7 fixes all the bars"), the reviewer's completeness lens
+found one more omitted surface, the author patched that named instance, and round 2
+found the next one — `StationeryPdpActions.tsx` (a third `fixed bottom-0` bar §4.7 did
+not enumerate), then `BooklistOriginLabel.tsx` (an 11px label the inventory claimed did
+not exist). Both closed only when the claim was reframed as a mechanical `find`/`grep`
+sweep with a `comm -23`-empty proof, not a hand list. #424 (C5) bounced `pr-review`
+twice on the same DNA one altitude up: round 1, `development` had read AC3 as
+*icon-only* controls and left ~40 known in-scope sub-44px targets in a "Deferred"
+section — an unauthorised scope narrowing of an unconditional criterion; round 2, the
+guard detector modelled height only and passed a 44×10px "X". The escalation valve
+never tripped (max 2, `replace_at` 3), but four children each burned ~2 extra **opus**
+review rounds on a failure that was fully predictable — and memory had already flagged
+it (`sdlc_lld_enumerate_not_sweep`) without the fix reaching the skill. The reviewer
+side (design-review's completeness lens) already existed; what was missing was the
+*authoring* side. Fix landed in four places: the shared `stage-playbooks.md` section,
+plus `sdlc-lld.md` (produce the sweep from the start), `sdlc-architecture.md` (pin the
+class's population and every dimension as a requirements fact), and `sdlc-development.md`
+(apply the rule per instance; never shrink a class-sweep alone — escalate the
+population question).

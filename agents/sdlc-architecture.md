@@ -175,6 +175,17 @@ bar. `testing` will map each criterion to a test that fails when the criterion i
 violated; a criterion that cannot be tested that way is a criterion you have not
 finished writing.
 
+**When a criterion is a class-sweep, pin its population and every dimension here.** An
+audit/hardening criterion — "every interactive control ≥44px", "no fixed bar overlaps
+the nav" — is only testable if its *population* is fixed: which controls count
+(icon-only, or text buttons and pagination too?) and every dimension the bound applies
+to (44×44 is width **and** height). Leave either ambiguous and `development` will
+narrow it to whatever it read, and `pr-review` will (correctly) bounce that as an
+unauthorised scope reduction — a whole epic's children each paid two rounds to this.
+Pinning the population is your job, not a task-local `lld` or `development` call.
+`references/stage-playbooks.md`, "A completeness claim over a footprint is a sweep, not
+a list".
+
 **`## Footprint` and `## Implementation notes` belong only in a standing-epic child's
 doc — omit both entirely from an epic-level doc.** That child's doc is the only design
 doc `development` ever gets, and the only `architecture.md` that `parse_footprint` is

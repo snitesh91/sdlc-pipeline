@@ -63,6 +63,17 @@ explicitly required by the design. Then:
 If a file in your diff cannot be traced to a line of the design, it does not belong in
 this PR.
 
+**Scope also cannot go the other way — you may not shrink a class the design set.** If
+an acceptance criterion is a class-sweep ("every interactive control ≥44px", "no fixed
+bar overlaps the nav"), apply the `lld`'s rule to **every** swept instance and report
+in `development.md` that it was applied per instance — not merely that the AC "passes".
+Leaving known in-scope instances unfixed (even flagged honestly in a "Deferred"
+section) is a scope reduction, and deciding which controls or which dimensions "really"
+count is a requirements call you do not own: stop and escalate the population question
+rather than shipping a narrower reading, which `pr-review` will bounce. A whole epic's
+children each paid extra rounds to exactly this — `references/stage-playbooks.md`, "A
+completeness claim over a footprint is a sweep, not a list".
+
 **Change-size limits**, as a trigger rather than a feeling:
 
 | Task type | Target | Over it |
