@@ -106,6 +106,19 @@ development PR closes an issue. How it may be merged depends on the unit:
   on `epic-<n>`. What must never be squashed or deleted is `epic-<n>` itself, which
   merges to `main` only at `close-epic`.
 
+> **Never delete a per-issue branch while its issue is open — its unmerged
+> design docs die with it.** A gate merges only `product.md`; the later-stage docs
+> (`architecture.md`, `arch-review` rework, `lld.md`) live *only* on `issue-<n>` until
+> the final development PR carries them to `main`. If that branch is deleted, force-reset,
+> or abandoned before the dev PR merges, those docs are lost — recoverable only from the
+> git object DB via `git fsck --unreachable`, and gone for good once GC runs. This is not
+> hypothetical: the 2026-09-09 retro found `#101` and `#170` with their whole
+> `architecture.md` + `arch-review` cycle stranded on dangling commits, and `#179`'s arch
+> docs live only on `issue-179` right now. So: the source of record for a stage is durable
+> **only after** the dev PR merges to `main`; treat an unmerged issue branch as the sole
+> copy and never delete it while the issue is open. When a standing/RTB child is parked at
+> a gate for a long time, the branch staying alive is what protects its design record.
+
 Once `open-gate` returns, park this unit and return to Step 1 (see `SKILL.md`,
 "Looping within an invocation"). There is no polling for a gate; it sits at
 `awaiting-human-review` until a later Step 1 pass finds the PR merged or carrying

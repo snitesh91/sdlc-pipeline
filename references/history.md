@@ -953,3 +953,43 @@ plus `sdlc-lld.md` (produce the sweep from the start), `sdlc-architecture.md` (p
 class's population and every dimension as a requirements fact), and `sdlc-development.md`
 (apply the rule per instance; never shrink a class-sweep alone — escalate the
 population question).
+
+### `gates.md`, "Never delete a per-issue branch while its issue is open" (+ driven-repo config/pin durability)
+
+Retro 2026-09-09 (watermark 143→149). An epic #94 (RTB, standing) run drove six children
+(#179, #182, #194, #202, #213, #224 + shipped #431) and surfaced two classes of failure —
+one in the skill, several in how the driven repo carries the pipeline's own state.
+
+**Gate A behaviour flip-flopped mid-invocation.** `auto-pass-gate-a` succeeded for #182 but
+refused for #194 minutes later, both standing children. Root cause: the driven repo's
+`sdlc-pipeline.config.json` had its **entire `pipeline` block uncommitted** — the committed
+version carried only `{retro}`, so profiles/gates/models lived as an unstaged working-tree
+edit. A `git checkout` in the shared checkout reverted it, dropping the resolved
+`standing.gates.requiresHumanGateA` from the intended `false` back to the CLI default `true`.
+`show-config` returned different profiles on two calls in the same session. Compounding it,
+the CLI itself is the `.github/sdlc-pipeline` **submodule checked out detached at `87735e3`,
+one commit ahead of the gitlink pin `2cf36c0`** — and `auto-pass-gate-a`/configurable Gate A
+do not even exist at `2cf36c0`. So the running binary and the resolved config were both
+floating. Fixed in the driven repo (operator-approved): commit the full config block, re-pin
+the submodule to the intended `87735e3`+this-retro commit. Lesson for any client: the
+pipeline's config and its submodule pin are load-bearing state — an uncommitted config or a
+detached submodule makes gate/profile behaviour non-deterministic. See the new memory
+`ops_sdlc_submodule_unpinned_drift`.
+
+**Design docs lost with deleted branches** — the `gates.md` fix above. `git fsck` found
+#101 and #170 with their whole `architecture.md` + `arch-review` cycle on dangling commits,
+never on `main`; #179's arch docs live only on `issue-179`. A gate merges only `product.md`;
+everything later rides the issue branch to `main` via the dev PR, so deleting that branch
+before the dev PR merges destroys the record. Rule added: never delete a per-issue branch
+while its issue is open.
+
+**Widespread stale path citations** (noted, not mass-fixed). 49 files cite the dead
+`.claude/skills/sdlc-next/` path — including the doc **template** `_templates/product.template.md`,
+so every new doc inherited it; ~76 frontend `src/components/<slice>/` and 19 backend
+`src/modules/book-catalog/` paths are stale from partial refactors (#244 feature-slices,
+catalog move). Every product stage this run had to re-validate the issue's cited paths against
+current `main` and correct them (#179 3 files, #213 `book-catalog`, #224 3rd `restoreCartId`
+site). Fixed the template + `bookshaw-docs/sdlc/README.md` at the source (new docs stop
+inheriting bad paths); the historical doc bodies were left as noise not worth a mass rewrite.
+Refuted as *recurring*: the "zero frontend unit tests" claim (11 docs, all pre-`#240`/vitest,
+never recurs) and the Effort-field-unsettable note (2 epic-level spots, already deferred).
