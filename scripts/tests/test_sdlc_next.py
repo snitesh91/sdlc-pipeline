@@ -4110,3 +4110,326 @@ def test_auto_pass_gate_a_advances_child_of_no_human_profile():
     assert list(stage_mut) in runner.calls
     comment_calls = [c for c in runner.calls if c[:3] == ["gh", "issue", "comment"]]
     assert any("Gate A auto-passed" in c[-1] for c in comment_calls)
+
+
+# --- citations (cite / verify-citations / verify-exit citations_ok) ---
+# See architecture.md for issue #194: a citation block's authority is a
+# byte-exact fragment copied from the real file, matched literally; an
+# `cite-example` block is illustrative and never resolved or counted.
+
+def test_parse_cite_blocks_distinguishes_asserted_from_illustrative():
+    from sdlc_next import parse_cite_blocks
+    text = (
+        "intro\n"
+        "```cite path=foo.yml\n"
+        "  a: 1\n"
+        "```\n"
+        "middle\n"
+        "```cite-example path=bar.yml rev=abc123\n"
+        "  b: 2\n"
+        "  c: 3\n"
+        "```\n"
+        "end\n"
+    )
+    blocks = parse_cite_blocks(text)
+    assert len(blocks) == 2
+    assert blocks[0] == {"kind": "cite", "path": "foo.yml", "rev": None,
+                          "body": "  a: 1", "line_no": 3}
+    assert blocks[1] == {"kind": "cite-example", "path": "bar.yml", "rev": "abc123",
+                          "body": "  b: 2\n  c: 3", "line_no": 7}
+
+
+def test_cite_generates_block_from_real_file_read(tmp_path):
+    from sdlc_next import cmd_cite
+    (tmp_path / "foo.yml").write_text("one\ntwo\nthree\n")
+    result = cmd_cite("foo.yml", line=2, repo_path=str(tmp_path))
+    assert result.get("ok", True) is True
+    assert "```cite path=foo.yml\ntwo\n```" == result["block"]
+    assert result["line_range"] == [2, 2]
+
+
+def test_cite_generates_multiline_block_with_lines_range(tmp_path):
+    from sdlc_next import cmd_cite
+    (tmp_path / "foo.yml").write_text("one\ntwo\nthree\nfour\n")
+    result = cmd_cite("foo.yml", lines="2-3", repo_path=str(tmp_path))
+    assert result["block"] == "```cite path=foo.yml\ntwo\nthree\n```"
+    assert result["line_range"] == [2, 3]
+
+
+def test_cite_selects_by_first_line_literally_containing_match(tmp_path):
+    from sdlc_next import cmd_cite
+    (tmp_path / "foo.yml").write_text("one\ncancel-in-progress: true\nthree\n")
+    result = cmd_cite("foo.yml", match="cancel-in-progress", repo_path=str(tmp_path))
+    assert result["block"] == "```cite path=foo.yml\ncancel-in-progress: true\n```"
+
+
+def test_cite_errors_and_emits_nothing_when_match_absent(tmp_path):
+    from sdlc_next import cmd_cite
+    (tmp_path / "foo.yml").write_text("one\ntwo\n")
+    result = cmd_cite("foo.yml", match="nonexistent-fragment", repo_path=str(tmp_path))
+    assert result["ok"] is False
+    assert "block" not in result
+
+
+def test_cite_errors_and_emits_nothing_when_match_is_ambiguous(tmp_path):
+    from sdlc_next import cmd_cite
+    (tmp_path / "foo.yml").write_text("dup: 1\ndup: 2\n")
+    result = cmd_cite("foo.yml", match="dup", repo_path=str(tmp_path))
+    assert result["ok"] is False
+    assert "block" not in result
+    assert "ambiguous" in result["reason"]
+
+
+def test_cite_errors_and_emits_nothing_when_line_out_of_range(tmp_path):
+    from sdlc_next import cmd_cite
+    (tmp_path / "foo.yml").write_text("one\ntwo\n")
+    result = cmd_cite("foo.yml", line=9, repo_path=str(tmp_path))
+    assert result["ok"] is False
+    assert "block" not in result
+
+
+def test_cite_chooses_fence_longer_than_any_backtick_run_in_body(tmp_path):
+    from sdlc_next import cmd_cite, parse_cite_blocks
+    (tmp_path / "foo.md").write_text("before\n```nested```\nafter\n")
+    result = cmd_cite("foo.md", line=2, repo_path=str(tmp_path))
+    assert result["block"].startswith("````cite ")
+    # round-trips: parsing the emitted block recovers the exact body.
+    blocks = parse_cite_blocks(result["block"])
+    assert blocks == [{"kind": "cite", "path": "foo.md", "rev": None,
+                        "body": "```nested```", "line_no": 2}]
+
+
+def test_cite_reads_pinned_revision_via_git_show():
+    from sdlc_next import cmd_cite
+    runner = ScriptedRunner({
+        ("git", "-C", "/repo", "show", "170df64:foo.yml"): "old: 1\ncancel-in-progress: true\n",
+    })
+    result = cmd_cite("foo.yml", match="cancel-in-progress", rev="170df64",
+                       repo_path="/repo", runner=runner)
+    assert result["block"] == "```cite path=foo.yml rev=170df64\ncancel-in-progress: true\n```"
+
+
+def test_verify_citations_reports_resolved_and_unresolved_with_positive_control(tmp_path):
+    from sdlc_next import cmd_verify_citations
+    (tmp_path / "target.yml").write_text("hello world\n")
+    good_doc = tmp_path / "good.md"
+    good_doc.write_text("```cite path=target.yml\nhello world\n```\n")
+    result = cmd_verify_citations(["good.md"], repo_path=str(tmp_path))
+    assert result["all_resolved"] is True
+    assert result["ok"] is True
+    assert result["citations"] == [{"path": "target.yml", "rev": None, "resolved": True,
+                                     "line_hint": 1}]
+
+    # Positive control: break the citation, watch it go unresolved, then revert.
+    bad_doc = tmp_path / "bad.md"
+    bad_doc.write_text("```cite path=target.yml\ngoodbye world\n```\n")
+    broken = cmd_verify_citations(["bad.md"], repo_path=str(tmp_path))
+    assert broken["all_resolved"] is False
+    assert broken["ok"] is False
+    assert broken["citations"][0]["resolved"] is False
+    assert "not found" in broken["citations"][0]["cited_vs_found"]
+
+    reverted = cmd_verify_citations(["good.md"], repo_path=str(tmp_path))
+    assert reverted["all_resolved"] is True
+
+
+def test_verify_citations_matching_is_literal_with_no_escaping(tmp_path):
+    from sdlc_next import cmd_verify_citations
+    line = "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}"
+    (tmp_path / "backend-ci.yml").write_text(f"jobs:\n{line}\nmore: [a, b]*\n")
+    doc = tmp_path / "doc.md"
+    doc.write_text(f"```cite path=backend-ci.yml\n{line}\n```\n")
+    result = cmd_verify_citations(["doc.md"], repo_path=str(tmp_path))
+    assert result["all_resolved"] is True
+
+
+def test_verify_citations_rev_pinned_resolves_against_historical_content_only():
+    from sdlc_next import cmd_verify_citations
+    runner = ScriptedRunner({
+        ("git", "-C", "/repo", "show", "170df64:ci.yml"):
+            "cancel-in-progress: true\n",
+    })
+    doc = "```cite path=ci.yml rev=170df64\ncancel-in-progress: true\n```\n"
+    result = cmd_verify_citations_text_helper(doc, repo_path="/repo", runner=runner)
+    assert result["all_resolved"] is True
+    assert result["citations"][0]["rev"] == "170df64"
+
+
+def cmd_verify_citations_text_helper(text, repo_path, runner):
+    from sdlc_next import verify_citations_text
+    return verify_citations_text(text, repo_path=repo_path, runner=runner)
+
+
+def test_verify_citations_unpinned_citation_does_not_resolve_against_superseded_value(tmp_path):
+    from sdlc_next import cmd_verify_citations
+    # current working tree no longer has the unconditional value -- it was
+    # superseded by a conditional guard.
+    (tmp_path / "ci.yml").write_text("cancel-in-progress: ${{ true }}\n")
+    doc = tmp_path / "doc.md"
+    doc.write_text("```cite path=ci.yml\ncancel-in-progress: true\n```\n")
+    result = cmd_verify_citations(["doc.md"], repo_path=str(tmp_path))
+    assert result["all_resolved"] is False
+
+
+def test_verify_citations_multiline_block_is_byte_exact_paraphrase_fails(tmp_path):
+    from sdlc_next import cmd_verify_citations
+    (tmp_path / "wf.yml").write_text("on:\n  push:\n    branches: [main]\n")
+    good_doc = tmp_path / "good.md"
+    good_doc.write_text("```cite path=wf.yml\non:\n  push:\n    branches: [main]\n```\n")
+    good = cmd_verify_citations(["good.md"], repo_path=str(tmp_path))
+    assert good["all_resolved"] is True
+
+    paraphrased_doc = tmp_path / "bad.md"
+    paraphrased_doc.write_text("```cite path=wf.yml\non:\n  push:\n    branches: [ main ]\n```\n")
+    bad = cmd_verify_citations(["bad.md"], repo_path=str(tmp_path))
+    assert bad["all_resolved"] is False
+
+
+def test_verify_citations_skips_cite_example_blocks_entirely(tmp_path):
+    from sdlc_next import cmd_verify_citations
+    # the fragment below is not present anywhere -- if this were an asserted
+    # `cite` block it would fail to resolve; as `cite-example` it must not.
+    doc = tmp_path / "spec.md"
+    doc.write_text("```cite-example path=nonexistent.yml\nthis is illustrative only\n```\n")
+    result = cmd_verify_citations(["spec.md"], repo_path=str(tmp_path))
+    assert result["all_resolved"] is True
+    assert result["ok"] is True
+    assert result["citations"] == []
+    assert result["examples_skipped"] == 1
+
+
+def test_verify_citations_multiple_docs_wraps_and_aggregates(tmp_path):
+    from sdlc_next import cmd_verify_citations
+    (tmp_path / "a.yml").write_text("alpha\n")
+    (tmp_path / "b.yml").write_text("beta\n")
+    (tmp_path / "doc1.md").write_text("```cite path=a.yml\nalpha\n```\n")
+    (tmp_path / "doc2.md").write_text("```cite path=b.yml\nMISSING\n```\n")
+    result = cmd_verify_citations(["doc1.md", "doc2.md"], repo_path=str(tmp_path))
+    assert result["all_resolved"] is False
+    assert result["ok"] is False
+    assert [d["document"] for d in result["documents"]] == ["doc1.md", "doc2.md"]
+    assert result["documents"][0]["all_resolved"] is True
+    assert result["documents"][1]["all_resolved"] is False
+
+
+def test_verify_exit_citations_ok_true_when_stage_record_all_resolve(tmp_path):
+    from sdlc_next import GitHub, cmd_verify_exit, _ISSUE_FIELDS_QUERY
+    docs_dir = tmp_path / "docs" / "sdlc" / "issue-9"
+    docs_dir.mkdir(parents=True)
+    (tmp_path / "target.yml").write_text("hello world\n")
+    (docs_dir / "development.md").write_text("```cite path=target.yml\nhello world\n```\n")
+    fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
+    gh_runner = ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"labels": []}),
+        fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
+            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "Development"},
+        ]}}}}}),
+    })
+    git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
+    gh = GitHub(runner=gh_runner)
+    result = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="development", runner=git_runner)
+    assert result["citations_ok"] is True
+    assert result.get("ok", True) is True
+
+
+def test_verify_exit_citations_ok_false_fails_overall_result_positive_control(tmp_path):
+    from sdlc_next import GitHub, cmd_verify_exit, _ISSUE_FIELDS_QUERY
+    docs_dir = tmp_path / "docs" / "sdlc" / "issue-9"
+    docs_dir.mkdir(parents=True)
+    (tmp_path / "target.yml").write_text("hello world\n")
+    record = docs_dir / "development.md"
+    fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
+    gh_runner = ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"labels": []}),
+        fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
+            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "Development"},
+        ]}}}}}),
+    })
+    git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
+    gh = GitHub(runner=gh_runner)
+
+    # Break: a citation that does not resolve.
+    record.write_text("```cite path=target.yml\ngoodbye world\n```\n")
+    broken = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="development", runner=git_runner)
+    assert broken["citations_ok"] is False
+    assert broken["ok"] is False
+    assert "reason" in broken
+
+    # Revert: fix the citation, confirm it goes back to passing.
+    record.write_text("```cite path=target.yml\nhello world\n```\n")
+    fixed = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="development", runner=git_runner)
+    assert fixed["citations_ok"] is True
+    assert fixed.get("ok", True) is True
+
+
+def test_verify_exit_citations_scoped_to_own_record_ignores_other_docs(tmp_path):
+    from sdlc_next import GitHub, cmd_verify_exit, _ISSUE_FIELDS_QUERY
+    docs_dir = tmp_path / "docs" / "sdlc" / "issue-9"
+    docs_dir.mkdir(parents=True)
+    (tmp_path / "target.yml").write_text("hello world\n")
+    # An older, already-merged doc with a rotted citation -- must not affect
+    # a later stage's own exit check (AC14).
+    (docs_dir / "product.md").write_text("```cite path=target.yml\nlong gone content\n```\n")
+    (docs_dir / "development.md").write_text("```cite path=target.yml\nhello world\n```\n")
+    fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
+    gh_runner = ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"labels": []}),
+        fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
+            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "Development"},
+        ]}}}}}),
+    })
+    git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
+    gh = GitHub(runner=gh_runner)
+    result = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="development", runner=git_runner)
+    assert result["citations_ok"] is True
+    assert result.get("ok", True) is True
+
+
+def test_verify_exit_omits_citations_ok_when_stage_has_no_canonical_record(tmp_path):
+    """`testing` writes no doc file at all -- there is nothing to re-check, so
+    the citation gate must not fire (and must not crash) for it."""
+    from sdlc_next import GitHub, cmd_verify_exit, _ISSUE_FIELDS_QUERY
+    fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
+    gh_runner = ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"labels": []}),
+        fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
+            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "Testing"},
+        ]}}}}}),
+    })
+    git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
+    gh = GitHub(runner=gh_runner)
+    result = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="testing", runner=git_runner)
+    assert "citations_ok" not in result
+    assert result.get("ok", True) is True
+
+
+def test_verify_exit_omits_citations_ok_when_stage_record_file_is_absent(tmp_path):
+    """Mirrors test_verify_exit_uses_epic_docs_dir_for_unit_epic: an
+    architecture-stage exit whose architecture.md is not yet on disk must not
+    be flipped to a citation failure -- that gap is `docs_present`'s job, not
+    this one's."""
+    from sdlc_next import GitHub, cmd_verify_exit, _ISSUE_FIELDS_QUERY
+    docs_dir = tmp_path / "docs" / "sdlc" / "epic-92"
+    docs_dir.mkdir(parents=True)
+    (docs_dir / "product.md").write_text("x")
+    fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=92)}")
+    gh_runner = ScriptedRunner({
+        ("gh", "issue", "view", "92", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"labels": []}),
+        fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
+            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "Architecture"},
+        ]}}}}}),
+    })
+    git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
+    gh = GitHub(runner=gh_runner)
+    result = cmd_verify_exit(gh, str(tmp_path), 92, expect_stage="architecture", unit="epic", runner=git_runner)
+    assert "citations_ok" not in result

@@ -2743,6 +2743,213 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str)
     return {"issue": issue, "pr": pr_number, "created": True}
 
 
+# --- citations: cite / verify-citations / verify-exit's citations_ok ---
+#
+# A citation block is a fenced code block whose info line names a file path
+# (and, optionally, a pinned revision) and whose body is a byte-exact fragment
+# copied out of that file. The body is the authority; a line number is never
+# stored, only derived at resolve time as a hint (see issue #194's
+# architecture.md, "Design"). Two kinds of block share one info-string token:
+# `cite` is *asserted* -- the resolver resolves and counts it; `cite-example`
+# is *illustrative* -- parsed so a spec of the format can show one, but never
+# resolved or counted. The token must match exactly, so `cite-example` is
+# never misread as a `cite` block with a stray word.
+
+_CITE_FENCE_RE = re.compile(r'^(`{3,})(cite-example|cite)\s+(.*?)\s*$')
+
+
+def _parse_cite_attrs(attr_str: str) -> dict:
+    return dict(tok.split("=", 1) for tok in attr_str.split() if "=" in tok)
+
+
+def parse_cite_blocks(text: str) -> list:
+    """Parses every `cite`/`cite-example` block out of a document's text.
+    Returns one dict per block: `{kind, path, rev, body, line_no}` in document
+    order, where `line_no` is the 1-based line number of the block's first
+    body line (a hint for a human reader, never used for resolution). A
+    fence's closing line is any run of backticks at least as long as the
+    opening one -- `cite` always emits an exact-length match, but a body that
+    itself contains a run of backticks needs the opening fence to be longer
+    still (see `cmd_cite`'s fence-length choice), which this closing rule
+    accommodates without special-casing it."""
+    lines = text.splitlines()
+    blocks = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        m = _CITE_FENCE_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        fence, kind, attrs_str = m.groups()
+        attrs = _parse_cite_attrs(attrs_str)
+        close_re = re.compile(r'^`{' + str(len(fence)) + r',}\s*$')
+        body_lines = []
+        j = i + 1
+        while j < n and not close_re.match(lines[j]):
+            body_lines.append(lines[j])
+            j += 1
+        blocks.append({
+            "kind": kind,
+            "path": attrs.get("path"),
+            "rev": attrs.get("rev"),
+            "body": "\n".join(body_lines),
+            "line_no": i + 2,
+        })
+        i = j + 1
+    return blocks
+
+
+def resolve_citation(path: str, body: str, rev: Optional[str] = None,
+                      repo_path: str = ".", runner: Runner = _default_runner) -> dict:
+    """Resolves one citation's body against the real file: the working tree,
+    or `git show <rev>:<path>` when a revision is pinned. Matching is a fixed-
+    string (`str.find`/`.count`) search, never a regex, so a body containing
+    `$ { } * \\`` resolves against exactly those bytes with no escaping burden
+    on the author (architecture.md AC9). Never raises -- a missing file, bad
+    path, or bad rev is reported as unresolved with the reason, per
+    architecture.md's "Where the resolver can fail is the point of the
+    design": the failure that matters is reported data, not a crash."""
+    result = {"path": path, "rev": rev}
+    try:
+        if rev:
+            content = runner(["git", "-C", repo_path, "show", f"{rev}:{path}"])
+        else:
+            with open(os.path.join(repo_path, path), "r") as f:
+                content = f.read()
+    except (GhError, OSError) as e:
+        result["resolved"] = False
+        result["cited_vs_found"] = (f"could not read {path}"
+                                     f"{f' at rev {rev}' if rev else ''}: {e}")
+        return result
+    count = content.count(body) if body else 0
+    result["resolved"] = count >= 1
+    if result["resolved"]:
+        idx = content.find(body)
+        result["line_hint"] = content.count("\n", 0, idx) + 1
+        if count > 1:
+            result["match_count"] = count
+    else:
+        result["cited_vs_found"] = (f"cited fragment not found in {path}"
+                                     f"{f' at rev {rev}' if rev else ''}")
+    return result
+
+
+def verify_citations_text(text: str, repo_path: str = ".",
+                           runner: Runner = _default_runner) -> dict:
+    """Shared resolver core: parses `text`, resolves every *asserted* block
+    against `repo_path`, and skips every *illustrative* one. Both
+    `cmd_verify_citations` (a document at a time) and `cmd_verify_exit`'s
+    `citations_ok` (the single record a completing stage authored) build on
+    this one function, so a block that resolves in one resolves in the
+    other."""
+    blocks = parse_cite_blocks(text)
+    citations = []
+    examples_skipped = 0
+    for b in blocks:
+        if b["kind"] == "cite-example":
+            examples_skipped += 1
+            continue
+        citations.append(resolve_citation(b["path"], b["body"], rev=b["rev"],
+                                           repo_path=repo_path, runner=runner))
+    return {"citations": citations, "examples_skipped": examples_skipped,
+            "all_resolved": all(c["resolved"] for c in citations)}
+
+
+def cmd_cite(path: str, line: Optional[int] = None, lines: Optional[str] = None,
+             match: Optional[str] = None, rev: Optional[str] = None,
+             repo_path: str = ".", runner: Runner = _default_runner) -> dict:
+    """Generates a citation block by reading the real file (or
+    `git show <rev>:<path>`) and selecting the target fragment by exact line,
+    an inclusive line range, or the first line literally containing `match`.
+    This is the structural anti-fabrication property (architecture.md AC7):
+    there is nothing to copy for content that is not actually in the file, so
+    a citation for it cannot be produced. Emits nothing (no `block` key,
+    `ok: False` instead) on any error -- an out-of-range line/range, or a
+    `match` that finds zero or several lines and is therefore ambiguous."""
+    try:
+        if rev:
+            content = runner(["git", "-C", repo_path, "show", f"{rev}:{path}"])
+        else:
+            with open(os.path.join(repo_path, path), "r") as f:
+                content = f.read()
+    except (GhError, OSError) as e:
+        return {"ok": False,
+                "reason": f"could not read {path}{f' at rev {rev}' if rev else ''}: {e}"}
+    file_lines = content.splitlines()
+    if line is not None:
+        start = end = line
+    elif lines is not None:
+        a, b = lines.split("-", 1)
+        start, end = int(a), int(b)
+    elif match is not None:
+        matches = [i + 1 for i, l in enumerate(file_lines) if match in l]
+        if len(matches) == 0:
+            return {"ok": False, "reason": f"no line in {path} contains {match!r}"}
+        if len(matches) > 1:
+            return {"ok": False,
+                     "reason": f"{match!r} matches {len(matches)} lines in {path} "
+                               f"({matches}) -- ambiguous, narrow the match"}
+        start = end = matches[0]
+    else:
+        return {"ok": False, "reason": "one of --line, --lines, or --match is required"}
+    if start < 1 or end < start or end > len(file_lines):
+        return {"ok": False,
+                 "reason": f"line range {start}-{end} is out of range for {path} "
+                           f"({len(file_lines)} lines)"}
+    body = "\n".join(file_lines[start - 1:end])
+    # Fence longer than any backtick run in the body, so arbitrary file
+    # content (including a body that itself contains ``` ```) round-trips
+    # without the fence being mistaken for a close inside the body.
+    fence_len = 3
+    for m in re.finditer(r'`+', body):
+        fence_len = max(fence_len, len(m.group()) + 1)
+    fence = "`" * fence_len
+    info = f"cite path={path}" + (f" rev={rev}" if rev else "")
+    result = {"path": path, "line_range": [start, end],
+              "block": f"{fence}{info}\n{body}\n{fence}"}
+    if rev:
+        result["rev"] = rev
+    return result
+
+
+def cmd_verify_citations(paths: list, repo_path: str = ".",
+                          runner: Runner = _default_runner) -> dict:
+    """Re-resolves every asserted citation in one or more documents. A single
+    document's result is returned flat (`document`/`citations`/
+    `examples_skipped`/`all_resolved`, per architecture.md's Interfaces);
+    several documents are wrapped under `documents`, with an aggregate
+    `all_resolved` across all of them. `ok` mirrors `all_resolved` either way,
+    so the CLI dispatch's `result.get("ok", True)` exit-code contract applies
+    with no new plumbing."""
+    documents = []
+    for p in paths:
+        with open(os.path.join(repo_path, p), "r") as f:
+            text = f.read()
+        doc_result = verify_citations_text(text, repo_path=repo_path, runner=runner)
+        doc_result = {"document": p, **doc_result}
+        documents.append(doc_result)
+    all_ok = all(d["all_resolved"] for d in documents)
+    result = dict(documents[0]) if len(documents) == 1 else {"documents": documents,
+                                                              "all_resolved": all_ok}
+    result["ok"] = all_ok
+    return result
+
+
+# The canonical filename of the single record a completing stage authored --
+# `cmd_verify_exit`'s `citations_ok` resolves only this file (architecture.md
+# AC12/AC14: "the completing stage's *own* record", scoped so an older
+# doc's rotted citation never fails a later stage). `testing` and the review
+# roles write no doc file at all and are deliberately absent from this map --
+# there is nothing to re-check for them, so `citations_ok` is simply omitted.
+STAGE_RECORD_FILENAMES = {
+    "product": "product.md",
+    "architecture": "architecture.md",
+    "lld": "lld.md",
+    "development": "development.md",
+}
+
+
 def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_stage: str,
                      pr: Optional[int] = None, unit: str = "issue",
                      runner: Runner = _default_runner) -> dict:
@@ -2793,6 +3000,29 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
         result["pr_base"] = pr_data.get("baseRefName")
     docs_dir = os.path.join(repo_path, DOC_ROOT, f"{unit}-{issue}")
     result["docs_present"] = sorted(os.listdir(docs_dir)) if os.path.isdir(docs_dir) else []
+    # Citation gate: re-checks only the single record the completing stage
+    # itself authored (never the whole docs_dir) -- an older, already-merged
+    # doc's rotted citation must not fail a later stage's own exit check
+    # (architecture.md AC14). A stage with no canonical record (`testing`,
+    # the review roles) or whose record isn't on disk yet is left alone --
+    # `docs_present` already surfaces a missing doc; this gate only ever
+    # fires once there is an actual record to re-check.
+    record_filename = STAGE_RECORD_FILENAMES.get(expect_stage)
+    if record_filename:
+        record_path = os.path.join(docs_dir, record_filename)
+        if os.path.isfile(record_path):
+            with open(record_path, "r") as f:
+                record_text = f.read()
+            citation_result = verify_citations_text(record_text, repo_path=repo_path,
+                                                      runner=runner)
+            result["citations"] = citation_result["citations"]
+            result["citations_ok"] = citation_result["all_resolved"]
+            if not citation_result["all_resolved"]:
+                result["ok"] = False
+                result.setdefault(
+                    "reason",
+                    f"{record_filename} has an unresolved citation -- see "
+                    f"result['citations'] for which one and what was cited vs. found.")
     log = runner(["git", "-C", repo_path, "log", "--oneline", "-5"]).strip()
     result["recent_commits"] = log.splitlines() if log else []
     return result
@@ -3415,6 +3645,31 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
     p.set_defaults(func=lambda a: cmd_verify_exit(
         GitHub(), a.repo_path, a.issue, a.expect_stage, a.pr, a.unit))
+    p = sub.add_parser("cite",
+                        help="Generate a citation block by reading the real file (or "
+                             "git show <rev>:<path>) -- selects the target fragment by "
+                             "--line, --lines, or --match, and errors with nothing "
+                             "emitted if it is not actually there")
+    p.add_argument("path")
+    target = p.add_mutually_exclusive_group(required=True)
+    target.add_argument("--line", type=int)
+    target.add_argument("--lines", help="inclusive range, e.g. 12-18")
+    target.add_argument("--match", help="literal substring; the fragment is the first "
+                                         "line containing it, erroring if that is zero "
+                                         "or several lines")
+    p.add_argument("--rev", default=None, help="pin to this revision instead of the "
+                                                "working tree")
+    p.add_argument("--repo-path", default=".")
+    p.set_defaults(func=lambda a: cmd_cite(a.path, line=a.line, lines=a.lines,
+                                            match=a.match, rev=a.rev,
+                                            repo_path=a.repo_path))
+    p = sub.add_parser("verify-citations",
+                        help="Re-resolve every asserted citation in one or more "
+                             "documents against the working tree or each citation's "
+                             "pinned revision")
+    p.add_argument("doc", nargs="+")
+    p.add_argument("--repo-path", default=".")
+    p.set_defaults(func=lambda a: cmd_verify_citations(a.doc, repo_path=a.repo_path))
     p = sub.add_parser("worktree-add",
                         help="Create (or find) the unit's worktree: resumes from "
                              "origin/<branch> when it exists, else branches off the "
