@@ -4,6 +4,26 @@ Provenance for rules that would otherwise read as arbitrary. Newest first. Keep
 entries to a few lines; the rule itself lives in the spine or its reference file —
 this file records *why* and *when*.
 
+## 2026-09-10 — auto-close-epic behind a config toggle
+
+Operator proposed at the 2026-09-08 retro, approved at the 2026-09-10 retro: let the
+orchestrator invoke the second `close-epic` call itself instead of handing the
+milestone to a human. Shipped as `pipeline.epicClose.auto` (default `false`, so other
+clients keep the human gate; Bookshaw sets it `true`). **No CLI mechanism change** —
+`cmd_close_epic` already reconciles, refuses on open children / missing-or-stale
+verification / failing checks, and merges when clean; a Blocker/Critical closing delta
+is filed as an epic child and re-trips the `open_children` refusal, so auto-close
+cannot fire over one. The change is purely the orchestrator's decision text (SKILL.md
+Step 1 `none` path + "take to the operator"; `epics.md` "Epic closing"). Escalation
+cases kept explicit: Blocker delta, open manual-testing bug child, or a verification
+that could not be run. The last is why this was gated on the e2e seeding fix at the
+09-08 retro — but it self-gates: after a db-reset e2e cannot run, so no e2e record,
+so `close-epic` refuses. Reported, not fabricated. Retro also confirmed the
+`44×10px` detector/completeness class was **already** covered by the 2026-09-08
+enumerate-not-sweep section (`stage-playbooks.md`, "A completeness claim … is a sweep"):
+epic #345's #424 pr-review bounces (3 rounds) predate that ship and were the rule not
+yet applied, not a rule missing — no new rule added, to avoid a second home for it.
+
 ## 2026-09-10 — design lane for standing-epic product/architecture
 
 Added `designLane` (default 2) so standing-epic children's product/architecture fan

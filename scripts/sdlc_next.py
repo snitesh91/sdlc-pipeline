@@ -152,6 +152,14 @@ _PIPELINE_DEFAULTS = {
     "retro": {"everyClosedIssues": 5,
               "watermarkFile": "{docRoot}/retro-watermark"},
     "continuous": {"cycleCap": 8},
+    # `auto: true` lets the orchestrator invoke the second `close-epic` call itself
+    # once the epic is closeable and both closing verifications are clean -- no human
+    # trigger. Default `false` keeps the historical human-makes-the-call gate. The
+    # mechanical refusals in `cmd_close_epic` (open children, missing/ stale
+    # verification, failing checks) are the safety net either way: a Blocker delta
+    # filed as an epic child re-trips `open_children`, so auto-close cannot fire over
+    # one. See "Epic closing" in references/epics.md.
+    "epicClose": {"auto": False},
     "models": {"product": "opus", "product-review": "opus", "architecture": "opus",
                "arch-review": "opus", "lld": "sonnet", "lld-review": "opus",
                "development": "sonnet", "testing": "sonnet", "pr-review": "opus"},
@@ -3429,9 +3437,10 @@ def cmd_mark_issue_closed(gh: GitHub, issue: int) -> dict:
     """Marks `issue` done -- called by .github/workflows/gate-auto-advance.yml
     the instant *any* issue in the repo closes (`issues: closed`), regardless of
     why: a `merge-pr` squash-merge auto-closing it via `Closes #<n>`, a human
-    closing it directly, or a human closing an epic once its children are all
-    done (the pipeline never closes an epic itself -- see "Epic closing" in
-    SKILL.md). Added 2026-08-20, per operator instruction, replacing the old
+    closing it directly, or an epic closing once its children are all done --
+    the epic-integration PR's `Closes #<n>` fires this on merge whether a human
+    or (when `pipeline.epicClose.auto`) the orchestrator triggered `close-epic`
+    (see "Epic closing" in SKILL.md). Added 2026-08-20, per operator instruction, replacing the old
     approach of `cmd_merge_pr` synchronously deleting both fields itself --
     that only ever covered issues closed *through* the pipeline's own
     `merge-pr` call, silently missing any issue a human closed by hand. Moving
