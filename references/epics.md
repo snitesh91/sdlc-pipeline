@@ -288,8 +288,11 @@ produced. A standing epic's children still gate `issue-<n>` → `main`, unsquash
 
 ## Epic closing
 
-The pipeline never closes an epic — a milestone-level call only the human makes. It
-tells you the moment an epic is ready, exactly once:
+Who pulls the trigger depends on `pipeline.epicClose.auto` (config, default
+`false`). With it **off**, closing an epic is a milestone-level call only the human
+makes. With it **on** (Bookshaw), the orchestrator runs the closing verification and,
+if it comes back clean, invokes the second `close-epic` call itself — no human
+trigger. Either way the CLI tells you the moment an epic is ready, exactly once:
 
 ```bash
 python3 "$SDLC" check-epics-closeable
@@ -329,6 +332,26 @@ It is deliberately **two calls, not one**. The first reconciles `epic-<n>` with
 `origin/main` and stops — verification has to run *after* the merge from `main` and
 *before* the merge to `main`. The second merges, once both halves of the closing
 verification are recorded on the thread.
+
+**When `pipeline.epicClose.auto` is on, the orchestrator makes the second call
+itself** the moment the close is clean — it does not hand back to the operator. "Clean"
+is what the CLI already enforces plus one judgement the CLI cannot: the closing
+verification produced **no Blocker/Critical delta** (those are filed against the epic
+as a child, which re-trips `close-epic`'s `open_children` refusal anyway) and **no
+open manual-testing bug child**. Escalate to the operator, do not auto-close, when any
+of these holds:
+
+- a Blocker/Critical delta or a manual-testing bug was filed against the epic (close
+  is blocked until it resolves — report it);
+- a verification **could not be obtained** — e.g. the full e2e suite cannot run
+  (the e2e user-profile seeding gap is exactly this: after a db-reset the backend
+  has no profiles, so e2e cannot run and its record must not be fabricated). No record
+  → `missing_epic_verification` stays true → `close-epic` refuses. This is the gate,
+  not a failure: report that the epic is close-ready pending a runnable e2e, and stop.
+
+Never record a verification you did not actually run clean — "establish a number by
+running the thing" (`references/stage-playbooks.md`) applies hardest here, where the
+record is the only thing between a green branch and an irreversible merge to `main`.
 
 **The closing verification is two runs in parallel, both by the pipeline:**
 
@@ -385,8 +408,10 @@ block a claim or workflow run).
   (`_maybe_mark_epic_in_progress`), crash-recovery re-claims included. Excluded for a
   standing epic (never claims an epic-level stage; its board Status is tracked by
   hand).
-- **Closing an epic** flips it to `Done` — via the `mark-issue-closed` Action job (the
-  pipeline never closes epics), for **every** epic regardless of standing/legacy.
+- **Closing an epic** flips it to `Done` — via the `mark-issue-closed` Action job
+  (fired by the integration PR's `Closes #<n>` on merge, whether the operator or, when
+  `pipeline.epicClose.auto` is on, the orchestrator triggered `close-epic`), for
+  **every** epic regardless of standing/legacy.
 - **No per-child board `Status` writes exist or are planned.**
 
 ### Pipeline Status `Done`

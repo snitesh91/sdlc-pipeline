@@ -165,10 +165,14 @@ apply.
 - **During `development`, `testing` and `pr-review`: take the recommended fix
   yourself.** An agent that ends with "recommend X" has done the analysis — apply it.
 - **Escalate exactly three things**: a product or scope call, an amendment to a
-  **gate-approved** doc, and an escalation-valve trip (`mark-needs-human`).
+  **gate-approved** doc, and an escalation-valve trip (`mark-needs-human`). Plus, when
+  `pipeline.epicClose.auto` is on, an epic close blocked by a Blocker/Critical closing
+  delta, an open manual-testing bug child, or a verification that could not be run
+  (`references/epics.md`, "Epic closing").
 - **Never operator questions**: parallelism, worktrees, model tiers, review scoping,
   which stage owns a defect, and merging (`references/operations.md`, "PRs merge
-  automatically").
+  automatically"). Epic close itself is the orchestrator's too **when
+  `pipeline.epicClose.auto` is on**; with it off, closing is the operator's call.
 
 ## Looping within an invocation
 
@@ -225,6 +229,15 @@ only the dependent stages. Keep the native edge; `list-parallel-ready` reads it.
 
 Before ending on `none`: `list-needs-human` (skim each reason; clear a stale one with
 a comment) and `check-epics-closeable` (idempotent). Both feed Step 4.
+
+**When `check-epics-closeable` names an epic and `pipeline.epicClose.auto` is on**
+(`show-config`), the orchestrator closes it rather than handing it to the operator:
+run `close-epic` (first call reconciles), run the two closing verifications, record
+each only if it ran clean, then run `close-epic` again to merge. Escalate instead of
+closing on a Blocker/Critical delta, an open manual-testing bug child, or a
+verification that could not be run — full mechanics and the escalation cases in
+`references/epics.md`, "Epic closing". With the toggle off, `check-epics-closeable`
+just feeds Step 4 for the operator to act on.
 
 ## Step 2 — Claim it
 
