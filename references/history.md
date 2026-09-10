@@ -4,6 +4,17 @@ Provenance for rules that would otherwise read as arbitrary. Newest first. Keep
 entries to a few lines; the rule itself lives in the spine or its reference file —
 this file records *why* and *when*.
 
+## 2026-09-10 — design lane for standing-epic product/architecture
+
+Added `designLane` (default 2) so standing-epic children's product/architecture fan
+out; approved by operator; default-profile epic-self design stays serial. New
+`list-design-ready <epic> --repo-path <p>` mirrors `list-parallel-ready`'s shape and
+eligibility gates (no footprint check — design stages touch only the child's own docs
+folder) but selects `product`/`architecture` children and counts only design-stage
+worktrees toward its own cap. Gated on the resolved profile's `epicLevelPhase`, not the
+`epic:standing` label. Cap set below devLane=3 because both stages run opus. See
+`references/parallelism.md`, "Design lane".
+
 ## 2026-09-08 — epic profiles + universal product-review stage + configurable Gate A
 
 Operator feature request, built directly (spec/plan ceremony waived). Three changes,

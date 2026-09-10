@@ -79,7 +79,12 @@ Both cases are now **profiles** (above), not hardcoded labels:
 - **A standing profile** (`epicLevelPhase: false`, shipped matching `epic:standing`) — a
   permanent bug-intake umbrella with no fixed scope to batch-architect; its children run
   the full per-issue `product` → `product-review` → `architecture` flow (bug fast-track
-  included). Resolved via `resolve_profile`; `is_epic_standing()` reads it.
+  included). Resolved via `resolve_profile`; `is_epic_standing()` reads it. Those
+  per-child `product`/`architecture` stages **fan out concurrently** through the
+  **design lane** (`list-design-ready`, cap `parallelism.designLane`, default 2 — set
+  below the dev-lane cap because both stages run opus) rather than running one at a
+  time; a default-profile epic has no such fan-out (its design is the single epic-self
+  phase). See `references/parallelism.md`, "Design lane".
 - **A legacy profile** (`driven: false`, shipped matching `epic:legacy`) — **not run by
   this pipeline at all, in any flow.** `decide_next_action` checks it first — before
   crash-recovery — and returns `action: "skip"` for the epic and every child. Applied by

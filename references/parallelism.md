@@ -18,7 +18,8 @@ is quoted.
 | Work | Concurrency | Detail |
 |---|---|---|
 | `pr-review` (within the one epic being driven) | Up to `PR_REVIEW_PARALLELISM` finished PRs at once, one worktree + one subagent each | "Parallel PR review" below |
-| Epic-level `product` / `architecture` (epic-self) | **Never**, within one invocation — one epic, one architecture pass at a time | `SKILL.md`, "Epic number is mandatory" |
+| Epic-level `product` / `architecture` (epic-self, default profile) | **Never**, within one invocation — one epic, one architecture pass at a time | `SKILL.md`, "Epic number is mandatory" |
+| Standing-epic child `product` / `architecture` | Up to `DESIGN_LANE_PARALLELISM` children of one standing epic at once, each in its own `git worktree` — `list-design-ready` computes eligibility mechanically | "Design lane" below |
 | `lld` / `development` / `testing` | Up to `DEV_LANE_PARALLELISM` children of one epic at once, each always in its own `git worktree` — `list-parallel-ready` computes eligibility mechanically | "Parallel implementation lane" below |
 | Rework from any review finding | **One development thread per issue, always** — a finding resumes that issue's own tracked `development` agent; several issues' rework threads may be live at once (one each), but a single issue never has two | "Rework routing stays sequential" below |
 
@@ -31,16 +32,20 @@ worktree (see "Working on a branch" below), so two invocations never contend for
 checkout. Two invocations targeting the *same* epic would still race on
 GitHub state — don't do that.
 
-Note on the two caps: `parallelism.devLane` and `parallelism.prReview` in the config (default 3 each) are
-each tuned against the machine's real resource cap for running test suites (memory
-and CPU available to the containers or processes the suites run in), but they are
-**independent pools** — worst case 6 concurrent real-suite runs. `active_count` in
-`list-parallel-ready` also counts `issue-*` worktrees from *other* epics' invocations
-(it reads `git worktree list` on the shared repo), which makes the dev-lane cap
-effectively machine-global rather than per-epic — deliberate, since the constraint it
-protects (the machine's suite-running resources) is machine-global too. If concurrent
-runs start reporting resource starvation rather than real defects, lower the caps —
-don't make reviews shallower.
+Note on the caps: `parallelism.devLane` and `parallelism.prReview` (default 3 each)
+are each tuned against the machine's real resource cap for running test suites (memory
+and CPU available to the containers or processes the suites run in); `parallelism.designLane`
+(default **2**) is set below devLane because `product`/`architecture` both run the
+`opus` model (`pipeline.models`) and cost more per unit than the dev lane's sonnet
+stages — a token/cost cap rather than a suite-resource one. All three are
+**independent pools**. `active_count` in `list-parallel-ready` also counts `issue-*`
+worktrees from *other* epics' invocations (it reads `git worktree list` on the shared
+repo), which makes the dev-lane cap effectively machine-global rather than per-epic —
+deliberate, since the constraint it protects (the machine's suite-running resources)
+is machine-global too. `list-design-ready` counts only *design-stage* worktrees toward
+its own cap, so a sibling already in the dev lane never consumes a design slot (and
+vice-versa). If concurrent runs start reporting resource starvation rather than real
+defects, lower the caps — don't make reviews shallower.
 
 What has *not* come back is the old label-coordinated free-for-all: context-blind
 agents discovering each other through the board. The main agent stays in the loop
@@ -51,9 +56,11 @@ second one running alongside it.
 
 ## Parallel implementation lane — mechanical eligibility, worktree-always
 
-Applies only to children of a **normal, already-`epic:architected` epic** (a
-standing-epic child's per-issue `product`/`architecture` flow is untouched; its
-`development`/`testing` join the lane like anyone else's).
+Applies to children at `lld`/`development`/`testing`: a **normal,
+already-`epic:architected` epic**'s children (past the epic-level design phase), and a
+standing-epic child once it reaches those stages. A standing-epic child's earlier
+per-issue `product`/`architecture` fans out through the **design lane** instead (see
+"Design lane" below), not this one.
 
 **Eligibility is computed by the script, never hand-tracked:**
 
@@ -113,6 +120,50 @@ child — same bookkeeping as the sequential case, just potentially more than on
 time. Resume-based rework is unaffected: a review finding on one child resumes only
 that child's own tracked agent, never a sibling's. Once a child reaches `testing`, it
 enters the same `list-ready-for-review` pool as any other child.
+
+## Design lane — standing-epic children's product/architecture fan out
+
+A **standing** epic (profile `epicLevelPhase == false`) runs no epic-level design
+phase; each child runs its own full `product`→`architecture`→`lld`→`development`→`testing`
+flow on its own issue number/branch/worktree. Without a pool query for the design
+stages, the orchestrator could only run one child's `product`/`architecture` at a time
+— serializing all design work on a backlog of 20+ children. The design lane fixes
+that:
+
+```bash
+python3 "$SDLC" list-design-ready <epic> \
+  --repo-path <repo-root>
+```
+
+Returns up to `DESIGN_LANE_PARALLELISM` (config `parallelism.designLane`, default
+**2**) children currently at `product` or `architecture` that are safe to start or
+resume right now, each checked against the **same eligibility gates as the dev lane**:
+
+1. **Not already active** — excludes any child whose `issue-<n>` branch has a live
+   `git worktree`.
+2. **Not `blockedBy`** anything still open.
+3. **Not needs-human, not gate-pending, and not stuck `in-progress` with no worktree**
+   (that last case is a crashed run — route it through `next-action`'s `resume`).
+
+There is **no footprint check** (the one gate the dev lane adds that this one does
+not): a standing child's `product`/`architecture` writes only that child's own
+`<docRoot>/issue-<n>/` docs folder, which cannot collide with a sibling's, so there is
+no shared-source overlap to verify. `active_count` counts only worktrees whose child
+is *itself* in a design stage — a sibling that has moved on to the dev lane holds a
+worktree but is the dev lane's slot, on the dev lane's cap, never a design slot.
+
+**Standing-profile only.** For a default-profile epic (`epicLevelPhase == true`),
+`list-design-ready` returns empty with a `note`: that epic's `product`/`architecture`
+is the epic-level phase — a single epic-self unit run in the `epic-<n>` worktree,
+strictly serial, never fanned out. The gate is the resolved profile's `epicLevelPhase`,
+not the hardcoded `epic:standing` label, so a client's own label→profile mapping is
+honoured. The command also refuses a non-epic argument and returns empty for an
+`epic:legacy` epic, and runs `git fetch origin` first so the active-worktree read
+reflects current remote state.
+
+Mechanics are identical to the dev lane — worktree-before-claim, one stage-agent line
+per active child, resume off `origin/issue-<n>`. `worktree-add <n>` stands up a
+standing child's `issue-<n>` worktree the same way regardless of which stage it is in.
 
 ## The machine's resource cap is the real cap — serialize suite-heavy stages
 

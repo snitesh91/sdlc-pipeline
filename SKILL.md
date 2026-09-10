@@ -112,7 +112,8 @@ operational failure: stop and report, never retry by hand.
 | Command | What it owns |
 |---|---|
 | `next-action <epic>` | Pick the one unit to work (Step 1) |
-| `list-parallel-ready <epic> --repo-path <p>` | Dev-lane pool: children safe to start/resume concurrently |
+| `list-parallel-ready <epic> --repo-path <p>` | Dev-lane pool: `lld`/`development`/`testing` children safe to start/resume concurrently |
+| `list-design-ready <epic> --repo-path <p>` | Design-lane pool: a **standing** epic's `product`/`architecture` children safe to start/resume concurrently (empty for a default-profile epic) |
 | `list-ready-for-review <epic>` | Review pool: finished PRs awaiting `pr-review` |
 | `worktree-add <n> [--unit epic]` | The unit's worktree, the one correct way: resumes from `origin/<branch>` when it exists, else branches off the integration base |
 | `claim <n> --role <role>` | Stage + In Progress + start comment |
@@ -145,7 +146,7 @@ replacement, 6 → `needs-human`) and the continuous-mode cycle cap.
 
 ## Epic number is mandatory
 
-`next-action` and both pool queries **require** an epic number. The pipeline never
+`next-action` and the pool queries **require** an epic number. The pipeline never
 scans the repo to decide whose turn it is. No epic named = a blocking question; ask
 before doing anything. One invocation per epic; two invocations on the *same* epic
 race — don't. Every child must be a native sub-issue of its epic to be picked; link
@@ -180,12 +181,16 @@ Step 4. `none` says nothing about other epics. Unattended operation:
 
 ## Concurrency — summary
 
-Epic-self `product`/`architecture` is strictly sequential in its own `epic-<n>`
-worktree. `lld`/`development`/`testing` fan out to `parallelism.devLane` children and
+Default-profile epic-self `product`/`architecture` is strictly sequential in its own
+`epic-<n>` worktree (a single epic-level unit — never fanned out).
+`lld`/`development`/`testing` fan out to `parallelism.devLane` children and
 `pr-review` to `parallelism.prReview` PRs (config; default 3 each), every branch in
-its own worktree, eligibility via the two pool queries. Rework is **one development
-thread per issue**, always. Full mechanics: `references/parallelism.md` — read it
-before starting any concurrent work.
+its own worktree, eligibility via the pool queries. A **standing** epic has no
+epic-level design phase — each child runs its own `product`→`architecture` too, and
+those fan out to `parallelism.designLane` children (config; default **2**, below
+devLane because both stages run opus) via `list-design-ready`. Rework is **one
+development thread per issue**, always. Full mechanics: `references/parallelism.md` —
+read it before starting any concurrent work.
 
 ## Step 1 — Pick the one unit to work
 
@@ -205,9 +210,12 @@ to any command taking `--unit`.
 | `none` | Nothing actionable in this epic | `list-needs-human` + `check-epics-closeable`, then Step 4 |
 | `skip` | Epic is `epic:legacy` | Say so (quote `reason`), then Step 4 |
 
-**Widen Step 1 with the two pool queries** whenever lane headroom remains — typically
+**Widen Step 1 with the pool queries** whenever lane headroom remains — typically
 after a `testing` handoff (`list-ready-for-review`) or when `next-action` returns a
-child (`list-parallel-ready`). **Always run `list-parallel-ready` immediately after
+child (`list-parallel-ready`). For a **standing** epic, also run `list-design-ready`
+to fan out children still in `product`/`architecture` (up to `parallelism.designLane`,
+default 2); for a default-profile epic it returns empty, since epic-self design is a
+single serial unit. **Always run `list-parallel-ready` immediately after
 every `merge-pr`**: a merge is the one event that unblocks a sibling, and an
 un-requeried child idles through a whole stage.
 
