@@ -6,7 +6,8 @@
   "humanAssignee": "maintainer",
   "parallelism": {
     "devLane": 3,
-    "prReview": 3
+    "prReview": 3,
+    "designLane": 2
   },
   "requiredWorkflows": [
     {

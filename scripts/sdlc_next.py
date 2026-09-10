@@ -115,6 +115,21 @@ PR_REVIEW_PARALLELISM = CONFIG["parallelism"]["prReview"]
 # than real defects.
 DEV_LANE_PARALLELISM = CONFIG["parallelism"]["devLane"]
 
+# How many *standing*-profile children of one epic may run their `product`/
+# `architecture` stages concurrently, one git worktree each -- the cap
+# `list-design-ready` returns by default. A standing epic has no epic-level
+# design phase (see `is_epic_standing`); every child runs its OWN
+# product->architecture->lld->development->testing flow, so without a pool query
+# for the design stages the orchestrator could only run one child's product/
+# architecture at a time. Deliberately lower than DEV_LANE_PARALLELISM (2 vs 3):
+# both stages run the `opus` model (see `pipeline.models`) and cost more per unit
+# than the dev lane's sonnet stages. Read via `.get` with a default so a config
+# predating this key (or any default-profile repo that never fans design out)
+# still loads. A default-profile epic's product/architecture is epic-self and
+# single-unit -- `list-design-ready` returns empty for it regardless of this cap.
+# See "Design lane" in references/parallelism.md.
+DESIGN_LANE_PARALLELISM = CONFIG["parallelism"].get("designLane", 2)
+
 # Only used by check_epics_closeable's one-time "ready to close" notification --
 # mark_needs_human/open_gate no longer touch the assignee (operator instruction:
 # the Pipeline Status field is the tracking mechanism on its own). See "Assignee
@@ -1831,6 +1846,136 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
             "stale_worktrees": stale}
 
 
+def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional[int] = None,
+                           runner: Runner = _default_runner) -> dict:
+    """Every open child of a **standing** `epic` at `product`/`architecture` that's
+    safe to start (or resume) concurrently, in its own `git worktree`, right now --
+    the design-stage sibling of `list-parallel-ready` (which only ever proposes
+    `lld`/`development`/`testing` children). See "Design lane" in
+    references/parallelism.md.
+
+    Standing-profile only. A standing epic has no epic-level Product/Architecture
+    phase (`epicLevelPhase == false`, see `is_epic_standing`); each child runs its
+    own full `product`->...->`testing` flow, so its design stages are per-child work
+    that can fan out. A **default**-profile epic runs `product`/`architecture` once
+    at the epic level as a single epic-self unit -- there is nothing to fan out, so
+    this returns empty (with a `note`) for it. Gated on the resolved profile's
+    `epicLevelPhase`, not the hardcoded `epic:standing` label, so a client's own
+    label->profile mapping is honoured (same as everywhere else -- see
+    `resolve_profile`).
+
+    Same eligibility gating as the dev lane: a candidate is proposed only if it
+    (a) isn't already running in its own worktree, (b) isn't
+    blocked/needs-human/gate-pending, and (c) has no open native `blockedBy`.
+    Unlike the dev lane there is **no footprint check**: `product`/`architecture`
+    for a standing child write only that child's own `{DOC_ROOT}/issue-<n>/`
+    docs folder, which cannot collide with a sibling's, so there is no
+    cross-child code overlap to verify (the footprint gate exists for the dev
+    lane, where children touch shared source trees). `active_count` is read live
+    off `git worktree list`, counting only worktrees whose child is itself in a
+    design stage -- a sibling that has already moved to the dev lane
+    (`lld`/`development`/`testing`) holds a worktree but is the dev lane's
+    concern and its own cap, never a design-lane slot.
+
+    Read-only apart from a `git fetch origin` (so the active-worktree read
+    reflects current remote state): never claims, posts, or creates a worktree.
+    `skipped` names every child this call excluded and why. Mirrors
+    `list-parallel-ready`'s JSON shape, with `design_ready` in place of
+    `parallel_ready`."""
+    limit = DESIGN_LANE_PARALLELISM if limit is None else limit
+    all_issues = gh.issue_list()
+    by_number = {i["number"]: i for i in all_issues}
+    epic_issue = by_number.get(epic)
+    if epic_issue is None or not is_epic(epic_issue):
+        raise GhError(f"#{epic} is not an epic (a top-level Type: Feature issue) -- "
+                       f"pass the epic's own issue number, not a child issue's")
+    base = {"design_ready": [], "count": 0, "eligible_total": 0, "active_count": 0,
+            "active_branches": [], "limit": limit, "slots_available": 0, "epic": epic,
+            "skipped": [], "stale_worktrees": []}
+    if is_epic_legacy(epic_issue):
+        return {**base, "note": f"epic #{epic} is epic:legacy -- not driven by this pipeline"}
+    if not is_epic_standing(epic_issue):
+        # Default-profile epic: its product/architecture is the epic-level phase,
+        # a single epic-self unit run in the epic's own worktree -- never fanned
+        # out across children. Gate on the resolved profile's epicLevelPhase, not
+        # the standing label (see docstring / resolve_profile).
+        return {**base, "note": f"epic #{epic} runs product/architecture at the epic level "
+                                 f"(profile epicLevelPhase is true) -- its design work is a single "
+                                 f"epic-self unit, not fanned out across children"}
+    open_issues = [i for i in all_issues if i["state"] == "OPEN"]
+    children = [i for i in open_issues if not is_epic(i) and i.get("parent")
+                and i["parent"]["number"] == epic]
+
+    runner(["git", "-C", repo_path, "fetch", "origin"])
+    active_branches = active_worktree_branches(repo_path, runner=runner)
+
+    eligible, skipped = [], []
+    for issue in sorted(children, key=sort_key):
+        number = issue["number"]
+        branch = issue_branch(number)
+        if branch in active_branches:
+            skipped.append({"issue": number, "reason": "already active in its own worktree"})
+            continue
+        # A standing child next-action hasn't surveyed yet has no Stage value;
+        # default_stage() says what it would be assigned (`product` -- a standing
+        # profile's childEntryStage). Read-only here -- the field itself is
+        # written by next-action's own survey or by `claim`, not this command.
+        stage = current_stage(issue) or default_stage(issue, epic_issue)
+        if stage not in ("product", "architecture"):
+            skipped.append({"issue": number, "reason": f"stage is {stage!r}, not product/architecture"})
+            continue
+        status = pipeline_status(issue)
+        if status == "needs-human" or status in GATE_PENDING_STATUSES:
+            skipped.append({"issue": number, "reason": f"Pipeline Status is {status!r}"})
+            continue
+        if status == "in-progress":
+            skipped.append({"issue": number, "reason": "Pipeline Status is 'in-progress' but this "
+                                                         "branch has no active worktree -- likely a "
+                                                         "crashed run; resume it via next-action, "
+                                                         "don't also start it here"})
+            continue
+        if gh.blocked_by(number):
+            skipped.append({"issue": number, "reason": "blocked by an open dependency"})
+            continue
+        eligible.append({"issue": number, "branch": branch, "stage": stage, "title": issue["title"]})
+
+    # Slot count off live worktrees, restricted to *design*-stage occupants: a
+    # sibling worktree in lld/development/testing is the dev lane's slot, not
+    # this one's (the two lanes have independent caps). A worktree whose issue is
+    # parked (needs-human / blocked / gate-pending) or already closed holds a
+    # slot nothing can use -- reported under `stale_worktrees`, same backstop as
+    # the dev lane (see cmd_list_parallel_ready).
+    occupied, stale = [], []
+    for branch in sorted(active_branches):
+        number = issue_number_from_branch(branch)
+        if number is None:
+            continue
+        issue = by_number.get(number)
+        if issue is None or issue["state"] != "OPEN":
+            stale.append({"branch": branch, "reason": "issue is closed or not found"})
+            continue
+        stage = current_stage(issue) or default_stage(issue, epic_issue)
+        if stage not in ("product", "architecture"):
+            # A dev-lane worktree -- counted against DEV_LANE_PARALLELISM by
+            # list-parallel-ready, never against the design lane.
+            continue
+        status = pipeline_status(issue)
+        if status == "needs-human" or status in GATE_PENDING_STATUSES:
+            stale.append({"branch": branch, "reason": f"Pipeline Status is {status!r}"})
+            continue
+        if gh.blocked_by(number):
+            stale.append({"branch": branch, "reason": "blocked by an open dependency"})
+            continue
+        occupied.append(branch)
+    active_count = len(occupied)
+    slots = max(0, limit - active_count)
+    selected = eligible[:slots]
+    return {"design_ready": selected, "count": len(selected), "eligible_total": len(eligible),
+            "active_count": active_count, "active_branches": sorted(occupied),
+            "limit": limit, "slots_available": slots, "epic": epic, "skipped": skipped,
+            "stale_worktrees": stale}
+
+
 def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> dict:
     """`testing`'s exit action once it passes: posts the canonical
     `<!-- stage-transition: testing->pr-review @ <ts> -->` handoff marker that puts
@@ -3533,6 +3678,19 @@ def main(argv: Optional[list] = None) -> int:
                     help=f"Total concurrent children allowed (default: DEV_LANE_PARALLELISM = "
                          f"{DEV_LANE_PARALLELISM})")
     p.set_defaults(func=lambda a: cmd_list_parallel_ready(GitHub(), a.repo_path, a.epic, a.limit))
+    p = sub.add_parser("list-design-ready",
+                        help="Up to DESIGN_LANE_PARALLELISM of this STANDING epic's product/"
+                             "architecture children safe to start/resume concurrently, each in its "
+                             "own worktree -- not blockedBy anything open, not parked/gate-pending. "
+                             "Empty for a default-profile epic, whose product/architecture is a "
+                             "single epic-self unit, not fanned out.")
+    p.add_argument("epic", type=int, help="Scope the design-lane pool to this epic's own children")
+    p.add_argument("--repo-path", default=".",
+                    help="Repo whose `git worktree list` gives the live active-branch count")
+    p.add_argument("--limit", type=int, default=None,
+                    help=f"Total concurrent design-stage children allowed (default: "
+                         f"DESIGN_LANE_PARALLELISM = {DESIGN_LANE_PARALLELISM})")
+    p.set_defaults(func=lambda a: cmd_list_design_ready(GitHub(), a.repo_path, a.epic, a.limit))
     p = sub.add_parser("handoff-to-pr-review",
                         help="testing's exit action on a pass: posts the canonical "
                              "testing->pr-review marker that queues this PR for review")
@@ -3746,7 +3904,11 @@ def main(argv: Optional[list] = None) -> int:
                         help="Print the effective pipeline tunables (config `pipeline` "
                              "block merged over defaults) plus repo/docRoot/parallelism")
     p.set_defaults(func=lambda a: {"repo": REPO, "docRoot": DOC_ROOT,
-                                   "parallelism": CONFIG["parallelism"],
+                                   # designLane is defaulted in code (not required in the
+                                   # config), so surface the effective value alongside the
+                                   # raw devLane/prReview rather than the raw block alone.
+                                   "parallelism": {**CONFIG["parallelism"],
+                                                   "designLane": DESIGN_LANE_PARALLELISM},
                                    "requiredWorkflows": CONFIG["requiredWorkflows"],
                                    "localCiSuites": list(LOCAL_CI_SUITES),
                                    **PIPELINE})
