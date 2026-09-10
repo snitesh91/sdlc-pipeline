@@ -2825,10 +2825,16 @@ def resolve_citation(path: str, body: str, rev: Optional[str] = None,
     count = content.count(body) if body else 0
     result["resolved"] = count >= 1
     if result["resolved"]:
-        idx = content.find(body)
-        result["line_hint"] = content.count("\n", 0, idx) + 1
+        line_hints = []
+        start = 0
+        for _ in range(count):
+            idx = content.find(body, start)
+            line_hints.append(content.count("\n", 0, idx) + 1)
+            start = idx + 1
+        result["line_hint"] = line_hints[0]
         if count > 1:
             result["match_count"] = count
+            result["line_hints"] = line_hints
     else:
         result["cited_vs_found"] = (f"cited fragment not found in {path}"
                                      f"{f' at rev {rev}' if rev else ''}")

@@ -4411,6 +4411,23 @@ def test_verify_exit_omits_citations_ok_when_stage_has_no_canonical_record(tmp_p
     assert result.get("ok", True) is True
 
 
+def test_resolve_citation_reports_every_matching_line_as_a_hint_on_ambiguity(tmp_path):
+    """architecture.md's Failure modes: 'Body appears multiple times in the
+    file -- ... Report all matching lines as hints'. A unique fragment still
+    resolves with a single line_hint and no match_count; ambiguity is a
+    hint-only report, never a resolve failure."""
+    from sdlc_next import resolve_citation
+    (tmp_path / "dup.yml").write_text("dup: 1\nother: x\ndup: 1\n")
+    unique = resolve_citation("dup.yml", "other: x", repo_path=str(tmp_path))
+    assert unique == {"path": "dup.yml", "rev": None, "resolved": True, "line_hint": 2}
+
+    ambiguous = resolve_citation("dup.yml", "dup: 1", repo_path=str(tmp_path))
+    assert ambiguous["resolved"] is True
+    assert ambiguous["match_count"] == 2
+    assert ambiguous["line_hint"] == 1
+    assert ambiguous["line_hints"] == [1, 3]
+
+
 def test_verify_exit_omits_citations_ok_when_stage_record_file_is_absent(tmp_path):
     """Mirrors test_verify_exit_uses_epic_docs_dir_for_unit_epic: an
     architecture-stage exit whose architecture.md is not yet on disk must not
