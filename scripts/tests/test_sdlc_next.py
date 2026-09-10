@@ -3661,6 +3661,157 @@ def test_cli_list_parallel_ready_dispatches(monkeypatch):
     assert captured == {"repo_path": "/repo", "epic": 110, "limit": 2}
 
 
+# --- design lane: a standing epic's product/architecture children fan out ---
+# The dev lane (list-parallel-ready) only ever proposes lld/development/testing
+# children, so product/architecture ran one-at-a-time. `list-design-ready` adds a
+# second pool for standing-profile children still in product/architecture, capped
+# at DESIGN_LANE_PARALLELISM (default 2, below devLane=3 because these run opus).
+
+def test_list_design_ready_fans_out_standing_children_up_to_the_cap():
+    from sdlc_next import GitHub, cmd_list_design_ready
+    epic = _epic(90, labels=["epic:standing"])
+    c1 = _issue(1, stage="product", parent=90, created="2026-08-01T00:00:00Z")
+    c2 = _issue(2, stage="architecture", parent=90, created="2026-08-02T00:00:00Z")
+    c3 = _issue(3, stage="product", parent=90, created="2026-08-03T00:00:00Z")
+    responses = {
+        tuple(_list_argv()): _list_response([epic, c1, c2, c3]),
+        ("git", "-C", "/repo", "fetch", "origin"): "",
+        ("git", "-C", "/repo", "worktree", "list", "--porcelain"):
+            "worktree /repo\nHEAD x\nbranch refs/heads/main\n",
+    }
+    responses.update(_no_blockers_responses(1, 2, 3))
+    gh = GitHub(runner=ScriptedRunner(responses))
+    result = cmd_list_design_ready(gh, "/repo", 90, runner=ScriptedRunner(responses))
+    assert result["limit"] == 2
+    assert result["eligible_total"] == 3
+    assert result["count"] == 2
+    assert [c["issue"] for c in result["design_ready"]] == [1, 2]
+    assert {c["stage"] for c in result["design_ready"]} == {"product", "architecture"}
+    assert result["active_count"] == 0
+    assert result["slots_available"] == 2
+    assert result["skipped"] == []
+
+
+def test_list_design_ready_returns_empty_for_a_default_profile_epic():
+    # A default-profile epic runs product/architecture ONCE at the epic level
+    # (epicLevelPhase == true) in a single epic-self unit -- there is nothing to
+    # fan out. Gated on the resolved profile, not the hardcoded standing label.
+    from sdlc_next import GitHub, cmd_list_design_ready
+    epic = _epic(110)   # no epic:standing label -> default profile
+    c1 = _issue(1, stage="product", parent=110)
+    c2 = _issue(2, stage="architecture", parent=110)
+    responses = {tuple(_list_argv()): _list_response([epic, c1, c2])}
+    gh = GitHub(runner=ScriptedRunner(responses))
+    result = cmd_list_design_ready(gh, "/repo", 110, runner=ScriptedRunner(responses))
+    assert result["design_ready"] == []
+    assert result["count"] == 0
+    assert "epicLevelPhase" in result["note"]
+
+
+def test_list_design_ready_skips_parked_blocked_gate_pending_and_active():
+    from sdlc_next import GitHub, cmd_list_design_ready
+    epic = _epic(90, labels=["epic:standing"])
+    c1 = _issue(1, stage="product", status="needs-human", parent=90)
+    c2 = _issue(2, stage="architecture", status="in-progress", parent=90)  # active in worktree
+    c3 = _issue(3, stage="product", parent=90)                              # blocked
+    c4 = _issue(4, stage="architecture", status="awaiting-human-review", parent=90)  # gate-pending
+    c5 = _issue(5, stage="product", parent=90, created="2026-08-09T00:00:00Z")        # clean
+    responses = {
+        tuple(_list_argv()): _list_response([epic, c1, c2, c3, c4, c5]),
+        ("git", "-C", "/repo", "fetch", "origin"): "",
+        ("git", "-C", "/repo", "worktree", "list", "--porcelain"):
+            "worktree /repo\nHEAD x\nbranch refs/heads/main\n\n"
+            "worktree /tmp/dev-2\nHEAD y\nbranch refs/heads/issue-2\n",
+    }
+    responses.update(_no_blockers_responses(2, 5))
+    from sdlc_next import _BLOCKED_BY_QUERY
+    responses[("gh", "api", "graphql", "-f", f"query={_BLOCKED_BY_QUERY.format(n=3)}")] = json.dumps(
+        {"data": {"repository": {"issue": {"blockedBy": {"nodes": [{"number": 99, "state": "OPEN"}]}}}}})
+    gh = GitHub(runner=ScriptedRunner(responses))
+    result = cmd_list_design_ready(gh, "/repo", 90, runner=ScriptedRunner(responses))
+    reasons = {s["issue"]: s["reason"] for s in result["skipped"]}
+    assert "needs-human" in reasons[1]
+    assert "already active" in reasons[2]
+    assert "blocked" in reasons[3]
+    assert "awaiting-human-review" in reasons[4]
+    assert result["active_count"] == 1                        # issue-2 worktree, design-stage
+    assert [c["issue"] for c in result["design_ready"]] == [5]
+
+
+def test_list_design_ready_dev_lane_worktree_does_not_consume_a_design_slot():
+    # A standing child that has already moved to development holds a worktree, but
+    # it is dev-lane work -- it must not count against the design-lane cap.
+    from sdlc_next import GitHub, cmd_list_design_ready
+    epic = _epic(90, labels=["epic:standing"])
+    c1 = _issue(1, stage="development", parent=90)   # dev lane, active in a worktree
+    c2 = _issue(2, stage="product", parent=90)
+    responses = {
+        tuple(_list_argv()): _list_response([epic, c1, c2]),
+        ("git", "-C", "/repo", "fetch", "origin"): "",
+        ("git", "-C", "/repo", "worktree", "list", "--porcelain"):
+            "worktree /repo\nHEAD x\nbranch refs/heads/main\n\n"
+            "worktree /tmp/dev-1\nHEAD y\nbranch refs/heads/issue-1\n",
+    }
+    responses.update(_no_blockers_responses(2))
+    gh = GitHub(runner=ScriptedRunner(responses))
+    result = cmd_list_design_ready(gh, "/repo", 90, runner=ScriptedRunner(responses))
+    assert result["active_count"] == 0                  # dev-lane worktree ignored here
+    assert [c["issue"] for c in result["design_ready"]] == [2]
+
+
+def test_list_design_ready_raises_for_a_non_epic():
+    from sdlc_next import GitHub, GhError, cmd_list_design_ready
+    child = _issue(5, stage="product", parent=90)
+    responses = {tuple(_list_argv()): _list_response([child])}
+    gh = GitHub(runner=ScriptedRunner(responses))
+    import pytest
+    with pytest.raises(GhError):
+        cmd_list_design_ready(gh, "/repo", 5, runner=ScriptedRunner(responses))
+
+
+def test_cli_list_design_ready_dispatches(monkeypatch):
+    import sdlc_next
+    monkeypatch.setenv("GITHUB_TOKEN", "x")
+    captured = {}
+
+    def fake(gh, repo_path, epic, limit):
+        captured.update(repo_path=repo_path, epic=epic, limit=limit)
+        return {"design_ready": [], "count": 0}
+
+    monkeypatch.setattr(sdlc_next, "cmd_list_design_ready", fake)
+    exit_code = sdlc_next.main(["list-design-ready", "90", "--repo-path", "/repo", "--limit", "2"])
+    assert exit_code == 0
+    assert captured == {"repo_path": "/repo", "epic": 90, "limit": 2}
+
+
+def test_design_lane_parallelism_defaults_to_two():
+    from sdlc_next import DESIGN_LANE_PARALLELISM
+    assert DESIGN_LANE_PARALLELISM == 2
+
+
+def test_show_config_includes_design_lane_default(tmp_path):
+    cfg = json.loads((Path(__file__).resolve().parents[2] / "sdlc.config.sample.json").read_text())
+    cfg_path = tmp_path / "sdlc-pipeline.config.json"
+    cfg_path.write_text(json.dumps(cfg))
+    script = str(Path(__file__).resolve().parents[1] / "sdlc_next.py")
+    out = subprocess.check_output(
+        [sys.executable, script, "show-config"],
+        env={**os.environ, "SDLC_CONFIG": str(cfg_path), "GITHUB_TOKEN": "x"}, text=True)
+    assert json.loads(out)["parallelism"]["designLane"] == 2
+
+
+def test_show_config_honours_a_design_lane_override(tmp_path):
+    cfg = json.loads((Path(__file__).resolve().parents[2] / "sdlc.config.sample.json").read_text())
+    cfg["parallelism"]["designLane"] = 5
+    cfg_path = tmp_path / "sdlc-pipeline.config.json"
+    cfg_path.write_text(json.dumps(cfg))
+    script = str(Path(__file__).resolve().parents[1] / "sdlc_next.py")
+    out = subprocess.check_output(
+        [sys.executable, script, "show-config"],
+        env={**os.environ, "SDLC_CONFIG": str(cfg_path), "GITHUB_TOKEN": "x"}, text=True)
+    assert json.loads(out)["parallelism"]["designLane"] == 5
+
+
 # --- worktree release: a parked or merged unit stops holding a dev-lane slot ---
 # Regression cover for the 2026-08-20 incident: #186 was parked `needs-human` but
 # its worktree was left on disk, so `list-parallel-ready` read the lane as full
