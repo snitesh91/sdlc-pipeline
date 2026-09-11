@@ -153,6 +153,11 @@ and the completeness lens are unchanged.
   the doc. Fixing what you find would bypass the rework valve — the `arch-review` ↔
   `architecture` and `lld-review` ↔ `lld` counters would never register the bounce,
   and the three-strike escalation would never fire.
+- **You are a subagent — finish inside this turn.** Nothing re-invokes you across
+  turns. If you background a long command (a measurement build, a suite run), **wait on
+  it in-turn via the Monitor tool** (foreground `sleep` is blocked). Never end your turn
+  "standing by" for a background/Monitor notification to resume you — it will not come,
+  and the review stalls until a human nudges it.
 
 ## Output
 

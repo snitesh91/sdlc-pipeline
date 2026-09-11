@@ -123,6 +123,19 @@ diff-only reading.
 
 Check CI: `sdlc_next.py pr-checks <pr>`.
 
+**Integration tests run only against a `_test` database.** Before you re-run any
+truncating suite (`test:it` / `cleanTables()`), confirm the *effective* DB name ends in
+`_test` (`bookshaw_test`); never copy a `DB_NAME` override from an arbitrary Makefile
+target. A wrong override once pointed `test:it` at the shared dev DB `bookshaw` and
+wiped real dev rows. If the effective DB is not a `_test` one, stop and report; do not
+run.
+
+**You are a subagent — finish inside this turn.** Nothing re-invokes you across turns.
+The suite re-run is fine to `run_in_background` (the IT suite should always be
+backgrounded/chunked), but then **wait on it in-turn via the Monitor tool** (foreground
+`sleep` is blocked). Never end your turn "standing by" for a background/Monitor
+notification to resume you — it will not come, and the review stalls.
+
 **If a layer cannot complete** — the suite will not run, a required file is
 unreadable — record which layer failed and continue with the rest. If layers failed
 **and** the surviving layers found nothing, that is **not** a clean review: report it

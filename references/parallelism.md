@@ -190,6 +190,14 @@ The rules, so nobody has to rediscover it a third time:
   may sit in the dev lane concurrently, but hold the second one's *suite-heavy* stage
   until the first finishes. Waiting a few minutes beats spending an hour diagnosing a
   resource kill dressed up as a test failure.
+- **At most ONE Docker-IT-heavy stage runs concurrently — even when the agent cap is
+  2.** A Docker-IT-heavy stage is any `development`/`testing`/`pr-review` running the
+  integration suite. A *light* stage (an `lld` or a `design-review` that is not running
+  the suite) may run alongside it, so the cap-2 lane is not wasted; a second IT suite is
+  not. And **the IT suite is always run backgrounded/chunked**, never as one blocking
+  foreground call over the whole suite. Epic #430 lost both agents at once this way: two
+  concurrent full IT suites saturated the Docker VM, each blew past the 600s stream
+  watchdog, and the watchdog killed both (see `references/history.md`).
 - **A resource kill is never a code finding.** If a run dies from exhaustion, say so
   explicitly, name which suites did and did not execute, and never report an unrun
   suite as passing.
@@ -570,6 +578,21 @@ targeted the shared checkout. Pass it explicitly only to override (e.g. CI's own
 checkout in `gate-auto-advance.yml`). Fallback when no worktree holds the branch is
 still "." — stand the worktree up first (see the creation commands above) rather than
 relying on that.
+
+**After any branch-touching op, verify the worktree map — the main checkout must stay
+on `main`.** A `sync-branch`/`merge-lld-doc`/`claim` run from an orchestrator shell
+whose cwd is the main checkout can leave that checkout *on* a pipeline branch
+(`epic-<n>`, `issue-<n>`), which forces the branch's real `/tmp/sdlc-*` worktree into
+**detached HEAD** — twice on epic #430, the second time under a live `development` agent,
+so its commits and uncommitted files sat on a detached HEAD not on `issue-<n>`. Guard:
+after those ops run `git worktree list` and confirm the main checkout is on `main` and
+each `/tmp/sdlc-*` holds its own branch (not detached); pass `--repo-path
+/tmp/sdlc-<...>-<n>` explicitly rather than relying on cwd. Recovery when it has already
+happened (no work lost): commit WIP on the detached HEAD → `git checkout main` in the
+main checkout to free the branch → `git checkout -B issue-<n>` in the `/tmp` worktree
+(carries the WIP) → `git push origin issue-<n>`; verify with `git merge-base
+--is-ancestor` that the detached HEAD descends from the branch tip before trusting it.
+Full incident: memory `ops_main_checkout_steals_branch`.
 
 ## Publishing lld.md to the epic branch — durable design, sibling visibility
 

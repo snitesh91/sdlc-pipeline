@@ -74,7 +74,10 @@ Cover:
   `list-parallel-ready` to decide which siblings may run concurrently. A wrong or
   malformed footprint either breaks the parallel lane or lets two children collide in
   the same files. Get it right and keep it complete — every path the change will
-  touch, not just the interesting ones.
+  touch, not just the interesting ones. **The footprint and any import/boundary sweep
+  cover the top-level `test/**` tree too, not just `src/**`** — test files import across
+  module boundaries, and a sweep scoped to `src/**` misses them (this narrowing bounced
+  epic #430 children A2/A5/B1).
 
 Even a child needing no design decisions beyond the epic's `architecture.md` still gets
 an `lld.md` — a short one saying exactly that, with its footprint. Structural

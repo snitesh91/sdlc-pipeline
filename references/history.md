@@ -1024,3 +1024,61 @@ site). Fixed the template + `bookshaw-docs/sdlc/README.md` at the source (new do
 inheriting bad paths); the historical doc bodies were left as noise not worth a mass rewrite.
 Refuted as *recurring*: the "zero frontend unit tests" claim (11 docs, all pre-`#240`/vitest,
 never recurs) and the Effort-field-unsettable note (2 epic-level spots, already deferred).
+
+## 2026-09-11 — retrospective on epic #430 (module-boundary isolation)
+
+Retro on the just-closed epic #430 (Rung-2 workspace packages / module-boundary
+isolation), from `sdlc_retro_backlog_epic430`. Additive edits, both repos (skill +
+driven `.claude/agents`). Applied this cycle:
+
+- **Subagent poll-in-turn (recurred 3×).** dev/testing/pr-review agents backgrounded the
+  IT suite then ended their turn "standing by" for a wake that never comes — a subagent
+  is not re-invoked across turns, so each needed a manual nudge. Rule added to
+  `sdlc-development`/`sdlc-testing`/`sdlc-pr-review`/`sdlc-design-review` and as a general
+  subsection in `stage-playbooks.md` ("Subagents finish in one turn"): finish in-turn;
+  background a long command but wait on it via Monitor (foreground `sleep` is blocked);
+  never park awaiting a background/Monitor notification. *Why: removes a whole class of
+  silent stalls.*
+- **Docker-IT concurrency cap + always-background** (`parallelism.md`). At most ONE
+  Docker-IT-heavy stage runs concurrently even at agent-cap 2 (a light lld/design-review
+  may run alongside); the IT suite is always backgrounded/chunked. *Why: two concurrent
+  full IT suites saturated the Docker VM past the 600s watchdog and killed both agents.*
+- **Destructive test-DB guard** (`sdlc-development`/`sdlc-testing`/`sdlc-pr-review`).
+  Truncating suites run only against a DB whose name ends in `_test`; confirm the
+  effective DB first; never copy a `DB_NAME` override from an arbitrary Makefile target.
+  *Why: a dev agent's wrong `DB_NAME` override pointed `test:it` at the shared dev DB
+  `bookshaw` and `cleanTables()` wiped real dev catalog/user/order rows.* STAGED
+  driven-repo follow-up (not implemented here — out of skill scope): a `_test`-name
+  assertion in `test/testutil/base-it.ts` (refuse to truncate otherwise), or an
+  ephemeral per-run Postgres, so the wipe is impossible by construction.
+- **Sweeps must include `test/**`** (`sdlc-lld`/`sdlc-development`). The footprint /
+  import-boundary sweep covers the top-level `test/**` tree, not just `src/**`. *Why:
+  test files import across boundaries; the `src/**`-only reading bounced A2/A5/B1.*
+- **Enumerate-not-sweep** — already a strong `sdlc-lld` refusal criterion (shipped
+  2026-09-08, skill 2cf36c0) and present in `stage-playbooks.md`; no new edit, noted as
+  covered. *Why: recorded so the retro item is closed, not silently dropped.*
+- **Export-port field-by-field projection** (`sdlc-development`). Port/adapter
+  implementations list exposed fields explicitly; never return a raw entity or bare
+  `.find()`. *Why: returning the entity leaks every column added later — GDPR
+  over-disclosure near-miss on A3 #473.*
+- **Affected-graph testing + tiered cadence** (`stage-playbooks.md`, testing/pr-review).
+  Once workspace packages + Turborepo exist, scope intermediate runs to affected packages
+  (`turbo run test --filter=...[base]`) with cache reuse; unit-continuous during dev,
+  IT-affected before PR, full suite once at epic close; the independent gates still
+  re-run. *Why: the full 824-test IT suite ran ~3× per child; boundaries now make scoped
+  runs safe. Blind spot recorded: raw cross-table SQL is invisible to both boundary lint
+  and the affected graph, so epic-close full run stays the backstop.*
+- **Worktree drift guard** (`parallelism.md`). After `sync-branch`/`merge-lld-doc`/`claim`,
+  verify `git worktree list` and keep the main checkout on `main`; recovery recipe
+  included. *Why: twice on #430 a branch-touching op checked a pipeline branch out into
+  the main checkout, detaching a live `/tmp` worktree under a running agent (memory
+  `ops_main_checkout_steals_branch`).*
+
+Staged for a future cycle (recorded, not built):
+
+- **Review→agent-learning loop** — `stage-playbooks.md` now carries the staged 3-tier
+  design (reviews emit a non-gating "Agent-process observations" block; retro
+  threshold-aggregates; only the retro edits agent files on a quiet lane; agents only
+  flag). Needs a CLI marker that does not exist yet. Seed defects (a)-(d) listed there.
+  *Why: operator asked reviews to grow the agents like a developer learns; kept off-gate
+  and threshold-gated to avoid a mid-run self-edit foot-gun.*

@@ -216,6 +216,21 @@ that test execute.** If it could not run, say so plainly, name the reason, and s
 which criterion is therefore unproven — `pr-review` can then weigh a known gap instead
 of trusting a coverage claim that was never true.
 
+## Subagents finish in one turn — never park awaiting a wake
+
+Every stage agent is a subagent, and a subagent is **not** re-invoked across turns:
+nothing wakes it once its turn ends. So a stage must complete everything it needs while
+its turn is live. For a long command — the integration suite, a container/image build,
+the e2e suite — run it with `run_in_background` and **wait on it in-turn via the Monitor
+tool** (foreground `sleep` is blocked). What must never happen is ending the turn
+"standing by" for a background job or a Monitor notification to resume the agent: the
+notification never arrives, the stage stalls until a human nudges it, and it registers
+as no progress. This recurred across every `development`/`testing` agent of epic #430
+and killed two agents outright on earlier epics (see `references/history.md`). The rule
+lives in the `sdlc-development`/`sdlc-testing`/`sdlc-pr-review`/`sdlc-design-review`
+agent definitions too; it is repeated here because it is a property of the whole
+pipeline, not one stage.
+
 ## Establish a number by running the thing, not by modelling it
 
 The dominant defect class of one whole epic — over a dozen confidently-stated, wrong
@@ -827,6 +842,21 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
     external service, a flow only reachable through the UI. Silence reads as "ran and
     passed"; say it explicitly instead.
 
+  **Affected-graph scoping + tiered cadence (once workspace packages + Turborepo
+  exist).** When the repo has explicit package boundaries and a Turborepo DAG, an
+  intermediate `testing`/`pr-review` run may be scoped to the affected packages —
+  `turbo run test --filter='...[<base-ref>]'` — with cache reuse, instead of the whole
+  suite every time. The cadence this enables: unit tests continuous during
+  `development` (no DB, seconds); the IT slice for the affected packages run once,
+  backgrounded, before `open-dev-pr` / before a `pr-review` verdict; the **full** suite
+  run exactly once at epic close (`references/epics.md`, "Epic closing"). This is
+  guidance *enabled by explicit boundaries*, not a licence to trust numbers: `testing`
+  and `pr-review` still re-run independently and report their own numbers — the scoping
+  narrows what runs, it does not remove the independent gate. Until the package graph
+  exists, run the suite as documented. Note the blind spot: raw cross-table SQL against
+  tables a package does not own is invisible to both boundary lint and the affected
+  graph, so the epic-close full run stays the backstop for it.
+
   **Reject tests that don't test** — existence-only assertions
   (`expect(service).toBeDefined()`), no meaningful assertion about output or state,
   a test asserting on its own mock's return value, or a test that survives the
@@ -925,3 +955,33 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
     if it contradicts the epic's design. PR stays draft meanwhile. If the resumed
     agent concludes it needs the human → `mark-needs-human` (on the epic, if the
     epic's architecture was the resumed stage) and park.
+
+## Review-sourced agent-process feedback loop (STAGED — not yet wired)
+
+This is a **staged design**, recorded so a future cycle can build it; it is not active
+today and needs a CLI marker that does not exist yet. The idea (operator, 2026-09-11:
+"reviews should gather feedback on the agent process, like a developer's learning") is
+to turn each cycle's reviews into improvements to the **agent definitions**, not just
+the playbook. Three tiers:
+
+- **Tier 1 — flag, off-gate.** `lld-review` and `pr-review` may emit a short,
+  **non-gating** "Agent-process observations" block about the agent's *method* (not the
+  diff) — and only for recurring/systemic issues, never a one-off. It never affects the
+  verdict.
+- **Tier 2 — threshold.** A marker tags those process-notes so the retro can
+  threshold-aggregate them (act on a class seen ≥N times; ignore singletons). The
+  escalation valve / `pairing-counts` already tracks bounce frequency per pairing and is
+  the natural home for the count.
+- **Tier 3 — the retro edits agent files.** Fixes land in `.claude/agents/sdlc-*.md`
+  (persona / procedure / refusal-criteria) — the developer-growth analogue.
+
+**Hard constraint: agents only FLAG; only the retro EDITS agent files, on a quiet lane.**
+No mid-run self-editing of agent definitions — that is a foot-gun. Attribution is to the
+agent-**type** and the defect-**class**, never to an individual run. Keep it lean:
+capped, off-gate, threshold-gated.
+
+Seed defects observed across epic #430 (the first Tier-3 edits, several already applied
+by the 2026-09-11 retro): (a) footprint/sweep excluding `test/**` (bounced A2/A5/B1);
+(b) enumerate-not-sweep recurrence; (c) export-port adapters returning the raw entity
+instead of a field-by-field projection (GDPR over-disclosure near-miss, A3 #473);
+(d) over-running full IT and parking on a backgrounded suite (all dev/testing agents).

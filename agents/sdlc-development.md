@@ -63,6 +63,11 @@ explicitly required by the design. Then:
 If a file in your diff cannot be traced to a line of the design, it does not belong in
 this PR.
 
+**The footprint/import sweep covers the top-level `test/**` tree, not just `src/**`.**
+When you check what the change touches or run the boundary/import lint, include the
+`test/` tree — test files import across module boundaries too, and a sweep scoped to
+`src/**` misses them. This narrowing bounced epic #430 children A2/A5/B1.
+
 **Scope also cannot go the other way — you may not shrink a class the design set.** If
 an acceptance criterion is a class-sweep ("every interactive control ≥44px", "no fixed
 bar overlaps the nav"), apply the `lld`'s rule to **every** swept instance and report
@@ -133,6 +138,21 @@ and `npm run test:it` inside the container. Never `npm` or `nest` on the host.
 Frontend: `make lint`, `make typecheck`, `make build`; `make e2e` from the workspace
 root for user-facing flows.
 
+**Integration tests run only against a `_test` database.** Any truncating suite
+(`test:it` / `cleanTables()`) must run against a DB whose name ends in `_test`
+(`bookshaw_test`) — confirm the *effective* DB name before you start it. **Never copy a
+`DB_NAME` override from an arbitrary Makefile target** to "make the suite run"; a wrong
+override once pointed `test:it` at the shared dev DB `bookshaw` and `cleanTables()`
+wiped real dev catalog/user/order rows. If the effective DB is not a `_test` one, stop
+and report — do not run the suite.
+
+**Port/adapter implementations project field-by-field — never return the entity.** An
+export/data-portability adapter (or any port that shapes data for an external consumer)
+must build its result by explicitly listing the fields to expose, not by returning a
+raw entity or a bare `.find()`/`findOne()` result. Returning the entity leaks every
+column added later — a GDPR over-disclosure the field-by-field projection makes
+structurally impossible (near-miss on epic #430 A3 #473).
+
 For a large multi-file refactor, batch the changes and defer `test:it` until the change
 set is coherent, then fix failures in one pass — mid-refactor IT runs mostly reflect
 work-in-progress, not real bugs.
@@ -144,6 +164,16 @@ after all the fix commits, before you re-hand-off. Each push is what re-triggers
 `pull_request`-scoped CI, so N pushes for one cycle's work is N× the wasted runner time.
 A mid-cycle push is only for handing off to a human or unblocking a teammate, never
 routine. If a push is ever rejected, **stop and report** — do not work around it.
+
+## You are a subagent — finish inside this turn
+
+You are a subagent and are **not** re-invoked across turns: nothing wakes you once your
+turn ends. Complete everything the stage needs while your turn is live. A long command
+— the integration suite, a container build — is fine to `run_in_background`, but then
+**wait on it in-turn via the Monitor tool** (foreground `sleep` is blocked). Never end
+your turn "standing by" for a background job or a Monitor notification to resume you: it
+will not come, the stage stalls until a human nudges it, and two agents on this repo
+died exactly that way.
 
 ## Stopping is a valid outcome
 

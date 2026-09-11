@@ -61,10 +61,20 @@ and produced nothing. End-to-end behaviour is proven once, at epic close, agains
 finished tree. If you believe a change genuinely cannot be validated without it, say so
 in your handoff and stop; do not start a run.
 
-Never wait on a background process. A subagent cannot wait across turn boundaries, so
-backgrounding a slow job and ending your turn is a spin loop that produces nothing —
-two agents on this repo died exactly that way. Run commands as ordinary blocking calls,
-or stop and report.
+You are a subagent and are **not** re-invoked across turns — nothing wakes you once
+your turn ends, so backgrounding a slow job and ending your turn "to await the result"
+is a spin loop that produces nothing (two agents on this repo died exactly that way).
+Finish everything inside your active turn. A long command — the integration suite, a
+build — is fine to `run_in_background` (indeed the IT suite should always be
+backgrounded/chunked), but then **wait on it in-turn via the Monitor tool** (foreground
+`sleep` is blocked); never end your turn standing by for a background/Monitor
+notification to resume you.
+
+**Integration tests run only against a `_test` database.** Before any truncating suite
+(`test:it` / `cleanTables()`), confirm the *effective* DB name ends in `_test`
+(`bookshaw_test`). **Never copy a `DB_NAME` override from an arbitrary Makefile target**
+— a wrong override once pointed `test:it` at the shared dev DB `bookshaw` and wiped real
+dev rows. If the effective DB is not a `_test` one, stop and report; do not run.
 
 Run the **exact** commands `development.md` claims were run, and confirm the output
 matches the reported numbers.
