@@ -193,26 +193,46 @@ All of them before the handoff, not after. Each exists because it was skipped on
 something shipped broken. The playbook holds the full list; these are the ones that
 have bitten this repo hardest:
 
-1. **Every plan-flagged risk is closed against the real system, not mocked away.**
+1. **Reconcile your document against the diff, immediately before handing off.**
+   Not a re-read for care — a mechanical pass, and the last thing you do. Epic #159
+   lost four review rounds to documents describing a different change than the branch
+   carried, two of which bought nothing but prose edits on code already proven sound.
+   Every instance passed its author's own careful reading, because the author was
+   checking against intent rather than against the tree:
+   - `grep -F` every quoted string against the file you attribute it to. A quotation
+     that does not reproduce is wrong, and one of them was **text from your own
+     delegation prompt**, cited to a design document. Your prompt is not a source.
+   - Regenerate every "untouched", "unchanged" and "out of scope" claim from
+     `git diff --name-only origin/<base>...HEAD`. These are the claims most likely to
+     have been true when you wrote them and false by the time you hand off, because
+     you kept working afterwards. One document asserted four times that a spec was
+     untouched while its own later section correctly described changing it.
+   - Confirm every fenced block introduced as command output is bytes you captured,
+     not a tidied paraphrase. Redirect to a file and paste from the file, or cite the
+     `record-local-ci` attestation, which already embeds a real run's output.
+   - Re-check every number — diff stats, suite counts, file counts — against the
+     artifact, not against an earlier draft of the same document.
+
+2. **Every plan-flagged risk is closed against the real system, not mocked away.**
    If the design (or your own discovery) named an unresolved integration risk, it needs
    a stated resolution with real evidence — a real service response, a real log line,
    a real query against the real Postgres the `test:it` suites run on. A unit test
    against a mock does not close an integration risk; it tests the mock. If it
    genuinely cannot be closed here, say so explicitly in the PR description and name
    what would close it. Do not let the mock stand in for the answer.
-2. **"Manually verified" claims cite evidence, not assertion.** Anywhere you write
+3. **"Manually verified" claims cite evidence, not assertion.** Anywhere you write
    that a path was verified manually, attach the concrete observation that proves it:
    terminal output, a log excerpt, a response body, or numbered repro steps someone
    else can re-run. The words alone are treated as *not verified*.
-3. **Golden-path behaviour is explicitly re-confirmed, not assumed.** When the change
+4. **Golden-path behaviour is explicitly re-confirmed, not assumed.** When the change
    touches shared code or error-handling paths, re-run the pre-existing,
    non-edge-case behaviour and record the result. "The edge case is fixed" is not
    evidence that the normal path still works.
-4. **Every acceptance criterion is checked against the real diff**, by name, from
+5. **Every acceptance criterion is checked against the real diff**, by name, from
    `git diff origin/<base>...HEAD --name-only`. An AC whose satisfying file is not in
    the diff is not done. Validators have shipped unit-tested and wired into no
    entrypoint, with commit messages reading as a finished build.
-5. **Every numbered task-local decision in `lld.md` is swept, not scanned.** Walk the
+6. **Every numbered task-local decision in `lld.md` is swept, not scanned.** Walk the
    decisions in order — decision 1, decision 2, decision 3 — and for each one quote the
    code that realises it and write `conform` or `deviate`. This is a sweep over a list
    the design already enumerated for you, so it is bounded and mechanical, and it is
@@ -232,7 +252,7 @@ have bitten this repo hardest:
 
    Deviating is allowed — silently deviating is not. A `deviate` row states what you
    did instead and why, and goes in the PR description as an explicit delta.
-6. **Never cite a `file:line` you have not opened in this session.** Anchor every
+7. **Never cite a `file:line` you have not opened in this session.** Anchor every
    reference to a quote you can produce — `grep -n "<literal string>" <path>`.
    Fabricated citations have shipped from this repo before.
 

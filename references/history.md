@@ -4,6 +4,72 @@ Provenance for rules that would otherwise read as arbitrary. Newest first. Keep
 entries to a few lines; the rule itself lives in the spine or its reference file —
 this file records *why* and *when*.
 
+## 2026-09-13 — retrospective: epic #159's 21 bounces, and why restating a rule stopped working
+
+Same operator directive as the #494 entry below, applied to epic #159's whole run. The
+counts, read from `pairing-counts` rather than impression: 10 `lld-review` reworks, 5
+`pr-review` reworks, 6 sync conflicts, across 7 children. **Every single `lld` bounced,
+most of them twice** — the design stage, not review, was the epic's expensive one.
+
+Roughly 15 of the 21 share the shape the #494 entry names, which two sessions reached
+independently on the same day: a claim about a source of truth made without reading it.
+What this epic adds is *which* claims, and the uncomfortable finding that *the rules
+already existed*.
+
+- **Attribution, four rounds lost.** A `development.md` quoted *"keep your changes
+  compatible with that shape and do not remove or relocate those guards"* as a footprint
+  note. Zero hits anywhere in the repo: its real origin was **the orchestrator's
+  delegation prompt**. The next round, the same file asserted in four places that a spec
+  and its timeouts were untouched while its own later section correctly described
+  raising them. A third presented a comma-joined paraphrase in a fence introduced as a
+  command "run for real". Two of those rounds bought nothing but prose edits on code
+  already proven sound. `references/stage-playbooks.md` already had a thorough *Citation
+  discipline* section — but it governs *where* a citation points, never whether the
+  attributed words are in the source. New: *Attribution is falsifiable*, as a mechanical
+  pre-handoff pass (grep every quotation; the prompt is not a source; a fence is a claim
+  of literalness; regenerate every "untouched" from `git diff --name-only`), plus the
+  matching completion gate in `agents/sdlc-development.md`.
+- **Negatives from searches that could not have found a counterexample.** *"Two, and
+  only two, bootstrap paths exist in the whole tree"* was false and the proof was, in
+  the reviewer's words, blind by construction. A detector resolved one syntactic form of
+  constructs this tree writes several ways: `require()` invisible while live in four
+  files including the one the evidence came from, `it.each` invisible while live in
+  seven, `(SKIP ? it.skip : it)(` invisible while live in the exact file the spec
+  asserted against. A doc sweep's file counts did not reproduce, 51 against 60 actual.
+  New in `agents/sdlc-lld.md`: any *only/every/no other/none/all* needs the search shown
+  as a command, a positive control proving it can return a hit, and the tree's actual
+  syntactic variants enumerated rather than reasoned about.
+- **The no-park rule failed again, so it became a contract.** *"Subagents finish in one
+  turn — never park awaiting a wake"* was already in the playbook and in three agent
+  definitions, citing two agents killed by it and a recurrence across every implementing
+  agent of epic #430. An epic-159 agent still started an e2e run, set a Monitor, and
+  ended its turn saying it would resume on the notification; it idled until the
+  orchestrator drove the run by hand. Restating it harder has demonstrably stopped
+  working, so the rule now constrains the **final message**: declare finished, blocked,
+  or stopped-for-a-decision — waiting is not terminal — and the orchestrator reads every
+  returning agent's last message for that shape before believing its handoff.
+- **`release_worktree` had been failing 100% of the time.** It calls `git worktree
+  remove` without `--force`; since the skill became a per-unit submodule *inside* each
+  worktree, git refuses every call with "working trees containing submodules cannot be
+  moved or removed". All three of 2026-09-13's merges left their worktree behind,
+  reinstating the 2026-08-20 incident its own docstring describes, where a stale
+  worktree made `list-parallel-ready` read the lane as full and propose nothing with no
+  error anywhere. Adding `--force` erodes no promise: the uncommitted-changes and
+  unpushed-commits refusals both run before the remove, verified independently by a
+  second session.
+- **A footprint must include the unit's own spec and test doubles.** Two children both
+  owned `test/testutil/db-helper.ts`; each one's unit test stubbed a `DataSource`
+  carrying only the half its own branch had added. Both green alone, three suites and
+  seven tests red on the merge. Composes with the same day's `list-parallel-ready` fix
+  for *which* footprints get compared.
+
+Ops, recorded in the driven repo rather than here: the Docker VM was 8092 MiB with 1024
+MiB of swap on a 48 GB host, exhausted at idle, which cost this epic eight test runs and
+forced heavy Docker work to run one at a time; and the workspace `Makefile` injected a
+hardcoded `POSTGRES_DATA_DIR` that overrode each profile's own, so an isolated epic stack
+came up on the dev stack's data directory and two postmasters on one PGDATA shut the dev
+database down mid-suite.
+
 ## 2026-09-13 — retrospective: two bounces on #494, and the two checks that could not fire
 
 Operator directive: treat every bounce as evidence something is wrong, and look for the

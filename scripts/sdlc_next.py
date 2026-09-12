@@ -1835,7 +1835,16 @@ def release_worktree(branch: str, runner: Runner = _default_runner,
         if unpushed:
             return {"released": False, "path": path,
                     "reason": f"{len(unpushed.splitlines())} commit(s) not pushed to origin/{branch}"}
-        runner(["git", "-C", base_repo, "worktree", "remove", path])
+        # `--force` is required, not a convenience: since the skill became a
+        # per-unit submodule *inside* each worktree, plain `worktree remove` refuses
+        # every single call with "working trees containing submodules cannot be moved
+        # or removed" -- so this function failed 100% of the time and reintroduced the
+        # exact 2026-08-20 incident the docstring above describes (three merges on
+        # 2026-09-13 each left their worktree behind). It does not weaken any promise:
+        # the uncommitted-changes and unpushed-commits refusals both run above, so by
+        # the time this executes the tree is clean of modifications and untracked
+        # files, which is the only property `--force` would otherwise erode.
+        runner(["git", "-C", base_repo, "worktree", "remove", "--force", path])
     except GhError as exc:
         return {"released": False, "path": path, "reason": str(exc)}
     return {"released": True, "path": path}

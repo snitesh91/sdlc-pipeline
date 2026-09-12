@@ -205,6 +205,48 @@ The rules that came out of it:
   docs cite that sibling's files, re-check those citations before the PR merges.** It
   is the one moment the pipeline creates staleness by itself rather than inheriting it.
 
+### Attribution is falsifiable — run the check, do not recall it
+
+The rules above govern *where* a citation points. They do not govern whether the words
+you attribute to a source are actually in it, and that is the gap epic #159 lost four
+review rounds to — two of them buying nothing but prose edits, on a branch whose code
+was already proven sound.
+
+Every one of these passed a conscientious author's own reading:
+
+- A `development.md` wrote *Per the footprint note ("keep your changes compatible with
+  that shape and do not remove or relocate those guards")*. That sentence exists in no
+  artifact: zero hits across the whole doc tree, the issue body, and its fifteen
+  comments. Its real origin was **the delegation prompt**. The agent quoted an
+  instruction it had been given and cited it to a design doc.
+- The next round, the same document asserted in four separate places that a spec and
+  its timeouts were untouched, while its own later section correctly described raising
+  them. Self-contradiction inside one file.
+- Another presented a comma-joined paraphrase inside a fenced block introduced as a
+  command "run for real". The real script prints one row per line with identifiers.
+  Its stated diff stat was stale in the same paragraph.
+
+So, as a mechanical pass before any handoff, not as a habit of care:
+
+- **Every quoted string must be reproducible by grep against the file you cite.** If
+  `grep -F "<the quoted words>" <cited file>` returns nothing, the quotation is wrong —
+  delete it or fix it. Quote spans short enough to survive reflowing.
+- **The delegation prompt is not a citable source.** Nothing in it is an artifact;
+  it does not merge, a reader cannot open it, and the next agent gets a different one.
+  A constraint that reached you only through your prompt goes in the document's own
+  voice, unquoted and unattributed.
+- **A fenced block introduced as command output must be bytes you captured.** Redirect
+  to a file and paste from the file, or cite the `record-local-ci` attestation, which
+  already embeds a real run's captured output. Prose describing what a command showed
+  is always acceptable; a fence is a claim of literalness.
+- **Generate every "untouched" / "unchanged" / "out of scope" claim from the diff**,
+  with `git diff --name-only origin/<base>...HEAD`, at the moment you write the
+  sentence. These claims are the most likely in any document to have been true when
+  drafted and false by handoff, because the author keeps working after writing them.
+
+A document that ships squash-merges into `main` as a permanent record. A fabricated
+quotation there invents a directive that some future reader will follow.
+
 ## Compile-checking is not verification
 
 A test runner's `--list`/dry-run mode, a type-check, and a lint pass tell you the code
@@ -249,6 +291,26 @@ and killed two agents outright on earlier epics (see `references/history.md`). T
 lives in the `sdlc-development`/`sdlc-pr-review`/`sdlc-design-review`
 agent definitions too; it is repeated here because it is a property of the whole
 pipeline, not one stage.
+
+**Restating this rule has stopped working — so it is now a contract on the final
+message.** It is already stated here, and again in three agent definitions, with two
+agents killed by it on earlier epics and a recurrence across every implementing agent
+of epic #430. On 2026-09-13 an epic-159 agent did it again: it started an e2e run,
+set up a Monitor, and ended its turn saying it would resume when the notification
+arrived. Nothing wakes a subagent. It sat idle until the orchestrator noticed, drove
+the run by hand, and re-messaged it.
+
+**Your final message must declare a terminal state**, and there are exactly three:
+finished, blocked on something named, or stopped for a decision you have stated. Any
+final message whose last act is to wait — "I'll pick this up when the run lands",
+"monitoring for completion", "no further action needed until the notification" — is a
+stall, no matter how much real work preceded it. If a run is still going, wait on it
+in-turn; if you cannot, say so and name what you need, which is a terminal state.
+
+**Orchestrator side:** read every returning agent's final message for this shape before
+acting on its content. A returned agent that declared waiting has not finished, and its
+issue is not at the stage its handoff implies. Re-message it with the result it was
+waiting for rather than treating the stage as complete.
 
 ## Establish a number by running the thing, not by modelling it
 

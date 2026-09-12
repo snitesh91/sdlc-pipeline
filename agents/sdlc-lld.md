@@ -43,6 +43,38 @@ specifying a new helper, a new module, or a new dependency:
 **Never assume something is missing** because you did not immediately see it. Say what
 you searched for and what you found.
 
+**A claim that something does not exist needs a search that could have found it.**
+Every `lld` in epic #159 bounced at `lld-review`, most of them twice, and the largest
+single cause was a negative asserted from a search that was incapable of returning a
+counterexample. The reviewer's phrase for one of them was *"the sweep offered as proof
+is blind by construction"*.
+
+- *"Two, and only two, bootstrap paths exist in the whole tree"* — false, and the
+  grep offered as proof could not have found the others.
+- A detector resolved one syntactic form of constructs this tree writes several ways.
+  `require()` was invisible to it while live in four files, including the very file
+  the narrowing evidence came from; `it.each` was invisible while live in seven; and
+  `(SKIP ? it.skip : it)(` was invisible while live in the exact file the spec
+  asserted against.
+- A doc-citation sweep was an instance list wearing a sweep's wording, and its file
+  counts did not reproduce: 51 claimed against 60 actual, with "4 new files"
+  enumerating 5.
+
+So whenever you write *only*, *every*, *no other*, *none*, or *all*:
+
+- **Show the search as a command**, with its output, so a reviewer re-runs it rather
+  than re-deriving it.
+- **Give it a positive control**: demonstrate the same search finding a known
+  instance. A search that has never returned a hit in your presence has not been
+  tested, and a negative from an untested search is worth nothing.
+- **Enumerate the syntactic variants the tree actually uses** before claiming a
+  pattern-based search is complete. Grep the tree for the alternate spellings rather
+  than reasoning about which ones "should" be there — `require` alongside `import`,
+  `it.each` and conditional callables alongside bare `it`, aliased and re-exported
+  bindings alongside direct ones. Resolve by binding where you can, not by spelling.
+- **Prefer a count you can reproduce to a count you tallied.** If you state a number
+  of files, state the command that prints it.
+
 **Every number and every boundary you write down carries the source it came from.**
 The two things this stage gets wrong are not design judgements — they are constraints
 restated from memory when the source was one grep away, and both bounce at `lld-review`:
@@ -102,6 +134,17 @@ Cover:
   cover the top-level `test/**` tree too, not just `src/**`** — test files import across
   module boundaries, and a sweep scoped to `src/**` misses them (this narrowing bounced
   epic #430 children A2/A5/B1).
+
+  **A unit's own spec and its test doubles are part of that unit's footprint**, even
+  when your change never opens them. A sibling that rewrites the mechanism your fake
+  imitates makes your spec wrong without touching your spec — and nothing catches it,
+  because both branches are green alone and only the merge is red. On 2026-09-13 two
+  epic-159 children both owned `test/testutil/db-helper.ts`: one added a guard that
+  reads `ds.options.database`, the other moved the deletes onto a pinned
+  `QueryRunner`. Each one's unit test stubbed a `DataSource` carrying only the half
+  its own branch had added, so each passed alone and the merged tree failed three
+  suites and seven tests. List the spec and the double alongside the implementation
+  file, so `list-parallel-ready` sees the collision that actually exists.
 
 Even a child needing no design decisions beyond the epic's `architecture.md` still gets
 an `lld.md` — a short one saying exactly that, with its footprint. Structural

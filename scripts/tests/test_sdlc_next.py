@@ -4603,11 +4603,11 @@ def test_release_worktree_removes_a_clean_fully_pushed_worktree():
             "/repo/.git\n",
         ("git", "-C", "/tmp/sdlc-dev-186", "status", "--porcelain"): "",
         ("git", "-C", "/tmp/sdlc-dev-186", "log", "--oneline", "origin/issue-186..issue-186"): "",
-        ("git", "-C", "/repo", "worktree", "remove", "/tmp/sdlc-dev-186"): "",
+        ("git", "-C", "/repo", "worktree", "remove", "--force", "/tmp/sdlc-dev-186"): "",
     })
     assert release_worktree("issue-186", runner=runner, base_repo="/repo") == {
         "released": True, "path": "/tmp/sdlc-dev-186"}
-    assert ["git", "-C", "/repo", "worktree", "remove", "/tmp/sdlc-dev-186"] in runner.calls
+    assert ["git", "-C", "/repo", "worktree", "remove", "--force", "/tmp/sdlc-dev-186"] in runner.calls
 
 
 def test_release_worktree_refuses_when_the_worktree_is_dirty():
@@ -4665,7 +4665,7 @@ def test_mark_needs_human_releases_the_units_worktree():
             "/repo/.git\n",
         ("git", "-C", "/tmp/sdlc-dev-186", "status", "--porcelain"): "",
         ("git", "-C", "/tmp/sdlc-dev-186", "log", "--oneline", "origin/issue-186..issue-186"): "",
-        ("git", "-C", "/repo", "worktree", "remove", "/tmp/sdlc-dev-186"): "",
+        ("git", "-C", "/repo", "worktree", "remove", "--force", "/tmp/sdlc-dev-186"): "",
     })
     runner.prefix_responses = {("gh", "issue", "comment", "186"): ""}
     result = cmd_mark_needs_human(GitHub(runner=runner), 186, reason="contract gap", repo_path="/repo")
