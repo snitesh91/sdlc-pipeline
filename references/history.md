@@ -1246,3 +1246,11 @@ upgrade trigger) is recommended as safe and awaits operator sign-off before it g
 `SKILL.md`; everything else stays, with the named signals to re-check after two more
 epics of `pairing-counts` data. Recorded here rather than guessed into the table, per
 the model-table paragraph's own rule.
+
+## 2026-09-12 — product-review & arch-review → fable (tier change)
+Moved `product-review` and `arch-review` from opus to fable in the SKILL.md model table.
+Both are backstopped by a human gate immediately after (Gate A / Gate B), so a cheaper
+adversarial pass is acceptable; `lld-review` and `pr-review` stay opus (last checks before
+irreversible, no human after). Operator-directed. Landed separately from the main 2026-09-12
+retro. Open interaction flagged in SKILL.md: a fable-run arch-review's confidence marker vs
+the Gate B confidence-skip — operator to decide.
