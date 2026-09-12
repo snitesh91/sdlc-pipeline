@@ -63,6 +63,16 @@ already existed*.
   seven tests red on the merge. Composes with the same day's `list-parallel-ready` fix
   for *which* footprints get compared.
 
+- **Neither session knew the skill had a test suite.** Both shipped control-plane
+  changes to `scripts/sdlc_next.py` with no test, in the same retrospective where both
+  were writing rules about not asserting coverage nobody had checked. `Step 5` said
+  edit, append, commit, push — and never mentioned running anything, so nothing pointed
+  at `scripts/tests/test_sdlc_next.py`. It would have caught them: it pins real
+  invocations, and adding `--force` to one `git worktree remove` turned two tests red on
+  the first run. Step 5 now names the suite, requires it green before the branch is
+  pushed, and asks for a regression test paired with a positive control that must stay
+  green, verified against the pre-fix script.
+
 Ops, recorded in the driven repo rather than here: the Docker VM was 8092 MiB with 1024
 MiB of swap on a 48 GB host, exhausted at idle, which cost this epic eight test runs and
 forced heavy Docker work to run one at a time; and the workspace `Makefile` injected a

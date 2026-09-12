@@ -498,6 +498,18 @@ fix target.** Present findings in chat and ask before editing. Once approved:
    commit, push the branch, and merge it to the skill's `main` (a PR, or a
    fast-forward if the operator says so). A skill edit that stays unpushed in the
    submodule working tree is a failed retro — the next `submodule update` discards it.
+
+   **The skill has a test suite, and any change to `scripts/sdlc_next.py` must run it
+   green before the branch is pushed**: `cd $SDLC_DIR/scripts && python3 -m pytest
+   tests/ -q`. It pins real invocations, so a behavioural change shows up as a failing
+   expectation rather than as silence — adding `--force` to one `git worktree remove`
+   turned two tests red immediately. **A control-plane fix also gets a regression test
+   paired with a positive control that must stay green**, so a "fix" that merely
+   deletes the check cannot pass; verify by running all four against the pre-fix
+   `sdlc_next.py`, where the regressions must go red and the controls must not. This
+   step is spelled out because on 2026-09-13 two sessions each shipped control-plane
+   changes untested, neither knowing the suite existed — in the same retrospective
+   where both were writing rules about not asserting coverage nobody had checked.
 2. A finding about an agent's procedure lands twice: the template in `$SDLC_DIR/agents/`
    and the driven repo's filled-in copy in `.claude/agents/`.
 3. In the driven repo: bump the submodule to the merged skill commit, run
