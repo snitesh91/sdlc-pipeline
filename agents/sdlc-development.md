@@ -95,10 +95,37 @@ violated.** Map criterion → test file and test name, one line each, in your ha
 comment. A criterion you cannot map is a gap you close before handing off, not one you
 declare.
 
+**A criterion → test row is a claim, and the assertion text is what falsifies it.**
+Writing the map is not the same as checking it, and the check is nearly free: read the
+assertion each row cites and ask whether it names the thing the criterion is *about*.
+An assertion that would pass just as happily for a different correct-looking output is
+not a test for that criterion — it is a shape check wearing a criterion's name. The
+concrete tell: the criterion distinguishes one expected result from its siblings, and
+the assertion mentions none of them.
+
+> A round of #494 mapped four criteria — "no schools matched", "too many to list",
+> "no classes", "school switched off" — to tests whose only assertion was
+> `expect(message.type).toBe('text')`. All five replies in that family are text. The
+> map read complete, the suite was green, and swapping the branch to the *wrong* reply
+> constant left it green at 16/16. Four criteria, no coverage.
+
+So, before you hand off:
+
+- **Every row's assertion must name the criterion's own discriminating value** — the
+  expected constant, string, status, count, or field — not merely its type, shape, or
+  presence. If it does not, the test is not finished.
+- **One positive control per family, not per criterion.** Where several criteria share
+  an assertion shape — a set of sibling constants, a set of error codes, a set of
+  states — make the code return a *sibling* of the correct value, run the family's
+  tests, and confirm the right one goes red. One control falsifies the whole family, so
+  this costs one run, not N. A family that stays green is the finding.
+
 **Mutation-check the guards that matter.** For the tests carrying the real acceptance —
 not every test — break the behaviour under test deliberately, confirm the test goes red,
 revert. State the mutation and what went red. Leave the tree clean (`git status`) before
-you hand off.
+you hand off. **"The guards that matter" is not "the guards you are already confident
+in".** Pick the ones whose failure would be expensive and whose correctness you have
+not otherwise demonstrated; the family positive control above covers the rest.
 
 ## Scope containment is mandatory before you finish
 
@@ -185,7 +212,27 @@ have bitten this repo hardest:
    `git diff origin/<base>...HEAD --name-only`. An AC whose satisfying file is not in
    the diff is not done. Validators have shipped unit-tested and wired into no
    entrypoint, with commit messages reading as a finished build.
-5. **Never cite a `file:line` you have not opened in this session.** Anchor every
+5. **Every numbered task-local decision in `lld.md` is swept, not scanned.** Walk the
+   decisions in order — decision 1, decision 2, decision 3 — and for each one quote the
+   code that realises it and write `conform` or `deviate`. This is a sweep over a list
+   the design already enumerated for you, so it is bounded and mechanical, and it is
+   the only version of this check that works: a deviation you would have *noticed* is
+   not the kind that ships. The ones that ship are the decisions you implemented
+   correctly at first and then widened while fixing something else, which look like
+   ordinary code and read as intentional.
+
+   > #494's decision 4 fixed a `try`/`catch` boundary at exactly
+   > `{interpret, build reply, send}`. The implementation put the claim-table
+   > `markHandled` call inside that `try`, so a bookkeeping failure *after* a reply had
+   > already been sent and charged marked the claim `FAILED` — immediately
+   > reclaimable, no staleness wait — and a redelivery drew a second charged reply.
+   > Three deviations were declared in that handoff; this one was not among them,
+   > because nothing walked the decision list. `pr-review` found it by reading the
+   > decision and then reading the code.
+
+   Deviating is allowed — silently deviating is not. A `deviate` row states what you
+   did instead and why, and goes in the PR description as an explicit delta.
+6. **Never cite a `file:line` you have not opened in this session.** Anchor every
    reference to a quote you can produce — `grep -n "<literal string>" <path>`.
    Fabricated citations have shipped from this repo before.
 
@@ -198,6 +245,24 @@ Frontend: `make lint`, `make typecheck`, `make build`.
 **Redirect every suite run to a file.** You need that file for `record-local-ci`, which
 refuses a summary and embeds the run's own captured output. Capture as you go rather
 than reconstructing at the end.
+
+**Read the workflow you are standing in for, before the run, not after it.** A
+`record-local-ci` attestation exists because the real CI workflow is main-only, so the
+run it attests has to be *that* workflow's invocation — flags included. The config's
+`requiredWorkflows[].files` names the workflow file for each suite; open it and copy the
+command. Inventing your own invocation turns an environmental difference into a
+debugging session that looks exactly like a regression in your own diff.
+
+> On #494 the attested suite was first run with Jest's default parallelism instead of
+> the `--runInBand` the backend workflow uses. It returned 247 failures across 51
+> unrelated suites — Postgres connection-pool exhaustion, 15 workers against
+> `max_connections=100` — and cost a full baseline-worktree reproduction on
+> `origin/epic-365` to prove the diff was innocent. The workflow file said `--runInBand`
+> the whole time.
+
+The corollary holds when a run *does* surface something: a cascade of failures across
+suites your diff never touched is environmental until proven otherwise, and the cheapest
+proof is the workflow's own invocation, not a baseline checkout.
 
 **A build you cite as verification must be a real build.** A stale gitignored
 `*.tsbuildinfo` makes the incremental `nest build` emit nothing and exit 0 — twice on
@@ -226,6 +291,15 @@ must build its result by explicitly listing the fields to expose, not by returni
 raw entity or a bare `.find()`/`findOne()` result. Returning the entity leaks every
 column added later — a GDPR over-disclosure the field-by-field projection makes
 structurally impossible (near-miss on epic #430 A3 #473).
+
+**A code comment that states a guarantee must be true for every input, or say what it
+excludes.** A comment describing what the code was *meant* to do reads to the next
+engineer — and to `pr-review` — as a claim about what it *does*, and an overstated one
+is worse than no comment: it stops the reader looking at the case you did not handle.
+If the helper truncates, if the branch handles only the common shape, if the guard is
+best-effort, the comment says so in the same sentence. Seven instances of this single
+pattern were raised on one #494 round — each hit independently by all three review axes,
+which is what a habit looks like rather than a slip.
 
 For a large multi-file refactor, batch the changes and defer `test:it` until the change
 set is coherent, then fix failures in one pass — mid-refactor IT runs mostly reflect

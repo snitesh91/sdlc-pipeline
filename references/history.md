@@ -4,6 +4,75 @@ Provenance for rules that would otherwise read as arbitrary. Newest first. Keep
 entries to a few lines; the rule itself lives in the spine or its reference file —
 this file records *why* and *when*.
 
+## 2026-09-13 — retrospective: two bounces on #494, and the two checks that could not fire
+
+Operator directive: treat every bounce as evidence something is wrong, and look for the
+agent-definition change that would have prevented it. Epic #365's child #494 bounced
+twice — once at `lld-review`, once at `pr-review` — and the four blocking findings share
+one shape: **a claim about a source of truth, made without going and reading it.**
+
+- `lld-review` round 1 — the design restated `product.md`'s "a single interactive list"
+  (ten sections of ten rows) as one ten-row section, narrowing AC6 roughly tenfold; and
+  it passed a caught `Error` to `logger.error(msg, err)` against an AC forbidding
+  message bodies in logs, because `NormalisingLogger.dispatch` promotes any `Error` in a
+  call's args into the record and the upstream client's error embeds up to 200 chars of
+  the provider's raw response. Both were one grep from correct. Fix in
+  `agents/sdlc-lld.md`: a derived threshold carries its criterion's sentence quoted next
+  to the constant, and a shared boundary an AC constrains is read, never assumed from
+  its name.
+- `pr-review` round 1 — the implementation widened a `try`/`catch` past task-local
+  decision 4's stated `{interpret, build reply, send}` boundary to include the
+  claim-table `markHandled`, so a bookkeeping failure after an already-charged send
+  marked the claim `FAILED` (immediately reclaimable, no staleness wait) and a
+  redelivery drew a second charged reply — AC23 violated, AC14 inverted. That handoff
+  declared three deviations and missed this one. Fix: a **task-local decision
+  conformance sweep** as a completion gate — walk `lld.md`'s numbered decisions in
+  order, quote the realising code, mark conform/deviate. A deviation the implementer
+  would have noticed is not the kind that ships.
+- `pr-review` round 1 — four criteria mapped to tests whose only assertion was
+  `expect(message.type).toBe('text')`, which all five replies in that family share. The
+  map read complete and the suite was green; swapping the branch to the wrong reply
+  constant left it green at 16/16. The existing positive-control rule
+  (`stage-playbooks.md`, "A completeness claim over a footprint is a sweep") was scoped
+  to class-of-surfaces audit children, so it never fired on a feature child. Two fixes:
+  the section now says the failure is not confined to that shape, and
+  `agents/sdlc-development.md` gains the cheap general form — every map row's assertion
+  must name the criterion's discriminating value, plus **one positive control per
+  family** of sibling expected values rather than one per criterion. Also tightened:
+  "mutation-check the guards that matter" was being read as "the guards you are already
+  confident in", which is what left the four vacuous rows unprobed.
+
+Two more from the same run, not bounces but wasted rounds:
+
+- The attested `test:it` was first run without the backend workflow's own `--runInBand`
+  and returned 247 failures across 51 untouched suites — Postgres connection-pool
+  exhaustion, 15 workers against `max_connections=100` — costing a baseline-worktree
+  reproduction on `origin/epic-365` to prove the diff innocent. `record-local-ci` exists
+  to stand in for that workflow; `requiredWorkflows[].files` names the file. Now a rule:
+  read the workflow and copy its invocation before the run, and treat a cascade across
+  untouched suites as environmental until the workflow's own invocation says otherwise.
+- Seven instances of "the comment asserts totality, the implementation is partial, no
+  test on the partial case", each hit independently by all three `pr-review` axes — a
+  habit, not a slip. `agents/sdlc-development.md` now requires a comment stating a
+  guarantee to be true for every input or to name what it excludes.
+
+Two control-plane defects found the same session, both fixed in `scripts/sdlc_next.py`:
+
+- **`list-parallel-ready` derived collisions and slots from different worktree sets.**
+  The footprint-collision set was built from every live worktree; the slot count was
+  built from the same list *minus* the parked ones. So #494 was reported as "footprint
+  overlaps active/eligible #323" where #323 was another epic's worktree, blocked on an
+  open dependency, correctly excluded from the slot count two loops later and just as
+  correctly unable to collide with anything. The occupied/stale split is now computed
+  once, before both derivations.
+- **`verify-exit` could not verify a `development` handoff at all.** `open-dev-pr` sets
+  the Stage field to `PR Review`, which normalises to `pr-review`; the misuse guard
+  refused every member of `REVIEW_ROLES`, so `--expect-stage development` failed (the
+  field had moved on) and `--expect-stage pr-review` failed as misuse. The pipeline's
+  most bounce-prone handoff was the one handoff the command could not check, and the
+  orchestrator fell back to checking it by hand. The guard now exempts a review role
+  that is also a real `STAGE_FIELD_NAMES` value — which is `pr-review` alone.
+
 ## 2026-09-10 — auto-close-epic behind a config toggle
 
 Operator proposed at the 2026-09-08 retro, approved at the 2026-09-10 retro: let the

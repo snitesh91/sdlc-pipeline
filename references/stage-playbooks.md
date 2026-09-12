@@ -336,6 +336,18 @@ For any such child, at **every** stage that touches the class:
   ships looking identical to an audited-clean one — so the inventory the checklist is
   built from must be the sweep's output, not a hand-typed list.
 
+**The narrow scoping of this section is itself a trap — the failure is not confined to
+audit/hardening children.** Any criterion → test map is a completeness claim in prose,
+and the positive control is what falsifies it; a child with an ordinary feature shape
+fails the same way when several criteria share one assertion shape. On #494 — a feature
+child, no class-of-surfaces acceptance anywhere in it — four criteria mapped to tests
+whose only assertion was the reply's *type*, which every reply in that family shares.
+Green suite, complete-looking map, no coverage; the `pr-review` positive control that
+exposed it took one run. So read the rule above as scoped to *any* stage claiming a set
+of criteria is covered, and see the family positive control in `sdlc-development.md`
+("How to write the tests") for the cheap form: one control per family of sibling
+expected values, not one per criterion.
+
 The population of the class is a **requirements** fact, not a `development` call. If
 which controls or which dimensions count is ambiguous ("interactive control" —
 icon-only, or text buttons and pagination too?), that is pinned at `architecture`/`lld`
@@ -844,6 +856,25 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
   don't work around it. **On a blocker** (ambiguous requirement, missing design
   decision): stop and report the specific question in your final message — never create
   issues or change fields yourself; the orchestrator resumes the right earlier stage.
+
+  **Sweep the design's numbered task-local decisions before handing off.** Walk
+  `lld.md`'s decisions in order, quote the code realising each, and mark it conform or
+  deviate — a bounded, mechanical pass over a list the design already enumerated. A
+  deviation the implementer would have noticed is not the kind that ships; the kind that
+  ships is a decision implemented correctly and then widened while fixing something
+  else, which reads as ordinary intentional code. #494 shipped a `try`/`catch` widened
+  past decision 4's stated `{interpret, build reply, send}` boundary to include the
+  claim-table write, so a bookkeeping failure after a charged send marked the claim
+  reclaimable and a redelivery drew a second charged reply. That round declared three
+  deviations and missed this one, because nothing walked the list.
+
+  **Run the attested suite the way its workflow runs it.** `record-local-ci` stands in
+  for a main-only workflow, so the run behind it has to use that workflow's own
+  invocation — the config's `requiredWorkflows[].files` names the file to read. An
+  invented invocation manufactures environmental failures that are indistinguishable
+  from regressions in the diff: #494's first full `test:it` ran without the workflow's
+  `--runInBand` and returned 247 failures across 51 untouched suites, costing a baseline
+  reproduction to prove the diff innocent.
 
   **Write tests against behaviour, never against implementation.** A test pinned to how
   the code works rather than what it guarantees is a *change-detector*: it goes red on

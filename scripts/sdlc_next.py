@@ -2115,8 +2115,39 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
 
     runner(["git", "-C", repo_path, "fetch", "origin"])
     active_branches = active_worktree_branches(repo_path, runner=runner)
-    active_footprints = []
+
+    # Split the live worktrees into the ones something is actually working in
+    # (`occupied`) and the ones holding a branch nothing can advance (`stale`)
+    # BEFORE either the footprint collision set or the slot count is derived
+    # from them. Both derivations have to see the same split: a worktree whose
+    # issue is closed, needs-human, gate-pending or blocked is not a collision
+    # risk for the same reason it is not a slot -- nothing is going to write in
+    # it. Deriving the slot count from the split while deriving collisions from
+    # the raw list is what stranded #494 on 2026-09-13: it was skipped for
+    # "footprint overlaps active/eligible #323" where #323 was a parked
+    # worktree of another epic, blocked on an open dependency, correctly
+    # excluded from the slot count two loops further down and just as correctly
+    # unable to collide with anything (see `references/history.md`).
+    occupied, stale = [], []
     for branch in sorted(active_branches):
+        number = issue_number_from_branch(branch)
+        if number is None:
+            continue
+        issue = by_number.get(number)
+        if issue is None or issue["state"] != "OPEN":
+            stale.append({"branch": branch, "reason": "issue is closed or not found"})
+            continue
+        status = pipeline_status(issue)
+        if status == "needs-human" or status in GATE_PENDING_STATUSES:
+            stale.append({"branch": branch, "reason": f"Pipeline Status is {status!r}"})
+            continue
+        if gh.blocked_by(number):
+            stale.append({"branch": branch, "reason": "blocked by an open dependency"})
+            continue
+        occupied.append(branch)
+
+    active_footprints = []
+    for branch in occupied:
         number = issue_number_from_branch(branch)
         if number is None:
             continue
@@ -2180,24 +2211,8 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
     # `release_worktree`'s job at park time; counting it correctly here is the
     # backstop for when that didn't happen -- a crashed session, a hand-parked
     # issue, or the 2026-08-20 incident where a leftover /tmp/sdlc-dev-186 read
-    # as a full lane and silently starved the invocation.
-    occupied, stale = [], []
-    for branch in sorted(active_branches):
-        number = issue_number_from_branch(branch)
-        if number is None:
-            continue
-        issue = by_number.get(number)
-        if issue is None or issue["state"] != "OPEN":
-            stale.append({"branch": branch, "reason": "issue is closed or not found"})
-            continue
-        status = pipeline_status(issue)
-        if status == "needs-human" or status in GATE_PENDING_STATUSES:
-            stale.append({"branch": branch, "reason": f"Pipeline Status is {status!r}"})
-            continue
-        if gh.blocked_by(number):
-            stale.append({"branch": branch, "reason": "blocked by an open dependency"})
-            continue
-        occupied.append(branch)
+    # as a full lane and silently starved the invocation. The split itself is
+    # computed once, above, so collisions and slots cannot disagree about it.
     active_count = len(occupied)
     slots = max(0, limit - active_count)
     selected = eligible[:slots]
@@ -3693,13 +3708,22 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
     # stage anyway, so the pipeline advanced on an unverified handoff. A result
     # nobody is forced to look at is not a check.
     #
-    # `REVIEW_ROLES` are excluded because they legitimately have no Stage value
-    # of their own -- a review runs immediately after the stage before it and
-    # inherits that stage's value (see the lifecycle model in SKILL.md). Asking
-    # `--expect-stage pr-review` is therefore always misuse, and is reported as
-    # such rather than as a pipeline failure, so the two cases stay
-    # distinguishable.
-    if expect_stage in REVIEW_ROLES:
+    # Most `REVIEW_ROLES` are excluded because they legitimately have no Stage
+    # value of their own -- a review runs immediately after the stage before it
+    # and inherits that stage's value (see the lifecycle model in SKILL.md).
+    # Asking for one of those is misuse, and is reported as such rather than as
+    # a pipeline failure, so the two cases stay distinguishable.
+    #
+    # `pr-review` is the exception and must NOT be refused: it is a real Stage
+    # field value ("PR Review" in `STAGE_FIELD_NAMES`), the one `open-dev-pr`
+    # writes as `development`'s own exit action. Refusing it left the
+    # `development` handoff with no accepted `--expect-stage` value at all --
+    # `development` fails because the field has already moved on, `pr-review`
+    # failed as misuse -- so the single most bounce-prone handoff in the
+    # pipeline was the one handoff this command could not verify, and the
+    # orchestrator fell back to checking it by hand (2026-09-13, #494; see
+    # `references/history.md`).
+    if expect_stage in REVIEW_ROLES and expect_stage not in STAGE_FIELD_NAMES.values():
         result["ok"] = False
         result["misuse"] = (f"`{expect_stage}` is a review role and has no Stage field value of "
                             f"its own -- it inherits the preceding stage's. Verify a review by "

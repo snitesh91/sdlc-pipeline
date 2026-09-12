@@ -43,6 +43,30 @@ specifying a new helper, a new module, or a new dependency:
 **Never assume something is missing** because you did not immediately see it. Say what
 you searched for and what you found.
 
+**Every number and every boundary you write down carries the source it came from.**
+The two things this stage gets wrong are not design judgements — they are constraints
+restated from memory when the source was one grep away, and both bounce at `lld-review`:
+
+- **A threshold, cap, limit or count you derive from an acceptance criterion is quoted
+  next to the constant** — the criterion's own sentence, verbatim, in the document.
+  Paraphrasing a limit is how it changes magnitude. On #494, `product.md` set the
+  threshold at "a single interactive list" — ten sections of ten rows — and the design
+  restated it as one ten-row section, narrowing the behaviour roughly tenfold with no
+  one able to see the substitution, because the source sentence was not on the page
+  next to the number.
+- **A shared boundary you route a value into is read, not assumed from its name** —
+  the logger, the serializer, the error formatter, the response mapper. When an
+  acceptance criterion constrains what may cross that boundary (privacy, redaction,
+  authorization), open its implementation and quote the line that decides what escapes.
+  On the same child the design passed a caught `Error` to `logger.error(msg, err)`
+  against an AC forbidding message bodies in logs; `NormalisingLogger.dispatch`
+  promotes any `Error` in a call's args straight into the emitted record, and the
+  upstream client's error embeds up to 200 characters of the provider's raw response —
+  routinely the parent's phone number. The name `logger.error` did not say that. The
+  implementation did.
+
+Both rules cost one grep each. `lld-review` will spend a whole round on either.
+
 **Infrastructure authority is not yours.** If this child genuinely needs
 infrastructure the epic's `architecture.md` does not authorise — a metrics sink, a new
 client, a new dependency — that is a deviation, not a detail. Escalate it.
