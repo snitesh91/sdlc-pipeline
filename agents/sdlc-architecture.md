@@ -100,7 +100,7 @@ a stated zero is a claim a reviewer can check; silence is not.
 **5. Acceptance criteria are a flat list, and nothing cites them.** One line each, no
 sub-bullets, no rationale, no evidence notes. **Never reference an AC by number
 elsewhere in the document** — those references rot the moment the list is revised, and
-`testing` maps criteria to tests from the list itself.
+`development` maps criteria to tests from the list itself.
 
 ## Escalation — where the human actually gets consulted
 
@@ -171,7 +171,7 @@ Follow **Document altitude** in `stage-playbooks.md` exactly.
 
 **Acceptance criteria bar:** each one must be *observable and unambiguous enough to
 write a failing test from, without reading any code*. Prose alone does not clear this
-bar. `testing` will map each criterion to a test that fails when the criterion is
+bar. `development` maps each criterion to a test that fails when the criterion is
 violated; a criterion that cannot be tested that way is a criterion you have not
 finished writing.
 

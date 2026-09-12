@@ -50,7 +50,7 @@ Once an epic is `epic:architected`, each child enters the pipeline **at `lld`** 
 lighter per-task design pass working from the epic's approved `architecture.md`:
 
 ```
-child issue: stage:lld -> [lld-review, automated, mandatory, no human gate] -> stage:development -> stage:testing -> [pr-review] -> CLOSED
+child issue: stage:lld -> [lld-review, automated, mandatory, no human gate] -> stage:development -> [pr-review] -> CLOSED
 ```
 
 `lld` has its own dedicated Stage value (`LLD`), its own doc (`lld.md`), its own
@@ -380,7 +380,7 @@ guards one altitude down.
 
 **The full e2e suite runs once, at epic close** (operator policy, 2026-08-22) — owned
 by the epic's dedicated e2e child, which should therefore be sequenced after the
-children whose surfaces it proves. Per-child `testing` runs only the specs covering the
+children whose surfaces it proves. Per-child, `development` runs only the specs covering the
 surfaces that child moved; a full suite per child is minutes of Docker for evidence the
 scoped run already gives. Triage the closing run's deltas by a stated rule, not case by
 case:

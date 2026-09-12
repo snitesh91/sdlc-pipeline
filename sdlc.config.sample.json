@@ -55,7 +55,6 @@
       "product": "STAGE_PRODUCT_ID",
       "architecture": "STAGE_ARCHITECTURE_ID",
       "development": "STAGE_DEVELOPMENT_ID",
-      "testing": "STAGE_TESTING_ID",
       "pr-review": "STAGE_PR_REVIEW_ID",
       "lld": "STAGE_LLD_ID"
     },
@@ -156,7 +155,6 @@
       "lld": "sonnet",
       "lld-review": "opus",
       "development": "sonnet",
-      "testing": "sonnet",
       "pr-review": "opus"
     },
     "docTemplates": "_templates",

@@ -2,7 +2,7 @@
 
 An agent-driven SDLC pipeline over GitHub Issues. One invocation drives actionable
 work — an epic through `product` → `architecture`, then each child through
-`lld` → `development` → `testing` → `pr-review` → merge — with the design and
+`lld` → `development` → `pr-review` → merge — with the design and
 implementation stages fanning out into bounded, worktree-isolated parallel pools.
 Eligibility is computed mechanically from native `blockedBy` edges and declared
 footprints, never hand-tracked.
@@ -110,7 +110,7 @@ mkdir -p <repo>/<docRoot>/_templates && cp templates/*.template.md <repo>/<docRo
 ```
 
 - **Agent definitions** (`agents/`): `sdlc-product`, `sdlc-architecture`,
-  `sdlc-design-review`, `sdlc-lld`, `sdlc-development`, `sdlc-testing`,
+  `sdlc-design-review`, `sdlc-lld`, `sdlc-development`,
   `sdlc-pr-review`, `sdlc-exploratory`. Each carries persona, procedure, refusal
   criteria and `tools:` only; pipeline rules stay in `references/stage-playbooks.md`.
   They reference the skill only as `$SDLC_DIR/...` (see Setup step 3).

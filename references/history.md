@@ -1361,3 +1361,107 @@ Operator: keep the Gate B confidence-skip at `gates.skipConfidenceThreshold` (de
 allow a fable-run arch-review to drive it. Fable is trusted to emit an honest confidence and 95
 is a high enough bar. No force-open, no raised threshold, no opus-only carve-out. Closes the
 open question left by the 2026-09-12 fable-tier change.
+
+## 2026-09-12 (e) — three docs only; `testing` merged into `development`
+
+Operator retrospective, landed as one change. Two decisions, taken in that order, with
+a literature check against published industry practice in between.
+
+### 1. The per-issue doc set is closed at three files
+
+**Why.** Operator observation while running several epics in parallel: the pipeline was
+generating markdown nobody read. `development.md` existed in 123 copies and `testing.md`
+in 45 — the second never specified anywhere in this skill at all, pure agent drift that
+went unnoticed for months. Both were self-reported records of work the reader was
+simultaneously told not to trust: the `pr-review` playbook instructed the reviewer to
+treat `development.md` as claims to check, which made it a file written to be
+distrusted.
+
+**What changed.** `product.md`, `architecture.md` and `lld.md` are now the complete,
+closed list, stated as such in `stage-playbooks.md`'s doc table with an explicit rule
+that a fourth file is a defect rather than initiative. `development` writes no doc.
+Its record moved to the **PR description**, which merges into `main` with the squash
+and stays attached to the diff — the same role a change description plays in
+established review practice, and a strictly better home than a sibling file that
+nothing links to. `STAGE_RECORD_FILENAMES` drops `development`, so `verify-exit`'s
+`citations_ok` no longer looks for a file that is not written.
+
+**Considered and rejected: a `## Test Plan` section in `lld.md`.** The first shape of
+this retro added one, so that what to test was decided before the code existed. Dropped
+on the operator's call as more process than it buys, and the literature agrees from the
+other direction: a design doc that descends into "how we will implement it" should have
+been the program. A plan enumerating test names would also have become a
+change-detector spec in document form — see below.
+
+### 2. `testing` is no longer a stage — `development` owns its own tests
+
+**Why.** The operator's read of published practice at scale: there is no separate QA
+function, the author writes the tests, and what a reviewer owes the tests is a judgement
+(item four on a reviewer's checklist), not a re-run. Our `testing` stage was a second
+agent repeating the first agent's suite and reporting its own numbers — expensive, and
+duplicative of both `development` and `pr-review`.
+
+**The honest counter-argument, and what answers it.** That stage was scar tissue: it
+existed because implementers here have fabricated citations and cited vacuous green
+builds (#323, #159). The industry answer to "why can you trust the author's tests" is
+*machines run them and attach the results* — presubmit and an automated test platform,
+not a second engineer. This repo's CI went main-only for cost, with `record-local-ci`
+standing in, so deleting the stage naively would have left the implementer attesting to
+its own work with nothing mechanical behind it.
+
+**What changed.** Operator chose the local option over turning child-PR CI back on.
+`record-local-ci` now **requires `--command` and `--output`**, reads the run's own
+captured stdout/stderr from that file, refuses an empty or unreadable one, and embeds
+the tail in the PR comment beside the existing sha pin. `merge-pr` already ignored an
+attestation whose sha no longer matched the head; that freshness rule is now the whole
+gate. So the protection is not "a second agent repeated the work" but "the evidence is
+machine-produced and pinned to the tree it describes".
+
+The rest of `testing`'s durable content moved rather than died:
+- criterion→test mapping, mutation-checking the guards that matter, the
+  no-fabricated-citations rule, the stale-`tsbuildinfo` rule and the "account for what
+  could not be executed" rule are now `development` completion gates;
+- the handoff comment shape (Commands run / AC coverage / Not executed) is now
+  `development`'s, capped at 6,000 characters as an evidence-carrying comment;
+- judging whether the tests are any *good* moved to `pr-review`.
+
+`open-dev-pr` sets Stage `PR Review` instead of `Testing` and posts **no** queue marker;
+`development` posts it via `handoff-to-pr-review` only after the attestations, so an
+unattested PR cannot be reviewable. `agents/sdlc-testing.md` is deleted. The `Testing`
+Stage value is still *read* (`STAGE_FIELD_NAMES`, `REVIEW_ENTRY_STAGES`) so a child an
+in-flight epic already stamped is picked up rather than lost — nothing writes it.
+
+### 3. `pr-review` reviews the design, not the implementer's account of it
+
+**Why.** Operator: "it should validate what was supposed to be built instead of what the
+developer built." Published reviewer guidance puts **design** first on the checklist and
+the author's description in a supporting role; our playbook had the reviewer verifying
+`development.md`'s claims as a primary activity, which measures the diff against the
+implementer's own story of it.
+
+**What changed.** The spec side of the review is the design doc and its acceptance
+criteria, full stop; the PR description, the handoff and the attestations are inputs
+that say *where to look*, never the standard. The review now carries an explicit
+priority order — design, functionality, complexity, tests, then naming/comments/style —
+and an explicit **code-health** bar: approve what definitely improves the codebase
+rather than holding out for perfect, since no human follows this stage to overrule an
+over-strict verdict. Test quality became a named lens with three checks: behaviour not
+implementation (a test pinned to *how* the code works is a **change-detector** — red on
+every behaviour-preserving refactor, reporting churn instead of regressions), no
+existence-only assertions, and every acceptance criterion covered by a test that would
+actually go red. The blanket suite re-run is replaced by a **selective mutation probe**
+on the guards carrying the real acceptance, with the conditional re-run rule now keyed
+on the shape of the local-CI evidence rather than on a `testing` round that no longer
+exists.
+
+`development` also gained the same test-writing guidance from the other side: drive
+tests through the public surface, assert observable behaviour, never assert on a mock's
+own return value, and size tests down — mostly narrow unit tests, a middle band of
+integration tests where a boundary is genuinely crossed, a thin end-to-end top.
+
+### Not changed
+
+The rework valve keeps one pairing fewer (`pr-review` <-> `development` only; the
+`testing` <-> `development` counter is gone with the stage). Child-PR CI stays
+main-only. No epic-level doc changed shape. The `_templates` skeletons are untouched —
+neither carried a testing section.

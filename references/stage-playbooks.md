@@ -16,25 +16,31 @@ says "the repo's own commands", that is where to look.
 Each child issue gets a folder `<docRoot>/issue-<n>/`, committed on the
 `issue-<n>` branch and merged into `main` with the eventual squash-merge. (A normal
 epic's own phase writes into `<docRoot>/epic-<n>/` instead — see
-`references/epics.md`, "Doc layout at the epic level".) Up to three predefined files:
+`references/epics.md`, "Doc layout at the epic level".) **Three filenames exist in
+this pipeline and no others:**
 
 | File | Written by | Required? |
 |---|---|---|
 | `product.md` | `product` (standing-epic children only) | Required for a standing-epic child, except a bug fast-track where `architecture` determined no product input was needed. **Never written for a normal-epic child** — that work happened in the epic's own `product.md`. |
 | `architecture.md` (standing-epic child) or `lld.md` (normal-epic child) | `architecture` or `lld` stage | Always — even a child needing no design decisions beyond the epic's `architecture.md` gets a short `lld.md` saying so, for structural consistency |
-| `development.md` | `development` | Always |
 
-`testing`, `arch-review`/`lld-review` and `pr-review` get **no** doc file. The two
-reviews are point-in-time passes; `testing`'s output is a **structured handoff
-comment** (see its exit action below) rather than a file, deliberately — a file of
-self-reported pass/fail numbers is exactly what `pr-review` is told not to trust, so
-it was a file written to be distrusted. Findings live in the issue comment thread
-(and in whichever doc a resumed stage updates).
+**`development`, `arch-review`/`lld-review` and `pr-review` write no doc file at all.**
+The two reviews are point-in-time passes whose findings live in the issue comment
+thread. `development`'s record is the **PR description** — what was built and why,
+travelling with the diff into `main` — and its evidence is the `record-local-ci`
+attestations, which carry each suite run's own captured output pinned to a head SHA.
+A committed file of self-reported pass/fail numbers is exactly what `pr-review` is
+told not to trust, so it was a file written to be distrusted (`development.md` and the
+never-specified `testing.md` both died this way on 2026-09-12 — `references/history.md`).
+
+**Writing any other file under `<docRoot>/issue-<n>/` is a defect, not initiative.**
+The list above is closed. If a stage believes it needs a fourth document, that is a
+question for a retrospective, not a call it makes mid-run.
 
 Each doc must be **detailed enough that the next stage's agent works from it
 independently**, without reconstructing context from the comment history. A doc may
 double as the stage's working/scratch space (e.g. an internal checklist inside
-`development.md`), but the filenames above are canonical — no alternate names.
+`lld.md`), but the filenames above are canonical — no alternate names.
 
 A normal-epic child's `lld.md` and every child's design doc must carry a `## Footprint`
 section in the exact parseable shape defined in `references/epics.md`, "How to size
@@ -44,8 +50,8 @@ the children" — backticked paths, one per bullet.
 
 `product.md` and `architecture.md` (epic-level, or issue-level for a standing child)
 are both read by a **human** at a gate, but they are not the same kind of document and
-do not follow the same rules. `development.md` and `lld.md` have **no** human gate and
-can stay as technical as the work demands; `lld.md` has no altitude requirement at all.
+do not follow the same rules. `lld.md` has **no** human gate and no altitude
+requirement at all — it can stay as technical as the work demands.
 
 Start both from the matching skeleton in `<docRoot>/<pipeline.docTemplates>/` (default `_templates`) — copy it in,
 fill the sections in order, delete the template's instructional HTML comments.
@@ -137,7 +143,7 @@ Within that:
 - **Acceptance criteria are a flat checklist and nothing else** — one line each, no
   sub-bullets, no rationale, no evidence notes. **Nothing elsewhere in the document
   cites an AC by number**; cross-references rot the moment the list is revised, and
-  `testing` maps criteria to tests from the list itself.
+  `development` maps criteria to tests from the list itself.
 - **Data model and Failure modes are conditional** — present only when entities or
   invariants actually change, or when the design introduces a genuinely new way for
   production to break. Do not draw the existing model.
@@ -151,7 +157,7 @@ Within that:
 
 See "Review altitude" under `arch-review` below for how this shapes review findings.
 
-## Citation discipline — every stage, not just `testing`
+## Citation discipline — every stage, without exception
 
 Every stage in this pipeline cites the codebase and the docs, and **every stage has
 shipped a wrong citation** — line numbers shifted by an addendum, a test cited ten
@@ -180,8 +186,8 @@ The rules that came out of it:
   `references/history.md`).
 - **A stale citation in a doc that is about to merge is a real finding**, not a nit —
   it merges into `main` as a record that actively misleads the next reader. That has
-  been a blocking finding on a `development.md` that still documented a locator the
-  `testing` stage had empirically disproved.
+  been a blocking finding on a design doc that still documented a locator the suite
+  run had empirically disproved.
 - **A citation can be correct when written and wrong when merged — nothing re-checks
   it after a merge.** A merge commit that pulls a sibling's refactor onto the branch
   after the docs were authored breaks every line number that pointed into the
@@ -208,7 +214,7 @@ from a passing one in a `--list` output.
 This is not hypothetical: new end-to-end tests have shipped with a locator that matched
 the wrong element and yielded `NaN`, past a clean `--list` check, in a suite where they
 skipped under the repo's default e2e invocation — they would have merged broken and
-silently stayed broken; `testing` caught it only by executing them for real (see
+silently stayed broken; it was caught only by executing them for real (see
 `references/history.md`).
 
 So: **no stage may report a test as covering an acceptance criterion unless it observed
@@ -219,9 +225,10 @@ of trusting a coverage claim that was never true.
 **A green build is not a build either — clear stale incremental state first.** An
 incremental TypeScript build (`nest build`, `tsc -b`) with a stale, gitignored
 `*.tsbuildinfo` on disk decides nothing changed, **emits nothing, and exits 0** — a
-vacuous green. It happened twice in one epic (#323 `development` and `testing` both
-reported a passing build that produced no `dist/main.js`; see `references/history.md`,
-2026-09-12). Standing step for `development`, `testing` and `pr-review`, whenever a
+vacuous green. It happened twice in one epic (#323, in `development` and again in the
+since-retired `testing` stage, both reporting a passing build that produced no
+`dist/main.js`; see `references/history.md`, 2026-09-12). Standing step for
+`development` and `pr-review`, whenever a
 build is used as a verification gate: **before** the build, remove the stale cache
 (`find <package> -name '*.tsbuildinfo' -delete`, or the repo's clean target) — **or**,
 after it, assert the expected artifact exists and is newer than the sources
@@ -237,9 +244,9 @@ the e2e suite — run it with `run_in_background` and **wait on it in-turn via t
 tool** (foreground `sleep` is blocked). What must never happen is ending the turn
 "standing by" for a background job or a Monitor notification to resume the agent: the
 notification never arrives, the stage stalls until a human nudges it, and it registers
-as no progress. This recurred across every `development`/`testing` agent of epic #430
+as no progress. This recurred across every implementing agent of epic #430
 and killed two agents outright on earlier epics (see `references/history.md`). The rule
-lives in the `sdlc-development`/`sdlc-testing`/`sdlc-pr-review`/`sdlc-design-review`
+lives in the `sdlc-development`/`sdlc-pr-review`/`sdlc-design-review`
 agent definitions too; it is repeated here because it is a property of the whole
 pipeline, not one stage.
 
@@ -323,8 +330,8 @@ For any such child, at **every** stage that touches the class:
   cover the other.
 - **`development` applies the class rule per instance; it does not re-judge the
   class.** The `lld` states the rule once ("every `fixed bottom-0` bar this child adds
-  or finds takes `bottom-14 md:bottom-0`"); `development.md` reports that the rule was
-  applied to each swept instance, not merely that the AC "passes". A per-file checklist
+  or finds takes `bottom-14 md:bottom-0`"); `development`'s handoff reports that the
+  rule was applied to each swept instance, not merely that the AC "passes". A per-file checklist
   that `development` works item by item is exactly where a missed-because-unlisted file
   ships looking identical to an audited-clean one — so the inventory the checklist is
   built from must be the sweep's output, not a hand-typed list.
@@ -345,7 +352,7 @@ ran the previous stage. Comments are the **visibility record** for a human and t
 
 - **Start comment is mandatory.** `🚧 Picking this up — <role> stage starting.` —
   posted before delegating, every time. When the orchestrator posts it itself
-  (`arch-review`, `lld-review`, `pr-review`, and `testing` right after `open-dev-pr`):
+  (`arch-review`, `lld-review`, and `pr-review`):
   `sdlc_next.py start-comment <n> --role <role>` — never hand-typed. (For roles
   claimed via `claim`/`pass-gate` the comment is already posted by that call — don't
   post twice.)
@@ -368,7 +375,7 @@ dilutes the few lines that decide whether a round succeeds. So:
 - **Stage handoff comment: ≤ 2,000 characters.** What changed, where the doc/commit is,
   the delta since the last round, the marker. The doc carries the detail.
 - **Evidence-carrying comment** (`product-review`, `arch-review`/`lld-review`,
-  `pr-review`, `testing`'s handoff): **≤ 6,000 characters.** Findings first, each as
+  `pr-review`, `development`'s handoff): **≤ 6,000 characters.** Findings first, each as
   one heading plus at most three lines (what, why it matters, the fix — described, not
   applied); non-blocking findings one line each; the verdict one line. Command output
   and quotes go in a `<details>` block trimmed to the lines that prove the point (≤ 15
@@ -400,7 +407,7 @@ it, commit that change with the related code.
 `architecture.md` has its own path — `references/epics.md`, "Epic-level deviation
 escalation". Everything else below applies to any child of any epic.)
 
-If a later stage (`arch-review`/`lld-review`, `testing`, `pr-review`) finds a real
+If a later stage (`arch-review`/`lld-review`, `pr-review`) finds a real
 problem attributable to an earlier stage, **do not spawn a fresh subagent and do not
 open a separate GitHub issue.** The orchestrator resumes the original subagent owning
 the responsible stage (via `SendMessage` to its tracked ID) with the specific finding
@@ -488,7 +495,7 @@ still found a blocking issue. The resume message should:
   conclusion rested on. A doc-only delta cannot move a suite result; a code delta can.
 
 **Escalation valve, per stage pairing**: each recurring problem gets its own counter
-(e.g. `arch-review` <-> `architecture`, `testing`/`pr-review` <-> `development`,
+(e.g. `arch-review` <-> `architecture`, `pr-review` <-> `development`,
 `sync-branch-conflict` <-> `development`). The valve has **two stages and a ceiling** —
 `pipeline.escalation.replaceAt` bounces with the incumbent agent (default 3), then a
 replacement up to `needsHumanAt` (default 6); `pairing-counts` echoes both:
@@ -803,9 +810,16 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
   coverage as unverified: ask for the count.
 
 - **`development` done** — Implement with TDD per repo conventions, in the child's
-  worktree on `issue-<n>`, in small logical **local** commits. Write
-  `issue-<n>/development.md` (what was built, how it maps to the design doc, commit
-  list, how to verify) and commit it alongside the code.
+  worktree on `issue-<n>`, in small logical **local** commits. **This stage owns the
+  tests.** There is no separate `testing` stage — it was merged in here on 2026-09-12
+  (`references/history.md`) — so the suite is written, run and evidenced by the same
+  agent that writes the code, and `pr-review` judges whether the tests are any good.
+
+  **The record is the PR description, not a doc file.** What was built, how it maps to
+  the design doc, how to verify it, what was deferred and why, and every deviation from
+  the design as an explicit delta — all of it goes in the PR body, where it merges into
+  `main` with the squash-merge and stays attached to the diff forever. Nothing is
+  written under `<docRoot>/issue-<n>/` by this stage.
 
   **Push discipline — batch, don't push per commit (operator directive, 2026-09-04).**
   Commit locally as often as is natural, but **push once per stage cycle**, not after
@@ -824,25 +838,65 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
 
   Open the draft PR via
   `sdlc_next.py open-dev-pr <n> --title "..." --body "..." --summary "..."` — appends
-  `Closes #<n>`, sets Stage to `Testing`, posts the handoff comment. Do not mark it
-  ready or merge it yourself. If a push is ever rejected, stop and report — don't work
-  around it. **On a blocker** (ambiguous requirement, missing design decision): stop
-  and report the specific question in your final message — never create issues or
-  change fields yourself; the orchestrator resumes the right earlier stage.
+  `Closes #<n>`, sets Stage to `PR Review`, posts the PR-opened comment. It posts **no**
+  queue marker, deliberately: a PR is not reviewable until its suites are attested. Do
+  not mark it ready or merge it yourself. If a push is ever rejected, stop and report —
+  don't work around it. **On a blocker** (ambiguous requirement, missing design
+  decision): stop and report the specific question in your final message — never create
+  issues or change fields yourself; the orchestrator resumes the right earlier stage.
 
-  **Completion gates — all of them before `open-dev-pr`, not after.** Each exists
-  because it was skipped once and something shipped broken:
+  **Write tests against behaviour, never against implementation.** A test pinned to how
+  the code works rather than what it guarantees is a *change-detector*: it goes red on
+  every refactor that preserves behaviour, so it reports churn instead of regressions
+  and trains everyone to edit the test until it passes. Drive every test through the
+  public surface — the exported function, the HTTP route, the rendered component — and
+  assert on the observable result, never on a mock's own return value or on a private
+  call sequence. This is the single quality bar `pr-review` applies to your tests.
+
+  **Size your tests down, not up.** Narrow tests that run in one process are fast and
+  deterministic; a broad one that stands up the world is neither, and a suite that
+  leans on the broad ones gets slow enough to be skipped and flaky enough to be ignored.
+  The healthy shape is mostly narrow unit tests over the business logic, a middle band
+  of integration tests over the interactions that actually cross a boundary, and a thin
+  top of end-to-end coverage. Reach for the integration suite when the risk is genuinely
+  in the interaction (a real query against the real Postgres, a real HTTP round trip) —
+  not to re-test logic a unit test already pins.
+
+  **Run the suites yourself and keep the output.** Use the repo's own lint/build/test
+  commands as documented in its `CLAUDE.md` and in the `sdlc-development` agent
+  definition, in the environment the repo mandates (inside its container when it says
+  so — never the host-side equivalent). Redirect each run to a file; you need that file
+  for the attestation. Any command that can outlast the default tool-call timeout needs
+  `run_in_background` plus an in-turn `Monitor` wait, or an explicit ≥600s timeout.
+
+  **Do not run `make e2e`.** A full end-to-end run costs over an hour of wall clock and
+  contends for shared ports and Docker stacks. End-to-end behaviour is proven once, at
+  epic close, against the finished tree (`references/epics.md`, "Epic closing"). If you
+  believe the change genuinely cannot be validated without it, say so in your handoff
+  and stop; do not start a run.
+
+  **Affected-graph scoping (once workspace packages + Turborepo exist).** When the repo
+  has explicit package boundaries and a Turborepo DAG, an intermediate run may be scoped
+  to the affected packages — `turbo run test --filter='...[<base-ref>]'` — with cache
+  reuse, instead of the whole suite every time. Unit tests continuous during
+  development; the integration slice for the affected packages run once, backgrounded,
+  before `open-dev-pr`; the **full** suite run once at epic close. Note the blind spot:
+  raw cross-table SQL against tables a package does not own is invisible to both
+  boundary lint and the affected graph, so the epic-close full run stays its backstop.
+
+  **Completion gates — all of them before the handoff, not after.** Each exists because
+  it was skipped once and something shipped broken:
 
   1. **Every risk flagged by the design doc is closed against the real system, not
      mocked away.** A unit test against a mock does not close an integration risk — it
      tests the mock. Close it against a real database (the repo's integration suites
      run against one), a real HTTP call, the real queue. If it genuinely cannot be
-     closed here, say so explicitly in `development.md` and name what would close it;
+     closed here, say so explicitly in the PR description and name what would close it;
      do not let the mock stand in for the answer.
   2. **"Manually verified" claims cite evidence, not assertion.** A terminal
      transcript, a log excerpt, a response body, or numbered repro steps someone else
      can re-run. The words "manually verified" with nothing attached are treated as
-     not verified — by `testing`, by `pr-review`, and here.
+     not verified — by `pr-review`, and here.
   3. **Golden-path behaviour is explicitly re-confirmed, not assumed.** Whenever the
      change touches shared code or error handling, re-run the pre-existing
      non-edge-case behaviour and record the result. Fixing an edge case while breaking
@@ -854,79 +908,47 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
      **wired into no entrypoint**, with commit messages reading as a finished build —
      `references/history.md`, 2026-08-28. A unit test of a function in isolation
      cannot prove the call site exists.)
+  5. **Every acceptance criterion has at least one test that would fail if the
+     criterion were violated** — a behaviour test, not an existence test. Map criterion
+     → test file and test name, one line each, in the handoff comment. A criterion with
+     no such test is a gap you close before handing off, not one you declare.
+  6. **Mutation-check the guards that matter.** For the tests that carry the real
+     acceptance — not every test — deliberately break the behaviour under test, confirm
+     the test goes red, revert. State the mutation and what went red. A test that stays
+     green against deliberately broken code is a decoration. Leave the tree clean
+     (`git status`) before handing off.
+  7. **A build you cite is a real build.** A stale gitignored `*.tsbuildinfo` makes an
+     incremental `nest build` emit nothing and exit 0 — twice on epic #159 a "passing"
+     build produced no `dist/main.js`. Delete the stale cache or assert the artifact
+     afterwards, and say which. Exit 0 alone is not evidence.
+  8. **Never cite a `file:line` you have not opened in this session.** Anchor every
+     reference to a quote you can produce — `grep -n "<literal string>" <path>` — so it
+     is checkable by the next reader rather than merely plausible. Fabricated citations
+     have shipped from this repo before.
 
-- **`testing`** — `open-dev-pr` already set Stage=`Testing` and posted development's
-  handoff; that is not testing's start comment. Orchestrator posts
-  `start-comment <n> --role testing` before delegating.
+  **Exit, in order.** First, for **each main-only required suite this round actually
+  ran** (suite keys come from the config's `requiredWorkflows[].suite`):
 
-- **`testing` done** — On `issue-<n>` (not `main`). **No doc file and no commit** —
-  the output is the structured handoff comment below. `testing` is read-only on the
-  tree for the same reason the two reviews are: every gap it finds, including a
-  missing or weak test, goes back to `development` through the rework valve rather
-  than being quietly fixed around it. Its one temporary write is the mutation check,
-  which it reverts before finishing (`git status` clean).
+  ```
+  sdlc_next.py record-local-ci --pr <pr> --suite <suite> --sha <HEAD> \
+      --command "<the exact command>" --output <path to that run's captured output>
+  ```
 
-  **Refuse an incomplete handoff.** If `development.md` is missing what was built,
-  the commands to run, the acceptance criteria it claims to cover, or what it
-  deferred — stop before validating anything, name the missing field, and resume the
-  `development` agent. Do not begin validation of an incomplete handoff.
+  This is the merge-gate stand-in for the GHA check that no longer runs on a child PR
+  (required suites went main-only for cost — `references/operations.md`, "Local-CI
+  attestation"). **It is also the only thing standing between a self-run suite and the
+  merge gate**, which is why it refuses a summary and demands the run's own captured
+  output pinned to the exact head SHA. Run it on the **current** head, after the last
+  push; a stale attestation from a prior head does not count. Skip it only for a suite
+  you did **not** run (a change confined to one suite's `prefixes` never ran the other,
+  and its tree isn't touched, so the gate won't ask for it).
 
-  **The mandate: independent verification.** `development.md`'s numbers are an input
-  to check, never evidence. Whatever it reports, verify all of this yourself:
-  - **Run the exact commands it claims were run** and confirm the output matches the
-    reported numbers. Report *your* numbers. Use the repo's own lint/build/test
-    commands as documented in its `CLAUDE.md` and the `sdlc-testing` agent definition,
-    in the environment the repo mandates for them (inside its container when it says
-    so — never the host-side equivalent). Run the end-to-end suite when the change
-    touches a user-facing flow — **scoped to the specs covering the surfaces this
-    child moved**, not the whole suite (operator policy, 2026-08-22; the full suite
-    runs once at epic close — see `references/epics.md`, "Epic closing"). The e2e
-    suite is not a known-broken suite: the committed harness config is presumed to
-    work, and a failure is a finding to root-cause, not a reason to route around it —
-    see `references/parallelism.md`, "The e2e suite is not known-broken". Any command
-    that can outlast the default tool-call timeout needs `run_in_background` or an
-    explicit ≥600s outer timeout.
-  - **Confirm each acceptance criterion has at least one test that would fail if the
-    criterion were violated** — a behaviour test, not an existence test. Map criterion
-    → test file and test name, one line each. A criterion with no such test is a
-    coverage gap, and a gap is a finding.
-  - **Mutation-check the guards that matter.** Deliberately break the behaviour under
-    test, confirm the test goes red, revert. State the mutation you made and what went
-    red. A test that stays green against deliberately broken code is a decoration, not
-    a guard — this check has repeatedly separated the two.
-  - **Cite evidence, never assertion.** Every claim carries a command and its real
-    output, or a grep-anchored quote (`grep -n "<literal>" <path>`). **Never cite a
-    `file:line` you have not opened in this session** — fabricated citations have
-    shipped from this stage before, which is why the anchor is a quote, not a number.
-  - **Account for what could not be executed and why** — a suite that needs an
-    external service, a flow only reachable through the UI. Silence reads as "ran and
-    passed"; say it explicitly instead.
+  Then `sdlc_next.py handoff-to-pr-review <n> --pr <pr> --summary "..."` — **always**,
+  including after rework (the marker is the review queue; never hand-type it). The
+  summary is the handoff comment below; post it as its own comment immediately before
+  the call when it runs long.
 
-  **Affected-graph scoping + tiered cadence (once workspace packages + Turborepo
-  exist).** When the repo has explicit package boundaries and a Turborepo DAG, an
-  intermediate `testing`/`pr-review` run may be scoped to the affected packages —
-  `turbo run test --filter='...[<base-ref>]'` — with cache reuse, instead of the whole
-  suite every time. The cadence this enables: unit tests continuous during
-  `development` (no DB, seconds); the IT slice for the affected packages run once,
-  backgrounded, before `open-dev-pr` / before a `pr-review` verdict; the **full** suite
-  run exactly once at epic close (`references/epics.md`, "Epic closing"). This is
-  guidance *enabled by explicit boundaries*, not a licence to trust numbers: `testing`
-  and `pr-review` still re-run independently and report their own numbers — the scoping
-  narrows what runs, it does not remove the independent gate. Until the package graph
-  exists, run the suite as documented. Note the blind spot: raw cross-table SQL against
-  tables a package does not own is invisible to both boundary lint and the affected
-  graph, so the epic-close full run stays the backstop for it.
-
-  **Reject tests that don't test** — existence-only assertions
-  (`expect(service).toBeDefined()`), no meaningful assertion about output or state,
-  a test asserting on its own mock's return value, or a test that survives the
-  mutation check unchanged. That is a `Fail` sent back to `development` with the
-  specific feedback, not a note in passing. The worked examples and the
-  four-question self-check are in the `sdlc-testing` agent definition.
-
-  **The handoff comment shape** (this is the whole of testing's output; pass it as
-  `--summary`, or post it as its own comment immediately before the handoff call when
-  it runs long):
+  **The handoff comment shape** (evidence-carrying, ≤ 6,000 characters):
 
   ```markdown
   ### Commands run
@@ -942,62 +964,80 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
   ### Not executed
   - <what, and why it could not run>
 
-  ### Verdict
-  PASS | FAIL — <what the evidence above proves>
+  ### Deviations from the design
+  - <the explicit delta, or "none">
   ```
 
-  - **Pass** → first, for **each main-only required suite this round actually re-ran**
-    (the suite keys come from the config's `requiredWorkflows[].suite` — see the
-    independent-verification commands above),
-    `sdlc_next.py record-local-ci --pr <pr> --suite <suite> --sha <HEAD>`,
-    where `<HEAD>` is the tested worktree's `git rev-parse HEAD`. This is the
-    merge-gate stand-in for the GHA check that no longer runs on a child PR (a
-    required suite that went main-only for cost — see `references/operations.md`,
-    "Local-CI attestation"). Skip it only for a suite you did **not** run (e.g. a
-    change confined to one suite's `prefixes` never ran the other suite, and its tree
-    isn't touched so the gate won't ask for it). A stale attestation from a prior head
-    does not count, so run this on the **current** head, after the last push. Then
-    `sdlc_next.py handoff-to-pr-review <n> --pr <pr> --summary "..."` —
-    **always**, including after rework (the marker is the review queue; never
-    hand-type it). Then either continue straight into `pr-review` in this invocation
-    or leave it for the next `list-ready-for-review` batch — both valid. Either way
-    the start comment is posted when the review actually starts.
-  - **Fail** → **post the structured handoff comment above as its own comment
-    first**, then resume the `development` agent with the failing test details; once
-    fixed, resume the `testing` agent to re-verify (don't spawn fresh — the one
-    exception is the valve's own context-reset replacement at the third bounce).
-    Valve pairing. The comment is not optional here: PASS posts one through
-    `handoff-to-pr-review`, FAIL posts nothing by default — so a FAIL round with live
-    probe evidence has left no trace on the issue and `pr-review` then blocked on
-    evidence that existed nowhere (`references/history.md`). Before delegating any
-    next stage, confirm the previous stage left a comment — if it didn't, get one.
+  **Account for what could not be executed and why** — a suite that needs an external
+  service, a flow only reachable through the UI. Silence reads as "ran and passed"; say
+  it explicitly instead.
+
+  Then either continue straight into `pr-review` in this invocation or leave it for the
+  next `list-ready-for-review` batch — both valid. Either way the start comment is
+  posted when the review actually starts.
 
 - **`pr-review`** — Orchestrator posts `start-comment <n> --role pr-review`, spawns a
   fresh subagent of type `sdlc-pr-review` (model per the config's `pipeline.models`)
-  reviewing the PR diff adversarially: real bugs, security, correctness; verify
-  `development.md`'s claims and `testing`'s handoff comment against the actual diff.
-  Check CI via `sdlc_next.py pr-checks <pr>`. May be one
-  of up to `PR_REVIEW_PARALLELISM` concurrent reviews, each in its own detached
+  reviewing the PR diff adversarially. Check CI via `sdlc_next.py pr-checks <pr>`. May
+  be one of up to `PR_REVIEW_PARALLELISM` concurrent reviews, each in its own detached
   worktree (`references/parallelism.md`).
 
-  **The suite re-run is conditional, not blanket (operator, 2026-09-12).** The
-  review's unique value is the adversarial three-layer diff read; the full-suite
-  re-run exists only as a backstop against a thin or fabricated `testing` round, and
-  when `testing` was rigorous it costs 25+ minutes of Docker wall-clock for near-zero
-  marginal signal (epic #159). Decide, and say which in the review comment:
-  - **Skip the full re-run** when `testing`'s handoff is *strong*: a Commands-run
-    table with real numbers on the current head, `record-local-ci` attestations for
-    every main-only suite the diff touches, a criterion→test map, and mutation checks
-    on the guards that matter. Then the review is the diff read plus static
-    verification, and targeted runs only.
+  **Review against what was supposed to be built, not against what the implementer
+  says they built (operator, 2026-09-12).** The spec side of the review is the design
+  doc and its acceptance criteria — `lld.md` for a normal-epic child, `architecture.md`
+  or `product.md` for a standing one. The PR description and the handoff comment are
+  *claims*: useful for knowing where to look, never evidence, and never the standard
+  the diff is measured against. An implementation that matches its own write-up
+  perfectly and the design not at all is the exact failure this ordering catches.
+
+  **What the review covers, in priority order.** This is the industry-standard reviewer
+  ordering and it is deliberate — the expensive defects are at the top:
+  1. **Design** — does the change belong in the system this way, at this boundary?
+  2. **Functionality** — does it do what the acceptance criteria say, including for
+     the user, not just for the happy path?
+  3. **Complexity** — is it more convoluted than the problem requires? Would the next
+     reader understand it?
+  4. **Tests** — are they present, and are they *good*: driven through the public
+     surface, asserting observable behaviour, and would they actually go red? An
+     existence-only assertion, a test asserting on its own mock's return value, or a
+     test pinned to implementation detail (a **change-detector**, red on every
+     behaviour-preserving refactor) is a finding, not a nit.
+  5. **Naming, comments, style, consistency, documentation** — real but cheap; these
+     are where "Nit:" belongs.
+
+  **Since `development` writes and validates its own tests, test quality is this
+  stage's job.** The `testing` stage was merged into `development` on 2026-09-12, so
+  nobody re-runs the implementer's suite as a matter of course. What replaced it is
+  narrow and mechanical: `record-local-ci` refuses an attestation without the run's own
+  captured output pinned to the current head SHA, and `merge-pr` refuses a stale one.
+  Read those attestations — the command, the output, the SHA — as the CI signal they
+  stand in for.
+
+  **Mutation-probe selectively, don't re-run blanket.** Pick the one or two guards that
+  carry the real acceptance, break the behaviour under test in your detached worktree,
+  confirm the test goes red, revert (`git status` clean). That is a far stronger signal
+  per minute than repeating a suite that already ran. Decide the rest, and say which in
+  the review comment:
+  - **Skip the full re-run** when the evidence is *strong*: a `record-local-ci`
+    attestation with real captured output on the current head for every main-only
+    suite the diff touches, plus a criterion→test map. Then the review is the diff
+    read, the mutation probe, and static verification only.
   - **Run targeted specs** (foreground, scoped to the surface) when a specific finding
-    needs confirming — a suspected edge case, a claim in `development.md` the diff does
-    not obviously support.
-  - **Re-run the suite** when the evidence is thin or suspect: numbers with no
-    command, a criterion with no named test, no mutation check, a head SHA that moved
-    after the attestation, or a `testing` round the orchestrator already had to bounce.
-  Never treat "testing passed" as the reason to skip — the *shape* of the evidence is
-  the reason. Whatever the verdict, the **last** action
+    needs confirming — a suspected edge case, a claim the diff does not obviously
+    support.
+  - **Re-run the suite** when the evidence is thin or suspect: an attestation whose
+    output does not match its claim, a criterion with no named test, a head SHA that
+    moved after the attestation, or a round the orchestrator already had to bounce.
+  Never treat "the suites passed" as the reason to skip — the *shape* of the evidence
+  is the reason.
+
+  **Approve on code health, not on perfection.** A change that definitely improves the
+  health of the codebase should go in, even when you can still imagine something
+  better; blocking it on preference rather than principle is how a review turns into a
+  gate nobody can pass. Technical fact beats taste, the repo's own conventions beat
+  personal style, and where the implementer's approach is sound, accept it and move on.
+  Reserve `rework` for what is actually wrong — a defect, a criterion unmet, a design
+  the change does not fit. Whatever the verdict, the **last** action
   before merging or resuming anyone: `sdlc_next.py record-pr-review <n> --pr <pr>
   --outcome clean|rework --summary "..."`.
   - **Clean review** → `sdlc_next.py merge-pr <pr> --issue <n>` — marks ready,
@@ -1011,10 +1051,11 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
   - **`status: missing-checks`** → never poll it (no GHA run is coming on a child
     PR). Two causes, distinguished by whether the named suite is a main-only one:
     - **a required suite not yet attested for this head** (the common case, not a
-      defect) → `testing` passed but didn't run `record-local-ci`, or a rework push
-      staled a prior attestation. Fix: run
-      `record-local-ci --pr <pr> --suite <suite> --sha <HEAD>` on the current head
-      (re-running the suite first if the diff changed since it last passed), then
+      defect) → `development` handed off without running `record-local-ci`, or a
+      rework push staled a prior attestation. Fix: run
+      `record-local-ci --pr <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`
+      on the current head, re-running the suite first (the attestation carries that
+      run's own captured output, so there is always a fresh run behind it), then
       re-check. Do **not** `mark-needs-human` for this.
     - **a genuine config defect** — some other required workflow renamed out of step
       with `REQUIRED_WORKFLOWS`, disabled, or `paths:`-mismatched →
@@ -1061,4 +1102,4 @@ Seed defects observed across epic #430 (the first Tier-3 edits, several already 
 by the 2026-09-11 retro): (a) footprint/sweep excluding `test/**` (bounced A2/A5/B1);
 (b) enumerate-not-sweep recurrence; (c) export-port adapters returning the raw entity
 instead of a field-by-field projection (GDPR over-disclosure near-miss, A3 #473);
-(d) over-running full IT and parking on a backgrounded suite (all dev/testing agents).
+(d) over-running full IT and parking on a backgrounded suite (all implementing agents).

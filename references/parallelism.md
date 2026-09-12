@@ -20,7 +20,7 @@ is quoted.
 | `pr-review` (within the one epic being driven) | Up to `PR_REVIEW_PARALLELISM` finished PRs at once, one worktree + one subagent each | "Parallel PR review" below |
 | Epic-level `product` / `architecture` (epic-self, default profile) | **Never**, within one invocation — one epic, one architecture pass at a time | `SKILL.md`, "Epic number is mandatory" |
 | Standing-epic child `product` / `architecture` | Up to `DESIGN_LANE_PARALLELISM` children of one standing epic at once, each in its own `git worktree` — `list-design-ready` computes eligibility mechanically | "Design lane" below |
-| `lld` / `development` / `testing` | Up to `DEV_LANE_PARALLELISM` children of one epic at once, each always in its own `git worktree` — `list-parallel-ready` computes eligibility mechanically | "Parallel implementation lane" below |
+| `lld` / `development` | Up to `DEV_LANE_PARALLELISM` children of one epic at once, each always in its own `git worktree` — `list-parallel-ready` computes eligibility mechanically | "Parallel implementation lane" below |
 | Rework from any review finding | **One development thread per issue, always** — a finding resumes that issue's own tracked `development` agent; several issues' rework threads may be live at once (one each), but a single issue never has two | "Rework routing stays sequential" below |
 
 **Concurrency across two *different* epics is achieved by running two separate
@@ -56,7 +56,7 @@ second one running alongside it.
 
 ## Parallel implementation lane — mechanical eligibility, worktree-always
 
-Applies to children at `lld`/`development`/`testing`: a **normal,
+Applies to children at `lld`/`development`: a **normal,
 already-`epic:architected` epic**'s children (past the epic-level design phase), and a
 standing-epic child once it reaches those stages. A standing-epic child's earlier
 per-issue `product`/`architecture` fans out through the **design lane** instead (see
@@ -118,13 +118,13 @@ every time it's called, rather than trusting a paragraph to stay accurate.
 "Working on a branch" below). The orchestrator tracks one stage-agent line per active
 child — same bookkeeping as the sequential case, just potentially more than one at a
 time. Resume-based rework is unaffected: a review finding on one child resumes only
-that child's own tracked agent, never a sibling's. Once a child reaches `testing`, it
-enters the same `list-ready-for-review` pool as any other child.
+that child's own tracked agent, never a sibling's. Once a child's `development` hands
+off, it enters the same `list-ready-for-review` pool as any other child.
 
 ## Design lane — standing-epic children's product/architecture fan out
 
 A **standing** epic (profile `epicLevelPhase == false`) runs no epic-level design
-phase; each child runs its own full `product`→`architecture`→`lld`→`development`→`testing`
+phase; each child runs its own full `product`→`architecture`→`lld`→`development`
 flow on its own issue number/branch/worktree. Without a pool query for the design
 stages, the orchestrator could only run one child's `product`/`architecture` at a time
 — serializing all design work on a backlog of 20+ children. The design lane fixes
@@ -185,13 +185,13 @@ The rules, so nobody has to rediscover it a third time:
   isolated-database setup are whatever the repo's `CLAUDE.md` and the stage's agent
   definition document — and record which batch covered which directories, so the
   batches demonstrably partition the whole tree with no overlap or omission.
-- **Do not start a second suite-running stage while one is live.** `testing` and
-  `pr-review` both re-run real suites; so does `development` under TDD. Two children
+- **Do not start a second suite-running stage while one is live.** `development` runs
+  the real suites under TDD, and `pr-review` may re-run them. Two children
   may sit in the dev lane concurrently, but hold the second one's *suite-heavy* stage
   until the first finishes. Waiting a few minutes beats spending an hour diagnosing a
   resource kill dressed up as a test failure.
 - **At most ONE Docker-IT-heavy stage runs concurrently — even when the agent cap is
-  2.** A Docker-IT-heavy stage is any `development`/`testing`/`pr-review` running the
+  2.** A Docker-IT-heavy stage is any `development`/`pr-review` running the
   integration suite. A *light* stage (an `lld` or a `design-review` that is not running
   the suite) may run alongside it, so the cap-2 lane is not wasted; a second IT suite is
   not. And **the IT suite is always run backgrounded/chunked**, never as one blocking
@@ -351,11 +351,11 @@ earlier runs' output has vanished with the container.
 
 ## Parallel PR review — reviews fan out, rework stays sequential
 
-`pr-review` is a decoupled pool: any PR that `testing` has passed sits waiting until a
-review agent picks it up, and up to `PR_REVIEW_PARALLELISM` of them can be reviewed at
+`pr-review` is a decoupled pool: any PR `development` has handed off sits waiting until
+a review agent picks it up, and up to `PR_REVIEW_PARALLELISM` of them can be reviewed at
 once, each in its own worktree. Reviews have **zero** dependency on each other; the
-cap is tuned purely against the machine's suite-running resource contention (each
-review re-runs the real test suite).
+cap is tuned purely against the machine's suite-running resource contention (a review
+may re-run the real test suite).
 
 ```bash
 python3 "$SDLC" list-ready-for-review <epic>            # up to PR_REVIEW_PARALLELISM PRs
@@ -364,10 +364,11 @@ python3 "$SDLC" list-ready-for-review <epic> --limit 1  # one-off override
 
 `<epic>` is required — the pool is scoped to the epic being driven. Returns
 `ready_for_review` (issue, PR, branch, title per entry) plus `skipped` naming every
-Stage=`Testing` child excluded and why. Read-only: never claims, never comments.
+review-entry child excluded and why. Read-only: never claims, never comments.
 
-An issue is listed when **all** hold: open child of `<epic>`, Stage = `Testing`, not
-needs-human/gate-pending, an **open draft PR** on `issue-<n>`, `testing`'s handoff
+An issue is listed when **all** hold: open child of `<epic>`, Stage = `PR Review` (or
+the retired `Testing`, for a child an in-flight epic stranded there), not
+needs-human/gate-pending, an **open draft PR** on `issue-<n>`, `development`'s handoff
 marker posted, and no `pr-review` outcome recorded since that marker.
 
 ### The two queue markers
@@ -376,17 +377,18 @@ Neither Stage nor Pipeline Status can distinguish "awaiting review" from "alread
 reviewed, dev is fixing it" — two comment markers do:
 
 ```
-<!-- stage-transition: testing->pr-review @ <ISO8601> -->     # queued for review        (handoff-to-pr-review)
+<!-- stage-transition: development->pr-review @ <ISO8601> --> # queued for review        (handoff-to-pr-review)
 <!-- pr-review-outcome: clean|rework:<pr> @ <ISO8601> -->     # a review already ran     (record-pr-review)
 ```
 
 **Both are posted by the script, never hand-typed** — the marker *is* the queue, and
 hand-written forms historically came out mangled (see `references/history.md`).
 
-- **`testing` passes** → `sdlc_next.py handoff-to-pr-review <issue> --pr <pr> --summary "..."`
-  — **every** time testing passes, including after a rework round; a fresh handoff
+- **`development` finishes** → `sdlc_next.py handoff-to-pr-review <issue> --pr <pr>
+  --summary "..."` — **every** time, including after a rework round; a fresh handoff
   marker is what makes an issue reviewable again after a recorded `rework` outcome.
-  Changes no fields — queued-for-review is not a new state.
+  Changes no fields — queued-for-review is not a new state. It comes **after** the
+  `record-local-ci` attestations, never before: an unattested PR is not reviewable.
 - **`pr-review` finishes** → `sdlc_next.py record-pr-review <issue> --pr <pr>
   --outcome clean|rework --summary "..."` — its last action, before `merge-pr` on a
   clean verdict or before resuming `development` on findings. Record the clean path
@@ -411,11 +413,12 @@ hand-written forms historically came out mangled (see `references/history.md`).
    subagent per PR in a **single parallel `Agent` call**, each with its own worktree
    path. Same `sdlc-pr-review` agent type, prompt, process, and model as the
    sequential case.
-4. **Reviews stay empirical, not diff-only.** Each agent re-runs the real test suite
-   and independently re-verifies the claims in `development.md` and in `testing`'s
-   handoff comment — that is what has caught real authorization bypasses that a
-   diff-only read passed (see `references/history.md`). If the suites starve each
-   other, lower `PR_REVIEW_PARALLELISM` — don't make the reviews shallower.
+4. **Reviews stay empirical, not diff-only.** Each agent measures the diff against the
+   approved design and its acceptance criteria, mutation-probes the guards that carry
+   that acceptance, and re-runs suites when the local-CI evidence is thin — that is what
+   has caught real authorization bypasses a diff-only read passed (see
+   `references/history.md`). If the suites starve each other, lower
+   `PR_REVIEW_PARALLELISM` — don't make the reviews shallower.
 5. Each agent finishes with `record-pr-review`, then the normal outcome handling
    (`references/stage-playbooks.md`, "pr-review").
 6. **Remove each worktree when its review ends**, crash included

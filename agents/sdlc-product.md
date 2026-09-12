@@ -157,7 +157,7 @@ justification, so the lighter path is a recorded decision rather than an omissio
 ## Acceptance criteria
 
 Each one must be observable and unambiguous enough that a failing test can be written
-from it **without reading any code**. `testing` will map each criterion to a test that
+from it **without reading any code**. `development` maps each criterion to a test that
 goes red when the criterion is violated — a criterion that cannot be tested that way is
 one you have not finished writing.
 

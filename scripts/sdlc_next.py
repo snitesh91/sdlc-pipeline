@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import io
 import json
 import os
 import re
@@ -212,7 +213,7 @@ _PIPELINE_DEFAULTS = {
     "epicClose": {"auto": False},
     "models": {"product": "opus", "product-review": "opus", "architecture": "opus",
                "arch-review": "opus", "lld": "sonnet", "lld-review": "opus",
-               "development": "sonnet", "testing": "sonnet", "pr-review": "opus"},
+               "development": "sonnet", "pr-review": "opus"},
     "docTemplates": "_templates",
     # Behavioural profiles, matched to an epic by label (ordered; first hit wins,
     # `"*"` is the terminal catch-all). Each profile is a bundle of toggles that
@@ -313,8 +314,22 @@ STAGE_FIELD_ID = _PF["stageFieldId"]
 STAGE_OPTION_IDS = _PF["stageOptionIds"]
 STAGE_FIELD_NAMES = {
     "Product": "product", "Architecture": "architecture", "Development": "development",
-    "Testing": "testing", "PR Review": "pr-review", "LLD": "lld",
+    "PR Review": "pr-review", "LLD": "lld",
+    # `Testing` is a RETIRED stage -- it was merged into `development` on
+    # 2026-09-12 (the implementer writes and runs its own tests; `pr-review` judges
+    # whether they are any good). Nothing writes this value any more. The read
+    # mapping stays so an issue stranded at the old value by an in-flight epic
+    # still resolves to a stage the dev lane will pick up instead of reading as
+    # "no stage at all".
+    "Testing": "testing",
 }
+
+# Stages a child can be sitting at when its draft PR is waiting for `pr-review`.
+# `pr-review` is what `open-dev-pr` now sets; `testing` is the retired value an
+# epic already in flight may have stamped before this change, kept so those
+# children still surface in `list-ready-for-review` instead of silently vanishing
+# from the queue.
+REVIEW_ENTRY_STAGES = ("pr-review", "testing")
 PIPELINE_STATUS_FIELD_ID = _PF["pipelineStatusFieldId"]
 PIPELINE_STATUS_OPTION_IDS = _PF["pipelineStatusOptionIds"]
 PIPELINE_STATUS_FIELD_NAMES = {
@@ -899,15 +914,19 @@ _DESIGN_REVIEW_OUTCOME_MARKER = re.compile(
 # backend/frontend suites no longer run on child PRs in GitHub Actions (they run
 # only on push to `main`; see each workflow's `on:` block) -- but they remain
 # MANDATORY for a child PR to merge. The proof just moves from a GHA check to the
-# suite the `testing` stage already re-runs locally, attested here as
+# suite the `development` stage runs locally, attested here as
 # `<!-- local-ci: <suite>:<pr> @ <sha> -->` by `record-local-ci`, and consumed by
 # `missing_required_workflows`. `<sha>` is the exact commit the suite ran against
-# (the testing worktree's HEAD). `merge-pr` accepts the attestation ONLY when that
+# (the development worktree's HEAD). `merge-pr` accepts the attestation ONLY when that
 # sha matches the PR's current head: an attestation from before the last push
 # describes a different tree, so it is treated as absent -- the same freshness
 # principle as the behind-base merge gate and every ordering check in this file. A
 # rework round that adds a commit therefore invalidates the old attestation and
-# forces `testing` to re-run and re-attest, which is exactly the intent.
+# forces `development` to re-run and re-attest, which is exactly the intent.
+# The attestation carries the run's own captured output, not a reported number:
+# `development` both writes and validates its own tests since the `testing` stage
+# was merged into it (2026-09-12), so the only thing standing between a claim and
+# the merge gate is that the evidence is machine-produced and sha-pinned.
 _LOCAL_CI_MARKER = re.compile(
     r"<!--\s*local-ci:\s*(\w+):(\d+)\s*@\s*([0-9a-fA-F]{7,40})\s*-->")
 
@@ -1134,7 +1153,7 @@ def last_transition_to(comments: list, to_role: str) -> Optional[int]:
 
     Matched on the **destination role only**, and on the last `->`-separated
     segment of it. `handoff-to-pr-review` writes the canonical
-    `testing->pr-review` form, but this marker line has historically been
+    `development->pr-review` form, but this marker line has historically been
     hand-written by each stage's own agent, and the real thread history shows the
     from-role is not reliable: issue #115 posted `development->pr-review` and
     #111 posted a mangled `pr-review->development->pr-review` for the same
@@ -1170,12 +1189,13 @@ def missing_pipeline_evidence(comments: list) -> list:
 
     Both failure modes it catches are real and have happened:
 
-    * A `testing` agent returned its verdict to the orchestrator instead of
-      posting it, because a dispatch prompt ended with "Return PASS or REJECT"
-      and the agent obeyed the more recent instruction over its own definition.
-      Issues #237 and #254 reached `pr-review` this way. `verify-exit` had
-      already reported `expected_stage_present: false` and was read past --
-      which is exactly why advisory output is not enough here.
+    * A stage agent returned its verdict to the orchestrator instead of posting
+      it, because a dispatch prompt ended with "Return PASS or REJECT" and the
+      agent obeyed the more recent instruction over its own definition. Issues
+      #237 and #254 reached `pr-review` this way (from the since-retired
+      `testing` stage). `verify-exit` had already reported
+      `expected_stage_present: false` and was read past -- which is exactly why
+      advisory output is not enough here.
     * A `pr-review` that never recorded an outcome leaves no evidence the last
       gate before auto-merge ever ran.
     * A recorded outcome of `rework` means the last gate said *do not merge*.
@@ -1185,13 +1205,13 @@ def missing_pipeline_evidence(comments: list) -> list:
       exact defect class this epic's retro is about.
 
     Ordering matters as much as presence: an outcome recorded *before* the latest
-    `testing->pr-review` handoff belongs to a previous round, and a rework round
-    that re-handed-off without a fresh review would otherwise merge on a stale
-    clean verdict. Same index-ordering rule `cmd_list_ready_for_review` uses."""
+    `development->pr-review` handoff belongs to a previous round, and a rework
+    round that re-handed-off without a fresh review would otherwise merge on a
+    stale clean verdict. Same index-ordering rule `cmd_list_ready_for_review` uses."""
     problems = []
     handoff = last_transition_to(comments, "pr-review")
     if handoff is None:
-        problems.append("no `testing->pr-review` handoff marker (run "
+        problems.append("no `development->pr-review` handoff marker (run "
                         "`handoff-to-pr-review <issue> --pr <pr> --summary ...`)")
     outcome = last_pr_review_outcome(comments)
     if outcome is None:
@@ -1199,7 +1219,7 @@ def missing_pipeline_evidence(comments: list) -> list:
                         "`record-pr-review <issue> --pr <pr> --outcome clean|rework`)")
     elif handoff is not None and outcome[0] < handoff:
         problems.append(f"the recorded `pr-review` outcome ({outcome[1]}) predates the latest "
-                        f"`testing->pr-review` handoff -- it belongs to an earlier round; "
+                        f"`development->pr-review` handoff -- it belongs to an earlier round; "
                         f"re-run `pr-review` on the current branch and record it")
     elif outcome[1] != "clean":
         problems.append(f"the latest recorded `pr-review` outcome is `{outcome[1]}`, not `clean` -- "
@@ -1535,9 +1555,11 @@ def cmd_next_action(gh: GitHub, args) -> dict:
 
 def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None) -> dict:
     """Every open child of `epic` whose development PR is sitting finished-and-
-    unreviewed: Stage = `Testing`, an open **draft** PR on its `issue-<n>`
-    branch, `testing`'s own `<!-- stage-transition: testing->pr-review ... -->`
-    handoff marker posted, and no `pr-review` outcome recorded *since* that
+    unreviewed: Stage = `PR Review` (or the retired `Testing`, for an issue an
+    in-flight epic stranded there), an open **draft** PR on its `issue-<n>`
+    branch, `development`'s own
+    `<!-- stage-transition: development->pr-review ... -->` handoff marker
+    posted, and no `pr-review` outcome recorded *since* that
     marker. Returns up to `limit` (default `PR_REVIEW_PARALLELISM`) of them,
     each with the issue number, PR number and branch -- enough for the
     orchestrator to stand up one worktree per review. See "Parallel PR review"
@@ -1548,24 +1570,25 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
     operator is currently driving end-to-end, not the whole repo.
 
     The "since that marker" ordering is what makes rework rounds work: an issue
-    that failed review goes back to `development` while its Stage stays `Testing`
-    and its Pipeline Status stays `In Progress`, so neither field can distinguish
-    "awaiting review" from "already reviewed, being fixed". A recorded outcome
-    newer than the latest `testing->pr-review` handoff means this round's review
-    already ran; a *later* handoff marker (posted when `testing` re-verifies the
-    fix) makes it eligible again.
+    that failed review goes back to `development` while its Stage stays
+    `PR Review` and its Pipeline Status stays `In Progress`, so neither field can
+    distinguish "awaiting review" from "already reviewed, being fixed". A recorded
+    outcome newer than the latest `development->pr-review` handoff means this
+    round's review already ran; a *later* handoff marker (posted when
+    `development` re-hands-off the fix) makes it eligible again.
 
-    Read-only: never claims, never posts. `skipped` reports every Stage =
-    `Testing` child of this epic that was excluded and why, so "my PR isn't
-    listed" is answerable without re-deriving the filter by hand."""
+    Read-only: never claims, never posts. `skipped` reports every review-entry
+    child of this epic that was excluded and why, so "my PR isn't listed" is
+    answerable without re-deriving the filter by hand."""
     limit = PR_REVIEW_PARALLELISM if limit is None else limit
     all_issues = gh.issue_list()
     open_issues = [i for i in all_issues if i["state"] == "OPEN"]
 
     ready, skipped = [], []
-    at_testing = [i for i in open_issues if not is_epic(i) and current_stage(i) == "testing"
-                  and i.get("parent") and i["parent"]["number"] == epic]
-    for issue in sorted(at_testing, key=sort_key):
+    at_review_entry = [i for i in open_issues if not is_epic(i)
+                       and current_stage(i) in REVIEW_ENTRY_STAGES
+                       and i.get("parent") and i["parent"]["number"] == epic]
+    for issue in sorted(at_review_entry, key=sort_key):
         number = issue["number"]
         status = pipeline_status(issue)
         if status == "needs-human" or status in GATE_PENDING_STATUSES:
@@ -1574,8 +1597,9 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
         comments = gh.issue_view(number).get("comments", [])
         handoff = last_transition_to(comments, "pr-review")
         if handoff is None:
-            skipped.append({"issue": number, "reason": "no testing->pr-review handoff marker yet "
-                                                        "-- testing hasn't passed this issue on"})
+            skipped.append({"issue": number, "reason": "no development->pr-review handoff marker "
+                                                        "yet -- development hasn't handed this "
+                                                        "issue on"})
             continue
         outcome = last_pr_review_outcome(comments)
         if outcome is not None and outcome[0] > handoff:
@@ -2336,12 +2360,12 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
 
 
 def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> dict:
-    """`testing`'s exit action once it passes: posts the canonical
-    `<!-- stage-transition: testing->pr-review @ <ts> -->` handoff marker that puts
-    this issue into `list-ready-for-review`'s pool. Run it every time testing
-    passes -- including after a rework round, since a fresh handoff marker is
-    exactly what makes an issue reviewable again after a recorded `rework`
-    outcome (see `cmd_list_ready_for_review`).
+    """`development`'s exit action once its own suites are green: posts the
+    canonical `<!-- stage-transition: development->pr-review @ <ts> -->` handoff
+    marker that puts this issue into `list-ready-for-review`'s pool. Run it every
+    time development finishes -- including after a rework round, since a fresh
+    handoff marker is exactly what makes an issue reviewable again after a
+    recorded `rework` outcome (see `cmd_list_ready_for_review`).
 
     Exists as a command rather than prose because the marker is now load-bearing
     (it's the queue), not just a visibility breadcrumb. It had been left to each
@@ -2351,14 +2375,14 @@ def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> d
     `start-comment` -- fixed, judgment-free wording belongs here, not in a
     hand-typed `gh issue comment`. See "Deterministic control plane" in SKILL.md.
 
-    Does not touch Stage (already `Testing` from `open-dev-pr`) or Pipeline Status
-    (still `In Progress`) -- a queued-for-review issue is not a *new* state, it's
-    the same one, now with a marked handoff."""
+    Does not touch Stage (already `PR Review` from `open-dev-pr`) or Pipeline
+    Status (still `In Progress`) -- a queued-for-review issue is not a *new* state,
+    it's the same one, now with a marked handoff."""
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     gh.issue_comment(issue,
-        f"✅ Testing passed. {summary} "
+        f"✅ Development complete. {summary} "
         f"PR #{pr} is queued for `pr-review`.\n\n"
-        f"<!-- stage-transition: testing->pr-review @ {timestamp} -->")
+        f"<!-- stage-transition: development->pr-review @ {timestamp} -->")
     return {"issue": issue, "pr": pr, "queued_for": "pr-review"}
 
 
@@ -2388,18 +2412,60 @@ def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary:
     return {"issue": issue, "pr": pr, "outcome": outcome, "recorded": True}
 
 
-def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str) -> dict:
+# How much of a suite run's captured output an attestation embeds. Enough to show
+# the summary line and the last failures a real run would print; short enough that
+# the PR thread stays readable and the comment stays inside GitHub's body limit.
+LOCAL_CI_EVIDENCE_LINES = 40
+LOCAL_CI_EVIDENCE_CHARS = 4000
+
+
+def read_ci_evidence(output_path: str) -> str:
+    """The tail of a suite run's own captured stdout/stderr, for `record-local-ci`.
+
+    Reads the file the stage redirected its run into. Refuses an unreadable or
+    empty one: the point of the attestation is that the merge gate sees the
+    runner's words rather than the agent's summary of them, and an empty file is
+    exactly the claim-without-evidence this replaced."""
+    try:
+        with io.open(os.path.expanduser(output_path), encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        raise GhError(f"--output must be a readable file holding the suite run's own "
+                      f"captured output: {exc}")
+    text = text.strip()
+    if not text:
+        raise GhError("--output file is empty -- an attestation must carry the run's own "
+                      "output, not a summary of it")
+    lines = text.splitlines()
+    if len(lines) > LOCAL_CI_EVIDENCE_LINES:
+        lines = ["... (earlier output trimmed) ..."] + lines[-LOCAL_CI_EVIDENCE_LINES:]
+    trimmed = "\n".join(lines)
+    if len(trimmed) > LOCAL_CI_EVIDENCE_CHARS:
+        trimmed = "... (trimmed) ...\n" + trimmed[-LOCAL_CI_EVIDENCE_CHARS:]
+    return trimmed
+
+
+def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
+                         command: str, output: str) -> dict:
     """Attest that a required suite (`backend`/`frontend`) passed locally against a
     specific commit -- the merge-gate stand-in for the GHA check that no longer
     runs on a child PR (both suites went main-only for cost on 2026-09-04; see each
     workflow's `on:` block and `REQUIRED_WORKFLOWS`).
 
-    Run by the `testing` stage, which independently re-runs the suite anyway (see
-    `references/stage-playbooks.md`, testing's "independent verification"), once per
-    suite it actually ran, against the exact commit it ran against. Posts one
-    comment on the *PR* (not the issue -- the attestation is bound to this PR's head
-    commit, and `merge-pr`/`pr-checks` read it back from the PR thread alongside the
-    head SHA) carrying `<!-- local-ci: <suite>:<pr> @ <sha> -->`.
+    Run by the `development` stage once per suite it actually ran, against the
+    exact commit it ran against. Posts one comment on the *PR* (not the issue --
+    the attestation is bound to this PR's head commit, and `merge-pr`/`pr-checks`
+    read it back from the PR thread alongside the head SHA) carrying
+    `<!-- local-ci: <suite>:<pr> @ <sha> -->`.
+
+    **The attestation carries evidence, not a claim.** `--command` is the exact
+    command run and `--output` a file holding that run's own captured stdout/stderr;
+    its tail is embedded in the comment. This is the whole of what replaced the
+    retired `testing` stage's independent re-run (2026-09-12): the implementer now
+    writes and runs its own tests, so the merge gate's protection is that the
+    evidence is machine-produced and pinned to a sha, not that a second agent
+    repeated the work. A summary with no captured output is refused here rather
+    than discovered at `pr-review`.
 
     `merge-pr` honours it only while `sha` matches the PR's current head: push a new
     commit (a rework round) and the attestation goes stale and must be re-run. Pass
@@ -2411,12 +2477,20 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str) -> dict:
         raise GhError(f"suite must be one of {LOCAL_CI_SUITES}, got {suite!r}")
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha or ""):
         raise GhError(f"sha must be a 7-40 char hex commit id, got {sha!r}")
+    if not (command or "").strip():
+        raise GhError("--command is required: the exact command the suite was run with")
+    evidence = read_ci_evidence(output)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fence = "```"
     gh.pr_comment(pr, f"🧪 Local CI attested — `{suite}` suite passed locally against "
                        f"`{sha}` (main-only GHA CI; this is the merge-gate stand-in).\n\n"
+                       f"Command: `{command.strip()}`\n\n"
+                       f"<details><summary>captured output (tail)</summary>\n\n"
+                       f"{fence}\n{evidence}\n{fence}\n\n</details>\n\n"
                        f"<!-- local-ci: {suite}:{pr} @ {sha} -->\n"
                        f"<!-- attested-at: {timestamp} -->")
-    return {"pr": pr, "suite": suite, "sha": sha, "attested": True}
+    return {"pr": pr, "suite": suite, "sha": sha, "command": command.strip(),
+            "evidence_lines": len(evidence.splitlines()), "attested": True}
 
 
 DESIGN_REVIEW_ROLES = ("product-review", "arch-review", "lld-review")
@@ -3374,11 +3448,13 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str)
     base = integration_base(gh, issue)
     pr_number = gh.pr_create(base=base, head=issue_branch(issue), title=title,
                               body=f"{body}\n\nCloses #{issue}", draft=True)
-    gh.set_stage_field(issue, "testing")
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    gh.set_stage_field(issue, "pr-review")
     gh.issue_comment(issue,
-        f"✅ {summary} — see `{DOC_ROOT}/issue-{issue}/development.md`. Draft PR: #{pr_number}.\n\n"
-        f"<!-- stage-transition: development->testing @ {timestamp} -->")
+        f"✅ {summary} Draft PR: #{pr_number} — what was built and why is in the PR "
+        f"description.\n\n"
+        f"Not yet queued for review: `development` still owes `record-local-ci` per "
+        f"suite it ran and `handoff-to-pr-review`, which posts the marker "
+        f"`list-ready-for-review` reads.")
     return {"issue": issue, "pr": pr_number, "created": True}
 
 
@@ -3591,7 +3667,6 @@ STAGE_RECORD_FILENAMES = {
     "product": "product.md",
     "architecture": "architecture.md",
     "lld": "lld.md",
-    "development": "development.md",
 }
 
 
@@ -4358,7 +4433,8 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_next_action(GitHub(), a))
     p = sub.add_parser("list-ready-for-review",
                         help="Up to PR_REVIEW_PARALLELISM of this epic's children whose draft PR "
-                             "is finished, handed off by testing, and not yet reviewed this round")
+                             "is finished, handed off by development, and not yet reviewed this "
+                             "round")
     p.add_argument("epic", type=int, help="Scope the review pool to this epic's own children")
     p.add_argument("--limit", type=int, default=None,
                     help=f"How many PRs to return (default: PR_REVIEW_PARALLELISM = "
@@ -4390,12 +4466,13 @@ def main(argv: Optional[list] = None) -> int:
                          f"DESIGN_LANE_PARALLELISM = {DESIGN_LANE_PARALLELISM})")
     p.set_defaults(func=lambda a: cmd_list_design_ready(GitHub(), a.repo_path, a.epic, a.limit))
     p = sub.add_parser("handoff-to-pr-review",
-                        help="testing's exit action on a pass: posts the canonical "
-                             "testing->pr-review marker that queues this PR for review")
+                        help="development's exit action once its suites are green: posts the "
+                             "canonical development->pr-review marker that queues this PR for "
+                             "review")
     p.add_argument("issue", type=int)
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--summary", required=True,
-                    help="One sentence: what was tested and the result")
+                    help="One sentence: what was built and tested, and the result")
     p.set_defaults(func=lambda a: cmd_handoff_to_pr_review(GitHub(), a.issue, a.pr, a.summary))
     p = sub.add_parser("record-pr-review",
                         help="Record a pr-review pass's outcome on the issue (last action of "
@@ -4407,17 +4484,24 @@ def main(argv: Optional[list] = None) -> int:
                     help="One sentence: what the review checked and concluded")
     p.set_defaults(func=lambda a: cmd_record_pr_review(GitHub(), a.issue, a.pr, a.outcome, a.summary))
     p = sub.add_parser("record-local-ci",
-                        help="testing's attestation that a main-only suite "
-                             "(backend/frontend) passed locally against a given commit -- "
+                        help="development's evidence-carrying attestation that a main-only "
+                             "suite (backend/frontend) passed locally against a given commit -- "
                              "the merge-gate stand-in for the GHA check that no longer runs "
                              "on a child PR")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--suite", required=True, choices=list(LOCAL_CI_SUITES))
     p.add_argument("--sha", required=True,
-                    help="The commit the suite ran against (the testing worktree's "
+                    help="The commit the suite ran against (the development worktree's "
                          "`git rev-parse HEAD`); merge-pr honours it only while it matches "
                          "the PR's current head")
-    p.set_defaults(func=lambda a: cmd_record_local_ci(GitHub(), a.pr, a.suite, a.sha))
+    p.add_argument("--command", required=True,
+                    help="The exact command the suite was run with, as run")
+    p.add_argument("--output", required=True,
+                    help="Path to a file holding that run's own captured stdout/stderr; its "
+                         "tail is embedded in the attestation comment. A summary is not "
+                         "accepted in its place")
+    p.set_defaults(func=lambda a: cmd_record_local_ci(GitHub(), a.pr, a.suite, a.sha,
+                                                       a.command, a.output))
     p = sub.add_parser("record-design-review",
                         help="Record an arch-review/lld-review outcome on the unit (last action "
                              "of every design review, before a rework resume or moving on)")

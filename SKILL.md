@@ -13,7 +13,7 @@ than one child's handoff loop is live at once, never that anything decides on it
 own. GitHub fields and comments are the **visibility log** and crash-resume point;
 the committed docs under `<docRoot>/issue-<n>/` and `epic-<n>/` are the **source of
 record**. Comments stay short and point at the docs — hard caps of 2,000 characters
-for a stage handoff and 6,000 for a review or `testing` comment
+for a stage handoff and 6,000 for a review or evidence-carrying comment
 (`references/stage-playbooks.md`, "Comment size is a contract").
 
 **This skill is a living process document.** Friction, dead references, and better
@@ -47,14 +47,14 @@ then each child runs a lighter per-task pipeline:
 
 ```
 epic:  product -> [product-review] -> [Gate A, human] -> architecture -> [arch-review] -> [Gate B, human or confidence-skip] -> epic:architected
-child: lld -> [lld-review, mandatory, no gate] -> development -> testing -> [pr-review] -> auto-merge -> CLOSED
+child: lld -> [lld-review, mandatory, no gate] -> development -> [pr-review] -> auto-merge -> CLOSED
 ```
 
 A **standing profile** (`epicLevelPhase: false`, e.g. matched to `epic:standing`)
 never runs an epic-level phase; each child runs the full flow on its own issue number:
 
 ```
-product -> [product-review] -> [Gate A] -> architecture -> [arch-review] -> [Gate B] -> development -> testing -> [pr-review] -> CLOSED
+product -> [product-review] -> [Gate A] -> architecture -> [arch-review] -> [Gate B] -> development -> [pr-review] -> CLOSED
 ```
 
 - **`product-review` is universal** — every unit that runs `product` runs it right
@@ -132,20 +132,20 @@ operational failure: stop and report, never retry by hand.
 | Command | What it owns |
 |---|---|
 | `next-action <epic>` | Pick the one unit to work (Step 1) |
-| `list-parallel-ready <epic> --repo-path <p>` | Dev-lane pool: `lld`/`development`/`testing` children safe to start/resume concurrently |
+| `list-parallel-ready <epic> --repo-path <p>` | Dev-lane pool: `lld`/`development` children safe to start/resume concurrently |
 | `list-design-ready <epic> --repo-path <p>` | Design-lane pool: a **standing** epic's `product`/`architecture` children safe to start/resume concurrently (empty for a default-profile epic) |
 | `list-ready-for-review <epic>` | Review pool: finished PRs awaiting `pr-review` |
 | `worktree-add <n> [--unit epic]` | The unit's worktree, the one correct way: resumes from `origin/<branch>` when it exists, else branches off the integration base; initialises the skill submodule and returns `skill_dir` (the per-unit `$SDLC_DIR`) |
 | `provision-epic-stack <n>` / `teardown-epic-stack <n>` | The epic's isolated runtime stack (own compose project, ports, env/secrets profile, DB data dir) — at epic start / at epic close; no-op unless `pipeline.stack.enabled` |
 | `claim <n> --role <role>` | Stage + In Progress + start comment |
-| `start-comment <n> --role <role>` | Start comment alone (`arch-review` / `lld-review` / `pr-review` / `testing`) |
+| `start-comment <n> --role <role>` | Start comment alone (`arch-review` / `lld-review` / `pr-review`) |
 | `sync-branch <n> [--unit epic]` | Reconcile the branch with its integration base; structured conflict result |
 | `merge-lld-doc <n>` | Publish a normal-epic child's clean `lld.md` onto the epic branch, then **advance** it to `development` (Stage set, Pipeline Status cleared — never claimed) |
 | `verify-exit <n> --expect-stage <s> [--pr <pr>] [--unit epic]` | Post-handoff state check |
 | `open-gate` / `check-gate` / `pass-gate` / `skip-gate` | Human-review gates (`references/gates.md`) |
-| `open-dev-pr <n> ...` | Draft PR + Stage=Testing + handoff comment |
+| `open-dev-pr <n> ...` | Draft PR + Stage=PR Review + handoff comment (posts **no** queue marker) |
 | `handoff-to-pr-review` / `record-pr-review` | The two review-queue markers |
-| `record-local-ci --pr <pr> --suite <s> --sha <HEAD>` | `testing`'s local-CI attestation; `<s>` is a `requiredWorkflows[].suite` from config |
+| `record-local-ci --pr <pr> --suite <s> --sha <HEAD> --command <cmd> --output <file>` | `development`'s evidence-carrying local-CI attestation; `<s>` is a `requiredWorkflows[].suite` from config |
 | `record-design-review <n> --role <r> --outcome clean\|rework` | Last action of **every** design review — the bounce marker `pairing-counts` reads |
 | `pr-checks <pr>` / `merge-pr <pr> --issue <n>` | CI status / the only merge gate (refuses behind-base; reports `config_changed`) |
 | `create-issue --parent <epic>` | The only issue-creation path |
@@ -188,7 +188,7 @@ apply.
 
 ## What you decide, and what you take to the operator
 
-- **During `development`, `testing` and `pr-review`: take the recommended fix
+- **During `development` and `pr-review`: take the recommended fix
   yourself.** An agent that ends with "recommend X" has done the analysis — apply it.
 - **Escalate exactly three things**: a product or scope call, an amendment to a
   **gate-approved** doc, and an escalation-valve trip (`mark-needs-human`). Plus, when
@@ -213,7 +213,7 @@ Step 4. `none` says nothing about other epics. Unattended operation:
 
 Default-profile epic-self `product`/`architecture` is strictly sequential in its own
 `epic-<n>` worktree (a single epic-level unit — never fanned out).
-`lld`/`development`/`testing` fan out to `parallelism.devLane` children and
+`lld`/`development` fan out to `parallelism.devLane` children and
 `pr-review` to `parallelism.prReview` PRs (config; default 3 each), every branch in
 its own worktree, eligibility via the pool queries. A **standing** epic has no
 epic-level design phase — each child runs its own `product`→`architecture` too, and
@@ -247,7 +247,7 @@ to any command taking `--unit`.
 | `skip` | Epic is `epic:legacy` | Say so (quote `reason`), then Step 4 |
 
 **Widen Step 1 with the pool queries** whenever lane headroom remains — typically
-after a `testing` handoff (`list-ready-for-review`) or when `next-action` returns a
+after a `development` handoff (`list-ready-for-review`) or when `next-action` returns a
 child (`list-parallel-ready`). For a **standing** epic, also run `list-design-ready`
 to fan out children still in `product`/`architecture` (up to `parallelism.designLane`,
 default 2); for a default-profile epic it returns empty, since epic-self design is a
@@ -334,9 +334,14 @@ orchestrator-direct review path.
 | `arch-review` | right after `architecture` | `sdlc-design-review` | fable | none (comment only) |
 | `lld` | `stage:lld` (normal-epic child) | `sdlc-lld` | sonnet | `issue-<n>/lld.md` |
 | `lld-review` | right after `lld` | `sdlc-design-review` | opus | none — **mandatory, never confidence-skipped** |
-| `development` | `stage:development` | `sdlc-development` | sonnet | `issue-<n>/development.md` |
-| `testing` | `stage:testing` | `sdlc-testing` | sonnet | none — structured handoff comment |
-| `pr-review` | right after `testing` passes | `sdlc-pr-review` | opus | none (comment only) |
+| `development` | `stage:development` | `sdlc-development` | sonnet | none — the PR description is the record; suite evidence is the `record-local-ci` attestations |
+| `pr-review` | right after `development` hands off | `sdlc-pr-review` | opus | none (comment only) |
+
+**There is no `testing` stage.** It was merged into `development` on 2026-09-12: the
+implementer writes and runs its own tests, and `pr-review` judges whether those tests
+are any good (`references/history.md`, that date). Nothing writes the `Testing` Stage
+value any more; it is still *read* so a child an in-flight epic stranded there is
+picked up rather than lost.
 
 `next-action`'s `stage` says directly whether a child runs `lld` or full
 `architecture`. The Model column is the default; the config's `pipeline.models.<role>` overrides it
@@ -354,7 +359,7 @@ the `product` and `architecture` authoring, and the two last-checks-before-somet
 backstopped by a human gate right after them (Gate A after `product-review`, Gate B after
 `arch-review`), so a cheaper adversarial pass is acceptable there; `lld-review`/`pr-review`
 stay opus because nothing human follows them. Sonnet on the review-backstopped,
-higher-frequency stages (`lld`, `development`, `testing`). Retune in
+higher-frequency stages (`lld`, `development`). Retune in
 `references/history.md` with a dated reason, not by guessing here — the latest
 stage-by-stage evaluation is the 2026-09-12 entry there.
 

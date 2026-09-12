@@ -64,7 +64,7 @@ Cover:
   `development` does not have to make them under time pressure.
 - **Acceptance criteria**, carried forward from the epic (unchanged, or with the
   revision stated). Each must be observable and unambiguous enough to write a failing
-  test from **without reading any code** — `testing` will map each one to a test that
+  test from **without reading any code** — `development` maps each one to a test that
   goes red when the criterion is violated.
 - **Honest risks.** "No risks identified" by default is a finding about the document.
 - **What is out of scope** for this child, explicitly — this is what stops

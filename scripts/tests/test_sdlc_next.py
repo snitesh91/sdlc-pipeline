@@ -1049,26 +1049,27 @@ def test_start_comment_posts_marker_with_no_label_mutation():
     assert len(runner.calls) == 1
 
 
-def test_handoff_to_pr_review_posts_marker_without_referencing_a_testing_doc():
-    """`testing` writes no `testing.md` any more -- its output is the structured
-    handoff comment the caller passes as `--summary`. The marker must still be the
-    canonical `testing->pr-review` one, and the body must not point at a file that
-    is never written."""
+def test_handoff_to_pr_review_posts_marker_without_referencing_a_stage_doc():
+    """`development` writes no doc file -- what was built and why lives in the PR
+    description, and the run evidence in the `record-local-ci` attestations. The
+    marker must be the canonical `development->pr-review` one, and the body must
+    not point at a file that is never written."""
     from sdlc_next import GitHub, cmd_handoff_to_pr_review
     from tests.test_sdlc_next import ScriptedRunner
     runner = ScriptedRunner()
     runner.prefix_responses[("gh", "issue", "comment", "42", "--repo",
                              "owner/repo", "--body")] = ""
     gh = GitHub(runner=runner)
-    result = cmd_handoff_to_pr_review(gh, 42, 77, "142 passed, 0 failed; every criterion mutation-checked.")
+    result = cmd_handoff_to_pr_review(gh, 42, 77, "142 passed, 0 failed.")
     assert result == {"issue": 42, "pr": 77, "queued_for": "pr-review"}
     assert len(runner.calls) == 1
     body = runner.calls[0][-1]
+    assert "development.md" not in body
     assert "testing.md" not in body
     assert "docs/sdlc/issue-42" not in body
-    assert body.startswith("✅ Testing passed. 142 passed, 0 failed; every criterion mutation-checked. ")
+    assert body.startswith("✅ Development complete. 142 passed, 0 failed. ")
     assert "PR #77 is queued for `pr-review`." in body
-    assert "<!-- stage-transition: testing->pr-review @ " in body
+    assert "<!-- stage-transition: development->pr-review @ " in body
 
 
 def test_git_rev_parse_head_runs_in_repo_path():
@@ -1725,34 +1726,109 @@ def test_missing_required_workflows_two_arg_calls_unchanged_by_local_ci():
         ["backend/src/x.ts"], []) == ["Backend CI"]
 
 
-def test_record_local_ci_posts_attestation_marker_on_the_pr():
+def _ci_output(tmp_path, text="Tests:  142 passed, 142 total\nexit 0\n"):
+    out = tmp_path / "backend-it.log"
+    out.write_text(text)
+    return str(out)
+
+
+def test_record_local_ci_posts_attestation_marker_on_the_pr(tmp_path):
     from sdlc_next import GitHub, cmd_record_local_ci
     from tests.test_sdlc_next import ScriptedRunner
     runner = ScriptedRunner({})
     runner.prefix_responses = {("gh", "pr", "comment", "42"): ""}
     gh = GitHub(runner=runner)
-    result = cmd_record_local_ci(gh, pr=42, suite="backend", sha="abc1234def")
-    assert result == {"pr": 42, "suite": "backend", "sha": "abc1234def", "attested": True}
+    result = cmd_record_local_ci(gh, pr=42, suite="backend", sha="abc1234def",
+                                  command="npm run test:it", output=_ci_output(tmp_path))
+    assert result == {"pr": 42, "suite": "backend", "sha": "abc1234def",
+                      "command": "npm run test:it", "evidence_lines": 2, "attested": True}
     body = next(c for c in runner.calls if c[:3] == ["gh", "pr", "comment"])[-1]
     assert "<!-- local-ci: backend:42 @ abc1234def -->" in body
 
 
-def test_record_local_ci_rejects_unknown_suite():
+def test_record_local_ci_embeds_the_runs_own_output_not_a_summary(tmp_path):
+    """Option B's whole protection: since `development` now writes and runs its own
+    tests, the merge gate's only defence is that the attestation carries the
+    runner's words, pinned to a sha. The captured output must reach the comment."""
+    from sdlc_next import GitHub, cmd_record_local_ci
+    from tests.test_sdlc_next import ScriptedRunner
+    runner = ScriptedRunner({})
+    runner.prefix_responses = {("gh", "pr", "comment", "42"): ""}
+    gh = GitHub(runner=runner)
+    cmd_record_local_ci(gh, pr=42, suite="backend", sha="abc1234def",
+                        command="npm run test:it",
+                        output=_ci_output(tmp_path, "Suites: 12 passed\nTests:  142 passed\n"))
+    body = next(c for c in runner.calls if c[:3] == ["gh", "pr", "comment"])[-1]
+    assert "Command: `npm run test:it`" in body
+    assert "Tests:  142 passed" in body
+    assert "<details><summary>captured output (tail)</summary>" in body
+
+
+def test_record_local_ci_trims_a_long_run_to_its_tail(tmp_path):
+    from sdlc_next import GitHub, cmd_record_local_ci, LOCAL_CI_EVIDENCE_LINES
+    from tests.test_sdlc_next import ScriptedRunner
+    runner = ScriptedRunner({})
+    runner.prefix_responses = {("gh", "pr", "comment", "42"): ""}
+    gh = GitHub(runner=runner)
+    long_log = "\n".join(f"line {i}" for i in range(500)) + "\nTests:  142 passed\n"
+    cmd_record_local_ci(gh, pr=42, suite="backend", sha="abc1234def",
+                        command="npm run test:it", output=_ci_output(tmp_path, long_log))
+    body = next(c for c in runner.calls if c[:3] == ["gh", "pr", "comment"])[-1]
+    assert "line 0\n" not in body
+    assert "... (earlier output trimmed) ..." in body
+    assert "Tests:  142 passed" in body
+    assert body.count("\nline ") <= LOCAL_CI_EVIDENCE_LINES
+
+
+def test_record_local_ci_refuses_an_empty_output_file(tmp_path):
+    """An empty capture is the claim-without-evidence the attestation replaced."""
+    from sdlc_next import GitHub, GhError, cmd_record_local_ci
+    from tests.test_sdlc_next import ScriptedRunner
+    import pytest
+    gh = GitHub(runner=ScriptedRunner({}))
+    with pytest.raises(GhError, match="must carry the run's own output"):
+        cmd_record_local_ci(gh, pr=42, suite="backend", sha="abc1234",
+                            command="npm run test:it", output=_ci_output(tmp_path, "   \n"))
+
+
+def test_record_local_ci_refuses_a_missing_output_file(tmp_path):
+    from sdlc_next import GitHub, GhError, cmd_record_local_ci
+    from tests.test_sdlc_next import ScriptedRunner
+    import pytest
+    gh = GitHub(runner=ScriptedRunner({}))
+    with pytest.raises(GhError, match="readable file"):
+        cmd_record_local_ci(gh, pr=42, suite="backend", sha="abc1234",
+                            command="npm run test:it", output=str(tmp_path / "nope.log"))
+
+
+def test_record_local_ci_rejects_an_empty_command(tmp_path):
+    from sdlc_next import GitHub, GhError, cmd_record_local_ci
+    from tests.test_sdlc_next import ScriptedRunner
+    import pytest
+    gh = GitHub(runner=ScriptedRunner({}))
+    with pytest.raises(GhError, match="--command is required"):
+        cmd_record_local_ci(gh, pr=42, suite="backend", sha="abc1234",
+                            command="  ", output=_ci_output(tmp_path))
+
+
+def test_record_local_ci_rejects_unknown_suite(tmp_path):
     from sdlc_next import GitHub, GhError, cmd_record_local_ci
     from tests.test_sdlc_next import ScriptedRunner
     import pytest
     gh = GitHub(runner=ScriptedRunner({}))
     with pytest.raises(GhError, match="suite must be one of"):
-        cmd_record_local_ci(gh, pr=42, suite="infra", sha="abc1234")
+        cmd_record_local_ci(gh, pr=42, suite="infra", sha="abc1234",
+                            command="npm run test:it", output=_ci_output(tmp_path))
 
 
-def test_record_local_ci_rejects_non_hex_sha():
+def test_record_local_ci_rejects_non_hex_sha(tmp_path):
     from sdlc_next import GitHub, GhError, cmd_record_local_ci
     from tests.test_sdlc_next import ScriptedRunner
     import pytest
     gh = GitHub(runner=ScriptedRunner({}))
     with pytest.raises(GhError, match="sha must be"):
-        cmd_record_local_ci(gh, pr=42, suite="backend", sha="not-a-sha")
+        cmd_record_local_ci(gh, pr=42, suite="backend", sha="not-a-sha",
+                            command="npm run test:it", output=_ci_output(tmp_path))
 
 
 def test_merge_pr_refuses_when_backend_workflow_reported_no_check():
@@ -1974,13 +2050,13 @@ def test_pr_checks_local_ci_attestation_clears_missing_required_workflow():
     assert result["missing_required_workflows"] == []
 
 
-def test_open_dev_pr_creates_draft_pr_with_closes_and_sets_stage_field_to_testing():
+def test_open_dev_pr_creates_draft_pr_with_closes_and_sets_stage_field_to_pr_review():
     from sdlc_next import (GitHub, cmd_open_dev_pr, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
                             STAGE_FIELD_ID, STAGE_OPTION_IDS)
     from tests.test_sdlc_next import ScriptedRunner
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}")
     stage_mutation_argv = ("gh", "api", "graphql", "-f",
-        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=STAGE_FIELD_ID, option_id=STAGE_OPTION_IDS['testing'])}")
+        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=STAGE_FIELD_ID, option_id=STAGE_OPTION_IDS['pr-review'])}")
     runner = ScriptedRunner({
         ("gh", "pr", "create", "--repo", "owner/repo", "--base", "main",
          "--head", "issue-9", "--title", "Add widget", "--body",
@@ -1999,6 +2075,12 @@ def test_open_dev_pr_creates_draft_pr_with_closes_and_sets_stage_field_to_testin
     result = cmd_open_dev_pr(gh, issue=9, title="Add widget", body="Implements the widget.",
                               summary="Implemented per architecture.md.")
     assert result == {"issue": 9, "pr": 42, "created": True}
+    body = next(c for c in runner.calls if c[:3] == ["gh", "issue", "comment"])[-1]
+    # The retired `testing` stage owned the queue marker; `open-dev-pr` must not
+    # post one itself, or a PR would be reviewable before its suites were attested.
+    assert "development.md" not in body
+    assert "stage-transition" not in body
+    assert "record-local-ci" in body
 
 
 def test_open_dev_pr_reuses_an_already_open_pr_instead_of_opening_a_duplicate():
@@ -5219,23 +5301,25 @@ def test_verify_citations_multiple_docs_wraps_and_aggregates(tmp_path):
 
 
 def test_verify_exit_citations_ok_true_when_stage_record_all_resolve(tmp_path):
+    """`lld.md` is a stage record; `development` writes no doc at all since the
+    2026-09-12 merge of `testing` into it, so it is absent from the map."""
     from sdlc_next import GitHub, cmd_verify_exit, _ISSUE_FIELDS_QUERY
     docs_dir = tmp_path / "docs" / "sdlc" / "issue-9"
     docs_dir.mkdir(parents=True)
     (tmp_path / "target.yml").write_text("hello world\n")
-    (docs_dir / "development.md").write_text("```cite path=target.yml\nhello world\n```\n")
+    (docs_dir / "lld.md").write_text("```cite path=target.yml\nhello world\n```\n")
     fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
     gh_runner = ScriptedRunner({
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
             json.dumps({"labels": []}),
         fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
-            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "Development"},
+            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "LLD"},
         ]}}}}}),
     })
     git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
     gh = GitHub(runner=gh_runner)
-    result = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="development", runner=git_runner)
+    result = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="lld", runner=git_runner)
     assert result["citations_ok"] is True
     assert result.get("ok", True) is True
 
@@ -5245,14 +5329,14 @@ def test_verify_exit_citations_ok_false_fails_overall_result_positive_control(tm
     docs_dir = tmp_path / "docs" / "sdlc" / "issue-9"
     docs_dir.mkdir(parents=True)
     (tmp_path / "target.yml").write_text("hello world\n")
-    record = docs_dir / "development.md"
+    record = docs_dir / "lld.md"
     fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
     gh_runner = ScriptedRunner({
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
             json.dumps({"labels": []}),
         fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
-            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "Development"},
+            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "LLD"},
         ]}}}}}),
     })
     git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
@@ -5260,14 +5344,14 @@ def test_verify_exit_citations_ok_false_fails_overall_result_positive_control(tm
 
     # Break: a citation that does not resolve.
     record.write_text("```cite path=target.yml\ngoodbye world\n```\n")
-    broken = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="development", runner=git_runner)
+    broken = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="lld", runner=git_runner)
     assert broken["citations_ok"] is False
     assert broken["ok"] is False
     assert "reason" in broken
 
     # Revert: fix the citation, confirm it goes back to passing.
     record.write_text("```cite path=target.yml\nhello world\n```\n")
-    fixed = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="development", runner=git_runner)
+    fixed = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="lld", runner=git_runner)
     assert fixed["citations_ok"] is True
     assert fixed.get("ok", True) is True
 
@@ -5280,7 +5364,28 @@ def test_verify_exit_citations_scoped_to_own_record_ignores_other_docs(tmp_path)
     # An older, already-merged doc with a rotted citation -- must not affect
     # a later stage's own exit check (AC14).
     (docs_dir / "product.md").write_text("```cite path=target.yml\nlong gone content\n```\n")
-    (docs_dir / "development.md").write_text("```cite path=target.yml\nhello world\n```\n")
+    (docs_dir / "lld.md").write_text("```cite path=target.yml\nhello world\n```\n")
+    fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
+    gh_runner = ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"labels": []}),
+        fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
+            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "LLD"},
+        ]}}}}}),
+    })
+    git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
+    gh = GitHub(runner=gh_runner)
+    result = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="lld", runner=git_runner)
+    assert result["citations_ok"] is True
+    assert result.get("ok", True) is True
+
+
+def test_verify_exit_omits_citations_ok_when_stage_has_no_canonical_record(tmp_path):
+    """`development` writes no doc file at all (its record is the PR description
+    and its evidence the `record-local-ci` attestations) -- there is nothing to
+    re-check, so the citation gate must not fire, and must not crash, for it."""
+    from sdlc_next import GitHub, cmd_verify_exit, _ISSUE_FIELDS_QUERY
     fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
     gh_runner = ScriptedRunner({
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
@@ -5293,26 +5398,6 @@ def test_verify_exit_citations_scoped_to_own_record_ignores_other_docs(tmp_path)
     git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
     gh = GitHub(runner=gh_runner)
     result = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="development", runner=git_runner)
-    assert result["citations_ok"] is True
-    assert result.get("ok", True) is True
-
-
-def test_verify_exit_omits_citations_ok_when_stage_has_no_canonical_record(tmp_path):
-    """`testing` writes no doc file at all -- there is nothing to re-check, so
-    the citation gate must not fire (and must not crash) for it."""
-    from sdlc_next import GitHub, cmd_verify_exit, _ISSUE_FIELDS_QUERY
-    fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
-    gh_runner = ScriptedRunner({
-        ("gh", "issue", "view", "9", "--repo", "owner/repo",
-         "--json", "number,title,labels,body,state,comments"):
-            json.dumps({"labels": []}),
-        fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
-            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "Testing"},
-        ]}}}}}),
-    })
-    git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
-    gh = GitHub(runner=gh_runner)
-    result = cmd_verify_exit(gh, str(tmp_path), 9, expect_stage="testing", runner=git_runner)
     assert "citations_ok" not in result
     assert result.get("ok", True) is True
 

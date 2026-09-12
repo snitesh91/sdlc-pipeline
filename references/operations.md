@@ -146,16 +146,23 @@ epic's integration branch merges at close — so each suite runs roughly once pe
 in CI, not once per child push.
 
 They stay **mandatory for a child PR to merge**. The proof moves off the GHA check
-and onto the suite the `testing` stage already re-runs locally:
+and onto the suite `development` runs locally:
 
-- `testing`, after its independent suite re-run passes, runs
-  `record-local-ci --pr <pr> --suite backend|frontend --sha <HEAD>` — once per suite
-  it actually ran — posting `<!-- local-ci: <suite>:<pr> @ <sha> -->` on the **PR**.
+- `development`, once its suites pass, runs
+  `record-local-ci --pr <pr> --suite backend|frontend --sha <HEAD> --command "..."
+  --output <file>` — once per suite it actually ran — posting
+  `<!-- local-ci: <suite>:<pr> @ <sha> -->` on the **PR**, with that run's own captured
+  output embedded.
+- **The captured output is not decoration.** Since the `testing` stage was merged into
+  `development` on 2026-09-12, the implementer both writes and validates its own tests,
+  and this attestation is the only mechanical thing between a self-run suite and the
+  merge gate. It refuses an empty or missing output file, which is why a summary cannot
+  be passed in its place.
 - `merge-pr` / `pr-checks` accept that attestation in place of the GHA check, but
   **only while `<sha>` matches the PR's current head**. A commit pushed after the
-  attestation (a rework round) makes it stale, and `testing` must re-run and
+  attestation (a rework round) makes it stale, and `development` must re-run and
   re-attest — the same freshness rule as the behind-base gate. `merge-pr` still
-  independently requires the `testing->pr-review` handoff and a clean `pr-review`
+  independently requires the `development->pr-review` handoff and a clean `pr-review`
   outcome (`missing_pipeline_evidence`); local-CI is only the CI half.
 - `infra.yml` is fully disabled (`workflow_dispatch` only) until the infra side is
   built out — it shipped zero roots and every run just no-op'd `discover`.
@@ -168,10 +175,11 @@ a passing GHA check nor a fresh local-CI attestation. Two distinct causes now, a
 they route differently:
 
 - **The main-only suite (backend/frontend) simply hasn't been attested for the
-  current head yet** — the common case, and *not* a defect. It clears when `testing`
-  runs `record-local-ci` for that head (or re-runs it after a rework push staled the
-  old attestation). If `testing` passed but skipped the attestation, that's the fix:
-  run `record-local-ci`. **Never poll** — no GHA run is coming on a child PR.
+  current head yet** — the common case, and *not* a defect. It clears when
+  `development` runs `record-local-ci` for that head (or re-runs it after a rework push
+  staled the old attestation). If development handed off but skipped the attestation,
+  that's the fix: re-run the suite and attest it. **Never poll** — no GHA run is coming
+  on a child PR.
 - **A genuine config defect** — a still-required GHA workflow never reported (renamed
   out of step with the config's `requiredWorkflows`, disabled, `paths:` mismatch). Route per
   `references/stage-playbooks.md` (`pr-review` exit actions); `mark-needs-human`.
