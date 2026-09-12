@@ -358,11 +358,10 @@ higher-frequency stages (`lld`, `development`, `testing`). Retune in
 `references/history.md` with a dated reason, not by guessing here — the latest
 stage-by-stage evaluation is the 2026-09-12 entry there.
 
-> **Open interaction to resolve (operator):** a `fable`-run `arch-review` emits the
-> confidence marker that can drive a **Gate B confidence-skip** (`gates.skipConfidenceThreshold`);
-> a fable review is a weaker signal to auto-skip a human gate on. Decide one of: keep Gate B
-> always-open for a `fable`-run `arch-review` (skip applies only to an opus-tier review), raise
-> the threshold, or accept fable-driven skips. Not resolved here.
+> **Resolved (operator, 2026-09-12):** a `fable`-run `arch-review` *may* drive the Gate B
+> confidence-skip, and the bar stays at `gates.skipConfidenceThreshold` (default 95) — fable
+> is trusted to emit an honest confidence, and 95 is a high enough bar that a fable skip is
+> acceptable. No force-open, no raised threshold, no opus-only carve-out.
 
 **The table is the default, not a floor — downgrade a genuinely small task** (a
 one-line config change, a typo fix, a rework round applying a fix already specified

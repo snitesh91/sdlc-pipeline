@@ -1355,3 +1355,9 @@ adversarial pass is acceptable; `lld-review` and `pr-review` stay opus (last che
 irreversible, no human after). Operator-directed. Landed separately from the main 2026-09-12
 retro. Open interaction flagged in SKILL.md: a fable-run arch-review's confidence marker vs
 the Gate B confidence-skip — operator to decide.
+
+## 2026-09-12 (d) — fable arch-review + Gate B skip: resolved
+Operator: keep the Gate B confidence-skip at `gates.skipConfidenceThreshold` (default 95) and
+allow a fable-run arch-review to drive it. Fable is trusted to emit an honest confidence and 95
+is a high enough bar. No force-open, no raised threshold, no opus-only carve-out. Closes the
+open question left by the 2026-09-12 fable-tier change.
