@@ -93,7 +93,40 @@
       "root": "/tmp",
       "devPrefix": "sdlc-dev-",
       "epicPrefix": "sdlc-epic-",
-      "reviewPrefix": "sdlc-review-"
+      "reviewPrefix": "sdlc-review-",
+      "ephemeralPrefix": "sdlc-tmp-"
+    },
+    "locks": {
+      "_comment": "Per-branch flock every branch-writing command takes; `{worktreesRoot}` expands to worktrees.root. SDLC_LOCK_DIR in the environment overrides `dir`.",
+      "dir": "{worktreesRoot}/.sdlc-locks",
+      "waitSeconds": 600
+    },
+    "skill": {
+      "_comment": "Where this repo vendors the skill as a submodule. worktree-add/sync-branch run `git submodule update --init` on it inside each unit's worktree so agents read the branch's own pinned copy. Empty submodulePath disables.",
+      "submodulePath": ".github/sdlc-pipeline",
+      "probeFile": "SKILL.md"
+    },
+    "stack": {
+      "_comment": "Per-epic isolated runtime stack (provision-epic-stack / teardown-epic-stack). Config-only isolation: your compose must read COMPOSE_PROJECT_NAME, every key under `ports`, and `dataDirKey`. Placeholders: {profile} {n} {project} {envFile} {secretsFile} {dataDir} {workspaceRoot}.",
+      "enabled": false,
+      "workspaceRoot": ".",
+      "baseProfile": "dev",
+      "profileTemplate": "epic{n}",
+      "envFile": ".env.{profile}",
+      "secretsFile": ".secrets.{profile}",
+      "composeProjectTemplate": "sdlc-{profile}",
+      "ports": {
+        "FRONTEND_PORT": 3000,
+        "BACKEND_PORT": 3001,
+        "DB_PORT_EXPOSE": 5432,
+        "BACKEND_DEBUG_PORT": 9229
+      },
+      "portStride": 20,
+      "dataDirKey": "POSTGRES_DATA_DIR",
+      "dataDirTemplate": ".docker/postgres-data-{profile}",
+      "upCommand": "COMPOSE_PROJECT_NAME={project} make fullstack-d PROFILE={profile}",
+      "seedCommand": "",
+      "downCommand": "COMPOSE_PROJECT_NAME={project} docker compose --env-file {envFile} down -v --remove-orphans"
     },
     "gates": {
       "_comment": "Global gate defaults; a profile's own `gates` override these for epics that match it.",

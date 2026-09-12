@@ -1082,3 +1082,167 @@ Staged for a future cycle (recorded, not built):
   flag). Needs a CLI marker that does not exist yet. Seed defects (a)-(d) listed there.
   *Why: operator asked reviews to grow the agents like a developer learns; kept off-gate
   and threshold-gated to avoid a mid-run self-edit foot-gun.*
+
+## 2026-09-12 — retrospective: concurrent multi-epic isolation, and six smaller fixes
+
+Run on a quiet lane after epics #159 and #365 overlapped in two interactive sessions on
+one clone. Seven items; the first is the structural one and the rest are what the same
+two epics surfaced. Bookshaw-side items from the same backlog (the `_test`-only
+`cleanTables` guard, the CI-STAGE/architecture.md reconciliation) are not here — they
+are driven-repo changes.
+
+### 1. Concurrent multi-epic isolation (`sdlc_next.py`, `parallelism.md`, `SKILL.md`)
+
+**Why.** Operator goal: N pipeline instances on N different epics simultaneously, with
+zero shared mutable resources. Three singletons blocked it. (a) The main checkout was
+still a git-write target: `pass-gate`, `merge-lld-doc` (every call) and `merge-pr`-adjacent
+ops fell back to `"."` when no worktree held the epic branch — which is the normal
+state of an epic branch — and checked the branch out *there*. That detached the branch's
+real `/tmp/sdlc-*` worktree (twice on #430, once under a live `development` agent; four
+more times on #159/#365), and once left the main checkout on a **peer session's**
+`epic-157` — a multi-writer race, not cwd drift (memory `ops_main_checkout_steals_branch`).
+(b) One shared dev Docker stack/DB/ports: `make e2e` depended on shared reference data
+and a concurrent backend-IT `cleanTables()` wiped it, blocking #509. (c) Every instance
+read the *same* `.github/sdlc-pipeline` copy in the main checkout, so a submodule bump
+for one epic changed another's instructions mid-run (the Step 5 "quiet lane" rule was
+the only guard).
+
+**What changed.**
+- `BranchWorkspace`: every branch-writing command (`sync-branch`, `merge-lld-doc`,
+  `pass-gate`, `close-epic`) resolves the branch's live non-main worktree or creates an
+  ephemeral one (`<root>/sdlc-tmp-<branch>-<pid>`) from `origin/<branch>`, operates,
+  and removes it when clean and pushed (else reports `retained_worktree`). The stolen
+  state — branch checked out in the main checkout — is refused with the recovery recipe;
+  a local ref with unpushed commits and no worktree is refused, never reset.
+  `--repo-path` now means "any path inside the repository"; its old meaning ("the
+  checkout to write in") is gone. `open-gate` cites `origin/<head>` after a fetch and
+  needs no working tree. `verify-exit` (read-only) keeps the old resolution.
+- `branch_lock`: exclusive `flock` per branch name (`pipeline.locks`, default 600s wait,
+  `SDLC_LOCK_DIR` override) around each of those commands. Per branch, not global —
+  different epics never contend; a global main-checkout mutex would have serialised the
+  pipeline and still left main on the wrong branch after a crash.
+- Per-unit skill copy: `pipeline.skill.submodulePath` (default `.github/sdlc-pipeline`).
+  `worktree-add` runs `git submodule update --init` in the new worktree and returns
+  `skill_dir`/`skill_commit`; `sync-branch` re-runs it after every successful reconcile
+  in a live worktree (a merge that moves the gitlink leaves the files at the old pin).
+  `$SDLC` (control plane) stays a stable bootstrap path; `$SDLC_DIR` (references/,
+  agents/) is per unit. Verified on git 2.50.1: the linked worktree's submodule gitdir
+  lands under `.git/worktrees/<wt>/modules/…`, independent of the main checkout's; the
+  command asserts that per-worktree gitdir after each init and refuses otherwise,
+  because no source could be found for the exact git version that introduced it.
+- `provision-epic-stack` / `teardown-epic-stack` (`pipeline.stack`, off by default):
+  generate `.env.epic<n>` from the base profile with distinct ports (stride × slot,
+  bumped while bound — `BACKEND_DEBUG_PORT` included, or 9229 collides), own
+  `COMPOSE_PROJECT_NAME` and data dir, `cp` the base secrets file, run up + seed;
+  teardown downs with volumes and removes the generated files. Config-only isolation,
+  the recipe proven by hand on #159.
+- Real-git evidence, not just scripted tests: the merge-lld-doc defect state was
+  reproduced against a local bare origin and published correctly with the main checkout
+  staying on `main`; the ephemeral path created, reconciled and removed its tree.
+
+**Deferred, recorded as DESIGN in `parallelism.md`:** one stack per epic (not per
+child); provision/teardown are orchestrator-invoked, not wired into `worktree-add`/
+`close-epic`; seeding is a config string and the e2e user-profile seed gap stays open;
+same-epic double invocation still races (the lock is per branch, not per epic); the
+Docker resource cap is machine-wide across instances.
+
+### 2. `merge-lld-doc` false "up-to-date" (`sdlc_next.py`)
+
+**Why.** Three times in one #159 session: first call commits the doc on a stale local
+base, push rejected (`conflict: true`, "re-run to reconcile"); the re-run compared the
+working tree — which already held the doc — to itself and returned `up-to-date` while
+`origin/epic-159` never received the file. Silent loss of the design doc.
+
+**What changed.** Every decision is made against origin: the doc's blob on
+`origin/issue-<n>` vs `origin/epic-<n>` decides up-to-date (`verified_on_origin: true`);
+otherwise the epic worktree is reset to `origin/<epic>` (refusing if it is dirty or
+carries unpushed non-doc commits), the doc staged from `origin/issue-<n>`, committed,
+pushed, and **a post-push fetch must show the blob on origin** before `merged: true`.
+A rejected push replays once from the re-fetched tip; still rejected → a `conflict`
+result whose reason says the doc is NOT on origin. Never a success it did not verify.
+
+### 3. Pre-product scope alignment (`SKILL.md` Step 2, `stage-playbooks.md`, `sdlc-product`)
+
+**Why.** Epic issues are mostly one-liners that do not carry the operator's real scope;
+divergence found after `product.md`, `architecture.md`, Gate A/B and child
+materialisation cascades rework through all of them. Gate A reviews the document — too
+late to fix the framing.
+
+**What changed.** The first time a unit enters `product` (no `product.md` yet), the
+orchestrator states its covers/excludes/open-decisions reading and asks the operator
+the genuine ambiguities in one batch before claiming or delegating; the answers go into
+the delegation prompt verbatim as "Operator scope decisions". The `sdlc-product`
+agent stops and returns scoping questions when that block is absent and the issue is
+thin, instead of inventing scope. Skipped on rework rounds and resumes.
+
+### 4. `pr-review` suite re-run is conditional (`stage-playbooks.md`, `sdlc-pr-review`)
+
+**Why.** The playbook said "re-run the real suite rather than trust the claims",
+unconditionally. When `testing` had just done a rigorous independent run (3+1 full
+`--runInBand` runs plus its own mutation check on #159's determinism children),
+`pr-review` re-ran the whole thing again — 25+ minutes of Docker for near-zero marginal
+signal. Operator: "why is pr-review testing at all".
+
+**What changed.** The re-run is decided by the *shape* of `testing`'s evidence: skip
+the full run when the handoff carries real numbers on the current head, local-CI
+attestations for the touched suites, a criterion→test map and mutation checks; run
+targeted specs when a finding needs confirming; re-run the suite when the evidence is
+thin or suspect. The review must say which it did. Its unique value — the three-layer
+adversarial diff read — is untouched, and the independent verification of specific
+claims stays mandatory.
+
+### 5. Stale `*.tsbuildinfo` before build-as-verification (`stage-playbooks.md`, dev/testing/pr-review agents)
+
+**Why.** A stale gitignored `tsconfig.build.tsbuildinfo` made `nest build` emit nothing
+and exit 0 — twice on #323 (`development` and `testing`), each reporting a passing
+build that produced no `dist/main.js`. The same "stale incremental cache" tell the
+playbook already warned about, now a standing step.
+
+**What changed.** Before any build used as a gate: delete stale `*.tsbuildinfo` **or**
+assert the expected artifact exists and is newer than the sources; state which in the
+handoff. Exit 0 alone is never evidence.
+
+### 6. `opus` alias tracks the latest opus — the 4.8 pin is retired (`SKILL.md`)
+
+**Why.** The 2026-09-01 entry pinned `opus` to Opus 4.8 via `ANTHROPIC_DEFAULT_OPUS_MODEL`;
+the 2026-09-03 retro found the pin absent from the skill's own files, but it *was*
+later applied in the driven repo's `.claude/settings.json` (`claude-opus-4-8`) and in
+the operator's global `~/.claude/settings.json` (`claude-opus-4-8[1m]`). A pinned alias
+runs the pipeline on a stale model as newer ones ship. Operator: `opus` means latest.
+
+**What changed.** The skill repo carried no pin (grep-verified: no `claude-opus-*` /
+`ANTHROPIC_DEFAULT_OPUS_MODEL` outside this history); `SKILL.md`'s model-table
+paragraph now states the rule — aliases only, never redirected to a version, in either
+the config or the driven repo's settings. **The two live pins are outside this repo
+and were not touched by this retro**: remove `ANTHROPIC_DEFAULT_OPUS_MODEL` from
+`bookshaw/.claude/settings.json` and the versioned `model` from `~/.claude/settings.json`
+(both operator/driven-repo edits; the settings apply at session start).
+
+### 7. Stage → agent → model-tier mapping — evaluation (no tier changed)
+
+**Why.** Operator asked for a re-discussion rather than treating the table as settled.
+Evidence weighed: epic #159's `lld-review` (opus) caught real vacuous-assertion and
+inert-drain defects that sonnet `testing` missed; sonnet `development` needed three
+rework rounds on determinism/mutation design (B4); sonnet `testing`'s independent
+re-runs were solid but slow; the 2026-09-01 finding that opus `lld` did not change the
+failure class; the 2026-09-03 finding that design-review fan-out axes on sonnet with an
+opus completeness lens lost nothing.
+
+| Stage | Current | Assessment | Recommendation |
+|---|---|---|---|
+| `product` | opus | Everything downstream is built from it, no human before Gate A reads it; the new scope-alignment step reduces *rework*, not the judgment needed. No evidence sonnet suffices. | **Keep.** The existing "downgrade a genuinely small task" rule already covers trivial standing-child units. |
+| `product-review` | opus | Adversarial, read-only, no human in front of it. No bounce data yet distinguishes it from a sonnet reviewer. | **Keep**; candidate for the design-review pattern (sonnet axes, opus completeness lens) once `pairing-counts` has two epics of `product-review ↔ product` data. Not obviously safe today. |
+| `architecture` | opus | Creates/splits children; widest blast radius of any stage. | **Keep.** |
+| `arch-review` | opus | Gate B skip decision rides on its confidence. | **Keep.** |
+| `lld` | sonnet | 2026-09-01: opus did not change the failure class; `lld-review` catches it. Holds. | **Keep.** |
+| `lld-review` | opus | Strongest evidence in the set — caught what sonnet `testing` missed on #159, and it is the only design review a normal-epic child gets. | **Keep; never skipped** (unchanged). |
+| `development` | sonnet | Mixed. Routine children fine; B4 (determinism, mutation design) took three rounds — the kind of work where the design is *in* the code. The table already allows an explicit, stated upgrade. | **Keep sonnet default; add an explicit upgrade trigger** for operator sign-off: dispatch `development` at opus when the `lld.md` flags nondeterminism, concurrency, or mutation-heavy guard design, or after the first `testing`/`pr-review` bounce on such a child. This is guidance under the existing upgrade rule, not a table change, and is the one recommendation that looks safe to adopt now. |
+| `testing` | sonnet | Independent re-runs solid; slow is Docker, not the tier. Item 4 above makes `pr-review` lean harder on this stage's evidence, which raises the cost of a thin round — the evidence-shape rule is the mitigation, not a tier change. | **Keep.** Watch `testing ↔ development` bounce counts for two epics; escalate to opus only if it starts missing what `pr-review` then finds. |
+| `pr-review` | opus | Last check before an irreversible merge; with item 4 its Docker cost drops and its value concentrates in the diff read, which is exactly where the tier matters. | **Keep.** |
+| Fan-out | design reviews fan out; `pr-review` runs its three layers; `testing` single | No stage showed a first-pass-discovery gap that more axes would close; `testing`'s cost is suite wall-clock, which fan-out would multiply. | **No change.** |
+
+**Net: no tier flipped in this retro.** One guidance addition (the `development`
+upgrade trigger) is recommended as safe and awaits operator sign-off before it goes into
+`SKILL.md`; everything else stays, with the named signals to re-check after two more
+epics of `pairing-counts` data. Recorded here rather than guessed into the table, per
+the model-table paragraph's own rule.

@@ -54,6 +54,13 @@ integration risk.
 
 Frontend: `make lint`, `make typecheck`, `make build`.
 
+**A green build is not evidence until you have cleared stale incremental state.** A
+stale gitignored `*.tsbuildinfo` makes `nest build` emit nothing and exit 0 (it
+happened in this stage on #323). Before re-running any build `development.md` cites,
+delete the stale cache (`find . -name '*.tsbuildinfo' -delete` in the package) **or**
+assert the artifact afterwards (`test -f dist/main.js`, newer than the sources). Record
+which you did in the Commands-run table; a build row with only "exit 0" is a claim.
+
 **Do not run `make e2e`.** The end-to-end suite is not part of this stage. A full run
 costs over an hour of wall clock, exceeds a tool call's timeout, and contends for
 shared ports and Docker stacks — it has repeatedly consumed an entire stage's budget

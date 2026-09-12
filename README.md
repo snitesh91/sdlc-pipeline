@@ -82,7 +82,10 @@ under `pipeline` in the config, each with a default (see `sdlc.config.sample.jso
 | `parallelism.devLane` / `.prReview` | 3 / 3 | Dev-lane and review-pool caps (top-level, required) |
 | `pipeline.labels.*` | `epic:standing` / `epic:legacy` / `epic:architected` | The three epic labels |
 | `pipeline.branches.issuePrefix` / `.epicPrefix` | `issue-` / `epic-` | Branch naming; also how gate PRs are recognised |
-| `pipeline.worktrees.*` | `/tmp`, `sdlc-dev-`, `sdlc-epic-`, `sdlc-review-` | Where the orchestrator puts worktrees |
+| `pipeline.worktrees.*` | `/tmp`, `sdlc-dev-`, `sdlc-epic-`, `sdlc-review-`, `sdlc-tmp-` | Where the orchestrator puts worktrees; `ephemeralPrefix` names the throwaway worktree a branch-writing command creates when nothing holds its branch |
+| `pipeline.locks.dir` / `.waitSeconds` | `{worktreesRoot}/.sdlc-locks` / 600 | Per-branch `flock` every branch-writing command takes (`SDLC_LOCK_DIR` env overrides the dir) |
+| `pipeline.skill.submodulePath` / `.probeFile` | `.github/sdlc-pipeline` / `SKILL.md` | Where the driven repo vendors this skill; `worktree-add`/`sync-branch` init it per worktree so each unit's agents read their own branch's pinned copy (empty path disables) |
+| `pipeline.stack.*` | `enabled: false`, dev-profile ports 3000/3001/5432/9229, stride 20 | Per-epic isolated runtime stack for `provision-epic-stack`/`teardown-epic-stack`: base profile, env/secrets file templates, compose project template, port keys, data-dir key, up/seed/down commands (`references/parallelism.md`, "Per-epic isolated stack") |
 | `pipeline.gates.skipConfidenceThreshold` | 95 | `arch-review` confidence needed to skip Gate B |
 | `pipeline.escalation.replaceAt` / `.needsHumanAt` | 3 / 6 | Bounce counts for the context-reset replacement and `needs-human` |
 | `pipeline.retro.everyClosedIssues` / `.watermarkFile` | 5 / `{docRoot}/retro-watermark` (`{docRoot}` resolves to the config's `docRoot`, e.g. `docs/sdlc/retro-watermark`) | Retro trigger and watermark location (relative to the driven repo) |
