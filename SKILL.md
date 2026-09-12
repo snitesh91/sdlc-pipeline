@@ -12,7 +12,9 @@ stage to one subagent, waits, verifies, and decides what's next. Parallel means 
 than one child's handoff loop is live at once, never that anything decides on its
 own. GitHub fields and comments are the **visibility log** and crash-resume point;
 the committed docs under `<docRoot>/issue-<n>/` and `epic-<n>/` are the **source of
-record**. Comments stay short and point at the docs.
+record**. Comments stay short and point at the docs — hard caps of 2,000 characters
+for a stage handoff and 6,000 for a review or `testing` comment
+(`references/stage-playbooks.md`, "Comment size is a contract").
 
 **This skill is a living process document.** Friction, dead references, and better
 gating decisions are fed back into this file and its references via the Step 5

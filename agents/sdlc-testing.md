@@ -195,7 +195,10 @@ mutation left behind is a defect you introduced.
 
 ## Output
 
-No doc file. Your output is the structured handoff comment defined in
+No doc file — and **≤ 6,000 characters** (`stage-playbooks.md`, "Comment size is a
+contract"): the three tables and the verdict, with raw command output in a trimmed
+`<details>` block, never inline; one row per criterion, not a narrative per criterion.
+Your output is the structured handoff comment defined in
 `stage-playbooks.md`: commands run with real numbers, criterion → test → mutation
 coverage, what could not be executed and why, and the verdict.
 

@@ -1277,6 +1277,36 @@ policy; no profile toggle was added. Companion practice already in the playbook:
 `sync-branch` before every transition, which the wider lld→dev gap makes more
 important.
 
+### 2. Comment size caps and playbook trims (`stage-playbooks.md`, `SKILL.md`, the four review/testing agents)
+
+**Why.** Operator, 2026-08-23 (memory `sdlc_next_verbosity_backlog`): `SKILL.md` said
+comments stay short and point at the docs; reality was ~10× that and nothing noticed.
+Measured on epic #98: `arch-review` rounds of 24,284 / 18,689 / 16,070 characters, an
+`lld-review` of 15,365 (#232), a `pr-review` of 14,640 (#241) — while stage handoffs,
+which own a doc, stayed at 1.4–3.3K. The round-4 architect dispatch pulled 59K characters
+of review text. Structural cause: the review roles own no doc, so their whole output has
+nowhere to go but a comment. Bulk is an input cost on every downstream stage and dilutes
+the instructions that decide a round. Deferred at the time until a real round-4 doc
+existed to judge against; landed now as a batch on a quiet lane, since `stage-playbooks.md`
+is read by live agents mid-run.
+
+**What changed.** A "Comment size is a contract" rule in Commenting discipline: **≤ 2,000
+characters for a stage handoff, ≤ 6,000 for an evidence-carrying comment** (the three
+reviews and `testing`'s handoff), with the shape that fits — one heading + ≤ 3 lines per
+blocking finding, one line per non-blocking, Scope ≤ 3 lines, evidence in a trimmed
+`<details>` block, no restating of the doc/diff/previous round; more findings than fit
+means a class, stated once with two exemplars and a sweep. Over the cap is a finding on the
+comment, and the orchestrator asks for a trimmed re-post. The four agent Output sections
+carry the cap (template copies; the driven repo's `.claude/agents/` copies must follow —
+Step 5 rule 2). Three playbook passages that narrated an incident inside a rule were cut
+to the rule plus a dated `history.md` pointer (`record-design-review` rationale,
+`development` gate 4, the `testing` FAIL-path paragraph) — no rule removed. The
+epic-level document altitude levers from the same backlog were already in place
+(`architecture.md` rules of 2026-08-2x: footprint/implementation notes omitted at epic
+level, decision sub-pages, "length is itself reviewable"); the 7–8K-word target for an
+epic-level doc stays a review judgement, not a mechanical count. Not built: a
+`review-<round>.md` per review — the caps make the comment fit without a new doc.
+
 ### 3. Product-stage WIP cap — `pipeline.productWip.maxGateAPending` (`sdlc_next.py`, `SKILL.md`, `gates.md`)
 
 **Why.** Operator instruction 2026-08-16 (memory `sdlc_next_product_stage_cap`): at most
