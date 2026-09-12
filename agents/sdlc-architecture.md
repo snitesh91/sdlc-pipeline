@@ -258,12 +258,32 @@ the #99/#107 collision. Each child's own subsection is where you will see it: tw
 children whose design notes reach for the same module is the collision, and the
 per-child footprints in their `lld.md`s are what will later prove it mechanically.
 
-## Exit
+## Exit actions — yours, performed as your last step
 
-Commit and push on the epic's **gate sub-branch** (`epic-<n>-gate-architecture`, cut
-from `origin/epic-<n>` in `/tmp/sdlc-epic-<n>`) or the child's `issue-<n>`, per the
-exit action in `stage-playbooks.md`. Never commit to `epic-<n>` itself — the epic
-branch only receives merges, and `open-gate --unit epic` refuses a gate whose
-sub-branch carries no commits over it. Post a short
-handoff comment linking the doc. **Do not change the Stage field** — it stays
-`Architecture` while `arch-review` runs, and the orchestrator owns the gate.
+These were moved here from `references/stage-playbooks.md` on 2026-09-13: they are
+**your** stage's actions and no other stage's, so they live in the one file you are
+guaranteed to read. Opening a human-review gate is the exception and remains the
+orchestrator's, after you return.
+
+### `architecture` done, `unit: "epic"`
+
+In the epic's worktree, on a fresh
+`epic-<n>-gate-architecture` cut from `origin/epic-<n>` (`git fetch origin && git
+checkout -b epic-<n>-gate-architecture origin/epic-<n>`) — **never commit to
+`epic-<n>` directly**, it only receives merges, and `open-gate --unit epic` refuses
+a gate whose sub-branch carries nothing over it. A second Gate B round reuses the
+same branch name, re-cut. Write
+`epic-<n>/architecture.md` per Document altitude: one design subsection per child
+plus shared decisions; create/split/merge/modify children here as needed (see
+`references/epics.md`). Commit, push, short handoff comment linking the doc. **Do
+not change the Stage field** — stays `Architecture` while `arch-review` runs.
+
+### `architecture` done, `unit: "issue"` (standing-epic child)
+
+Continue on
+`issue-<n>` (or create it, for a bug fast-track). For a fast-track bug, first make
+the explicit product-input call (`references/epics.md`, "Bug fast-track"). Write
+`issue-<n>/architecture.md` per Document altitude — if there are genuinely no
+decisions beyond `product.md`, say so in a short version, but still write it.
+Commit, push, short handoff comment. **Do not change the Stage field** — stays
+`Architecture` while `arch-review` runs.

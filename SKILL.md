@@ -27,6 +27,7 @@ which flags problems in its handoff instead.
 |---|---|
 | `references/parallelism.md` | Starting or resuming any child work or review pool; anything touching worktrees, branches, `sync-branch`, git conflicts, merge freshness, or an agent dying mid-stage |
 | `references/gates.md` | Opening, checking, passing, or skipping a human-review gate; addressing gate feedback |
+| `references/rework.md` | A review returned a finding, a stage reported ambiguity, a bounce may trip the escalation valve, or you are writing a replacement agent's resume message |
 | `references/stage-playbooks.md` | Delegating any stage (its exit actions live here); **the one file a stage subagent is told to Read** — docs, altitude, commenting, rework rules |
 | `references/epics.md` | Epic-level phase, child sizing and footprints, deviation escalation, bug fast-track, epic closing, board status |
 | `references/operations.md` | Token and repo access, issue taxonomy (fields), auto-merge policy, local-CI attestation |
@@ -78,7 +79,7 @@ product -> [product-review] -> [Gate A] -> architecture -> [arch-review] -> [Gat
   while the epic itself is gate-pending, blocked, or needs-human.
 - **Nothing spins off a separate ticket.** Every problem found before merge is fixed
   inline by resuming the subagent that owns the responsible stage
-  (`references/stage-playbooks.md`, "Rework and blockers"). Only three things pause a
+  (`references/rework.md`). Only three things pause a
   unit: a cross-issue `blockedBy`, a `needs-human` verdict, or an open gate. None of
   them pause the invocation — see "Looping".
 
@@ -391,10 +392,20 @@ and `superpowers:systematic-debugging` first. **Exclude**
 `superpowers:finishing-a-development-branch` (integration decision is fixed: draft PR,
 stop) and `superpowers:using-git-worktrees` (the orchestrator owns worktrees).
 
-**Agent files carry persona, procedure and `tools:` only.** Every pipeline rule —
-stage order, gates, doc set, rework routing, exit actions — lives in
-`references/stage-playbooks.md`, and every agent is told to Read it first. Two homes
-for one rule is how rules drift.
+**One rule, one home — and the home is chosen by scope** (2026-09-13). A rule that
+binds every stage (citation discipline, the no-park contract, the doc set, commenting,
+what counts as verification) lives once in `references/stage-playbooks.md`. A rule that
+binds one stage — how that stage works, and **its own exit actions** — lives once in
+that stage's `agents/sdlc-*.md`. Every agent Reads the playbook first and is guaranteed
+to read its own definition, so each rule reaches whoever needs it without being stated
+twice.
+
+This replaced "agent files carry persona, procedure and `tools:` only", which the skill
+stated and did not follow: the no-park rule had four homes and had drifted into three
+different strengths, the weakest being what the agent that stalled on 2026-09-13 was
+reading. Exit actions were 459 lines of the playbook that every agent read to use one
+eighth of. Two homes for one rule really is how rules drift — the fix was to give each
+rule exactly one home, not to move them all to the same file.
 
 ### The delegation prompt
 
@@ -461,8 +472,10 @@ by construction — every persisted state after `merge-lld-doc` maps to one next
 `merge-lld-doc` run yet: run it.
 
 **Stage exit actions** — what each stage does last, every verdict branch — live in
-`references/stage-playbooks.md`, "Stage-specific exit actions". Follow them exactly;
-the gate-opening steps inside them are the orchestrator's, not the agent's.
+that stage's own `agents/sdlc-*.md`, with the routing table in
+`references/stage-playbooks.md`, "Stage exit actions live in the agent files". The
+agent performs its own; **opening a human-review gate, posting `start-comment` before a
+review, and `merge-lld-doc` stay yours**, after the agent returns.
 
 Repeat Steps 2–3 until the unit is merged or architected, blocked, or needs a human.
 

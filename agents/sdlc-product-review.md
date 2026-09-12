@@ -129,3 +129,32 @@ Your job is only to make the clean verdict trustworthy.
 Then follow `stage-playbooks.md`'s routing: a blocker resumes the `product` agent (you do
 not fix it); a clean verdict is recorded and the orchestrator takes it to Gate A — opened
 for a human, or auto-passed when the profile says so.
+
+## Exit actions — yours, performed as your last step
+
+These were moved here from `references/stage-playbooks.md` on 2026-09-13: they are
+**your** stage's actions and no other stage's, so they live in the one file you are
+guaranteed to read. Opening a human-review gate is the exception and remains the
+orchestrator's, after you return.
+
+### `product-review`
+
+(universal — runs after every `product`) — Orchestrator posts
+`start-comment <n> --role product-review`, then spawns a fresh subagent of type
+`sdlc-product-review` (model per `pipeline.models`, default opus) reviewing
+`product.md` against the real product/codebase for **requirements quality**:
+acceptance-criteria completeness and testability, scope/decomposition, unstated
+assumptions, internal consistency. Requirements only — design belongs to
+`architecture`. There is **no confidence marker** (Gate A is not confidence-gated).
+Last action, both verdicts: `record-design-review <n> --role product-review
+--outcome clean|rework`.
+- **REWORK** → resume the `product` agent to fix the blockers (one thread), then
+  re-review. Loop until clean; the escalation valve tracks the `product-review ↔
+  product` pairing (`pairing-counts`), replacing the agent at `replaceAt` and marking
+  `needs-human` at `needsHumanAt`. Rework rounds are scoped (see "Rework and blockers").
+- **CLEAN** → the orchestrator resolves the epic's profile and takes Gate A:
+  - `requiresHumanGateA: true` (default profile) → open the human Gate A exactly as
+    before: `open-gate ... --doc product.md --next-stage architecture [--unit epic]`.
+  - `requiresHumanGateA: false` (a standing/RTB profile) → **auto-pass**:
+    `auto-pass-gate-a <n> [--unit epic] --summary "..."` — advances to `architecture`
+    and claims it, no human. See `references/gates.md`, "Gate A configurability".

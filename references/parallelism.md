@@ -329,7 +329,7 @@ earlier runs' output has vanished with the container.
   "conflicting_files": [...]}` at exit 0 when reconciling with `origin/main` hits a
   real merge conflict (actual unmerged paths — any other merge failure still raises
   loudly; the worktree is left clean, merge aborted). Treat it exactly like any other
-  rework finding (`references/stage-playbooks.md`, "Rework and blockers"): resume that
+  rework finding (`references/rework.md`): resume that
   child's own `development` agent with the conflicting files, have it resolve in its
   own worktree, re-run `sync-branch`. Track as its own escalation-valve pairing
   (`sync-branch-conflict` <-> `development`, per child) — third conflict on the same

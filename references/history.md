@@ -4,6 +4,81 @@ Provenance for rules that would otherwise read as arbitrary. Newest first. Keep
 entries to a few lines; the rule itself lives in the spine or its reference file —
 this file records *why* and *when*.
 
+## 2026-09-13 — one rule, one home, chosen by scope
+
+Operator: *"the skill is getting complex. Agent is not honoring the agents and skills."*
+
+The skill stated a contract it did not follow. `SKILL.md` said agent files carry
+persona, procedure and `tools:` only, with every pipeline rule in
+`stage-playbooks.md`, *"Two homes for one rule is how rules drift."* Measured: the
+no-park rule had **four** homes and had drifted into three different strengths — the
+playbook cited a whole epic's recurrence and two dead agents, `sdlc-development` said
+only "two agents on this repo died exactly that way", `sdlc-pr-review` said only "the
+review stalls". The agent that stalled on 2026-09-13 was a `development` agent reading
+the weakest copy. Drift was not hypothetical; it was already load-bearing.
+
+Volume compounded it. `Stage-specific exit actions` was **459 of the playbook's 1,199
+lines** and every agent read all of it to use one eighth, alongside 198 lines of rework
+routing that is the orchestrator's decision, not any agent's, and 28 lines describing a
+design explicitly *not wired*.
+
+The fix is not "move everything to one file" — that is what produced a 12,331-word file
+nobody honours. Each rule gets **one home, chosen by who needs it**:
+
+- **Binds every stage** (citation discipline, the no-park contract, the doc set,
+  commenting, what counts as verification) → `stage-playbooks.md`, once.
+- **Binds one stage**, including its own exit actions → that stage's
+  `agents/sdlc-*.md`, once. An agent is guaranteed to read its own definition.
+- **The orchestrator's decisions** (rework routing, resume-message construction, the
+  context-reset replacement, the escalation valve) → new `references/rework.md`, read
+  on demand. The stage-facing half stayed in the playbook.
+- **Not active** (the staged review-sourced feedback loop) → here.
+
+Opening a gate, posting `start-comment`, and `merge-lld-doc` stayed the orchestrator's
+and are named as such in the routing table.
+
+Result: `stage-playbooks.md` 12,331 → 5,912 words (-52%); what a `development` agent
+must read 16,278 → 11,609 (-29%), and it no longer reads six other stages' exit
+actions. The no-park rule now states the terminal-state contract identically in all
+three agent files that carry it, each pointing here for the incident history — the
+first time that rule has said the same thing in every place it appears.
+
+## 2026-09-13 — staged design moved out of the playbook's hot path
+
+Every stage agent Reads `stage-playbooks.md` in full, so a section describing a design
+that is **not active** is pure cost on every delegation. The review-sourced
+agent-process feedback loop is recorded below, unchanged, for the cycle that builds it.
+
+## Review-sourced agent-process feedback loop (STAGED — not yet wired)
+
+This is a **staged design**, recorded so a future cycle can build it; it is not active
+today and needs a CLI marker that does not exist yet. The idea (operator, 2026-09-11:
+"reviews should gather feedback on the agent process, like a developer's learning") is
+to turn each cycle's reviews into improvements to the **agent definitions**, not just
+the playbook. Three tiers:
+
+- **Tier 1 — flag, off-gate.** `lld-review` and `pr-review` may emit a short,
+  **non-gating** "Agent-process observations" block about the agent's *method* (not the
+  diff) — and only for recurring/systemic issues, never a one-off. It never affects the
+  verdict.
+- **Tier 2 — threshold.** A marker tags those process-notes so the retro can
+  threshold-aggregate them (act on a class seen ≥N times; ignore singletons). The
+  escalation valve / `pairing-counts` already tracks bounce frequency per pairing and is
+  the natural home for the count.
+- **Tier 3 — the retro edits agent files.** Fixes land in `.claude/agents/sdlc-*.md`
+  (persona / procedure / refusal-criteria) — the developer-growth analogue.
+
+**Hard constraint: agents only FLAG; only the retro EDITS agent files, on a quiet lane.**
+No mid-run self-editing of agent definitions — that is a foot-gun. Attribution is to the
+agent-**type** and the defect-**class**, never to an individual run. Keep it lean:
+capped, off-gate, threshold-gated.
+
+Seed defects observed across epic #430 (the first Tier-3 edits, several already applied
+by the 2026-09-11 retro): (a) footprint/sweep excluding `test/**` (bounced A2/A5/B1);
+(b) enumerate-not-sweep recurrence; (c) export-port adapters returning the raw entity
+instead of a field-by-field projection (GDPR over-disclosure near-miss, A3 #473);
+(d) over-running full IT and parking on a backgrounded suite (all implementing agents).
+
 ## 2026-09-13 — retrospective: epic #159's 21 bounces, and why restating a rule stopped working
 
 Same operator directive as the #494 entry below, applied to epic #159's whole run. The

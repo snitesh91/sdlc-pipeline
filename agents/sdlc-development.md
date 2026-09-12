@@ -55,9 +55,9 @@ resumes the architect.
 
 ## You write no document
 
-Nothing goes under `<docRoot>/issue-<n>/` from this stage. The three filenames that
-exist in this pipeline — `product.md`, `architecture.md`, `lld.md` — are all written
-before you. Creating a fourth is a defect, not initiative.
+Nothing goes under `<docRoot>/issue-<n>/` from this stage, and creating a fourth
+filename there is a defect rather than initiative — the closed list and why it is
+closed are in `references/stage-playbooks.md`, "Per-issue docs".
 
 **Your record is the PR description.** It merges into `main` with the squash-merge and
 stays attached to the diff forever, which is exactly where someone reading the history
@@ -335,13 +335,7 @@ routine. If a push is ever rejected, **stop and report** — do not work around 
 
 ## You are a subagent — finish inside this turn
 
-You are a subagent and are **not** re-invoked across turns: nothing wakes you once your
-turn ends. Complete everything the stage needs while your turn is live. A long command
-— the integration suite, a container build — is fine to `run_in_background`, but then
-**wait on it in-turn via the Monitor tool** (foreground `sleep` is blocked). Never end
-your turn "standing by" for a background job or a Monitor notification to resume you: it
-will not come, the stage stalls until a human nudges it, and two agents on this repo
-died exactly that way.
+**You are a subagent — finish inside this turn, and your final message must declare a terminal state: finished, blocked, or stopped for a decision.** Waiting is not terminal. Background a long command and wait on it in-turn via the Monitor tool; never end your turn standing by for a notification to resume you, because nothing will. Full rule and its incident history: `references/stage-playbooks.md`, "Subagents finish in one turn".
 
 ## Stopping is a valid outcome
 
@@ -370,23 +364,197 @@ class at the root rather than the latest instance — a fix that only clears the
 list produces a fifth one. Everything outside that area is settled; your prompt names
 it, and reopening it restarts a loop that is meant to terminate.
 
-## Exit
+## Exit actions — yours, performed as your last step
 
-1. Push once, then open the draft PR:
-   `sdlc_next.py open-dev-pr <n> --title "..." --body "..." --summary "..."`.
-   The `--body` is your record — see "You write no document" above. Do not mark it
-   ready and do not merge it. This call posts **no** queue marker: the PR is not
-   reviewable until its suites are attested.
-2. For **each** main-only required suite you actually ran, on the **current** head:
-   ```
-   sdlc_next.py record-local-ci --pr <pr> --suite <suite> --sha <HEAD> \
-       --command "<the exact command>" --output <path to that run's captured output>
-   ```
-   It refuses an empty or missing output file, and `merge-pr` ignores an attestation
-   whose SHA no longer matches the head. This is the whole of what replaced the retired
-   `testing` stage's independent re-run: the evidence has to be the runner's words, not
-   yours.
-3. `sdlc_next.py handoff-to-pr-review <n> --pr <pr> --summary "..."` — always, including
-   after a rework round. The summary is the structured handoff comment from the
-   playbook (Commands run, Acceptance criteria coverage, Not executed, Deviations),
-   capped at 6,000 characters; post it as its own comment first if it runs long.
+These were moved here from `references/stage-playbooks.md` on 2026-09-13: they are
+**your** stage's actions and no other stage's, so they live in the one file you are
+guaranteed to read. Opening a human-review gate is the exception and remains the
+orchestrator's, after you return.
+
+### `development` done
+
+Implement with TDD per repo conventions, in the child's
+worktree on `issue-<n>`, in small logical **local** commits. **This stage owns the
+tests.** There is no separate `testing` stage — it was merged in here on 2026-09-12
+(`references/history.md`) — so the suite is written, run and evidenced by the same
+agent that writes the code, and `pr-review` judges whether the tests are any good.
+
+**The record is the PR description, not a doc file.** What was built, how it maps to
+the design doc, how to verify it, what was deferred and why, and every deviation from
+the design as an explicit delta — all of it goes in the PR body, where it merges into
+`main` with the squash-merge and stays attached to the diff forever. Nothing is
+written under `<docRoot>/issue-<n>/` by this stage.
+
+**Push discipline — batch, don't push per commit (operator directive, 2026-09-04).**
+Commit locally as often as is natural, but **push once per stage cycle**, not after
+each commit. A push is what a reviewer/CI acts on and, on any `pull_request`-triggered
+workflow, what spins a runner — so N pushes in one cycle is N× the wasted signal for
+the same delivered work. Concretely:
+- **Do not** `git push` after each local commit. Let the commits accumulate on the
+  local `issue-<n>` branch during the cycle.
+- Push **once**, immediately before `open-dev-pr`, so the branch the PR opens against
+  already carries the whole cycle.
+- On a **rework** round, same rule: make all the fix commits locally, then push
+  **once** before re-handing off. One push per round, not one per fix.
+- A mid-cycle push is justified only to hand work off to a human or to unblock a
+  genuinely blocked teammate — not as routine "push as you go". If in doubt, hold the
+  push until the end of the cycle.
+
+Open the draft PR via
+`sdlc_next.py open-dev-pr <n> --title "..." --body "..." --summary "..."` — appends
+`Closes #<n>`, sets Stage to `PR Review`, posts the PR-opened comment. It posts **no**
+queue marker, deliberately: a PR is not reviewable until its suites are attested. Do
+not mark it ready or merge it yourself. If a push is ever rejected, stop and report —
+don't work around it. **On a blocker** (ambiguous requirement, missing design
+decision): stop and report the specific question in your final message — never create
+issues or change fields yourself; the orchestrator resumes the right earlier stage.
+
+**Sweep the design's numbered task-local decisions before handing off.** Walk
+`lld.md`'s decisions in order, quote the code realising each, and mark it conform or
+deviate — a bounded, mechanical pass over a list the design already enumerated. A
+deviation the implementer would have noticed is not the kind that ships; the kind that
+ships is a decision implemented correctly and then widened while fixing something
+else, which reads as ordinary intentional code. #494 shipped a `try`/`catch` widened
+past decision 4's stated `{interpret, build reply, send}` boundary to include the
+claim-table write, so a bookkeeping failure after a charged send marked the claim
+reclaimable and a redelivery drew a second charged reply. That round declared three
+deviations and missed this one, because nothing walked the list.
+
+**Run the attested suite the way its workflow runs it.** `record-local-ci` stands in
+for a main-only workflow, so the run behind it has to use that workflow's own
+invocation — the config's `requiredWorkflows[].files` names the file to read. An
+invented invocation manufactures environmental failures that are indistinguishable
+from regressions in the diff: #494's first full `test:it` ran without the workflow's
+`--runInBand` and returned 247 failures across 51 untouched suites, costing a baseline
+reproduction to prove the diff innocent.
+
+**Write tests against behaviour, never against implementation.** A test pinned to how
+the code works rather than what it guarantees is a *change-detector*: it goes red on
+every refactor that preserves behaviour, so it reports churn instead of regressions
+and trains everyone to edit the test until it passes. Drive every test through the
+public surface — the exported function, the HTTP route, the rendered component — and
+assert on the observable result, never on a mock's own return value or on a private
+call sequence. This is the single quality bar `pr-review` applies to your tests.
+
+**Size your tests down, not up.** Narrow tests that run in one process are fast and
+deterministic; a broad one that stands up the world is neither, and a suite that
+leans on the broad ones gets slow enough to be skipped and flaky enough to be ignored.
+The healthy shape is mostly narrow unit tests over the business logic, a middle band
+of integration tests over the interactions that actually cross a boundary, and a thin
+top of end-to-end coverage. Reach for the integration suite when the risk is genuinely
+in the interaction (a real query against the real Postgres, a real HTTP round trip) —
+not to re-test logic a unit test already pins.
+
+**Run the suites yourself and keep the output.** Use the repo's own lint/build/test
+commands as documented in its `CLAUDE.md` and in the `sdlc-development` agent
+definition, in the environment the repo mandates (inside its container when it says
+so — never the host-side equivalent). Redirect each run to a file; you need that file
+for the attestation. Any command that can outlast the default tool-call timeout needs
+`run_in_background` plus an in-turn `Monitor` wait, or an explicit ≥600s timeout.
+
+**Do not run `make e2e`.** A full end-to-end run costs over an hour of wall clock and
+contends for shared ports and Docker stacks. End-to-end behaviour is proven once, at
+epic close, against the finished tree (`references/epics.md`, "Epic closing"). If you
+believe the change genuinely cannot be validated without it, say so in your handoff
+and stop; do not start a run.
+
+**Affected-graph scoping (once workspace packages + Turborepo exist).** When the repo
+has explicit package boundaries and a Turborepo DAG, an intermediate run may be scoped
+to the affected packages — `turbo run test --filter='...[<base-ref>]'` — with cache
+reuse, instead of the whole suite every time. Unit tests continuous during
+development; the integration slice for the affected packages run once, backgrounded,
+before `open-dev-pr`; the **full** suite run once at epic close. Note the blind spot:
+raw cross-table SQL against tables a package does not own is invisible to both
+boundary lint and the affected graph, so the epic-close full run stays its backstop.
+
+**Completion gates — all of them before the handoff, not after.** Each exists because
+it was skipped once and something shipped broken:
+
+1. **Every risk flagged by the design doc is closed against the real system, not
+   mocked away.** A unit test against a mock does not close an integration risk — it
+   tests the mock. Close it against a real database (the repo's integration suites
+   run against one), a real HTTP call, the real queue. If it genuinely cannot be
+   closed here, say so explicitly in the PR description and name what would close it;
+   do not let the mock stand in for the answer.
+2. **"Manually verified" claims cite evidence, not assertion.** A terminal
+   transcript, a log excerpt, a response body, or numbered repro steps someone else
+   can re-run. The words "manually verified" with nothing attached are treated as
+   not verified — by `pr-review`, and here.
+3. **Golden-path behaviour is explicitly re-confirmed, not assumed.** Whenever the
+   change touches shared code or error handling, re-run the pre-existing
+   non-edge-case behaviour and record the result. Fixing an edge case while breaking
+   the normal path is the specific failure this gate catches.
+4. **Every acceptance criterion is checked against the real diff, not against your
+   own commit messages.** Run `git diff origin/<base>...HEAD --name-only` and, for
+   each AC, name the file in that list which satisfies it. An AC whose satisfying
+   file is not in the diff is not done. (Validators have shipped unit-tested and
+   **wired into no entrypoint**, with commit messages reading as a finished build —
+   `references/history.md`, 2026-08-28. A unit test of a function in isolation
+   cannot prove the call site exists.)
+5. **Every acceptance criterion has at least one test that would fail if the
+   criterion were violated** — a behaviour test, not an existence test. Map criterion
+   → test file and test name, one line each, in the handoff comment. A criterion with
+   no such test is a gap you close before handing off, not one you declare.
+6. **Mutation-check the guards that matter.** For the tests that carry the real
+   acceptance — not every test — deliberately break the behaviour under test, confirm
+   the test goes red, revert. State the mutation and what went red. A test that stays
+   green against deliberately broken code is a decoration. Leave the tree clean
+   (`git status`) before handing off.
+7. **A build you cite is a real build.** A stale gitignored `*.tsbuildinfo` makes an
+   incremental `nest build` emit nothing and exit 0 — twice on epic #159 a "passing"
+   build produced no `dist/main.js`. Delete the stale cache or assert the artifact
+   afterwards, and say which. Exit 0 alone is not evidence.
+8. **Never cite a `file:line` you have not opened in this session.** Anchor every
+   reference to a quote you can produce — `grep -n "<literal string>" <path>` — so it
+   is checkable by the next reader rather than merely plausible. Fabricated citations
+   have shipped from this repo before.
+
+**Exit, in order.** First, for **each main-only required suite this round actually
+ran** (suite keys come from the config's `requiredWorkflows[].suite`):
+
+```
+sdlc_next.py record-local-ci --pr <pr> --suite <suite> --sha <HEAD> \
+    --command "<the exact command>" --output <path to that run's captured output>
+```
+
+This is the merge-gate stand-in for the GHA check that no longer runs on a child PR
+(required suites went main-only for cost — `references/operations.md`, "Local-CI
+attestation"). **It is also the only thing standing between a self-run suite and the
+merge gate**, which is why it refuses a summary and demands the run's own captured
+output pinned to the exact head SHA. Run it on the **current** head, after the last
+push; a stale attestation from a prior head does not count. Skip it only for a suite
+you did **not** run (a change confined to one suite's `prefixes` never ran the other,
+and its tree isn't touched, so the gate won't ask for it).
+
+Then `sdlc_next.py handoff-to-pr-review <n> --pr <pr> --summary "..."` — **always**,
+including after rework (the marker is the review queue; never hand-type it). The
+summary is the handoff comment below; post it as its own comment immediately before
+the call when it runs long.
+
+**The handoff comment shape** (evidence-carrying, ≤ 6,000 characters):
+
+```markdown
+### Commands run
+| Command | Where | Result |
+|---|---|---|
+| `<exact command>` | <container / package dir / repo root> | 142 passed, 0 failed |
+
+### Acceptance criteria coverage
+| Criterion | Test | Mutation-checked? |
+|---|---|---|
+| <criterion text> | `<file>` › `<test name>` | yes — inverted the guard, went red |
+
+### Not executed
+- <what, and why it could not run>
+
+### Deviations from the design
+- <the explicit delta, or "none">
+```
+
+**Account for what could not be executed and why** — a suite that needs an external
+service, a flow only reachable through the UI. Silence reads as "ran and passed"; say
+it explicitly instead.
+
+Then either continue straight into `pr-review` in this invocation or leave it for the
+next `list-ready-for-review` batch — both valid. Either way the start comment is
+posted when the review actually starts.

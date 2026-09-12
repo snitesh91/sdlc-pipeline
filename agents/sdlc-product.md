@@ -205,12 +205,38 @@ Issue: "Fix logout button not clearing session"   (Low)
 Both directions are real failures with real cost. Size honestly, then match the
 coordination to the size.
 
-## Exit
+## Exit actions — yours, performed as your last step
 
-Commit and push on the epic's **gate sub-branch** (`epic-<n>-gate-product`, cut from
-the `epic-<n>` you create at `main`'s tip in `/tmp/sdlc-epic-<n>`) or on `issue-<n>`,
-per the exit action in `stage-playbooks.md`. Never commit the doc to `epic-<n>` itself
-— the epic branch only receives merges, and `open-gate --unit epic` refuses a gate
-whose sub-branch carries no commits over it. Update the issue or epic body with a pointer and a
-brief summary, and set Effort. **Never set the Stage field to `Architecture`
-yourself** — the orchestrator opens the human review.
+These were moved here from `references/stage-playbooks.md` on 2026-09-13: they are
+**your** stage's actions and no other stage's, so they live in the one file you are
+guaranteed to read. Opening a human-review gate is the exception and remains the
+orchestrator's, after you return.
+
+### `product` done, `unit: "epic"`
+
+In the epic's own worktree
+(`/tmp/sdlc-epic-<n>`). Create `epic-<n>` from `main` (first stage to touch it),
+then **author on the gate sub-branch, not on `epic-<n>`**: `git checkout -b
+epic-<n>-gate-product`. The epic branch only ever receives merges — see "Opening a
+gate" in `references/gates.md`; `open-gate --unit epic` refuses if the doc did not
+reach the sub-branch. Write `<docRoot>/epic-<n>/product.md` as a requirements document covering
+the whole epic, per Document altitude — organised by **functional area, never by
+child issue**. Children are the architecture stage's output; a product document that
+names them is either pre-empting that decomposition or reporting on it, and the
+requirement is the same whoever ends up implementing it. Commit; push both
+`epic-<n>` (empty, at `main`'s tip) and `epic-<n>-gate-product`. Update the
+epic's body with a pointer + brief summary. Set the epic's Effort, and each child's
+if the epic already has children. Then the orchestrator runs **`product-review`**
+(below); only on its clean verdict does Gate A follow. **Do not change the Stage
+field** — it stays `Product` while `product-review` runs.
+
+### `product` done, `unit: "issue"` (standing-epic child)
+
+Create `issue-<n>` from
+`main`. Write `issue-<n>/product.md` as a requirements document with full
+requirements and acceptance criteria, per Document altitude. Commit, push. Update the
+issue body with a pointer + summary. Set Effort (if `High`, strongly consider
+splitting via `create-issue`). Priority normally lives on the epic; set it on the
+child only to jump the sibling queue. Then the orchestrator runs **`product-review`**
+(below), and Gate A follows only on a clean verdict. **Do not change the Stage
+field** — stays `Product` while `product-review` runs.

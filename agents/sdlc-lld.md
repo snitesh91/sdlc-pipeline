@@ -185,12 +185,24 @@ other open children. Overlap is not automatically wrong — but unnoticed overla
 two parallel children stomp each other. If you find it, say so in the doc so
 `lld-review` can judge it deliberately.
 
-## Exit
+## Exit actions — yours, performed as your last step
 
-Commit and push on `issue-<n>` in the child's worktree, then post a short handoff
-comment linking the doc. **Do not change the Stage field** — it stays `LLD` while
-`lld-review` runs. `lld-review` is mandatory every time and has no confidence-skip;
-it is the only design review a normal-epic child gets, deliberately.
+These were moved here from `references/stage-playbooks.md` on 2026-09-13: they are
+**your** stage's actions and no other stage's, so they live in the one file you are
+guaranteed to read. Opening a human-review gate is the exception and remains the
+orchestrator's, after you return.
+
+### `lld` (normal-epic child) done
+
+In the child's worktree on `issue-<n>` (create
+if first stage). Read the epic's `<docRoot>/epic-<parent>/architecture.md`
+as the design source of truth; the **first move** is the fits-vs-deviates call
+(`references/epics.md`, "Epic-level deviation escalation"). If it fits → write
+`issue-<n>/lld.md` (no altitude requirement): exact files/functions to touch, how it
+maps to the epic design, task-local decisions — **including the parseable
+`## Footprint` section**. Commit, push, short handoff comment. **Do not change the
+Stage field** — stays `LLD` while `lld-review` runs. If it doesn't fit → don't write
+`lld.md`; follow the deviation escalation.
 
 On genuine ambiguity, **stop and report the specific question in your final message**.
 Never guess, never create issues, never change fields yourself.
