@@ -1277,6 +1277,28 @@ policy; no profile toggle was added. Companion practice already in the playbook:
 `sync-branch` before every transition, which the wider lld→dev gap makes more
 important.
 
+### 3. Product-stage WIP cap — `pipeline.productWip.maxGateAPending` (`sdlc_next.py`, `SKILL.md`, `gates.md`)
+
+**Why.** Operator instruction 2026-08-16 (memory `sdlc_next_product_stage_cap`): at most
+five units awaiting Gate A at once — epic #92 had opened five parallel Gate A PRs a
+human could not review in step. The epic-level product/architecture phase answered
+that for default-profile epics (one Gate A per epic) but not for a standing/RTB backlog,
+whose children each open their own Gate A and fan out via `list-design-ready`. Checked
+first, per the brief: **nothing in the code or `SKILL.md` enforced an equivalent** — no
+count of gate-pending product units anywhere, no tunable — so this is a code change,
+not a documentation one.
+
+**What changed.** New tunable `pipeline.productWip.maxGateAPending` (default 5, `0`
+disables; visible in `show-config`). `product_gate_pending` counts open issues repo-wide
+at Stage `Product` with Pipeline Status in `GATE_PENDING_STATUSES`. `next-action` skips a
+*fresh* `product` delegation (epic-self or child) at the cap and keeps walking; a `none`
+reached that way carries `product_cap` with the deferred units. `list-design-ready`
+proposes `product` candidates only up to the remaining headroom, decremented per
+candidate in the call, so one fan-out cannot overshoot; `architecture` candidates are
+never gated. Resumes, rework rounds and gate actions are never gated — passing gates is
+what drains the queue. Repo-wide on purpose (one reviewer across all epics); in-flight
+`in-progress` product units are not counted, an accepted small overshoot.
+
 ## 2026-09-12 — product-review & arch-review → fable (tier change)
 Moved `product-review` and `arch-review` from opus to fable in the SKILL.md model table.
 Both are backstopped by a human gate immediately after (Gate A / Gate B), so a cheaper

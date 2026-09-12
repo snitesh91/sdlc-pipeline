@@ -254,6 +254,15 @@ every `merge-pr` and every `merge-lld-doc`**: a merge is the event that unblocks
 sibling, and `merge-lld-doc` is the event that turns a child into a `development`
 unit — an un-requeried child idles through a whole stage.
 
+**Product WIP cap — at most `pipeline.productWip.maxGateAPending` (default 5) units
+awaiting Gate A, repo-wide.** `next-action` and `list-design-ready` will not start a
+*fresh* `product` delegation (an epic's own, or a standing child's) while that many
+open units already sit at Stage `Product` with an open Gate A; they loop to the next
+actionable unit instead, and a `none` reached that way carries `product_cap` naming
+what was deferred — report it in Step 4. Resumes, rework rounds, `pass-gate` and
+`address-gate-feedback` are never gated: passing gates is what drains the queue.
+Enforced in code; the why is in `references/gates.md`, "Gate A WIP cap".
+
 **A `blockedBy` edge is not automatically a whole-child stop.** It usually constrains
 `development` onward, not `lld` — start the design stage concurrently and sequence
 only the dependent stages. Keep the native edge; `list-parallel-ready` reads it.

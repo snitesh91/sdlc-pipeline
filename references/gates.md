@@ -28,6 +28,32 @@ open (see `references/epics.md`, "Bug fast-track"); if that path later escalates
 product after all, the resulting `product.md` runs `product-review` and Gate A per the
 profile.
 
+### Gate A WIP cap
+
+**At most `pipeline.productWip.maxGateAPending` units (default 5) may sit at Stage
+`Product` with an open Gate A — Pipeline Status `awaiting-human-review` or
+`feedback-received` — across the whole repo at once.** Operator instruction 2026-08-16:
+epic #92 produced five parallel Gate A PRs a single human could not keep up with
+reviewing, and the epic-level product phase fixed that only for default-profile epics —
+a standing/RTB backlog still opens Gate A per child. Enforced by the control plane:
+
+- `next-action` skips a *fresh* `product` delegation (epic-self or child) at the cap
+  and walks on to the next actionable unit; a `none` reached this way carries
+  `product_cap: {limit, pending, deferred}`.
+- `list-design-ready` proposes `product`-stage candidates only up to the remaining
+  headroom (`cap − pending`, decremented per candidate selected in that call), so one
+  fan-out cannot overshoot; `architecture` candidates are past Gate A and never gated.
+  The result carries `product_cap`.
+- Never gated: a `resume` (the unit is already counted or about to be), a rework round
+  (`product-review` → `product`, in-session), `pass-gate`, `address-gate-feedback`, and
+  any unit of a profile with `requiresHumanGateA: false` — it auto-passes Gate A and
+  never enters the human's queue, so the cap has nothing to protect there.
+- The count is repo-wide by design: the reviewer is one person across every epic, and
+  N concurrent invocations on N epics would otherwise each open five. Units in
+  `product` that are `in-progress` are not counted (they are not yet in the human's
+  queue), so concurrent invocations can overshoot by at most their in-flight product
+  units — accepted. `0` disables the cap.
+
 **Gate B** — between `arch-review` finishing clean and the next stage starting, gating
 `architecture.md`. **Conditional** — skipped automatically when `arch-review` returns
 a clean verdict *and* self-reported confidence above the threshold; see "Gate B
