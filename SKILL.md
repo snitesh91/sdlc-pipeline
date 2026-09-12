@@ -317,9 +317,9 @@ orchestrator-direct review path.
 | Role | Trigger | `subagent_type` | Model | Doc it owns |
 |---|---|---|---|---|
 | `product` | `stage:product` (epic or standing child) | `sdlc-product` | opus | `<unit>-<n>/product.md` |
-| `product-review` | right after `product` | `sdlc-product-review` | opus | none (comment only) — universal; blocker bounces `product`, clean goes to Gate A |
+| `product-review` | right after `product` | `sdlc-product-review` | fable | none (comment only) — universal; blocker bounces `product`, clean goes to Gate A |
 | `architecture` | `stage:architecture` (epic or standing child) | `sdlc-architecture` | opus | `<unit>-<n>/architecture.md` (epic level also creates/splits children, sets Effort) |
-| `arch-review` | right after `architecture` | `sdlc-design-review` | opus | none (comment only) |
+| `arch-review` | right after `architecture` | `sdlc-design-review` | fable | none (comment only) |
 | `lld` | `stage:lld` (normal-epic child) | `sdlc-lld` | sonnet | `issue-<n>/lld.md` |
 | `lld-review` | right after `lld` | `sdlc-design-review` | opus | none — **mandatory, never confidence-skipped** |
 | `development` | `stage:development` | `sdlc-development` | sonnet | `issue-<n>/development.md` |
@@ -336,11 +336,21 @@ track the latest model of their tier**: never redirect them to a fixed version (
 silently runs the pipeline on a stale model as newer ones ship (operator, 2026-09-12;
 the earlier 4.8 pin is retired). The tier is pinned here
 at the call site, not in the agent files, so one definition can run at two tiers and
-a retune is a one-word edit. Opus sits where judgment has no human in front of it
-(`product`, the design pairing, and the two last-checks-before-something-irreversible:
-`lld-review` and `pr-review`); Sonnet on the review-backstopped, higher-frequency
-stages. Retune in `references/history.md` with a dated reason, not by guessing here —
-the latest stage-by-stage evaluation is the 2026-09-12 entry there.
+a retune is a one-word edit. Opus sits where a mistake has no human in front of it:
+the `product` and `architecture` authoring, and the two last-checks-before-something-irreversible
+(`lld-review`, `pr-review`). **`product-review` and `arch-review` run on `fable`** — both are
+backstopped by a human gate right after them (Gate A after `product-review`, Gate B after
+`arch-review`), so a cheaper adversarial pass is acceptable there; `lld-review`/`pr-review`
+stay opus because nothing human follows them. Sonnet on the review-backstopped,
+higher-frequency stages (`lld`, `development`, `testing`). Retune in
+`references/history.md` with a dated reason, not by guessing here — the latest
+stage-by-stage evaluation is the 2026-09-12 entry there.
+
+> **Open interaction to resolve (operator):** a `fable`-run `arch-review` emits the
+> confidence marker that can drive a **Gate B confidence-skip** (`gates.skipConfidenceThreshold`);
+> a fable review is a weaker signal to auto-skip a human gate on. Decide one of: keep Gate B
+> always-open for a `fable`-run `arch-review` (skip applies only to an opus-tier review), raise
+> the threshold, or accept fable-driven skips. Not resolved here.
 
 **The table is the default, not a floor — downgrade a genuinely small task** (a
 one-line config change, a typo fix, a rework round applying a fix already specified
