@@ -787,3 +787,56 @@ full run builds from the epic integration branch.
 - **The Docker resource cap stays machine-wide.** N isolated stacks are N sets of
   containers on one VM; the "at most one Docker-IT-heavy stage" rule above is now a
   per-machine rule the N instances cannot see each other enforce.
+
+### Cross-epic coordination file — DEFERRED, build only if real parallel-epic contention occurs
+
+**Status: DESIGN ONLY. Not built, not scheduled. Do not implement without the trigger
+below (operator, 2026-09-12).** Recorded so the next person to hit the problem starts
+from the design, not from zero.
+
+**Purpose — the missing third leg.** Isolation (worktrees, per-epic stacks, per-epic
+skill copy) *separates* what can be separated. This coordinates what **cannot** be
+separated: the single machine's finite shared resources across concurrently running
+epics/sessions. The last DESIGN bullet above ("the Docker resource cap stays
+machine-wide") is exactly the gap.
+
+**What it would track — machine-wide runtime state:**
+
+- **The heavy-Docker slot.** Claim before a backend-IT / `make e2e` run, release after,
+  so "≤ 1 heavy Docker run" (see "The machine's resource cap is the real cap") is
+  enforced **globally across epics** — today it is a per-session convention that N
+  instances cannot see each other keep.
+- **A port / compose-project registry.** Each isolated stack reserves its port range
+  and `COMPOSE_PROJECT_NAME` so stacks cannot collide; `provision-epic-stack` today
+  probes for bound ports at provision time only, and a debug-port `9229` clash has
+  actually happened.
+- **A live session/epic registry.** Who is driving which epic/branch, for
+  cross-session visibility — avoids branch-steal races and blind "is a peer busy?"
+  guessing (the `ops_main_checkout_steals_branch` class).
+- **Cross-epic unblocks.** A child in epic A that unblocks a child in epic B — the
+  native `blockedBy` edge crosses epics fine, but no invocation on B learns that A
+  merged until its own next survey.
+
+**Hard design constraints — or it becomes the next shared-mutable-state hazard the
+isolation retro removed:**
+
+1. **Machine-local and gitignored, at the workspace root — never committed.** The
+   resources are machine-local; a committed file churns git and conflicts across epic
+   branches.
+2. **Locked writes** — `flock`, the same mechanism as the per-branch locks
+   (`pipeline.locks`). Unlocked claim/release races otherwise.
+3. **Liveness / TTL reclaim of stale holders** — heartbeat or PID-liveness. A crashed
+   session must not hold the Docker slot or a port range forever. **This is the hard
+   part** and the reason not to build it casually.
+4. **Control-plane owned** — `sdlc_next.py` gets claim/release/reserve commands;
+   agents never hand-edit the file, exactly as they never hand-type `gh`.
+
+**Scope caveat.** Only helps *same-machine* concurrency. Remote/cloud sessions do not
+share Docker or ports and gain nothing from it.
+
+**Trigger to build (operator, 2026-09-12): implement only if real parallel multi-epic
+development actually hits contention or collision.** Until then it stays
+documented-not-built. The near-misses that would justify it, all from epic #159: the
+shared-dev-DB wipe (`cleanTables()` under a concurrent IT run), the `9229` debug-port
+clash, and the branch-steal races. One recurrence of any of them under N-epic
+concurrency is the signal; a hypothetical is not.

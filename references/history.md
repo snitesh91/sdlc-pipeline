@@ -1329,6 +1329,25 @@ never gated. Resumes, rework rounds and gate actions are never gated — passing
 what drains the queue. Repo-wide on purpose (one reviewer across all epics); in-flight
 `in-progress` product units are not counted, an accepted small overshoot.
 
+### 4. Cross-epic coordination file — DEFERRED, documented only (`parallelism.md`)
+
+**Why.** The isolation retro (item 1 of the main 2026-09-12 entry) separated everything
+that can be separated and left one gap on record: the machine's finite shared resources
+— the heavy-Docker slot, ports/compose projects, which session drives which branch —
+are still coordinated by per-session convention that N concurrent instances cannot see
+each other keep. Epic #159 produced the near-misses: the shared-dev-DB wipe, a `9229`
+debug-port clash, branch-steal races.
+
+**What changed.** Nothing was built. `parallelism.md` gains a "Cross-epic coordination
+file — DEFERRED" subsection under the multi-epic isolation material recording the
+design: what it tracks (heavy-Docker slot claim/release, port/compose-project registry,
+live session/epic registry, cross-epic unblocks), the four hard constraints
+(machine-local + gitignored, `flock`ed writes, liveness/TTL reclaim of stale holders —
+the hard part — and control-plane ownership via new `sdlc_next.py` commands), the
+same-machine-only caveat, and the **trigger**: operator, 2026-09-12 — implement only if
+real parallel multi-epic development actually hits contention or collision. Marked
+DEFERRED so nobody builds it on a hypothetical.
+
 ## 2026-09-12 — product-review & arch-review → fable (tier change)
 Moved `product-review` and `arch-review` from opus to fable in the SKILL.md model table.
 Both are backstopped by a human gate immediately after (Gate A / Gate B), so a cheaper
