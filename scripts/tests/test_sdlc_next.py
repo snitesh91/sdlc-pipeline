@@ -5441,3 +5441,110 @@ def test_verify_exit_omits_citations_ok_when_stage_record_file_is_absent(tmp_pat
     gh = GitHub(runner=gh_runner)
     result = cmd_verify_exit(gh, str(tmp_path), 92, expect_stage="architecture", unit="epic", runner=git_runner)
     assert "citations_ok" not in result
+
+
+def test_list_parallel_ready_ignores_a_parked_worktrees_footprint_for_collisions():
+    """A parked worktree cannot collide with anything, for the same reason it is
+    not a slot: nothing is going to write in it.
+
+    Regression for 2026-09-13, epic #365: #494 was skipped as "footprint overlaps
+    active/eligible #323" where #323 was another epic's worktree, blocked on an
+    open dependency and already excluded from the slot count. Collisions were
+    derived from every live worktree while slots were derived from the pruned
+    set, so the two disagreed."""
+    from sdlc_next import GitHub, cmd_list_parallel_ready
+    epic = _epic(110, labels=["epic:architected"])
+    parked = _issue(323, stage="lld", status="needs-human", parent=110)
+    candidate = _issue(494, stage="development", parent=110)
+    shared = "## Footprint\n\n- `backend/src/modules/search/**`\n"
+    responses = {
+        tuple(_list_argv()): _list_response([epic, parked, candidate]),
+        ("git", "-C", "/repo", "fetch", "origin"): "",
+        ("git", "-C", "/repo", "worktree", "list", "--porcelain"):
+            _worktree_list(("/repo", "main"), ("/tmp/sdlc-dev-323", "issue-323")),
+        ("git", "-C", "/repo", "show", "origin/issue-323:docs/sdlc/issue-323/lld.md"): shared,
+        ("git", "-C", "/repo", "show", "origin/issue-494:docs/sdlc/issue-494/lld.md"): shared,
+    }
+    responses.update(_no_blockers_responses(494))
+    runner = ScriptedRunner(responses)
+    result = cmd_list_parallel_ready(GitHub(runner=runner), "/repo", 110, runner=runner)
+    # Identical footprints, and the candidate is still proposed.
+    assert [c["issue"] for c in result["parallel_ready"]] == [494]
+    # #323 is skipped only for holding its own worktree, never for a collision.
+    assert result["skipped"] == [
+        {"issue": 323, "reason": "already active in its own worktree"}]
+    assert result["active_count"] == 0
+    assert result["stale_worktrees"] == [
+        {"branch": "issue-323", "reason": "Pipeline Status is 'needs-human'"}]
+
+
+def test_list_parallel_ready_still_collides_with_a_live_worktrees_footprint():
+    """Positive control for the test above: the same overlap, with the sibling
+    actually being worked in, must still be refused. A fix that simply stopped
+    checking footprints would pass the parked-worktree test."""
+    from sdlc_next import GitHub, cmd_list_parallel_ready
+    epic = _epic(110, labels=["epic:architected"])
+    live = _issue(323, stage="development", parent=110)
+    candidate = _issue(494, stage="development", parent=110)
+    shared = "## Footprint\n\n- `backend/src/modules/search/**`\n"
+    responses = {
+        tuple(_list_argv()): _list_response([epic, live, candidate]),
+        ("git", "-C", "/repo", "fetch", "origin"): "",
+        ("git", "-C", "/repo", "worktree", "list", "--porcelain"):
+            _worktree_list(("/repo", "main"), ("/tmp/sdlc-dev-323", "issue-323")),
+        ("git", "-C", "/repo", "show", "origin/issue-323:docs/sdlc/issue-323/lld.md"): shared,
+        ("git", "-C", "/repo", "show", "origin/issue-494:docs/sdlc/issue-494/lld.md"): shared,
+    }
+    responses.update(_no_blockers_responses(323, 494))
+    runner = ScriptedRunner(responses)
+    result = cmd_list_parallel_ready(GitHub(runner=runner), "/repo", 110, runner=runner)
+    assert result["parallel_ready"] == []
+    assert result["skipped"] == [
+        {"issue": 323, "reason": "already active in its own worktree"},
+        {"issue": 494, "reason": "footprint overlaps active/eligible #323"}]
+    assert result["active_count"] == 1
+
+
+def _verify_exit_runners(tmp_path, stage_field_value):
+    from sdlc_next import _ISSUE_FIELDS_QUERY
+    fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
+    gh_runner = ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"): json.dumps({"labels": []}),
+        fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
+            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"},
+             "name": stage_field_value},
+        ]}}}}}),
+    })
+    git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
+    return gh_runner, git_runner
+
+
+def test_verify_exit_accepts_pr_review_because_it_is_a_real_stage_value(tmp_path):
+    """`open-dev-pr` sets Stage to `PR Review` as `development`'s own exit action,
+    so `pr-review` is the only correct value to verify that handoff with.
+
+    Regression for 2026-09-13: the misuse guard refused every `REVIEW_ROLES`
+    member, which left the `development` handoff with no accepted
+    `--expect-stage` at all -- `development` failed because the field had already
+    moved on, `pr-review` failed as misuse."""
+    from sdlc_next import GitHub, cmd_verify_exit
+    gh_runner, git_runner = _verify_exit_runners(tmp_path, "PR Review")
+    result = cmd_verify_exit(GitHub(runner=gh_runner), str(tmp_path), 9,
+                             expect_stage="pr-review", runner=git_runner)
+    assert result["stage"] == "pr-review"
+    assert result["expected_stage_present"] is True
+    assert "misuse" not in result
+    assert result.get("ok") is not False
+
+
+def test_verify_exit_still_refuses_review_roles_with_no_stage_value(tmp_path):
+    """Positive control: the three reviews that genuinely have no Stage value of
+    their own are still reported as misuse, not as a pipeline failure."""
+    from sdlc_next import GitHub, cmd_verify_exit
+    for role in ("product-review", "arch-review", "lld-review"):
+        gh_runner, git_runner = _verify_exit_runners(tmp_path, "LLD")
+        result = cmd_verify_exit(GitHub(runner=gh_runner), str(tmp_path), 9,
+                                 expect_stage=role, runner=git_runner)
+        assert result["ok"] is False, role
+        assert "misuse" in result, role
