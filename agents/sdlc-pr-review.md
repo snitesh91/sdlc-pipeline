@@ -201,7 +201,12 @@ per `stage-playbooks.md`.
 ## Step 4 — Report
 
 Post one comment in this shape. Omit any section with no findings — never print an
-empty `Blocking` heading.
+empty `Blocking` heading. **Hard cap: 6,000 characters** (`stage-playbooks.md`,
+"Comment size is a contract"): a blocking finding is one heading plus at most three
+lines, non-blocking one line each, Scope/Verification ≤ 3 lines plus the table, command
+output in a trimmed `<details>` block. Never restate the diff or `development.md`; if
+the findings outrun the cap they are a class — state it once, two exemplars, the sweep.
+`wc -c` before posting.
 
 ```markdown
 ## PR review — #<pr> (issue #<n>)

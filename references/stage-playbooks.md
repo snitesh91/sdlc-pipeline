@@ -358,6 +358,31 @@ ran the previous stage. Comments are the **visibility record** for a human and t
 - **Enough to resume from a crash**: if a fresh session couldn't tell from comments
   plus docs where a crashed run left off, there weren't enough.
 
+**Comment size is a contract, not a style preference.** Measured before this rule
+existed: `arch-review` rounds of 24,284 / 18,689 / 16,070 characters, an `lld-review`
+of 15,365, a `pr-review` of 14,640 — against stage handoffs that owned a doc and stayed
+at 1.4–3.3K. A round-4 architect dispatch pulled 59K characters of review text across
+three fetches. Comment bulk is an **input cost on every downstream stage**, and it
+dilutes the few lines that decide whether a round succeeds. So:
+
+- **Stage handoff comment: ≤ 2,000 characters.** What changed, where the doc/commit is,
+  the delta since the last round, the marker. The doc carries the detail.
+- **Evidence-carrying comment** (`product-review`, `arch-review`/`lld-review`,
+  `pr-review`, `testing`'s handoff): **≤ 6,000 characters.** Findings first, each as
+  one heading plus at most three lines (what, why it matters, the fix — described, not
+  applied); non-blocking findings one line each; the verdict one line. Command output
+  and quotes go in a `<details>` block trimmed to the lines that prove the point (≤ 15
+  lines per block). The Scope/Verification section is ≤ 3 lines — say what you read and
+  ran, not everything you found sound.
+- **Do not restate the document, the diff, or the previous round.** A reviewer who has
+  more to say than the cap allows has found a *class*, not a list: state the class
+  once, give two exemplars and the sweep that finds the rest ("A completeness claim …
+  is a sweep, not a list"), and stop. Cut the "what I checked and found fine"
+  inventory first — it is the bulk in every over-length comment measured.
+- **Over the cap is a finding on the comment.** The orchestrator asks for a trimmed
+  re-post before dispatching the next stage, the same way it asks for a missing
+  comment. `wc -c` on the body before posting is the whole check.
+
 Each handoff comment ends with the hidden marker
 `<!-- stage-transition: <from-role>-><to-role> @ <ISO8601> -->` — posted by the
 script wherever a script command owns the transition (`open-dev-pr`,
@@ -737,15 +762,17 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
 
   - **Clean (any confidence)** → **no gate, ever** — `lld-review` is the only review
     a normal-epic child's design gets, deliberately. After `record-design-review`,
-    publish the design to the epic branch:
+    publish the design and advance the child in one call:
     `sdlc_next.py merge-lld-doc <n>` — commits this child's `lld.md` onto
-    `epic-<parent>` and pushes it, so the low-level design is durable there independent
-    of the child branch and siblings pick it up on their next `sync-branch` (better
-    cross-child overlap checks). Scoped no-op for a standing-epic child or a parentless
-    issue; a structured conflict result (never a crash) if the epic branch moved under
-    it. Then claim `development` directly:
-    `sdlc_next.py claim <n> --role development` (never `skip-gate`/`open-gate` here).
-    Continue immediately.
+    `epic-<parent>`, pushes and verifies it on origin (siblings pick it up on their
+    next `sync-branch`), then sets Stage to `Development` and clears Pipeline Status
+    — **advance, not claim**. Do **not** follow it with `claim <n> --role development`
+    (and never `skip-gate`/`open-gate` here): the child is now a fresh `next-action` /
+    `list-parallel-ready` unit and is picked by lane and priority alongside any
+    sibling `lld` it unblocked. Scoped no-op for a standing-epic child or a parentless
+    issue; a structured conflict result (never a crash, never an advance) if the epic
+    branch moved under it — re-run once quiet. `references/parallelism.md`,
+    "Publishing lld.md to the epic branch".
   - **Fixable task-level issue** → resume the `lld` agent; re-verify. Valve pairing
     `lld-review` <-> `lld`.
   - **Doesn't fit the epic's design after all** → deviation escalation, as if `lld`
@@ -760,18 +787,12 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
       --summary "..." [--unit epic]
   ```
 
-  This is the design-side twin of `record-pr-review`, and it exists because the valve
-  could not see the pairing that fires it most: `lld-review` <-> `lld` has run the
-  large majority of an epic's review rounds and tripped the context-reset replacement
-  on most of its children while `pairing-counts` tracked only `pr-review` and sync
-  conflicts — so the strike count lived in one orchestrator's head, and any crashed
-  session or continuous-mode agent would have resumed it at zero (see
-  `references/history.md`). `pairing-counts` now reports these per role under
-  `design_review`; read it before deciding whether a bounce is routine.
-
-  **The confidence marker does not substitute for this.** `skip-gate` reads
-  confidence, which answers "how far do I trust a *clean* verdict" — it is meaningless
-  on a rework verdict, which is exactly the verdict a valve counts. Post both.
+  The design-side twin of `record-pr-review`: it is what lets `pairing-counts` see the
+  `lld-review` <-> `lld` pairing — the one that fires the valve most and had no
+  mechanical counter (see `references/history.md`, 2026-08-28). Read `pairing-counts`
+  (`design_review`) before deciding whether a bounce is routine. **The confidence
+  marker does not substitute for this** — it is meaningless on a rework verdict, which
+  is exactly the verdict a valve counts. Post both.
 
   **State your axis coverage in the handoff.** A design review that fans out to
   parallel axes must say, in its own comment, **how many it launched and how many had
@@ -829,16 +850,10 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
   4. **Every acceptance criterion is checked against the real diff, not against your
      own commit messages.** Run `git diff origin/<base>...HEAD --name-only` and, for
      each AC, name the file in that list which satisfies it. An AC whose satisfying
-     file is not in the diff is not done.
-
-     Added 2026-08-28: this stage has reported a build complete across many commits
-     when the design's validators had been written and unit-tested but **wired into
-     none of the entrypoints** — no entrypoint file appeared in the diff at all. The
-     commit messages read as a finished build; the diff did not, and it was caught
-     only because the next agent checked the ACs against the diff instead of the
-     summary (see `references/history.md`). This is the same class `lld-review` closes
-     one level down: *a unit test of a function in isolation cannot prove the call
-     site exists.*
+     file is not in the diff is not done. (Validators have shipped unit-tested and
+     **wired into no entrypoint**, with commit messages reading as a finished build —
+     `references/history.md`, 2026-08-28. A unit test of a function in isolation
+     cannot prove the call site exists.)
 
 - **`testing`** — `open-dev-pr` already set Stage=`Testing` and posted development's
   handoff; that is not testing's start comment. Orchestrator posts
@@ -951,13 +966,11 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
     first**, then resume the `development` agent with the failing test details; once
     fixed, resume the `testing` agent to re-verify (don't spawn fresh — the one
     exception is the valve's own context-reset replacement at the third bounce).
-    Valve pairing. The comment is not optional on this branch: the PASS path posts one
-    through `handoff-to-pr-review` and the FAIL path posts nothing by default, so a
-    failing round is the one round the pipeline silently loses — a long `testing`
-    round has produced a FAIL verdict and live probe evidence and left **no trace on
-    the issue**, and `pr-review` then blocked because the evidence existed nowhere
-    (see `references/history.md`). Before delegating any next stage, confirm the
-    previous stage left a comment — if it didn't, get one.
+    Valve pairing. The comment is not optional here: PASS posts one through
+    `handoff-to-pr-review`, FAIL posts nothing by default — so a FAIL round with live
+    probe evidence has left no trace on the issue and `pr-review` then blocked on
+    evidence that existed nowhere (`references/history.md`). Before delegating any
+    next stage, confirm the previous stage left a comment — if it didn't, get one.
 
 - **`pr-review`** — Orchestrator posts `start-comment <n> --role pr-review`, spawns a
   fresh subagent of type `sdlc-pr-review` (model per the config's `pipeline.models`)

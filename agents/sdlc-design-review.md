@@ -162,7 +162,12 @@ and the completeness lens are unchanged.
 ## Output
 
 Post one handoff comment. Findings first, each with its location and why it matters to
-soundness; then the verdict; then the confidence marker.
+soundness; then the verdict; then the confidence marker. **Hard cap: 6,000 characters**
+(`stage-playbooks.md`, "Comment size is a contract") — a blocking finding is one
+heading plus at most three lines, non-blocking findings one line each, Scope ≤ 3
+lines, evidence in a trimmed `<details>` block. Do not restate the doc or inventory
+what you found sound; more findings than fit is a *class* — state it once with two
+exemplars and the sweep that finds the rest. `wc -c` before posting.
 
 ```markdown
 ## Design review — issue #<n> (`architecture.md` | `lld.md`)

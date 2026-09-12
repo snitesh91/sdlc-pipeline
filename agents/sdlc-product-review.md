@@ -97,7 +97,10 @@ first round again. If the `Agent` tool is unavailable, work the axes yourself in
 ## Output
 
 Post one handoff comment: findings first, each with its location and why it matters to the
-requirements; then the verdict.
+requirements; then the verdict. **Hard cap: 6,000 characters** (`stage-playbooks.md`,
+"Comment size is a contract"): one heading plus at most three lines per blocking finding,
+one line per non-blocking, Scope ≤ 3 lines, no restating of `product.md`. `wc -c` before
+posting.
 
 ```markdown
 ## Product review — issue #<n> (`product.md`)

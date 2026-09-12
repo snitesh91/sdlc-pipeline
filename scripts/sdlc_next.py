@@ -187,6 +187,14 @@ _PIPELINE_DEFAULTS = {
                        "--env-file {envFile} down -v --remove-orphans",
     },
     "gates": {"skipConfidenceThreshold": 95, "requiresHumanGateA": True},
+    # Product-stage WIP cap (operator, 2026-08-16; epic #92 produced five parallel
+    # Gate A PRs a human could not keep up with). At most `maxGateAPending` open
+    # units repo-wide may sit at Stage=Product with an open Gate A (Pipeline Status
+    # awaiting-human-review / feedback-received) before `next-action` and
+    # `list-design-ready` stop starting *fresh* `product` delegations and loop to
+    # other actionable units instead. Resumes, rework rounds, and gate actions
+    # (`pass-gate` / `address-gate-feedback`) are never gated. `0` disables.
+    "productWip": {"maxGateAPending": 5},
     "escalation": {"replaceAt": 3, "needsHumanAt": 6},
     # `{docRoot}` is formatted with the config's `docRoot` at load time, so the
     # default lands next to the committed docs of the driven repo (e.g.
@@ -254,6 +262,9 @@ EPIC_BRANCH_PREFIX = PIPELINE["branches"]["epicPrefix"]
 # `epic-<n>` + `-gate-` + `product` -> `epic-5-gate-product`. See `epic_gate_branch`.
 GATE_BRANCH_SUFFIX = PIPELINE["branches"]["gateSuffix"]
 ESCALATION = PIPELINE["escalation"]
+# Read at call time by `product_wip_headroom` (never captured at import into a
+# default arg) so a test or a one-off run can override it on the module.
+PRODUCT_WIP_CAP = PIPELINE["productWip"]["maxGateAPending"]
 
 
 def issue_branch(number: int) -> str:
@@ -797,6 +808,29 @@ def default_stage(issue: dict, parent_epic: Optional[dict] = None) -> str:
     if issue_type(issue) == "Bug":
         return "architecture"
     return "product"
+
+
+def product_gate_pending(all_issues: list) -> list:
+    """Open issues, repo-wide, sitting at Stage=Product with an open Gate A --
+    Pipeline Status in `GATE_PENDING_STATUSES` (`feedback-received` is a
+    visibility flip on top of `awaiting-human-review`, still the same open gate).
+    This is the human's product-review queue; `PRODUCT_WIP_CAP` bounds it.
+    Repo-wide on purpose: the human reviewing Gate A PRs is one person across
+    every epic, so an epic-scoped count would let N invocations each open five."""
+    return sorted(i["number"] for i in all_issues
+                  if i["state"] == "OPEN" and current_stage(i) == "product"
+                  and pipeline_status(i) in GATE_PENDING_STATUSES)
+
+
+def product_wip_headroom(all_issues: list) -> Optional[int]:
+    """How many *fresh* `product` delegations may start before the Gate A queue
+    hits `PRODUCT_WIP_CAP`; `None` when the cap is disabled (`<= 0`). Callers that
+    start several units in one call (`list-design-ready`) decrement it per unit
+    selected, so a single fan-out cannot overshoot the cap either."""
+    cap = PRODUCT_WIP_CAP
+    if not cap or cap <= 0:
+        return None
+    return max(0, cap - len(product_gate_pending(all_issues)))
 
 
 def priority_rank(issue: dict) -> int:
@@ -1375,7 +1409,15 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
     `action: "none"` means this epic genuinely has nothing actionable left
     right now -- not that the whole repo is drained; a different epic may
     still have plenty to do, but this function doesn't know or care, by
-    design."""
+    design.
+
+    **Product WIP cap.** A *fresh* `product` delegation (epic-self or child, not
+    a resume) is skipped -- the loop moves on to the next actionable unit --
+    while `product_gate_pending` is at `PRODUCT_WIP_CAP` (`pipeline.productWip.
+    maxGateAPending`, default 5). A `none` reached that way carries
+    `product_cap` naming the deferred units, so the orchestrator's report can
+    say why nothing started. Gate actions (`pass-gate`, `address-gate-feedback`)
+    are what drain the queue and are never gated."""
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
     epic_issue = by_number.get(epic)
@@ -1389,6 +1431,22 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
 
     children = [i for i in all_issues if i["state"] == "OPEN"
                 and i.get("parent") and i["parent"]["number"] == epic]
+    # A profile whose Gate A auto-passes (`requiresHumanGateA: false`) never puts a
+    # unit in the human's queue, so its product delegations are never capped.
+    product_headroom = (product_wip_headroom(all_issues)
+                        if effective_gates(epic_issue)["requiresHumanGateA"] else None)
+    deferred_by_cap: list = []
+
+    def capped(stage: str) -> bool:
+        return stage == "product" and product_headroom is not None and product_headroom <= 0
+
+    def none_result() -> dict:
+        result = {"action": "none", "epic": epic}
+        if deferred_by_cap:
+            result["product_cap"] = {"limit": PRODUCT_WIP_CAP,
+                                     "pending": product_gate_pending(all_issues),
+                                     "deferred": deferred_by_cap}
+        return result
 
     def unit_of(issue: dict) -> str:
         return "epic" if is_epic(issue) else "issue"
@@ -1413,12 +1471,16 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
                         "gate_pr": gate["gate_pr"], "stage": gate["stage"],
                         "unresolved_threads": gate["unresolved_threads"],
                         "new_comments": gate["new_comments"]}
-        elif status != "needs-human" and not is_epic_architected(epic_issue) \
-                and not gh.blocked_by(epic):
-            return {"action": "delegate", "issue": epic, "unit": "epic",
-                    "stage": current_stage(epic_issue) or "product"}
+        elif status != "needs-human" and not is_epic_architected(epic_issue):
+            epic_stage = current_stage(epic_issue) or "product"
+            if capped(epic_stage):
+                deferred_by_cap.append(epic)
+            elif not gh.blocked_by(epic):
+                return {"action": "delegate", "issue": epic, "unit": "epic",
+                        "stage": epic_stage}
         # else: epic-self work is done (architected, no pending gate),
-        # needs-human, or blocked on another epic -- fall through to children.
+        # needs-human, blocked on another epic, or deferred by the product cap --
+        # fall through to children.
 
     if resolve_profile(epic_issue)["childrenNeedArchitectedEpic"] \
             and not is_epic_architected(epic_issue):
@@ -1430,7 +1492,7 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
         # epic, not just the epic's own phase. Without this guard, those three
         # fall-through cases would delegate a child at `lld` against a design that
         # hasn't been written or approved.
-        return {"action": "none", "epic": epic}
+        return none_result()
 
     for issue in sorted(children, key=sort_key):
         status = pipeline_status(issue)
@@ -1447,6 +1509,12 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
                         "unresolved_threads": gate["unresolved_threads"],
                         "new_comments": gate["new_comments"]}
             continue
+        stage = current_stage(issue) or default_stage(issue, epic_issue)
+        if capped(stage):
+            # Checked before the blockedBy call and the Stage-assign write: a unit
+            # the cap defers this pass gets no side effects at all.
+            deferred_by_cap.append(issue["number"])
+            continue
         if gh.blocked_by(issue["number"]):
             continue
         if current_stage(issue) is None:
@@ -1454,11 +1522,11 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
             # none set yet -- operator instruction: a new issue should show its
             # stage directly, not sit blank on the board until claim() eventually
             # picks it up.
-            gh.set_stage_field(issue["number"], default_stage(issue, epic_issue))
+            gh.set_stage_field(issue["number"], stage)
         return {"action": "delegate", "issue": issue["number"], "unit": "issue",
-                "stage": current_stage(issue) or default_stage(issue, epic_issue)}
+                "stage": stage}
 
-    return {"action": "none", "epic": epic}
+    return none_result()
 
 
 def cmd_next_action(gh: GitHub, args) -> dict:
@@ -2150,7 +2218,15 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
     reflects current remote state): never claims, posts, or creates a worktree.
     `skipped` names every child this call excluded and why. Mirrors
     `list-parallel-ready`'s JSON shape, with `design_ready` in place of
-    `parallel_ready`."""
+    `parallel_ready`.
+
+    **Product WIP cap** (`pipeline.productWip.maxGateAPending`, default 5): a
+    `product`-stage candidate is proposed only while the repo-wide Gate A queue
+    (`product_gate_pending`) plus the `product` candidates already selected in
+    this call leave headroom under the cap -- one fan-out cannot push the human's
+    review queue past it. `architecture`-stage candidates are never gated (they
+    are past Gate A). Result carries `product_cap` with the cap and the pending
+    list so the orchestrator can report it."""
     limit = DESIGN_LANE_PARALLELISM if limit is None else limit
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
@@ -2158,9 +2234,14 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
     if epic_issue is None or not is_epic(epic_issue):
         raise GhError(f"#{epic} is not an epic (a top-level Type: Feature issue) -- "
                        f"pass the epic's own issue number, not a child issue's")
+    # Same exemption as decide_next_action: an auto-passing Gate A never queues on
+    # the human, so that profile's product candidates are not capped.
+    product_headroom = (product_wip_headroom(all_issues)
+                        if effective_gates(epic_issue)["requiresHumanGateA"] else None)
+    product_cap = {"limit": PRODUCT_WIP_CAP, "pending": product_gate_pending(all_issues)}
     base = {"design_ready": [], "count": 0, "eligible_total": 0, "active_count": 0,
             "active_branches": [], "limit": limit, "slots_available": 0, "epic": epic,
-            "skipped": [], "stale_worktrees": []}
+            "skipped": [], "stale_worktrees": [], "product_cap": product_cap}
     if is_epic_legacy(epic_issue):
         return {**base, "note": f"epic #{epic} is epic:legacy -- not driven by this pipeline"}
     if not is_epic_standing(epic_issue):
@@ -2206,6 +2287,15 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
         if gh.blocked_by(number):
             skipped.append({"issue": number, "reason": "blocked by an open dependency"})
             continue
+        if stage == "product" and product_headroom is not None:
+            if product_headroom <= 0:
+                skipped.append({"issue": number,
+                                "reason": f"product WIP cap: {len(product_cap['pending'])} unit(s) "
+                                          f"already awaiting Gate A review (cap "
+                                          f"{PRODUCT_WIP_CAP}) -- not starting a fresh product "
+                                          f"stage until one passes"})
+                continue
+            product_headroom -= 1
         eligible.append({"issue": number, "branch": branch, "stage": stage, "title": issue["title"]})
 
     # Slot count off live worktrees, restricted to *design*-stage occupants: a
@@ -2242,7 +2332,7 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
     return {"design_ready": selected, "count": len(selected), "eligible_total": len(eligible),
             "active_count": active_count, "active_branches": sorted(occupied),
             "limit": limit, "slots_available": slots, "epic": epic, "skipped": skipped,
-            "stale_worktrees": stale}
+            "stale_worktrees": stale, "product_cap": product_cap}
 
 
 def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> dict:
@@ -2666,7 +2756,20 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], issue: int,
     internal replay from the new tip), or no `lld.md` on `origin/issue-<n>`,
     returns a structured result at exit 0 (`conflict`/`reason`), not an uncaught
     crash -- modelled on `cmd_sync_branch`'s conflict handling. A genuine
-    operational git failure still propagates as GhError (exit 1)."""
+    operational git failure still propagates as GhError (exit 1).
+
+    **Advance-not-claim (2026-09-12).** Once the doc is verified on origin
+    (`merged: true`, or `up-to-date` with `verified_on_origin`), this command
+    also advances the child's Stage to `development` and clears its Pipeline
+    Status -- exactly what `pass-gate --unit epic` / `live=False` do, and
+    deliberately **not** a `claim`. The child then surfaces as a fresh
+    `next-action` / `list-parallel-ready` unit at `development`, so one
+    orchestrator pass can return a *mix* of lanes (this child's `development`
+    plus the sibling `lld`s it just unblocked) instead of being forced to chain
+    straight into development for whichever child's lld finished first. This is a
+    scheduling mechanism only, never an "all llds before any development"
+    policy -- an independent child still flows lld->development without waiting
+    on siblings. See `_advance_after_lld_publish` for the crash-safety argument."""
     issues = {i["number"]: i for i in gh.issue_list()}
     entry = issues.get(issue)
     if entry is None:
@@ -2686,7 +2789,47 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], issue: int,
     src_ref = f"origin/{issue_branch(issue)}"
     with branch_lock(epic), BranchWorkspace(epic, repo_path, runner) as ws:
         result = _publish_lld_doc(gh, ws.path, issue, epic, doc_path, src_ref, runner)
+    result = _advance_after_lld_publish(gh, issue, entry, result)
     return _with_workspace(result, ws)
+
+
+def _advance_after_lld_publish(gh: GitHub, issue: int, entry: dict, result: dict) -> dict:
+    """Stage -> `development`, Pipeline Status cleared -- **no claim** -- once
+    `_publish_lld_doc` has verified the doc on origin. Returns `result` with
+    `advanced`/`next_stage`/`claimed` added.
+
+    Gated on `verified_on_origin`, not on `merged`: the doc reaches origin and
+    the field write are two separate side effects, and a crash between them
+    must leave a re-run that lands on `up-to-date` still able to advance.
+    Gated on the child's Stage being `lld`: a re-run after the advance (or on a
+    child already past it) writes nothing -- idempotent, like every other
+    marker/field write here.
+
+    Write order matters. Stage is set **before** Pipeline Status is cleared, so
+    the only crash-window state is `Stage=development, Pipeline Status=in-progress`,
+    which `next-action` reads as `resume` at `development` -- the same work,
+    picked up from `origin/issue-<n>` + the published `lld.md`. The other order
+    would leave `Stage=lld, Pipeline Status=unset`, which `next-action` would
+    read as a *fresh* `lld` and redo a reviewed design. Before this command
+    advanced anything, the crash-window state after `merge-lld-doc` was
+    `Stage=lld, in-progress` with a clean review marker -- an ambiguous resume
+    that the orchestrator had to disambiguate from the thread. Now every
+    persisted state maps to exactly one next step."""
+    if not result.get("verified_on_origin"):
+        return {**result, "advanced": False}
+    stage = current_stage(entry)
+    if stage != "lld":
+        return {**result, "advanced": False,
+                "reason_not_advanced": f"Stage is {stage!r}, not 'lld' — nothing to advance"}
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    gh.set_stage_field(issue, "development")
+    gh.clear_pipeline_status_field(issue)
+    gh.issue_comment(issue,
+        f"➡️ `lld-review` clean and `lld.md` published — Stage advanced to `development` "
+        f"(not claimed). `next-action` / `list-parallel-ready` pick it up as a fresh unit, "
+        f"alongside any sibling `lld` it unblocked.\n\n"
+        f"<!-- stage-transition: lld-review->development @ {timestamp} -->")
+    return {**result, "advanced": True, "next_stage": "development", "claimed": False}
 
 
 def _blob_at(repo_path: str, ref: str, path: str, runner: Runner) -> Optional[str]:
@@ -4406,8 +4549,9 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_sync_branch(GitHub(), a.repo_path, a.issue, a.unit))
     p = sub.add_parser("merge-lld-doc",
                         help="Publish a normal-epic child's lld.md onto its epic branch as soon "
-                             "as lld-review is CLEAN — durable design + sibling visibility; "
-                             "no-op for a standing-epic child or a parentless issue")
+                             "as lld-review is CLEAN, then advance its Stage to development "
+                             "(NOT claimed -- next-action/list-parallel-ready pick it up as a "
+                             "fresh unit); no-op for a standing-epic child or a parentless issue")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
                     help="Any path inside the repository; the doc is published from the epic branch's own live worktree or an ephemeral one, never the main checkout")

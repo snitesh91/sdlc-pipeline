@@ -1247,6 +1247,107 @@ upgrade trigger) is recommended as safe and awaits operator sign-off before it g
 epics of `pairing-counts` data. Recorded here rather than guessed into the table, per
 the model-table paragraph's own rule.
 
+## 2026-09-12 (c) — lld/development decoupling, comment size caps, product WIP cap
+
+Three operator-approved backlog items landed on a quiet lane after the main 2026-09-12
+retro (`6c691b5`). Each was already recorded as a memory; this is the why in one place.
+
+### 1. `merge-lld-doc` advances to `development` instead of the orchestrator claiming it (`sdlc_next.py`, `SKILL.md`, `stage-playbooks.md`, `parallelism.md`)
+
+**Why.** The clean-`lld-review` exit was `record-design-review` → `merge-lld-doc` →
+`claim development`, so the orchestrator was forced to chain straight into development
+for whichever child's lld happened to finish first. Operator (2026-09-12): decouple, so
+a single `next-action` pass can return a *mix* by lane — one `development` for the
+child that just cleared review plus the sibling `lld`s it unblocked — scheduled by lane
+and priority. Bonus defect it removes: a crash between `merge-lld-doc` and `claim` left
+`Stage=LLD, in-progress` with a clean review marker, an ambiguous resume. The
+prerequisite (the origin-verified `merge-lld-doc` reconcile, item 2 of the main retro)
+had already shipped.
+
+**What changed.** `merge-lld-doc` sets Stage → `Development` and clears Pipeline Status
+once the doc is verified on origin (`merged: true` *or* `up-to-date`), gated on the
+child still being at `LLD`; Stage is written before the status clear so the only crash
+window reads as `resume/development`. It never claims (no `in-progress`, no start
+comment) — the `pass-gate --unit epic` / `live=False` shape. Result carries
+`advanced`/`next_stage`/`claimed: false`; a conflict or refusal advances nothing.
+`SKILL.md`'s clean-lld-review exit and the playbook's `lld-review` exit action drop the
+`claim` step and say re-run `list-parallel-ready` after every `merge-lld-doc`. **Scope
+guard, per operator ("definitely not all"):** mechanism only, not an all-llds-first
+policy; no profile toggle was added. Companion practice already in the playbook:
+`sync-branch` before every transition, which the wider lld→dev gap makes more
+important.
+
+### 2. Comment size caps and playbook trims (`stage-playbooks.md`, `SKILL.md`, the four review/testing agents)
+
+**Why.** Operator, 2026-08-23 (memory `sdlc_next_verbosity_backlog`): `SKILL.md` said
+comments stay short and point at the docs; reality was ~10× that and nothing noticed.
+Measured on epic #98: `arch-review` rounds of 24,284 / 18,689 / 16,070 characters, an
+`lld-review` of 15,365 (#232), a `pr-review` of 14,640 (#241) — while stage handoffs,
+which own a doc, stayed at 1.4–3.3K. The round-4 architect dispatch pulled 59K characters
+of review text. Structural cause: the review roles own no doc, so their whole output has
+nowhere to go but a comment. Bulk is an input cost on every downstream stage and dilutes
+the instructions that decide a round. Deferred at the time until a real round-4 doc
+existed to judge against; landed now as a batch on a quiet lane, since `stage-playbooks.md`
+is read by live agents mid-run.
+
+**What changed.** A "Comment size is a contract" rule in Commenting discipline: **≤ 2,000
+characters for a stage handoff, ≤ 6,000 for an evidence-carrying comment** (the three
+reviews and `testing`'s handoff), with the shape that fits — one heading + ≤ 3 lines per
+blocking finding, one line per non-blocking, Scope ≤ 3 lines, evidence in a trimmed
+`<details>` block, no restating of the doc/diff/previous round; more findings than fit
+means a class, stated once with two exemplars and a sweep. Over the cap is a finding on the
+comment, and the orchestrator asks for a trimmed re-post. The four agent Output sections
+carry the cap (template copies; the driven repo's `.claude/agents/` copies must follow —
+Step 5 rule 2). Three playbook passages that narrated an incident inside a rule were cut
+to the rule plus a dated `history.md` pointer (`record-design-review` rationale,
+`development` gate 4, the `testing` FAIL-path paragraph) — no rule removed. The
+epic-level document altitude levers from the same backlog were already in place
+(`architecture.md` rules of 2026-08-2x: footprint/implementation notes omitted at epic
+level, decision sub-pages, "length is itself reviewable"); the 7–8K-word target for an
+epic-level doc stays a review judgement, not a mechanical count. Not built: a
+`review-<round>.md` per review — the caps make the comment fit without a new doc.
+
+### 3. Product-stage WIP cap — `pipeline.productWip.maxGateAPending` (`sdlc_next.py`, `SKILL.md`, `gates.md`)
+
+**Why.** Operator instruction 2026-08-16 (memory `sdlc_next_product_stage_cap`): at most
+five units awaiting Gate A at once — epic #92 had opened five parallel Gate A PRs a
+human could not review in step. The epic-level product/architecture phase answered
+that for default-profile epics (one Gate A per epic) but not for a standing/RTB backlog,
+whose children each open their own Gate A and fan out via `list-design-ready`. Checked
+first, per the brief: **nothing in the code or `SKILL.md` enforced an equivalent** — no
+count of gate-pending product units anywhere, no tunable — so this is a code change,
+not a documentation one.
+
+**What changed.** New tunable `pipeline.productWip.maxGateAPending` (default 5, `0`
+disables; visible in `show-config`). `product_gate_pending` counts open issues repo-wide
+at Stage `Product` with Pipeline Status in `GATE_PENDING_STATUSES`. `next-action` skips a
+*fresh* `product` delegation (epic-self or child) at the cap and keeps walking; a `none`
+reached that way carries `product_cap` with the deferred units. `list-design-ready`
+proposes `product` candidates only up to the remaining headroom, decremented per
+candidate in the call, so one fan-out cannot overshoot; `architecture` candidates are
+never gated. Resumes, rework rounds and gate actions are never gated — passing gates is
+what drains the queue. Repo-wide on purpose (one reviewer across all epics); in-flight
+`in-progress` product units are not counted, an accepted small overshoot.
+
+### 4. Cross-epic coordination file — DEFERRED, documented only (`parallelism.md`)
+
+**Why.** The isolation retro (item 1 of the main 2026-09-12 entry) separated everything
+that can be separated and left one gap on record: the machine's finite shared resources
+— the heavy-Docker slot, ports/compose projects, which session drives which branch —
+are still coordinated by per-session convention that N concurrent instances cannot see
+each other keep. Epic #159 produced the near-misses: the shared-dev-DB wipe, a `9229`
+debug-port clash, branch-steal races.
+
+**What changed.** Nothing was built. `parallelism.md` gains a "Cross-epic coordination
+file — DEFERRED" subsection under the multi-epic isolation material recording the
+design: what it tracks (heavy-Docker slot claim/release, port/compose-project registry,
+live session/epic registry, cross-epic unblocks), the four hard constraints
+(machine-local + gitignored, `flock`ed writes, liveness/TTL reclaim of stale holders —
+the hard part — and control-plane ownership via new `sdlc_next.py` commands), the
+same-machine-only caveat, and the **trigger**: operator, 2026-09-12 — implement only if
+real parallel multi-epic development actually hits contention or collision. Marked
+DEFERRED so nobody builds it on a hypothetical.
+
 ## 2026-09-12 — product-review & arch-review → fable (tier change)
 Moved `product-review` and `arch-review` from opus to fable in the SKILL.md model table.
 Both are backstopped by a human gate immediately after (Gate A / Gate B), so a cheaper

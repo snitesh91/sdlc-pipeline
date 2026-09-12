@@ -606,14 +606,38 @@ instead:
 python3 "$SDLC" merge-lld-doc <n>   # auto-resolves the epic branch's worktree
 ```
 
-Run it right after `record-design-review`, before `claim <n> --role development` (see
-`references/stage-playbooks.md`, the `lld-review` exit action). It takes
-`<docRoot>/issue-<n>/lld.md` verbatim from `origin/issue-<n>` and commits
-**only that one file** onto `epic-<parent>` as a doc-only commit, then pushes — not a
-merge of the whole child branch, so none of the child's in-progress code goes with it.
-Two payoffs: the low-level design is durable on the epic branch independent of the
-still-open `issue-<n>` branch, and every sibling picks it up in-tree on its next
-`sync-branch`, so cross-child overlap checks read the real committed design.
+Run it right after `record-design-review` (see `references/stage-playbooks.md`, the
+`lld-review` exit action). It takes `<docRoot>/issue-<n>/lld.md` verbatim from
+`origin/issue-<n>` and commits **only that one file** onto `epic-<parent>` as a
+doc-only commit, then pushes — not a merge of the whole child branch, so none of the
+child's in-progress code goes with it. Two payoffs: the low-level design is durable on
+the epic branch independent of the still-open `issue-<n>` branch, and every sibling
+picks it up in-tree on its next `sync-branch`, so cross-child overlap checks read the
+real committed design.
+
+**It also advances the child — advance-not-claim (2026-09-12).** Once the doc is
+verified on origin, the command sets Stage to `Development` and clears Pipeline
+Status, exactly as `pass-gate --unit epic` hands off to children: no `in-progress`, no
+start comment, no `claim`. `development` is then a *fresh* `next-action` /
+`list-parallel-ready` unit — so a single orchestrator pass can return, say, one
+`development` plus the two sibling `lld`s that were `blockedBy` it, scheduled by lane
+and priority instead of chained opportunistically onto whichever lld finished first.
+Mechanism only: an independent child still goes `lld` → `development` on the very next
+pick; this is **not** "all llds merge before any development starts".
+
+- **Every persisted state maps to one next step** (the old chain left `Stage=LLD,
+  in-progress` with a clean review marker after a crash — an ambiguous resume). Stage
+  is written *before* the status clear, so the only crash window is `Stage=Development,
+  in-progress`, which `next-action` reads as `resume` at `development` — the same work,
+  from `origin/issue-<n>` + the published doc. A crash *before* the field write leaves
+  `Stage=LLD` with the doc already on origin; the re-run lands on `up-to-date`
+  (verified on origin) and still advances. A child already at `Development` is left
+  untouched (`advanced: false`).
+- **`sync-branch` still runs first, every transition.** Decoupling widens the gap
+  between the lld merge and the development pick, so the worktree freshness rule
+  ("Keeping a branch current") matters more here, not less.
+- **Not advanced on a conflict or refusal** — the doc is not on origin, so the child
+  stays at `LLD`; re-run once the branch is quiet.
 
 - **Scope: normal-epic children only.** A standing-epic child (integrates into `main`,
   not an epic branch) or a parentless issue is a structured no-op at exit 0, never an
@@ -763,3 +787,56 @@ full run builds from the epic integration branch.
 - **The Docker resource cap stays machine-wide.** N isolated stacks are N sets of
   containers on one VM; the "at most one Docker-IT-heavy stage" rule above is now a
   per-machine rule the N instances cannot see each other enforce.
+
+### Cross-epic coordination file — DEFERRED, build only if real parallel-epic contention occurs
+
+**Status: DESIGN ONLY. Not built, not scheduled. Do not implement without the trigger
+below (operator, 2026-09-12).** Recorded so the next person to hit the problem starts
+from the design, not from zero.
+
+**Purpose — the missing third leg.** Isolation (worktrees, per-epic stacks, per-epic
+skill copy) *separates* what can be separated. This coordinates what **cannot** be
+separated: the single machine's finite shared resources across concurrently running
+epics/sessions. The last DESIGN bullet above ("the Docker resource cap stays
+machine-wide") is exactly the gap.
+
+**What it would track — machine-wide runtime state:**
+
+- **The heavy-Docker slot.** Claim before a backend-IT / `make e2e` run, release after,
+  so "≤ 1 heavy Docker run" (see "The machine's resource cap is the real cap") is
+  enforced **globally across epics** — today it is a per-session convention that N
+  instances cannot see each other keep.
+- **A port / compose-project registry.** Each isolated stack reserves its port range
+  and `COMPOSE_PROJECT_NAME` so stacks cannot collide; `provision-epic-stack` today
+  probes for bound ports at provision time only, and a debug-port `9229` clash has
+  actually happened.
+- **A live session/epic registry.** Who is driving which epic/branch, for
+  cross-session visibility — avoids branch-steal races and blind "is a peer busy?"
+  guessing (the `ops_main_checkout_steals_branch` class).
+- **Cross-epic unblocks.** A child in epic A that unblocks a child in epic B — the
+  native `blockedBy` edge crosses epics fine, but no invocation on B learns that A
+  merged until its own next survey.
+
+**Hard design constraints — or it becomes the next shared-mutable-state hazard the
+isolation retro removed:**
+
+1. **Machine-local and gitignored, at the workspace root — never committed.** The
+   resources are machine-local; a committed file churns git and conflicts across epic
+   branches.
+2. **Locked writes** — `flock`, the same mechanism as the per-branch locks
+   (`pipeline.locks`). Unlocked claim/release races otherwise.
+3. **Liveness / TTL reclaim of stale holders** — heartbeat or PID-liveness. A crashed
+   session must not hold the Docker slot or a port range forever. **This is the hard
+   part** and the reason not to build it casually.
+4. **Control-plane owned** — `sdlc_next.py` gets claim/release/reserve commands;
+   agents never hand-edit the file, exactly as they never hand-type `gh`.
+
+**Scope caveat.** Only helps *same-machine* concurrency. Remote/cloud sessions do not
+share Docker or ports and gain nothing from it.
+
+**Trigger to build (operator, 2026-09-12): implement only if real parallel multi-epic
+development actually hits contention or collision.** Until then it stays
+documented-not-built. The near-misses that would justify it, all from epic #159: the
+shared-dev-DB wipe (`cleanTables()` under a concurrent IT run), the `9229` debug-port
+clash, and the branch-steal races. One recurrence of any of them under N-epic
+concurrency is the signal; a hypothetical is not.

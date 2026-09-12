@@ -133,6 +133,10 @@
       "skipConfidenceThreshold": 95,
       "requiresHumanGateA": true
     },
+    "productWip": {
+      "_comment": "Repo-wide cap on units sitting at Stage=Product with an open Gate A (awaiting-human-review / feedback-received). next-action and list-design-ready stop starting fresh product delegations at the cap; 0 disables.",
+      "maxGateAPending": 5
+    },
     "escalation": {
       "replaceAt": 3,
       "needsHumanAt": 6
