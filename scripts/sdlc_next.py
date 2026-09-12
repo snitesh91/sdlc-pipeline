@@ -19,11 +19,16 @@ stdout regardless of exit code.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
+import shutil
+import socket
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -142,8 +147,45 @@ _PIPELINE_DEFAULTS = {
     "labels": {"standing": "epic:standing", "legacy": "epic:legacy",
                "architected": "epic:architected"},
     "branches": {"issuePrefix": "issue-", "epicPrefix": "epic-", "gateSuffix": "-gate-"},
+    # `ephemeralPrefix` names the throwaway worktree a branch-touching command
+    # stands up when no live worktree holds its target branch -- the main checkout
+    # is never a git-write target (see `branch_workspace`).
     "worktrees": {"root": "/tmp", "devPrefix": "sdlc-dev-", "epicPrefix": "sdlc-epic-",
-                  "reviewPrefix": "sdlc-review-"},
+                  "reviewPrefix": "sdlc-review-", "ephemeralPrefix": "sdlc-tmp-"},
+    # Per-branch flock so two sessions (or two lanes of one session) never run a
+    # branch-touching command on the same branch concurrently. `dir` may use
+    # `{worktreesRoot}`; `SDLC_LOCK_DIR` in the environment overrides it (tests).
+    "locks": {"dir": "{worktreesRoot}/.sdlc-locks", "waitSeconds": 600},
+    # Where the driven repo vendors this skill as a git submodule. `worktree-add`
+    # and `sync-branch` run `git submodule update --init` on it inside the unit's
+    # worktree, so each epic's stage agents read the playbook/persona files at
+    # the skill version *its own branch* pins (`<worktree>/<submodulePath>`), not
+    # the shared main checkout's copy. `probeFile` must exist after init or the
+    # init is reported failed. Empty `submodulePath` disables the whole feature.
+    "skill": {"submodulePath": ".github/sdlc-pipeline", "probeFile": "SKILL.md"},
+    # Per-epic isolated runtime stack (`provision-epic-stack` / `teardown-epic-stack`).
+    # Config-only isolation: the driven repo's compose must already honour the env
+    # keys listed under `ports` plus `COMPOSE_PROJECT_NAME` and `dataDirKey`. Every
+    # `{...}` placeholder is formatted with profile/project/envFile/secretsFile/
+    # dataDir/workspaceRoot. `enabled: false` makes both commands structured no-ops.
+    "stack": {
+        "enabled": False,
+        "workspaceRoot": ".",
+        "baseProfile": "dev",
+        "profileTemplate": "epic{n}",
+        "envFile": ".env.{profile}",
+        "secretsFile": ".secrets.{profile}",
+        "composeProjectTemplate": "sdlc-{profile}",
+        "ports": {"FRONTEND_PORT": 3000, "BACKEND_PORT": 3001,
+                  "DB_PORT_EXPOSE": 5432, "BACKEND_DEBUG_PORT": 9229},
+        "portStride": 20,
+        "dataDirKey": "POSTGRES_DATA_DIR",
+        "dataDirTemplate": ".docker/postgres-data-{profile}",
+        "upCommand": "COMPOSE_PROJECT_NAME={project} make fullstack-d PROFILE={profile}",
+        "seedCommand": "",
+        "downCommand": "COMPOSE_PROJECT_NAME={project} docker compose "
+                       "--env-file {envFile} down -v --remove-orphans",
+    },
     "gates": {"skipConfidenceThreshold": 95, "requiresHumanGateA": True},
     "escalation": {"replaceAt": 3, "needsHumanAt": 6},
     # `{docRoot}` is formatted with the config's `docRoot` at load time, so the
@@ -1205,7 +1247,10 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                           f"{', '.join(f'#{n}' for n in open_children)}"}
     behind = gh.branch_behind_by(branch, base="main")
     if behind:
-        git_reconcile_branch(repo_path, branch, base="main", runner=runner)
+        # The epic branch rarely has a live worktree by close time; reconcile in
+        # an ephemeral one under the branch lock, never in the main checkout.
+        with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
+            git_reconcile_branch(ws.path, branch, base="main", runner=runner)
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         gh.issue_comment(epic,
             f"🔄 Reconciled `{branch}` with `origin/main` ({behind} commit(s) picked up). "
@@ -1213,9 +1258,11 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
             f"an exploratory pass, in parallel. Evidence recorded before this point describes a "
             f"different tree and will not be accepted.\n\n"
             f"<!-- epic-reconciled: {epic} @ {timestamp} -->")
-        return {"epic": epic, "merged": False, "branch": branch, "reconciled": behind,
-                "reason": f"picked up {behind} commit(s) from main -- run the closing "
-                          f"verification against the reconciled branch, then re-run close-epic"}
+        return _with_workspace(
+            {"epic": epic, "merged": False, "branch": branch, "reconciled": behind,
+             "reason": f"picked up {behind} commit(s) from main -- run the closing "
+                       f"verification against the reconciled branch, then re-run close-epic"},
+            ws)
     missing = missing_epic_verification(gh.issue_view(epic).get("comments", []))
     if missing:
         return {"epic": epic, "merged": False, "branch": branch, "missing_verification": missing,
@@ -1574,6 +1621,48 @@ def worktree_path(unit: str, number: int) -> str:
     return os.path.join(w["root"], f"{prefix}{number}")
 
 
+def init_skill_submodule(worktree: str, runner: Runner = _default_runner) -> dict:
+    """Make `<worktree>/<pipeline.skill.submodulePath>` hold the skill at the
+    commit this worktree's branch pins -- the per-epic `$SDLC_DIR` stage agents
+    read (`SKILL.md`, "Setup"). A linked worktree does NOT populate submodules on
+    `git worktree add`, and a merge that moves the gitlink only marks it
+    `modified (new commit)`; both need `git submodule update --init` in that
+    worktree. Verified empirically 2026-09-12 on git 2.50.1: the submodule's
+    gitdir lands under `$GIT_COMMON_DIR/worktrees/<id>/modules/`, so each
+    worktree's copy is independent of the main checkout's and of every other
+    worktree's. That per-worktree gitdir is what the post-init check asserts --
+    a git too old to do it would share one gitdir across worktrees, and the
+    check refuses rather than let two epics silently fight over one checkout.
+
+    Structured, never raising for the "no submodule here" case:
+    `{"skill_dir": None, "reason": ...}` when the feature is disabled or the
+    path is not a tracked gitlink in this tree."""
+    sub = (PIPELINE["skill"].get("submodulePath") or "").strip("/")
+    if not sub:
+        return {"skill_dir": None, "reason": "pipeline.skill.submodulePath is empty"}
+    try:
+        runner(["git", "-C", worktree, "ls-files", "--error-unmatch", sub])
+    except GhError:
+        return {"skill_dir": None, "reason": f"{sub} is not tracked in this tree"}
+    runner(["git", "-C", worktree, "submodule", "update", "--init", "--", sub])
+    skill_dir = os.path.join(worktree, sub)
+    gitdir = runner(["git", "-C", skill_dir, "rev-parse", "--absolute-git-dir"]).strip()
+    if "/worktrees/" not in gitdir:
+        raise GhError(
+            f"submodule {sub} in linked worktree {worktree} uses gitdir {gitdir}, which is not "
+            f"per-worktree ($GIT_COMMON_DIR/worktrees/<id>/modules/...). This git cannot keep "
+            f"one skill checkout per epic; upgrade git (verified working on 2.50.1).")
+    probe = PIPELINE["skill"].get("probeFile")
+    try:
+        runner(["git", "-C", skill_dir, "ls-files", "--error-unmatch", probe] if probe else
+               ["git", "-C", skill_dir, "rev-parse", "HEAD"])
+    except GhError:
+        raise GhError(f"submodule {sub} initialised but {probe or 'HEAD'} is missing in "
+                      f"{skill_dir} -- the pinned skill commit is not checked out")
+    pinned = runner(["git", "-C", skill_dir, "rev-parse", "HEAD"]).strip()
+    return {"skill_dir": skill_dir, "skill_commit": pinned}
+
+
 def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: str = ".",
                      runner: Runner = _default_runner) -> dict:
     """Stand up the unit's worktree the one correct way, so the orchestrator never
@@ -1604,8 +1693,11 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
         base = f"origin/{integration_base(gh, number, unit)}"
         runner(["git", "-C", repo_path, "worktree", "add", path, "-b", branch, base])
         resumed = False
+    # A linked worktree's submodule directory is empty until initialised; do it
+    # here so `skill_dir` is the per-unit `$SDLC_DIR` from the first command on.
+    skill = init_skill_submodule(path, runner=runner)
     return {"created": True, "path": path, "branch": branch, "base": base,
-            "resumed": resumed}
+            "resumed": resumed, **skill}
 
 
 def release_worktree(branch: str, runner: Runner = _default_runner,
@@ -1659,17 +1751,186 @@ def release_worktree(branch: str, runner: Runner = _default_runner,
 
 def resolve_repo_path(repo_path: Optional[str], branch: str,
                        runner: Runner = _default_runner) -> str:
-    """Where a branch-touching command should run. An explicitly passed
-    `--repo-path` always wins. When omitted (None), the command resolves the
-    branch's own live worktree from `git worktree list` -- so forgetting the
-    flag no longer silently targets the shared checkout while the branch's real
-    worktree sits elsewhere (the footgun the old default of "." carried).
-    Falls back to "." only when no worktree currently holds the branch (e.g. a
-    crashed run whose worktree was removed, or an epic branch living in the
-    shared checkout)."""
+    """Where a **read-only** command (`verify-exit`) looks for a branch's files.
+    An explicitly passed `--repo-path` wins; otherwise the branch's live worktree
+    from `git worktree list`; "." only when nothing holds the branch. Commands
+    that *write* to a branch never use this -- they go through
+    `branch_workspace`, which never yields the main checkout (2026-09-12)."""
     if repo_path is not None:
         return repo_path
     return worktree_path_for_branch(branch, runner=runner) or "."
+
+
+def _lock_dir() -> str:
+    """Directory of the per-branch lockfiles. `SDLC_LOCK_DIR` wins (the test suite
+    and any operator who wants locks off the worktree root); else the config's
+    `pipeline.locks.dir` with `{worktreesRoot}` expanded."""
+    env = os.environ.get("SDLC_LOCK_DIR")
+    if env:
+        return env
+    return PIPELINE["locks"]["dir"].format(worktreesRoot=PIPELINE["worktrees"]["root"])
+
+
+class BranchLocked(GhError):
+    """Raised when another process holds the branch's lock past `waitSeconds`."""
+
+
+@contextlib.contextmanager
+def branch_lock(branch: str, wait_seconds: Optional[float] = None):
+    """Exclusive per-branch `flock` around every branch-touching command, so two
+    sessions (or two lanes of one session) can never fetch/checkout/merge/push
+    the same branch at the same time. Keyed by branch name, so operations on
+    *different* branches never contend -- a global main-checkout mutex would
+    serialize the whole pipeline for no gain, and is not what removed the race:
+    the race is gone because the main checkout is no longer a write target at
+    all (`branch_workspace`); the lock is the belt for two writers on one branch.
+
+    Blocks up to `pipeline.locks.waitSeconds` (default 600, `0` = fail fast),
+    polling non-blocking `flock` every 0.5s, then raises `BranchLocked` (a
+    `GhError`, exit 1) naming the lockfile so the operator can see who holds it.
+    The lockfile is never deleted -- deleting it would let a third process lock a
+    fresh inode while two others still contend on the old one."""
+    if wait_seconds is None:
+        wait_seconds = float(PIPELINE["locks"]["waitSeconds"])
+    lock_dir = _lock_dir()
+    os.makedirs(lock_dir, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", branch)
+    path = os.path.join(lock_dir, f"{safe}.lock")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    deadline = time.monotonic() + wait_seconds
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise BranchLocked(
+                        f"branch {branch} is locked by another sdlc-pipeline process "
+                        f"({path}); waited {wait_seconds:g}s. Another session is operating "
+                        f"this branch -- let it finish, or raise pipeline.locks.waitSeconds")
+                time.sleep(0.5)
+        os.write(fd, f"{os.getpid()} {datetime.now(timezone.utc).isoformat()}\n".encode())
+        yield path
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def worktree_map(base_repo: str = ".", runner: Runner = _default_runner) -> tuple:
+    """`(main_path, {branch: path})` from `git worktree list --porcelain`. The
+    first `worktree` entry is always the repository's main worktree (git lists
+    it first, unconditionally); detached worktrees have no `branch` line and are
+    absent from the map."""
+    out = runner(["git", "-C", base_repo, "worktree", "list", "--porcelain"])
+    main_path, path, by_branch = None, None, {}
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+            if main_path is None:
+                main_path = path
+        elif line.startswith("branch refs/heads/") and path is not None:
+            by_branch[line[len("branch refs/heads/"):]] = path
+    return main_path, by_branch
+
+
+class BranchWorkspace:
+    """A working tree that has `branch` checked out, for a command that must
+    write to that branch -- **never the repository's main checkout.**
+
+    Resolution order:
+    1. A live non-main worktree already holds the branch -> use it, leave it.
+    2. The *main* checkout holds the branch -> refuse (`GhError`) with the
+       recovery recipe. This is the stolen-branch state the 2026-09-10/12
+       incidents left behind (`ops_main_checkout_steals_branch`): operating there
+       would keep the main checkout off `main` and keep the branch's real
+       `/tmp/sdlc-*` worktree detached under whichever agent is using it.
+    3. Nothing holds it -> stand up an **ephemeral** worktree at
+       `<worktrees.root>/<ephemeralPrefix><branch>-<pid>` from `origin/<branch>`
+       (fetch first), operate, and remove it on exit if it is clean and fully
+       pushed. A local `<branch>` ref carrying commits not on origin is refused
+       rather than reset away; a branch on neither origin nor local is an error.
+
+    Used as a context manager; `.path` is the tree to operate in, `.ephemeral`
+    says whether it was created here, and `.retained` is set when an ephemeral
+    tree could not be removed (dirty / unpushed -- surfaced in the caller's
+    result so the operator knows a tree is left behind)."""
+
+    def __init__(self, branch: str, base_repo: str = ".", runner: Runner = _default_runner):
+        self.branch = branch
+        self.base_repo = base_repo or "."
+        self.runner = runner
+        self.path: Optional[str] = None
+        self.ephemeral = False
+        self.retained: Optional[str] = None
+
+    def __enter__(self) -> "BranchWorkspace":
+        r, base, branch = self.runner, self.base_repo, self.branch
+        main_path, by_branch = worktree_map(base, runner=r)
+        live = by_branch.get(branch)
+        if live is not None:
+            if main_path is not None and os.path.realpath(live) == os.path.realpath(main_path):
+                raise GhError(
+                    f"branch {branch} is checked out in the repository's MAIN checkout "
+                    f"({main_path}); the pipeline never writes there. Recovery: commit any "
+                    f"WIP there, `git -C {main_path} checkout main`, then re-run -- the "
+                    f"command will use the branch's own worktree or an ephemeral one.")
+            self.path = live
+            return self
+        r(["git", "-C", base, "fetch", "origin"])
+        on_origin = origin_branch_exists(base, branch, runner=r)
+        try:
+            r(["git", "-C", base, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"])
+            local = True
+        except GhError:
+            local = False
+        if not on_origin and not local:
+            raise GhError(f"branch {branch} exists neither on origin nor locally -- nothing to "
+                          f"operate on (stand it up with worktree-add first)")
+        if on_origin and local:
+            unpushed = r(["git", "-C", base, "log", "--oneline",
+                          f"origin/{branch}..{branch}"]).strip()
+            if unpushed:
+                raise GhError(
+                    f"local ref {branch} carries {len(unpushed.splitlines())} commit(s) not on "
+                    f"origin/{branch} and no worktree holds it; refusing to reset it. Push or "
+                    f"discard those commits, then re-run.")
+        w = PIPELINE["worktrees"]
+        self.path = os.path.join(w["root"], f"{w['ephemeralPrefix']}{branch}-{os.getpid()}")
+        if on_origin:
+            r(["git", "-C", base, "worktree", "add", self.path, "-B", branch, f"origin/{branch}"])
+        else:
+            r(["git", "-C", base, "worktree", "add", self.path, branch])
+        self.ephemeral = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if not self.ephemeral or self.path is None:
+            return False
+        r, base, path = self.runner, self.base_repo, self.path
+        try:
+            dirty = r(["git", "-C", path, "status", "--porcelain"]).strip()
+            unpushed = ""
+            if origin_branch_exists(base, self.branch, runner=r):
+                unpushed = r(["git", "-C", path, "log", "--oneline",
+                              f"origin/{self.branch}..{self.branch}"]).strip()
+            if dirty or unpushed:
+                self.retained = path
+                return False
+            r(["git", "-C", base, "worktree", "remove", path])
+        except GhError:
+            self.retained = path
+        return False
+
+
+def _with_workspace(result: dict, ws: BranchWorkspace) -> dict:
+    """Surface a retained ephemeral tree in a command's JSON result; silent when
+    the tree was a live worktree or was cleanly removed."""
+    if ws.retained:
+        result["retained_worktree"] = ws.retained
+    return result
 
 
 def origin_branch_exists(repo_path: str, branch: str, runner: Runner = _default_runner) -> bool:
@@ -2199,8 +2460,15 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
                 f"{base} to it, push both, then re-run open-gate.")
     else:
         head, base = branch, "main"
-    repo_path = resolve_repo_path(repo_path, head, runner=runner)
-    sha = git_rev_parse_head(repo_path, runner=runner)
+    # The SHA the gate comment cites is the PUSHED head -- `origin/<head>` after a
+    # fetch -- never a local worktree's HEAD. The PR is opened against origin, so
+    # a local-only commit could only ever produce a comment citing a SHA the PR
+    # does not contain; and reading origin needs no working tree at all, so this
+    # command no longer touches (or steals) any checkout. `repo_path` is only
+    # where `git fetch` runs (default: the current directory).
+    repo_path = repo_path or "."
+    runner(["git", "-C", repo_path, "fetch", "origin"])
+    sha = runner(["git", "-C", repo_path, "rev-parse", f"origin/{head}"]).strip()
     pr_number = gh.pr_create(
         base=base, head=head,
         title=f"{title} — {doc} for review (#{issue})",
@@ -2318,24 +2586,34 @@ def cmd_sync_branch(gh: GitHub, repo_path: Optional[str], issue: int, unit: str 
     at exit 0, instead of propagating as `GhError` (exit 1) the way every
     other git failure from this command still does."""
     branch = f"{unit}-{issue}"
-    repo_path = resolve_repo_path(repo_path, branch, runner=runner)
-    try:
-        base = "main" if unit == "epic" else integration_base(gh, issue, unit)
-        git_reconcile_branch(repo_path, branch, base=base, runner=runner)
-    except MergeConflict as e:
-        # Persist the conflict on the issue -- the JSON result alone doesn't
-        # survive a crashed session, and the sync-branch-conflict <->
-        # development escalation-valve pairing must be reconstructible from the
-        # thread (cmd_pairing_counts reads this marker back).
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        gh.issue_comment(issue,
-            f"⚠️ Merge conflict reconciling `{branch}` with `origin/{base}` — "
-            f"{len(e.files)} file(s): {', '.join(f'`{f}`' for f in e.files)}. "
-            f"Routing to `development` for resolution in its own worktree.\n\n"
-            f"<!-- sync-conflict: {branch} @ {timestamp} -->")
-        return {"issue": issue, "unit": unit, "branch": branch, "base": base, "synced": False,
-                "conflict": True, "conflicting_files": e.files}
-    return {"issue": issue, "unit": unit, "branch": branch, "base": base, "synced": True}
+    base = "main" if unit == "epic" else integration_base(gh, issue, unit)
+    result = {"issue": issue, "unit": unit, "branch": branch, "base": base, "synced": True}
+    with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
+        try:
+            git_reconcile_branch(ws.path, branch, base=base, runner=runner)
+            # The merge may have moved the skill submodule's gitlink; a merge
+            # alone leaves the working files at the OLD pin ("modified (new
+            # commit)"). Re-init here -- sync-branch runs between stage agents,
+            # so this is the one naturally quiet point per worktree. Only for a
+            # live worktree an agent will read from; an ephemeral tree exists
+            # for the git op alone.
+            if not ws.ephemeral:
+                skill = init_skill_submodule(ws.path, runner=runner)
+                if skill.get("skill_dir"):
+                    result.update(skill)
+        except MergeConflict as e:
+            # Persist the conflict on the issue -- the JSON result alone doesn't
+            # survive a crashed session, and the sync-branch-conflict <->
+            # development escalation-valve pairing must be reconstructible from the
+            # thread (cmd_pairing_counts reads this marker back).
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            gh.issue_comment(issue,
+                f"⚠️ Merge conflict reconciling `{branch}` with `origin/{base}` — "
+                f"{len(e.files)} file(s): {', '.join(f'`{f}`' for f in e.files)}. "
+                f"Routing to `development` for resolution in its own worktree.\n\n"
+                f"<!-- sync-conflict: {branch} @ {timestamp} -->")
+            result.update({"synced": False, "conflict": True, "conflicting_files": e.files})
+    return _with_workspace(result, ws)
 
 
 # A `git push` refused by origin because the remote ref moved under us
@@ -2373,20 +2651,22 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], issue: int,
     already survives a crash there, see references/history.md), as a single
     doc-only commit on `epic-<parent>`. This is deliberately NOT a merge of the
     whole child branch: only the design doc is durable-early, none of the child's
-    in-progress code. Runs in the epic branch's own worktree via
-    `resolve_repo_path(..., "epic-<parent>")`, the same worktree-based style
-    `cmd_sync_branch`/`cmd_pass_gate` use.
+    in-progress code. Runs under the epic branch's lock, in the epic branch's
+    live worktree or an ephemeral one (`BranchWorkspace`) -- never the main
+    checkout.
 
-    **Idempotent.** If the epic branch already holds byte-identical `lld.md`
-    content for this issue, the `git checkout` of the source version leaves the
-    tree clean and this returns `{"merged": false, "reason": "up-to-date"}` --
-    safe to run more than once (a re-run after a crash, a re-review).
+    **Idempotent, judged on origin.** If `origin/<epic>` already holds the
+    byte-identical `lld.md` blob that `origin/issue-<n>` has, this returns
+    `{"merged": false, "reason": "up-to-date", "verified_on_origin": true}` --
+    safe to run more than once. `merged: true` is reported only after a
+    post-push fetch confirms the blob is on `origin/<epic>`; see
+    `_publish_lld_doc` for the reconcile loop and the defect it replaced.
 
-    A push refused because the epic branch advanced concurrently, or a checkout
-    that finds no `lld.md` on `origin/issue-<n>`, returns a structured result at
-    exit 0 (`conflict`/`reason`), not an uncaught crash -- modelled on
-    `cmd_sync_branch`'s conflict handling. A genuine operational git failure
-    still propagates as GhError (exit 1) like everywhere else."""
+    A push refused because the epic branch advanced concurrently (after one
+    internal replay from the new tip), or no `lld.md` on `origin/issue-<n>`,
+    returns a structured result at exit 0 (`conflict`/`reason`), not an uncaught
+    crash -- modelled on `cmd_sync_branch`'s conflict handling. A genuine
+    operational git failure still propagates as GhError (exit 1)."""
     issues = {i["number"]: i for i in gh.issue_list()}
     entry = issues.get(issue)
     if entry is None:
@@ -2404,38 +2684,95 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], issue: int,
     epic = epic_branch(parent_number)
     doc_path = f"{DOC_ROOT}/issue-{issue}/lld.md"
     src_ref = f"origin/{issue_branch(issue)}"
-    epic_path = resolve_repo_path(repo_path, epic, runner=runner)
-    runner(["git", "-C", epic_path, "fetch", "origin"])
-    runner(["git", "-C", epic_path, "checkout", epic])
+    with branch_lock(epic), BranchWorkspace(epic, repo_path, runner) as ws:
+        result = _publish_lld_doc(gh, ws.path, issue, epic, doc_path, src_ref, runner)
+    return _with_workspace(result, ws)
+
+
+def _blob_at(repo_path: str, ref: str, path: str, runner: Runner) -> Optional[str]:
+    """Blob SHA of `path` at `ref`, or None when the ref has no such path."""
     try:
-        # Stage exactly this one path at origin/issue-<n>'s version. On identical
-        # content this is a no-op; on divergence it stages the doc, and nothing
-        # else in the epic worktree is touched.
-        runner(["git", "-C", epic_path, "checkout", src_ref, "--", doc_path])
+        return runner(["git", "-C", repo_path, "rev-parse", "--verify", "--quiet",
+                       f"{ref}:{path}"]).strip() or None
     except GhError:
+        return None
+
+
+def _publish_lld_doc(gh: GitHub, epic_path: str, issue: int, epic: str, doc_path: str,
+                     src_ref: str, runner: Runner, attempts: int = 2) -> dict:
+    """The reconcile loop behind `cmd_merge_lld_doc`. **Every decision is made
+    against `origin/<epic>`, never the local tree** -- the 2026-09-12 defect
+    (`sdlc_merge_lld_doc_branch_steal_bug`) was exactly the old shape: a doc
+    committed on a stale local base, push rejected, and the re-run comparing the
+    working tree (which already held the doc) to itself and reporting
+    `up-to-date` while `origin/<epic>` never received the file.
+
+    Per attempt: fetch; compare the doc's blob on `origin/issue-<n>` with its
+    blob on `origin/<epic>` (identical -> genuinely up-to-date, verified on
+    origin); otherwise hard-reset the epic worktree to `origin/<epic>` (a stale
+    doc-only commit from a rejected earlier attempt is discarded and replayed;
+    anything else unpushed on the local epic branch refuses first), stage the
+    doc from `origin/issue-<n>`, commit, push. After the push: fetch again and
+    **verify the blob is now on `origin/<epic>`** -- only then is `merged: true`
+    reported. A rejected push (origin moved between fetch and push) retries once
+    from the new origin tip; still rejected -> a structured `conflict` result
+    that says the doc is NOT published. Never a success it did not verify."""
+    runner(["git", "-C", epic_path, "fetch", "origin"])
+    src_blob = _blob_at(epic_path, src_ref, doc_path, runner)
+    if src_blob is None:
         return {"issue": issue, "merged": False, "epic_branch": epic,
                 "reason": f"no lld.md on {src_ref} — nothing to publish"}
-    if not runner(["git", "-C", epic_path, "status", "--porcelain", "--", doc_path]).strip():
-        return {"issue": issue, "merged": False, "epic_branch": epic, "reason": "up-to-date"}
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    runner(["git", "-C", epic_path, "commit", "-m",
-            f"docs(sdlc): publish issue-{issue} lld.md to {epic}", "--", doc_path])
-    sha = git_rev_parse_head(epic_path, runner=runner)
-    try:
-        runner(["git", "-C", epic_path, "push", "origin", epic])
-    except GhError as e:
-        if _PUSH_REJECTED_RE.search(str(e)):
+    if _blob_at(epic_path, f"origin/{epic}", doc_path, runner) == src_blob:
+        return {"issue": issue, "merged": False, "epic_branch": epic, "reason": "up-to-date",
+                "verified_on_origin": True}
+    if runner(["git", "-C", epic_path, "status", "--porcelain"]).strip():
+        return {"issue": issue, "merged": False, "epic_branch": epic,
+                "reason": f"epic worktree {epic_path} has uncommitted changes — refusing to "
+                          f"reset it; commit or stash them, then re-run"}
+    # Unpushed local commits on the epic branch: a stale doc-only commit from a
+    # rejected earlier attempt is exactly what the reset below replays and is
+    # safe to drop; anything touching other paths is somebody's work -- refuse.
+    unpushed_files = runner(["git", "-C", epic_path, "diff", "--name-only",
+                             f"origin/{epic}...{epic}"]).split()
+    if any(f != doc_path for f in unpushed_files):
+        return {"issue": issue, "merged": False, "epic_branch": epic,
+                "reason": f"local {epic} carries unpushed commits touching "
+                          f"{', '.join(f for f in unpushed_files if f != doc_path)} — "
+                          f"refusing to reset it; push or discard them, then re-run"}
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        runner(["git", "-C", epic_path, "checkout", "-B", epic, f"origin/{epic}"])
+        runner(["git", "-C", epic_path, "checkout", src_ref, "--", doc_path])
+        runner(["git", "-C", epic_path, "commit", "-m",
+                f"docs(sdlc): publish issue-{issue} lld.md to {epic}", "--", doc_path])
+        sha = git_rev_parse_head(epic_path, runner=runner)
+        try:
+            runner(["git", "-C", epic_path, "push", "origin", epic])
+        except GhError as e:
+            if not _PUSH_REJECTED_RE.search(str(e)):
+                raise
+            last_error = str(e).strip().splitlines()[-1] if str(e).strip() else str(e)
+            runner(["git", "-C", epic_path, "fetch", "origin"])
+            continue
+        runner(["git", "-C", epic_path, "fetch", "origin"])
+        if _blob_at(epic_path, f"origin/{epic}", doc_path, runner) != src_blob:
             return {"issue": issue, "merged": False, "epic_branch": epic, "conflict": True,
                     "commit": sha,
-                    "reason": f"push to {epic} rejected — the epic branch advanced "
-                              f"concurrently; re-run to reconcile and retry"}
-        raise
-    gh.issue_comment(issue,
-        f"📄 Published `lld.md` to `{epic}` (`{sha}`) — the low-level design is now durable "
-        f"on the epic branch, independent of `{issue_branch(issue)}`, and siblings pick it up on "
-        f"their next `sync-branch`.\n\n"
-        f"<!-- lld-doc-published: {epic}:{sha} @ {timestamp} -->")
-    return {"issue": issue, "merged": True, "epic_branch": epic, "commit": sha}
+                    "reason": f"push to {epic} returned success but origin/{epic} does not "
+                              f"carry {doc_path} at the published blob — refusing to report "
+                              f"merged; inspect origin/{epic} and re-run"}
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        gh.issue_comment(issue,
+            f"📄 Published `lld.md` to `{epic}` (`{sha}`) — the low-level design is now durable "
+            f"on the epic branch, independent of `{issue_branch(issue)}`, and siblings pick it "
+            f"up on their next `sync-branch`.\n\n"
+            f"<!-- lld-doc-published: {epic}:{sha} @ {timestamp} -->")
+        return {"issue": issue, "merged": True, "epic_branch": epic, "commit": sha,
+                "verified_on_origin": True, "attempts": attempt}
+    return {"issue": issue, "merged": False, "epic_branch": epic, "conflict": True,
+            "reason": f"push to {epic} rejected {attempts}× in a row — the epic branch keeps "
+                      f"advancing under this command; lld.md is NOT on origin/{epic}. "
+                      f"Re-run once the branch is quiet. Last git error: {last_error}"}
 
 
 def _complete_epic_architecture(gh: GitHub, epic_number: int, note: str) -> dict:
@@ -2501,18 +2838,23 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
                        f"{actual_stage!r}, not stage={stage!r} -- pass next-action's own 'stage' "
                        f"field verbatim; it is the gate's owning doc-stage, not a target you pick")
     branch = f"{unit}-{issue}"
-    repo_path = resolve_repo_path(repo_path, branch, runner=runner)
     # A merged per-issue gate landed on `main`, so the issue branch reconciles
     # with `origin/main`. A merged epic gate landed on `epic-<n>` itself (its head
     # was the `epic-<n>-gate-<stage>` sub-branch), so the epic worktree reconciles
     # with `origin/epic-<n>` -- `main` is not involved until `close-epic`. The
     # epic's integration base is still `main`; `sync-branch --unit epic` keeps
     # using it. See "The epic integration branch" in references/epics.md.
-    git_reconcile_branch(repo_path, branch,
-                          base=epic_branch(issue) if unit == "epic" else "main", runner=runner)
+    # Under the branch lock, in the branch's own (or an ephemeral) worktree --
+    # an epic branch usually has no live worktree at gate-pass time, and this is
+    # the command that most often borrowed the main checkout for it (epic #365).
+    with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
+        git_reconcile_branch(ws.path, branch,
+                              base=epic_branch(issue) if unit == "epic" else "main",
+                              runner=runner)
     if unit == "epic" and stage == "architecture":
-        return _complete_epic_architecture(
-            gh, issue, f"human review confirmed for `architecture.md` — merged via #{gate_pr}.")
+        return _with_workspace(_complete_epic_architecture(
+            gh, issue, f"human review confirmed for `architecture.md` — merged via #{gate_pr}."),
+            ws)
     next_stage = STAGE_AFTER_GATE[stage]
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if live:
@@ -2529,7 +2871,8 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
             f"<!-- stage-transition: human-review:{stage}->{next_stage} @ {timestamp} -->")
         gh.set_stage_field(issue, next_stage)
         gh.clear_pipeline_status_field(issue)
-    return {"issue": issue, "unit": unit, "next_stage": next_stage, "claimed": live}
+    return _with_workspace({"issue": issue, "unit": unit, "next_stage": next_stage,
+                            "claimed": live}, ws)
 
 
 GATE_B_SKIP_CONFIDENCE_THRESHOLD = PIPELINE["gates"]["skipConfidenceThreshold"]
@@ -3656,6 +3999,209 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
     return {"closeable_epics": results}
 
 
+# --- Per-epic isolated runtime stack -----------------------------------------
+#
+# The git half of "N pipeline instances on N epics with zero shared mutable
+# state" is `BranchWorkspace` + `branch_lock`. This is the runtime half: every
+# epic gets its own compose project, ports, env/secrets profile and database
+# data directory, provisioned at epic start (or before its first e2e-running
+# child) and torn down at epic close. Isolation is config-only -- the driven
+# repo's compose must already read the keys named in `pipeline.stack` (proven
+# on the origin repo: COMPOSE_PROJECT_NAME, *_PORT, DB_PORT_EXPOSE,
+# BACKEND_DEBUG_PORT, POSTGRES_DATA_DIR). See "Per-epic isolated stack" in
+# references/parallelism.md.
+
+Shell = Callable[[str, str], str]  # (command, cwd) -> stdout; raises GhError on nonzero
+
+
+def _default_shell(command: str, cwd: str) -> str:
+    result = subprocess.run(command, shell=True, cwd=cwd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise GhError(f"command failed ({result.returncode}) in {cwd}: {command}\n"
+                      f"{result.stdout[-2000:]}\n{result.stderr[-2000:]}")
+    return result.stdout
+
+
+def _port_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def stack_profile(epic: int) -> str:
+    return PIPELINE["stack"]["profileTemplate"].format(n=epic)
+
+
+def _stack_layout(epic: int) -> dict:
+    """Every path/name the two stack commands share, derived from config once."""
+    s = PIPELINE["stack"]
+    profile = stack_profile(epic)
+    root = os.path.abspath(s["workspaceRoot"])
+    fmt = {"profile": profile, "n": epic, "workspaceRoot": root}
+    env_file = s["envFile"].format(**fmt)
+    secrets_file = s["secretsFile"].format(**fmt)
+    return {
+        "profile": profile,
+        "project": s["composeProjectTemplate"].format(**fmt),
+        "workspace_root": root,
+        "env_file": os.path.join(root, env_file),
+        "secrets_file": os.path.join(root, secrets_file),
+        "base_env_file": os.path.join(root, s["envFile"].format(profile=s["baseProfile"], n=epic,
+                                                                 workspaceRoot=root)),
+        "base_secrets_file": os.path.join(root, s["secretsFile"].format(
+            profile=s["baseProfile"], n=epic, workspaceRoot=root)),
+        "data_dir": s["dataDirTemplate"].format(**fmt),
+        "env_file_rel": env_file,
+    }
+
+
+def pick_stack_ports(epic: int, probe: Callable[[int], bool] = _port_free) -> dict:
+    """Distinct host ports for this epic's stack: each configured base port plus
+    a stride-multiple offset derived from the epic number, bumped by another
+    stride while any port in the set is already bound. Deterministic per epic
+    when the machine is quiet, and never colliding with the base profile (offset
+    is never zero) or another provisioned epic (its ports are bound)."""
+    s = PIPELINE["stack"]
+    stride = int(s["portStride"])
+    base_ports = {k: int(v) for k, v in s["ports"].items()}
+    slots = 45
+    start = (epic % slots) + 1
+    for i in range(slots):
+        offset = stride * (((start + i - 1) % slots) + 1)
+        candidate = {k: v + offset for k, v in base_ports.items()}
+        if all(probe(p) for p in candidate.values()):
+            return candidate
+    raise GhError(f"no free port set found for epic #{epic} across {slots} stride slots "
+                  f"(stride {stride}); tear down stale epic stacks first")
+
+
+_ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+
+def render_env_profile(base_text: str, overrides: dict) -> str:
+    """The base profile's text with every `KEY=` line in `overrides` replaced in
+    place and any missing key appended under a marker -- so the epic profile
+    stays a faithful copy of the base plus exactly the isolation keys."""
+    seen = set()
+    out = []
+    for line in base_text.splitlines():
+        m = _ENV_LINE_RE.match(line)
+        key = m.group(1) if m else None
+        if key in overrides:
+            out.append(f"{key}={overrides[key]}")
+            seen.add(key)
+        else:
+            out.append(line)
+    missing = [k for k in overrides if k not in seen]
+    if missing:
+        out.append("")
+        out.append("# --- sdlc-pipeline per-epic isolation (generated) ---")
+        out.extend(f"{k}={overrides[k]}" for k in missing)
+    return "\n".join(out) + "\n"
+
+
+def _read_env_ports(path: str) -> dict:
+    ports = {}
+    keys = set(PIPELINE["stack"]["ports"])
+    with open(path) as f:
+        for line in f:
+            m = _ENV_LINE_RE.match(line)
+            if m and m.group(1) in keys:
+                try:
+                    ports[m.group(1)] = int(line.split("=", 1)[1].strip())
+                except ValueError:
+                    pass
+    return ports
+
+
+def cmd_provision_epic_stack(epic: int, up: bool = True, shell: Shell = _default_shell,
+                             probe: Callable[[int], bool] = _port_free) -> dict:
+    """Stand up the epic's isolated stack: generate `<envFile>` for profile
+    `epic<n>` from the base profile with distinct ports + compose project + data
+    dir, copy the base secrets file (a plain copy -- no secret is ever read),
+    then run `upCommand` and, if set, `seedCommand`. Idempotent: an existing
+    profile is reused as-is (its ports read back), only the up/seed commands
+    re-run. `enabled: false` -> structured no-op, so a repo without a
+    parametrised compose is unaffected."""
+    s = PIPELINE["stack"]
+    if not s["enabled"]:
+        return {"epic": epic, "provisioned": False,
+                "reason": "pipeline.stack.enabled is false — shared stack in use"}
+    lay = _stack_layout(epic)
+    created = False
+    if os.path.exists(lay["env_file"]):
+        ports = _read_env_ports(lay["env_file"])
+    else:
+        if not os.path.isfile(lay["base_env_file"]):
+            raise GhError(f"base profile {lay['base_env_file']} not found -- set "
+                          f"pipeline.stack.baseProfile/envFile to the repo's dev profile")
+        if not os.path.isfile(lay["base_secrets_file"]):
+            raise GhError(f"base secrets file {lay['base_secrets_file']} not found -- the epic "
+                          f"profile is a copy of it (pipeline.stack.secretsFile)")
+        ports = pick_stack_ports(epic, probe=probe)
+        overrides = {"COMPOSE_PROJECT_NAME": lay["project"], **{k: str(v) for k, v in ports.items()},
+                     s["dataDirKey"]: lay["data_dir"]}
+        with open(lay["base_env_file"]) as f:
+            base_text = f.read()
+        with open(lay["env_file"], "w") as f:
+            f.write(render_env_profile(base_text, overrides))
+        shutil.copyfile(lay["base_secrets_file"], lay["secrets_file"])
+        os.makedirs(os.path.join(lay["workspace_root"], lay["data_dir"]), exist_ok=True)
+        created = True
+    fmt = {"profile": lay["profile"], "project": lay["project"], "envFile": lay["env_file_rel"],
+           "secretsFile": os.path.relpath(lay["secrets_file"], lay["workspace_root"]),
+           "dataDir": lay["data_dir"], "workspaceRoot": lay["workspace_root"], "n": epic}
+    ran = []
+    if up:
+        for key in ("upCommand", "seedCommand"):
+            cmd = (s.get(key) or "").format(**fmt)
+            if cmd.strip():
+                shell(cmd, lay["workspace_root"])
+                ran.append(cmd)
+    return {"epic": epic, "provisioned": True, "created": created, "profile": lay["profile"],
+            "project": lay["project"], "env_file": lay["env_file"],
+            "secrets_file": lay["secrets_file"], "data_dir": lay["data_dir"], "ports": ports,
+            "commands_run": ran,
+            "use": f"COMPOSE_PROJECT_NAME={lay['project']} make <target> PROFILE={lay['profile']}"}
+
+
+def cmd_teardown_epic_stack(epic: int, keep_data: bool = False,
+                            shell: Shell = _default_shell) -> dict:
+    """The inverse: `downCommand` (volumes included), then remove the generated
+    env + secrets profile files and the data directory. Structured no-op when
+    nothing is provisioned. A failing down command still removes nothing, so a
+    half-torn stack is visible rather than orphaned."""
+    s = PIPELINE["stack"]
+    if not s["enabled"]:
+        return {"epic": epic, "torn_down": False,
+                "reason": "pipeline.stack.enabled is false — shared stack in use"}
+    lay = _stack_layout(epic)
+    if not os.path.exists(lay["env_file"]):
+        return {"epic": epic, "torn_down": False, "profile": lay["profile"],
+                "reason": f"no stack provisioned ({lay['env_file']} absent)"}
+    fmt = {"profile": lay["profile"], "project": lay["project"], "envFile": lay["env_file_rel"],
+           "secretsFile": os.path.relpath(lay["secrets_file"], lay["workspace_root"]),
+           "dataDir": lay["data_dir"], "workspaceRoot": lay["workspace_root"], "n": epic}
+    cmd = (s.get("downCommand") or "").format(**fmt)
+    if cmd.strip():
+        shell(cmd, lay["workspace_root"])
+    removed = []
+    for p in (lay["env_file"], lay["secrets_file"]):
+        if os.path.exists(p):
+            os.remove(p)
+            removed.append(p)
+    data_abs = os.path.join(lay["workspace_root"], lay["data_dir"])
+    if not keep_data and os.path.isdir(data_abs):
+        shutil.rmtree(data_abs, ignore_errors=True)
+        removed.append(data_abs)
+    return {"epic": epic, "torn_down": True, "profile": lay["profile"], "project": lay["project"],
+            "down_command": cmd, "removed": removed}
+
+
 def main(argv: Optional[list] = None) -> int:
     if not os.environ.get("GITHUB_TOKEN"):
         print(json.dumps({"error": "GITHUB_TOKEN not set — prefix the call with "
@@ -3755,7 +4301,7 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("open-gate")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
-                    help="Checkout holding the branch; omit to auto-resolve its live worktree")
+                    help="Any path inside the repository (base for the worktree map); the command operates in the branch's own live worktree or an ephemeral one, never the main checkout")
     p.add_argument("--title", required=True)
     p.add_argument("--doc", required=True, choices=["product.md", "architecture.md"])
     p.add_argument("--next-stage", required=True)
@@ -3766,7 +4312,7 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("pass-gate")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
-                    help="Checkout holding the branch; omit to auto-resolve its live worktree")
+                    help="Any path inside the repository (base for the worktree map); the command operates in the branch's own live worktree or an ephemeral one, never the main checkout")
     p.add_argument("--gate-pr", type=int, required=True)
     p.add_argument("--stage", required=True, choices=["product", "architecture"])
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
@@ -3812,7 +4358,7 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("verify-exit")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
-                    help="Checkout holding the branch; omit to auto-resolve its live worktree")
+                    help="Any path inside the repository (base for the worktree map); the command operates in the branch's own live worktree or an ephemeral one, never the main checkout")
     p.add_argument("--expect-stage", required=True)
     p.add_argument("--pr", type=int, default=None)
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
@@ -3855,7 +4401,7 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("sync-branch")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
-                    help="Checkout holding the branch; omit to auto-resolve its live worktree")
+                    help="Any path inside the repository (base for the worktree map); the command operates in the branch's own live worktree or an ephemeral one, never the main checkout")
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
     p.set_defaults(func=lambda a: cmd_sync_branch(GitHub(), a.repo_path, a.issue, a.unit))
     p = sub.add_parser("merge-lld-doc",
@@ -3864,7 +4410,7 @@ def main(argv: Optional[list] = None) -> int:
                              "no-op for a standing-epic child or a parentless issue")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
-                    help="Checkout holding the epic branch; omit to auto-resolve its live worktree")
+                    help="Any path inside the repository; the doc is published from the epic branch's own live worktree or an ephemeral one, never the main checkout")
     p.set_defaults(func=lambda a: cmd_merge_lld_doc(GitHub(), a.repo_path, a.issue))
     p = sub.add_parser("open-dev-pr")
     p.add_argument("issue", type=int)
@@ -3943,6 +4489,20 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_record_epic_verification(GitHub(), a.epic, a.kind, a.summary))
     p = sub.add_parser("check-epics-closeable")
     p.set_defaults(func=lambda a: cmd_check_epics_closeable(GitHub()))
+    p = sub.add_parser("provision-epic-stack",
+                        help="Stand up the epic's isolated runtime stack (own compose project, "
+                             "ports, env/secrets profile, DB data dir) -- see pipeline.stack; "
+                             "no-op when pipeline.stack.enabled is false")
+    p.add_argument("epic", type=int)
+    p.add_argument("--no-up", action="store_true",
+                    help="Generate the profile only; skip upCommand/seedCommand")
+    p.set_defaults(func=lambda a: cmd_provision_epic_stack(a.epic, up=not a.no_up))
+    p = sub.add_parser("teardown-epic-stack",
+                        help="Compose down -v the epic's stack and remove its generated profile "
+                             "files and data dir")
+    p.add_argument("epic", type=int)
+    p.add_argument("--keep-data", action="store_true", help="Leave the DB data dir in place")
+    p.set_defaults(func=lambda a: cmd_teardown_epic_stack(a.epic, keep_data=a.keep_data))
     args = parser.parse_args(argv)
     try:
         result = args.func(args)

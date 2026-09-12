@@ -59,6 +59,15 @@ _NO_UNIT_WORKTREE = {("git", "-C", ".", "worktree", "list", "--porcelain"):
 _NO_WORKTREE_RESULT = {"released": False, "reason": "no worktree"}
 
 
+def _live_wt(branch: str, path: str = "/repo", main: str = "/main") -> dict:
+    """Scripted `git worktree list --porcelain` (read from `path`) showing the main
+    checkout on `main` and a separate live worktree at `path` holding `branch` --
+    the state every write command expects to find (`BranchWorkspace`)."""
+    return {("git", "-C", path, "worktree", "list", "--porcelain"):
+            f"worktree {main}\nHEAD aaa\nbranch refs/heads/main\n\n"
+            f"worktree {path}\nHEAD bbb\nbranch refs/heads/{branch}\n"}
+
+
 def _issue_list_page(nodes, has_next=False, end_cursor=None):
     return json.dumps({"data": {"repository": {"issues": {
         "pageInfo": {"hasNextPage": has_next, "endCursor": end_cursor},
@@ -1075,7 +1084,8 @@ def test_open_gate_creates_pr_sets_status_field_and_posts_marked_comment():
     from sdlc_next import (GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
                             PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS)
     from tests.test_sdlc_next import ScriptedRunner
-    git_runner = ScriptedRunner({("git", "-C", "/repo", "rev-parse", "HEAD"): "abc1234\n"})
+    git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): "",
+                                 ("git", "-C", "/repo", "rev-parse", "origin/issue-9"): "abc1234\n"})
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}")
     status_mutation_argv = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['awaiting-human-review'])}")
@@ -2019,6 +2029,7 @@ def test_pass_gate_reconciles_comments_and_reclaims_next_stage():
     from tests.test_sdlc_next import ScriptedRunner
     import json
     git_runner = ScriptedRunner({
+        **_live_wt("issue-9"),
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "checkout", "issue-9"): "",
         ("git", "-C", "/repo", "merge", "origin/main"): "",
@@ -2345,7 +2356,8 @@ def test_open_gate_unit_epic_opens_gate_sub_branch_against_epic_branch():
     # doc path is still the epic's own `docs/sdlc/epic-<n>/` folder.
     from sdlc_next import GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, \
         PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
-    git_runner = ScriptedRunner({("git", "-C", "/repo", "rev-parse", "HEAD"): "abcd1234\n"})
+    git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): "",
+                                 ("git", "-C", "/repo", "rev-parse", "origin/epic-92-gate-product"): "abcd1234\n"})
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=92)}")
     status_mutation_argv = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_92', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['awaiting-human-review'])}")
@@ -2377,7 +2389,8 @@ def test_open_gate_unit_epic_opens_gate_sub_branch_against_epic_branch():
 def test_open_gate_unit_epic_gate_b_uses_architecture_gate_sub_branch():
     from sdlc_next import GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, \
         PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
-    git_runner = ScriptedRunner({("git", "-C", "/repo", "rev-parse", "HEAD"): "abcd1234\n"})
+    git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): "",
+                                 ("git", "-C", "/repo", "rev-parse", "origin/epic-5-gate-architecture"): "abcd1234\n"})
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=5)}")
     status_mutation_argv = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_5', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['awaiting-human-review'])}")
@@ -2405,7 +2418,8 @@ def test_open_gate_unit_issue_still_targets_main_from_issue_branch():
     # Standing-epic child gates are unchanged by the 2026-09-06 epic-gate rerouting.
     from sdlc_next import GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, \
         PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
-    git_runner = ScriptedRunner({("git", "-C", "/repo", "rev-parse", "HEAD"): "abcd1234\n"})
+    git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): "",
+                                 ("git", "-C", "/repo", "rev-parse", "origin/issue-9"): "abcd1234\n"})
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}")
     status_mutation_argv = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['awaiting-human-review'])}")
@@ -2439,6 +2453,7 @@ def test_pass_gate_unit_epic_at_architecture_completes_epic_instead_of_claiming_
     from sdlc_next import GitHub, cmd_pass_gate, _ISSUE_NODE_ID_QUERY, _DELETE_ISSUE_FIELD_VALUE_MUTATION, \
         STAGE_FIELD_ID, PIPELINE_STATUS_FIELD_ID
     git_runner = ScriptedRunner({
+        **_live_wt("epic-92"),
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "checkout", "epic-92"): "",
         ("git", "-C", "/repo", "merge", "origin/epic-92"): "",
@@ -2686,6 +2701,7 @@ def test_auto_pass_gate_completes_epic_architecture_for_merged_epic_gate():
                             _DELETE_ISSUE_FIELD_VALUE_MUTATION, _ISSUE_FIELDS_QUERY,
                             STAGE_FIELD_ID, PIPELINE_STATUS_FIELD_ID, REPO)
     git_runner = ScriptedRunner({
+        **_live_wt("epic-92"),
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "checkout", "epic-92"): "",
         ("git", "-C", "/repo", "merge", "origin/epic-92"): "",
@@ -2819,6 +2835,7 @@ def test_auto_pass_gate_dispatches_to_pass_gate_for_matching_open_gate():
                             _DELETE_ISSUE_FIELD_VALUE_MUTATION, _ISSUE_FIELDS_QUERY, STAGE_FIELD_ID,
                             STAGE_OPTION_IDS, PIPELINE_STATUS_FIELD_ID, REPO)
     git_runner = ScriptedRunner({
+        **_live_wt("issue-9"),
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "checkout", "issue-9"): "",
         ("git", "-C", "/repo", "merge", "origin/main"): "",
@@ -3260,7 +3277,8 @@ def test_git_reconcile_branch_raises_merge_conflict_and_aborts_on_real_conflict(
         ("git", "-C", "/repo", "diff", "--name-only", "--diff-filter=U"): "src/a.ts\nsrc/b.ts\n",
         ("git", "-C", "/repo", "merge", "--abort"): "",
     })
-    runner.fail_on = {("git", "-C", "/repo", "merge", "origin/main")}
+    runner.fail_on = {("git", "-C", "/repo", "merge", "origin/main"),
+                      ("git", "-C", "/repo", "ls-files", "--error-unmatch", ".github/sdlc-pipeline")}
     try:
         git_reconcile_branch("/repo", "issue-9", runner=runner)
         assert False, "expected MergeConflict"
@@ -3295,6 +3313,7 @@ def test_sync_branch_returns_conflict_result_without_raising_and_posts_marker():
     # valve.
     from sdlc_next import GitHub, cmd_sync_branch
     runner = ScriptedRunner({
+        **_live_wt("issue-9"),
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "checkout", "issue-9"): "",
         ("git", "-C", "/repo", "diff", "--name-only", "--diff-filter=U"): "src/a.ts\n",
@@ -3315,11 +3334,13 @@ def test_sync_branch_returns_conflict_result_without_raising_and_posts_marker():
 def test_sync_branch_success_posts_no_comment():
     from sdlc_next import GitHub, cmd_sync_branch
     runner = ScriptedRunner({
+        **_live_wt("issue-9"),
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "checkout", "issue-9"): "",
         ("git", "-C", "/repo", "merge", "origin/main"): "",
         ("git", "-C", "/repo", "push", "origin", "issue-9"): "",
     })
+    runner.fail_on = {("git", "-C", "/repo", "ls-files", "--error-unmatch", ".github/sdlc-pipeline")}
     gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([_issue(9)])})
     gh = GitHub(runner=gh_runner)
     result = cmd_sync_branch(gh, "/repo", 9, runner=runner)
@@ -3344,6 +3365,7 @@ def test_sync_branch_auto_resolves_worktree_when_repo_path_omitted():
         ("git", "-C", "/tmp/sdlc-dev-9", "merge", "origin/main"): "",
         ("git", "-C", "/tmp/sdlc-dev-9", "push", "origin", "issue-9"): "",
     })
+    runner.fail_on = {("git", "-C", "/tmp/sdlc-dev-9", "ls-files", "--error-unmatch", ".github/sdlc-pipeline")}
     gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([_issue(9)])}))
     result = cmd_sync_branch(gh, None, 9, runner=runner)
     assert result["synced"] is True
@@ -3359,54 +3381,132 @@ def test_resolve_repo_path_explicit_wins_and_falls_back_to_dot():
 
 
 # --- merge-lld-doc: publish lld.md to the epic branch on a clean lld-review ---
+#
+# Since 2026-09-12 every decision is made against origin/<epic>, never the local
+# tree, and `merged: true` is only reported after a post-push fetch confirms the
+# blob is on origin (memory `sdlc_merge_lld_doc_branch_steal_bug`).
+
+_LLD_DOC = "docs/sdlc/issue-185/lld.md"
+
+
+def _lld_git(commit_sha="deadbeef", origin_blob_before="blobOLD", origin_blob_after="blobNEW",
+             src_blob="blobNEW", path="/epic-110"):
+    """Scripted git for a merge-lld-doc run in a live epic worktree at `path`:
+    fetch, compare blobs on origin, reset to origin tip, stage/commit/push, then
+    the post-push verification fetch + blob read."""
+    doc = _LLD_DOC
+    r = ScriptedRunner({
+        **_live_wt("epic-110", path=path),
+        ("git", "-C", path, "fetch", "origin"): "",
+        ("git", "-C", path, "rev-parse", "--verify", "--quiet", f"origin/issue-185:{doc}"):
+            src_blob + "\n",
+        ("git", "-C", path, "status", "--porcelain"): "",
+        ("git", "-C", path, "diff", "--name-only", "origin/epic-110...epic-110"): "",
+        ("git", "-C", path, "checkout", "-B", "epic-110", "origin/epic-110"): "",
+        ("git", "-C", path, "checkout", "origin/issue-185", "--", doc): "",
+        ("git", "-C", path, "commit", "-m",
+         "docs(sdlc): publish issue-185 lld.md to epic-110", "--", doc): "",
+        ("git", "-C", path, "rev-parse", "HEAD"): commit_sha + "\n",
+        ("git", "-C", path, "push", "origin", "epic-110"): "",
+    })
+    # The origin blob is read twice: before (decide) and after the push (verify).
+    blobs = iter([origin_blob_before, origin_blob_after, origin_blob_after])
+    key = ("git", "-C", path, "rev-parse", "--verify", "--quiet", f"origin/epic-110:{doc}")
+    base_call = r.__call__
+
+    def call(argv):
+        if tuple(argv) == key:
+            r.calls.append(argv)
+            return next(blobs) + "\n"
+        return base_call(argv)
+    r.call = call
+    return r
+
+
+class _Dispatch:
+    """Wrap a ScriptedRunner whose `.call` attribute overrides `__call__`."""
+    def __init__(self, r):
+        self.r = r
+        self.calls = r.calls
+
+    def __call__(self, argv):
+        return self.r.call(argv)
+
 
 def test_merge_lld_doc_happy_path_commits_and_pushes_to_epic_branch():
-    # A normal-epic child's lld.md is taken from origin/issue-<n> and committed
-    # onto epic-<parent> as a doc-only commit, then pushed; a marker comment is
-    # posted on the issue.
     from sdlc_next import GitHub, cmd_merge_lld_doc
     epic = _epic(110, labels=["epic:architected"])
     child = _issue(185, stage="lld", parent=110)
     gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])})
     gh_runner.prefix_responses = {("gh", "issue", "comment", "185"): ""}
     gh = GitHub(runner=gh_runner)
-    doc = "docs/sdlc/issue-185/lld.md"
-    runner = ScriptedRunner({
-        ("git", "-C", "/epic-110", "fetch", "origin"): "",
-        ("git", "-C", "/epic-110", "checkout", "epic-110"): "",
-        ("git", "-C", "/epic-110", "checkout", "origin/issue-185", "--", doc): "",
-        ("git", "-C", "/epic-110", "status", "--porcelain", "--", doc): " M " + doc + "\n",
-        ("git", "-C", "/epic-110", "commit", "-m",
-         "docs(sdlc): publish issue-185 lld.md to epic-110", "--", doc): "",
-        ("git", "-C", "/epic-110", "rev-parse", "HEAD"): "deadbeef\n",
-        ("git", "-C", "/epic-110", "push", "origin", "epic-110"): "",
-    })
+    runner = _Dispatch(_lld_git())
     result = cmd_merge_lld_doc(gh, "/epic-110", 185, runner=runner)
-    assert result == {"issue": 185, "merged": True, "epic_branch": "epic-110", "commit": "deadbeef"}
+    assert result == {"issue": 185, "merged": True, "epic_branch": "epic-110",
+                      "commit": "deadbeef", "verified_on_origin": True, "attempts": 1}
     comment_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"])
     body = comment_call[comment_call.index("--body") + 1]
     assert "<!-- lld-doc-published: epic-110:deadbeef" in body
     # Doc-only: the child branch is never merged, only its one lld.md path touched.
     assert ["git", "-C", "/epic-110", "merge", "origin/issue-185"] not in runner.calls
+    # Replayed from origin's tip, never from whatever the local branch held.
+    assert ["git", "-C", "/epic-110", "checkout", "-B", "epic-110", "origin/epic-110"] in runner.calls
+    # Verified after the push: a second fetch precedes the success report.
+    push_i = runner.calls.index(["git", "-C", "/epic-110", "push", "origin", "epic-110"])
+    assert ["git", "-C", "/epic-110", "fetch", "origin"] in runner.calls[push_i + 1:]
 
 
-def test_merge_lld_doc_idempotent_noop_when_content_matches():
-    # Identical content: `git checkout origin/issue-<n> -- lld.md` leaves the tree
-    # clean, so status --porcelain is empty and nothing is committed or pushed.
+def test_merge_lld_doc_idempotent_noop_when_origin_already_has_the_doc():
+    # Identical blob on origin/epic-110 and origin/issue-185: nothing is reset,
+    # committed or pushed, and the no-op says it was judged on origin.
     from sdlc_next import GitHub, cmd_merge_lld_doc
     epic = _epic(110, labels=["epic:architected"])
     child = _issue(185, stage="lld", parent=110)
     gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])}))
-    doc = "docs/sdlc/issue-185/lld.md"
-    runner = ScriptedRunner({
-        ("git", "-C", "/epic-110", "fetch", "origin"): "",
-        ("git", "-C", "/epic-110", "checkout", "epic-110"): "",
-        ("git", "-C", "/epic-110", "checkout", "origin/issue-185", "--", doc): "",
-        ("git", "-C", "/epic-110", "status", "--porcelain", "--", doc): "",
-    })
+    runner = _Dispatch(_lld_git(origin_blob_before="blobNEW"))
     result = cmd_merge_lld_doc(gh, "/epic-110", 185, runner=runner)
-    assert result == {"issue": 185, "merged": False, "epic_branch": "epic-110", "reason": "up-to-date"}
-    assert ["git", "-C", "/epic-110", "push", "origin", "epic-110"] not in runner.calls
+    assert result == {"issue": 185, "merged": False, "epic_branch": "epic-110",
+                      "reason": "up-to-date", "verified_on_origin": True}
+    assert not any(c[3] in ("push", "commit") for c in runner.calls)
+    assert ["git", "-C", "/epic-110", "checkout", "-B", "epic-110", "origin/epic-110"] not in runner.calls
+
+
+def test_merge_lld_doc_regression_local_tree_holding_the_doc_is_not_up_to_date():
+    # THE 2026-09-12 defect: a prior attempt committed the doc on a stale local
+    # base and its push was rejected. The local tree now holds the doc, but
+    # origin/epic-110 does not. The old code compared the working tree to itself
+    # and said "up-to-date"; the fix compares blobs on origin, replays the doc
+    # from origin's tip, pushes, and verifies.
+    from sdlc_next import GitHub, cmd_merge_lld_doc
+    epic = _epic(110, labels=["epic:architected"])
+    child = _issue(185, stage="lld", parent=110)
+    gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])})
+    gh_runner.prefix_responses = {("gh", "issue", "comment", "185"): ""}
+    gh = GitHub(runner=gh_runner)
+    inner = _lld_git(commit_sha="c0ffee")
+    # The stale local doc-only commit shows up as an unpushed diff on exactly the doc path.
+    inner.responses[("git", "-C", "/epic-110", "diff", "--name-only",
+                     "origin/epic-110...epic-110")] = _LLD_DOC + "\n"
+    runner = _Dispatch(inner)
+    result = cmd_merge_lld_doc(gh, "/epic-110", 185, runner=runner)
+    assert result["merged"] is True and result["verified_on_origin"] is True
+    assert result["commit"] == "c0ffee"
+    assert ["git", "-C", "/epic-110", "push", "origin", "epic-110"] in runner.calls
+
+
+def test_merge_lld_doc_refuses_to_reset_unpushed_non_doc_work_on_the_epic_branch():
+    from sdlc_next import GitHub, cmd_merge_lld_doc
+    epic = _epic(110, labels=["epic:architected"])
+    child = _issue(185, stage="lld", parent=110)
+    gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])}))
+    inner = _lld_git()
+    inner.responses[("git", "-C", "/epic-110", "diff", "--name-only",
+                     "origin/epic-110...epic-110")] = "src/other.ts\n" + _LLD_DOC + "\n"
+    runner = _Dispatch(inner)
+    result = cmd_merge_lld_doc(gh, "/epic-110", 185, runner=runner)
+    assert result["merged"] is False
+    assert "src/other.ts" in result["reason"] and "refusing to reset" in result["reason"]
+    assert not any(c[3] in ("push", "commit") for c in runner.calls)
 
 
 def test_merge_lld_doc_noop_for_standing_epic_child():
@@ -3434,60 +3534,302 @@ def test_merge_lld_doc_noop_for_parentless_issue():
     assert runner.calls == []
 
 
-def test_merge_lld_doc_push_rejection_returns_conflict_without_raising():
-    # Epic branch advanced concurrently -> push refused. Structured conflict
-    # result at exit 0, not a crash; no marker comment posted.
+def test_merge_lld_doc_push_rejected_twice_reports_conflict_never_success():
+    # Epic branch keeps advancing -> push refused on the first attempt AND on the
+    # replay from the new tip. Structured conflict at exit 0 that says the doc is
+    # NOT on origin; no marker comment; no false success.
     from sdlc_next import GitHub, cmd_merge_lld_doc, GhError
     epic = _epic(110, labels=["epic:architected"])
     child = _issue(185, stage="lld", parent=110)
     gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])})
     gh = GitHub(runner=gh_runner)
-    doc = "docs/sdlc/issue-185/lld.md"
+    inner = _lld_git()
     push_argv = ("git", "-C", "/epic-110", "push", "origin", "epic-110")
+    base_call = inner.call
 
-    def runner(argv):
-        runner.calls.append(argv)
+    def call(argv):
         if tuple(argv) == push_argv:
+            inner.calls.append(argv)
             raise GhError("command failed (1): git push\n ! [rejected]  epic-110 -> epic-110 "
                           "(non-fast-forward)\nUpdates were rejected because the remote "
                           "contains work that you do not have locally.")
-        canned = {
-            ("git", "-C", "/epic-110", "fetch", "origin"): "",
-            ("git", "-C", "/epic-110", "checkout", "epic-110"): "",
-            ("git", "-C", "/epic-110", "checkout", "origin/issue-185", "--", doc): "",
-            ("git", "-C", "/epic-110", "status", "--porcelain", "--", doc): " M " + doc + "\n",
-            ("git", "-C", "/epic-110", "commit", "-m",
-             "docs(sdlc): publish issue-185 lld.md to epic-110", "--", doc): "",
-            ("git", "-C", "/epic-110", "rev-parse", "HEAD"): "cafef00d\n",
-        }
-        return canned[tuple(argv)]
-    runner.calls = []
-
+        return base_call(argv)
+    inner.call = call
+    runner = _Dispatch(inner)
     result = cmd_merge_lld_doc(gh, "/epic-110", 185, runner=runner)
-    assert result["merged"] is False
-    assert result["conflict"] is True
-    assert result["epic_branch"] == "epic-110"
-    assert result["commit"] == "cafef00d"
-    # No marker comment on a conflict.
+    assert result["merged"] is False and result["conflict"] is True
+    assert "NOT on origin/epic-110" in result["reason"]
+    assert sum(1 for c in runner.calls if tuple(c) == push_argv) == 2
+    # Each attempt replays from origin's (re-fetched) tip.
+    assert sum(1 for c in runner.calls
+               if c == ["git", "-C", "/epic-110", "checkout", "-B", "epic-110", "origin/epic-110"]) == 2
+    assert not any(c[:3] == ["gh", "issue", "comment"] for c in gh_runner.calls)
+
+
+def test_merge_lld_doc_push_accepted_but_origin_lacks_blob_is_not_reported_merged():
+    # Belt and braces: even a push that returned 0 is not success until origin
+    # shows the blob.
+    from sdlc_next import GitHub, cmd_merge_lld_doc
+    epic = _epic(110, labels=["epic:architected"])
+    child = _issue(185, stage="lld", parent=110)
+    gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])})
+    gh = GitHub(runner=gh_runner)
+    runner = _Dispatch(_lld_git(origin_blob_after="blobSOMETHINGELSE"))
+    result = cmd_merge_lld_doc(gh, "/epic-110", 185, runner=runner)
+    assert result["merged"] is False and result["conflict"] is True
+    assert "does not carry" in result["reason"]
     assert not any(c[:3] == ["gh", "issue", "comment"] for c in gh_runner.calls)
 
 
 def test_merge_lld_doc_noop_when_no_lld_on_child_branch():
-    # `git checkout origin/issue-<n> -- lld.md` fails when the file isn't there --
-    # structured no-op, not a crash.
+    # No lld.md blob on origin/issue-<n> -- structured no-op, not a crash.
     from sdlc_next import GitHub, cmd_merge_lld_doc
     epic = _epic(110, labels=["epic:architected"])
     child = _issue(185, stage="lld", parent=110)
     gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])}))
-    doc = "docs/sdlc/issue-185/lld.md"
     runner = ScriptedRunner({
+        **_live_wt("epic-110", path="/epic-110"),
         ("git", "-C", "/epic-110", "fetch", "origin"): "",
-        ("git", "-C", "/epic-110", "checkout", "epic-110"): "",
     })
-    runner.fail_on = {("git", "-C", "/epic-110", "checkout", "origin/issue-185", "--", doc)}
+    runner.fail_on = {("git", "-C", "/epic-110", "rev-parse", "--verify", "--quiet",
+                       f"origin/issue-185:{_LLD_DOC}")}
     result = cmd_merge_lld_doc(gh, "/epic-110", 185, runner=runner)
     assert result["merged"] is False
     assert "no lld.md" in result["reason"]
+
+
+def test_merge_lld_doc_refuses_when_main_checkout_holds_the_epic_branch():
+    # The stolen-branch state: the main checkout is on epic-110. The pipeline
+    # never writes there -- refuse with the recovery recipe, touch nothing.
+    from sdlc_next import GitHub, GhError, cmd_merge_lld_doc
+    import pytest
+    epic = _epic(110, labels=["epic:architected"])
+    child = _issue(185, stage="lld", parent=110)
+    gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])}))
+    runner = ScriptedRunner({
+        ("git", "-C", "/main", "worktree", "list", "--porcelain"):
+            "worktree /main\nHEAD aaa\nbranch refs/heads/epic-110\n",
+    })
+    with pytest.raises(GhError) as exc:
+        cmd_merge_lld_doc(gh, "/main", 185, runner=runner)
+    assert "MAIN checkout" in str(exc.value) and "checkout main" in str(exc.value)
+    assert len(runner.calls) == 1
+
+
+# --- Concurrent multi-epic isolation: branch locks and ephemeral workspaces ---
+
+def test_branch_lock_is_exclusive_per_branch_and_released_on_exit():
+    from sdlc_next import branch_lock, BranchLocked
+    import pytest
+    with branch_lock("epic-1") as path:
+        assert path.endswith("epic-1.lock")
+        with pytest.raises(BranchLocked):
+            with branch_lock("epic-1", wait_seconds=0):
+                pass
+        # A different branch never contends.
+        with branch_lock("epic-2", wait_seconds=0):
+            pass
+    with branch_lock("epic-1", wait_seconds=0):
+        pass
+
+
+def test_branch_workspace_uses_live_non_main_worktree_and_leaves_it():
+    from sdlc_next import BranchWorkspace
+    runner = ScriptedRunner({**_live_wt("issue-9", path="/tmp/sdlc-dev-9")})
+    with BranchWorkspace("issue-9", "/tmp/sdlc-dev-9", runner) as ws:
+        assert ws.path == "/tmp/sdlc-dev-9" and ws.ephemeral is False
+    assert ws.retained is None
+    assert not any(c[3] == "worktree" and c[4] in ("add", "remove") for c in runner.calls)
+
+
+def test_branch_workspace_creates_ephemeral_worktree_from_origin_and_removes_it():
+    from sdlc_next import BranchWorkspace, PIPELINE
+    import os
+    path = f"/tmp/sdlc-tmp-epic-365-{os.getpid()}"
+    runner = ScriptedRunner({
+        ("git", "-C", "/main", "worktree", "list", "--porcelain"):
+            "worktree /main\nHEAD aaa\nbranch refs/heads/main\n",
+        ("git", "-C", "/main", "fetch", "origin"): "",
+        ("git", "-C", "/main", "show-ref", "--verify", "--quiet", "refs/remotes/origin/epic-365"): "",
+        ("git", "-C", "/main", "worktree", "add", path, "-B", "epic-365", "origin/epic-365"): "",
+        ("git", "-C", path, "status", "--porcelain"): "",
+        ("git", "-C", path, "log", "--oneline", "origin/epic-365..epic-365"): "",
+        ("git", "-C", "/main", "worktree", "remove", path): "",
+    })
+    runner.fail_on = {("git", "-C", "/main", "rev-parse", "--verify", "--quiet", "refs/heads/epic-365")}
+    with BranchWorkspace("epic-365", "/main", runner) as ws:
+        assert ws.path == path and ws.ephemeral is True
+    assert ["git", "-C", "/main", "worktree", "remove", path] in runner.calls
+    assert ws.retained is None
+    # Nothing ever ran `git checkout` in the main checkout.
+    assert not any(c[:3] == ["git", "-C", "/main"] and c[3] == "checkout" for c in runner.calls)
+
+
+def test_branch_workspace_retains_ephemeral_worktree_with_unpushed_commits():
+    from sdlc_next import BranchWorkspace
+    import os
+    path = f"/tmp/sdlc-tmp-epic-365-{os.getpid()}"
+    runner = ScriptedRunner({
+        ("git", "-C", "/main", "worktree", "list", "--porcelain"):
+            "worktree /main\nHEAD aaa\nbranch refs/heads/main\n",
+        ("git", "-C", "/main", "fetch", "origin"): "",
+        ("git", "-C", "/main", "show-ref", "--verify", "--quiet", "refs/remotes/origin/epic-365"): "",
+        ("git", "-C", "/main", "worktree", "add", path, "-B", "epic-365", "origin/epic-365"): "",
+        ("git", "-C", path, "status", "--porcelain"): "",
+        ("git", "-C", path, "log", "--oneline", "origin/epic-365..epic-365"): "abc unpushed\n",
+    })
+    runner.fail_on = {("git", "-C", "/main", "rev-parse", "--verify", "--quiet", "refs/heads/epic-365")}
+    with BranchWorkspace("epic-365", "/main", runner) as ws:
+        pass
+    assert ws.retained == path
+    assert ["git", "-C", "/main", "worktree", "remove", path] not in runner.calls
+
+
+def test_branch_workspace_refuses_when_local_ref_has_unpushed_commits_and_no_worktree():
+    from sdlc_next import BranchWorkspace, GhError
+    import pytest
+    runner = ScriptedRunner({
+        ("git", "-C", "/main", "worktree", "list", "--porcelain"):
+            "worktree /main\nHEAD aaa\nbranch refs/heads/main\n",
+        ("git", "-C", "/main", "fetch", "origin"): "",
+        ("git", "-C", "/main", "show-ref", "--verify", "--quiet", "refs/remotes/origin/epic-365"): "",
+        ("git", "-C", "/main", "rev-parse", "--verify", "--quiet", "refs/heads/epic-365"): "abc\n",
+        ("git", "-C", "/main", "log", "--oneline", "origin/epic-365..epic-365"): "abc wip\n",
+    })
+    with pytest.raises(GhError) as exc:
+        with BranchWorkspace("epic-365", "/main", runner):
+            pass
+    assert "not on origin/epic-365" in str(exc.value)
+    assert not any(c[3] == "worktree" and c[4] == "add" for c in runner.calls)
+
+
+def test_sync_branch_with_no_live_worktree_runs_in_an_ephemeral_one():
+    # The epic-branch case that used to borrow the main checkout: nothing holds
+    # epic-92, so sync-branch stands up an ephemeral worktree, reconciles there,
+    # and removes it. The main checkout sees no checkout/merge/push at all.
+    from sdlc_next import GitHub, cmd_sync_branch
+    import os
+    path = f"/tmp/sdlc-tmp-epic-92-{os.getpid()}"
+    runner = ScriptedRunner({
+        ("git", "-C", "/main", "worktree", "list", "--porcelain"):
+            "worktree /main\nHEAD aaa\nbranch refs/heads/main\n",
+        ("git", "-C", "/main", "fetch", "origin"): "",
+        ("git", "-C", "/main", "show-ref", "--verify", "--quiet", "refs/remotes/origin/epic-92"): "",
+        ("git", "-C", "/main", "worktree", "add", path, "-B", "epic-92", "origin/epic-92"): "",
+        ("git", "-C", path, "fetch", "origin"): "",
+        ("git", "-C", path, "checkout", "epic-92"): "",
+        ("git", "-C", path, "merge", "origin/main"): "",
+        ("git", "-C", path, "push", "origin", "epic-92"): "",
+        ("git", "-C", path, "status", "--porcelain"): "",
+        ("git", "-C", path, "log", "--oneline", "origin/epic-92..epic-92"): "",
+        ("git", "-C", "/main", "worktree", "remove", path): "",
+    })
+    runner.fail_on = {("git", "-C", "/main", "rev-parse", "--verify", "--quiet", "refs/heads/epic-92")}
+    gh = GitHub(runner=ScriptedRunner({}))
+    result = cmd_sync_branch(gh, "/main", 92, unit="epic", runner=runner)
+    assert result == {"issue": 92, "unit": "epic", "branch": "epic-92", "base": "main",
+                      "synced": True}
+    assert not any(c[:3] == ["git", "-C", "/main"] and c[3] in ("checkout", "merge", "push")
+                   for c in runner.calls)
+
+
+# --- Concurrent multi-epic isolation: per-epic runtime stack ---
+
+def _enable_stack(monkeypatch, tmp_path):
+    from sdlc_next import PIPELINE
+    stack = dict(PIPELINE["stack"])
+    stack.update({"enabled": True, "workspaceRoot": str(tmp_path), "seedCommand": "make seed PROFILE={profile}"})
+    monkeypatch.setitem(PIPELINE, "stack", stack)
+    (tmp_path / ".env.dev").write_text(
+        "FRONTEND_PORT=3000\nBACKEND_PORT=3001\nexport DB_PORT_EXPOSE=5432\nBACKEND_DEBUG_PORT=9229\n"
+        "COMPOSE_PROJECT_NAME=singlasoft\nPOSTGRES_DATA_DIR=.docker/postgres-data\nOTHER=keep\n")
+    (tmp_path / ".secrets.dev").write_text("SECRET=xyz\n")
+    return stack
+
+
+def test_provision_epic_stack_generates_isolated_profile_and_runs_up_and_seed(monkeypatch, tmp_path):
+    from sdlc_next import cmd_provision_epic_stack
+    _enable_stack(monkeypatch, tmp_path)
+    ran = []
+    result = cmd_provision_epic_stack(159, shell=lambda c, cwd: ran.append((c, cwd)) or "",
+                                      probe=lambda p: True)
+    assert result["provisioned"] is True and result["created"] is True
+    assert result["profile"] == "epic159" and result["project"] == "sdlc-epic159"
+    env = (tmp_path / ".env.epic159").read_text()
+    ports = result["ports"]
+    # Every port is offset from the base profile -- never the shared dev ports.
+    assert ports["FRONTEND_PORT"] != 3000 and ports["BACKEND_DEBUG_PORT"] != 9229
+    assert ports["BACKEND_PORT"] - ports["FRONTEND_PORT"] == 1
+    assert f"BACKEND_DEBUG_PORT={ports['BACKEND_DEBUG_PORT']}" in env
+    assert "export DB_PORT_EXPOSE=5432" not in env and f"DB_PORT_EXPOSE={ports['DB_PORT_EXPOSE']}" in env
+    assert "COMPOSE_PROJECT_NAME=sdlc-epic159" in env
+    assert "POSTGRES_DATA_DIR=.docker/postgres-data-epic159" in env
+    assert "OTHER=keep" in env
+    assert (tmp_path / ".secrets.epic159").read_text() == "SECRET=xyz\n"
+    assert (tmp_path / ".docker/postgres-data-epic159").is_dir()
+    assert [c for c, _ in ran] == [
+        "COMPOSE_PROJECT_NAME=sdlc-epic159 make fullstack-d PROFILE=epic159",
+        "make seed PROFILE=epic159"]
+    assert all(cwd == str(tmp_path) for _, cwd in ran)
+
+
+def test_provision_epic_stack_is_idempotent_and_reads_ports_back(monkeypatch, tmp_path):
+    from sdlc_next import cmd_provision_epic_stack
+    _enable_stack(monkeypatch, tmp_path)
+    first = cmd_provision_epic_stack(159, shell=lambda c, cwd: "", probe=lambda p: True)
+    ran = []
+    second = cmd_provision_epic_stack(159, shell=lambda c, cwd: ran.append(c) or "",
+                                      probe=lambda p: False)  # probe never consulted
+    assert second["created"] is False and second["ports"] == first["ports"]
+    assert len(ran) == 2  # up + seed re-run; profile untouched
+
+
+def test_provision_epic_stack_bumps_ports_when_a_slot_is_taken(monkeypatch, tmp_path):
+    from sdlc_next import pick_stack_ports, PIPELINE
+    _enable_stack(monkeypatch, tmp_path)
+    stride = PIPELINE["stack"]["portStride"]
+    first = pick_stack_ports(159, probe=lambda p: True)
+    bumped = pick_stack_ports(159, probe=lambda p: p != first["BACKEND_PORT"])
+    assert bumped["BACKEND_PORT"] == first["BACKEND_PORT"] + stride
+
+
+def test_provision_and_teardown_are_noops_when_stack_disabled():
+    from sdlc_next import cmd_provision_epic_stack, cmd_teardown_epic_stack
+    calls = []
+    assert cmd_provision_epic_stack(1, shell=lambda c, cwd: calls.append(c))["provisioned"] is False
+    assert cmd_teardown_epic_stack(1, shell=lambda c, cwd: calls.append(c))["torn_down"] is False
+    assert calls == []
+
+
+def test_teardown_epic_stack_downs_and_removes_profile_and_data(monkeypatch, tmp_path):
+    from sdlc_next import cmd_provision_epic_stack, cmd_teardown_epic_stack
+    _enable_stack(monkeypatch, tmp_path)
+    cmd_provision_epic_stack(159, shell=lambda c, cwd: "", probe=lambda p: True)
+    ran = []
+    result = cmd_teardown_epic_stack(159, shell=lambda c, cwd: ran.append(c) or "")
+    assert result["torn_down"] is True
+    assert ran == ["COMPOSE_PROJECT_NAME=sdlc-epic159 docker compose --env-file .env.epic159 "
+                   "down -v --remove-orphans"]
+    assert not (tmp_path / ".env.epic159").exists()
+    assert not (tmp_path / ".secrets.epic159").exists()
+    assert not (tmp_path / ".docker/postgres-data-epic159").exists()
+    # The base profile is untouched.
+    assert (tmp_path / ".env.dev").exists() and (tmp_path / ".secrets.dev").exists()
+    # Second teardown: structured no-op.
+    assert cmd_teardown_epic_stack(159, shell=lambda c, cwd: "")["torn_down"] is False
+
+
+def test_teardown_epic_stack_keeps_files_when_down_fails(monkeypatch, tmp_path):
+    from sdlc_next import cmd_provision_epic_stack, cmd_teardown_epic_stack, GhError
+    import pytest
+    _enable_stack(monkeypatch, tmp_path)
+    cmd_provision_epic_stack(159, shell=lambda c, cwd: "", probe=lambda p: True)
+
+    def failing(c, cwd):
+        raise GhError("compose down failed")
+    with pytest.raises(GhError):
+        cmd_teardown_epic_stack(159, shell=failing)
+    assert (tmp_path / ".env.epic159").exists()
 
 
 # --- Parallel implementation lane: list-parallel-ready ---
@@ -3973,9 +4315,12 @@ def test_worktree_add_first_touch_child_branches_off_epic_branch():
         ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-dev-185", "-b", "issue-185",
          "origin/epic-110"): "",
     })
-    assert cmd_worktree_add(gh, 185, runner=runner) == {
+    runner.fail_on = {("git", "-C", "/tmp/sdlc-dev-185", "ls-files", "--error-unmatch", ".github/sdlc-pipeline")}
+    result = cmd_worktree_add(gh, 185, runner=runner)
+    assert {k: result[k] for k in ("created", "path", "branch", "base", "resumed")} == {
         "created": True, "path": "/tmp/sdlc-dev-185", "branch": "issue-185",
         "base": "origin/epic-110", "resumed": False}
+    assert result["skill_dir"] is None  # no skill submodule tracked in this tree
 
 
 def test_worktree_add_resume_uses_pushed_branch_never_main():
@@ -3988,6 +4333,7 @@ def test_worktree_add_resume_uses_pushed_branch_never_main():
         ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-dev-185", "-B", "issue-185",
          "origin/issue-185"): "",
     })
+    runner.fail_on = {("git", "-C", "/tmp/sdlc-dev-185", "ls-files", "--error-unmatch", ".github/sdlc-pipeline")}
     result = cmd_worktree_add(gh, 185, runner=runner)
     assert result["resumed"] is True and result["base"] == "origin/issue-185"
     assert not any("origin/main" in c for c in runner.calls)
@@ -4003,6 +4349,7 @@ def test_worktree_add_epic_unit_branches_off_main_into_epic_path():
         ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-epic-110", "-b", "epic-110",
          "origin/main"): "",
     })
+    runner.fail_on = {("git", "-C", "/tmp/sdlc-epic-110", "ls-files", "--error-unmatch", ".github/sdlc-pipeline")}
     assert cmd_worktree_add(gh, 110, unit="epic", runner=runner)["path"] == "/tmp/sdlc-epic-110"
 
 
@@ -4015,6 +4362,71 @@ def test_worktree_add_noop_when_branch_already_checked_out():
     result = cmd_worktree_add(gh, 185, runner=runner)
     assert result["created"] is False and result["path"] == "/tmp/sdlc-dev-185"
     assert len(runner.calls) == 1  # no fetch, no add
+
+def test_worktree_add_inits_the_skill_submodule_and_reports_the_per_unit_skill_dir():
+    # A linked worktree's submodule dir is empty until `submodule update --init`
+    # runs *in that worktree*; the result's `skill_dir` is the per-epic $SDLC_DIR
+    # stage agents read. The post-init check asserts the gitdir is per-worktree.
+    from sdlc_next import GitHub, cmd_worktree_add
+    gh = GitHub(runner=ScriptedRunner({}))
+    wt, sub = "/tmp/sdlc-epic-110", "/tmp/sdlc-epic-110/.github/sdlc-pipeline"
+    runner = ScriptedRunner({
+        **_wt_list_main(),
+        ("git", "-C", ".", "fetch", "origin"): "",
+        ("git", "-C", ".", "branch", "-r", "--list", "origin/epic-110"): "  origin/epic-110\n",
+        ("git", "-C", ".", "worktree", "add", wt, "-B", "epic-110", "origin/epic-110"): "",
+        ("git", "-C", wt, "ls-files", "--error-unmatch", ".github/sdlc-pipeline"): ".github/sdlc-pipeline\n",
+        ("git", "-C", wt, "submodule", "update", "--init", "--", ".github/sdlc-pipeline"): "",
+        ("git", "-C", sub, "rev-parse", "--absolute-git-dir"):
+            "/repo/.git/worktrees/sdlc-epic-110/modules/.github/sdlc-pipeline\n",
+        ("git", "-C", sub, "ls-files", "--error-unmatch", "SKILL.md"): "SKILL.md\n",
+        ("git", "-C", sub, "rev-parse", "HEAD"): "7d03993\n",
+    })
+    result = cmd_worktree_add(gh, 110, unit="epic", runner=runner)
+    assert result["skill_dir"] == sub and result["skill_commit"] == "7d03993"
+    add_i = runner.calls.index(["git", "-C", ".", "worktree", "add", wt, "-B", "epic-110", "origin/epic-110"])
+    assert ["git", "-C", wt, "submodule", "update", "--init", "--", ".github/sdlc-pipeline"] in runner.calls[add_i:]
+
+
+def test_init_skill_submodule_refuses_a_shared_non_per_worktree_gitdir():
+    from sdlc_next import init_skill_submodule, GhError
+    import pytest
+    wt, sub = "/tmp/sdlc-epic-110", "/tmp/sdlc-epic-110/.github/sdlc-pipeline"
+    runner = ScriptedRunner({
+        ("git", "-C", wt, "ls-files", "--error-unmatch", ".github/sdlc-pipeline"): ".github/sdlc-pipeline\n",
+        ("git", "-C", wt, "submodule", "update", "--init", "--", ".github/sdlc-pipeline"): "",
+        ("git", "-C", sub, "rev-parse", "--absolute-git-dir"): "/repo/.git/modules/.github/sdlc-pipeline\n",
+    })
+    with pytest.raises(GhError) as exc:
+        init_skill_submodule(wt, runner=runner)
+    assert "not per-worktree" in str(exc.value)
+
+
+def test_sync_branch_reinits_the_skill_submodule_after_the_merge_in_a_live_worktree():
+    # The merge can move the submodule gitlink; only `submodule update --init`
+    # moves the working files to the new pin. Runs after the merge, in the live
+    # worktree, and reports the per-unit skill_dir.
+    from sdlc_next import GitHub, cmd_sync_branch
+    wt, sub = "/tmp/sdlc-dev-9", "/tmp/sdlc-dev-9/.github/sdlc-pipeline"
+    runner = ScriptedRunner({
+        **_live_wt("issue-9", path=wt),
+        ("git", "-C", wt, "fetch", "origin"): "",
+        ("git", "-C", wt, "checkout", "issue-9"): "",
+        ("git", "-C", wt, "merge", "origin/main"): "",
+        ("git", "-C", wt, "push", "origin", "issue-9"): "",
+        ("git", "-C", wt, "ls-files", "--error-unmatch", ".github/sdlc-pipeline"): ".github/sdlc-pipeline\n",
+        ("git", "-C", wt, "submodule", "update", "--init", "--", ".github/sdlc-pipeline"): "",
+        ("git", "-C", sub, "rev-parse", "--absolute-git-dir"):
+            "/repo/.git/worktrees/sdlc-dev-9/modules/.github/sdlc-pipeline\n",
+        ("git", "-C", sub, "ls-files", "--error-unmatch", "SKILL.md"): "SKILL.md\n",
+        ("git", "-C", sub, "rev-parse", "HEAD"): "abc123\n",
+    })
+    gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([_issue(9)])}))
+    result = cmd_sync_branch(gh, wt, 9, runner=runner)
+    assert result["synced"] is True and result["skill_dir"] == sub and result["skill_commit"] == "abc123"
+    merge_i = runner.calls.index(["git", "-C", wt, "merge", "origin/main"])
+    assert ["git", "-C", wt, "submodule", "update", "--init", "--", ".github/sdlc-pipeline"] in runner.calls[merge_i:]
+
 
 
 def test_merge_pr_closes_child_explicitly_when_merged_into_epic_branch():
@@ -4132,7 +4544,8 @@ def test_open_gate_unit_issue_does_not_consult_the_gate_branch_guard():
     # on any unscripted call, so the absence of a scripted compare proves it.
     from sdlc_next import GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, \
         PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
-    git_runner = ScriptedRunner({("git", "-C", "/repo", "rev-parse", "HEAD"): "abcd1234\n"})
+    git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): "",
+                                 ("git", "-C", "/repo", "rev-parse", "origin/issue-9"): "abcd1234\n"})
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}")
     status_mutation_argv = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['awaiting-human-review'])}")
