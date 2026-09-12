@@ -179,11 +179,7 @@ target. A wrong override once pointed `test:it` at the shared dev DB `bookshaw` 
 wiped real dev rows. If the effective DB is not a `_test` one, stop and report; do not
 run.
 
-**You are a subagent — finish inside this turn.** Nothing re-invokes you across turns.
-The suite re-run is fine to `run_in_background` (the IT suite should always be
-backgrounded/chunked), but then **wait on it in-turn via the Monitor tool** (foreground
-`sleep` is blocked). Never end your turn "standing by" for a background/Monitor
-notification to resume you — it will not come, and the review stalls.
+**You are a subagent — finish inside this turn, and your final message must declare a terminal state: finished, blocked, or stopped for a decision.** Waiting is not terminal. Background a long command and wait on it in-turn via the Monitor tool; never end your turn standing by for a notification to resume you, because nothing will. Full rule and its incident history: `references/stage-playbooks.md`, "Subagents finish in one turn".
 
 **If a layer cannot complete** — the suite will not run, a required file is
 unreadable — record which layer failed and continue with the rest. If layers failed
@@ -305,19 +301,109 @@ service". If you cannot cite a location you read, you do not have a finding.
 - **REWORK** — one or more blocking findings, or CI is failing. Back to `development`
   with the specific findings.
 
-## Step 5 — Exit
+## Exit actions — yours, performed as your last step
 
-Whatever the verdict, your **last** action before merging or resuming anyone is:
+These were moved here from `references/stage-playbooks.md` on 2026-09-13: they are
+**your** stage's actions and no other stage's, so they live in the one file you are
+guaranteed to read. Opening a human-review gate is the exception and remains the
+orchestrator's, after you return.
 
-```bash
-sdlc_next.py record-pr-review <n> --pr <pr> --outcome clean|rework --summary "..."
-```
+### `pr-review`
 
-`CONDITIONAL ACCEPT` records as `clean` — it merges. Then follow
-`stage-playbooks.md`'s `pr-review` exit action for what happens next: `merge-pr` on a
-clean verdict (it re-checks CI itself and refuses if the branch is behind `main`),
-resume `development` on rework, `mark-needs-human` on `status: missing-checks` unless
-the diff itself touches `.github/workflows/**`.
+Orchestrator posts `start-comment <n> --role pr-review`, spawns a
+fresh subagent of type `sdlc-pr-review` (model per the config's `pipeline.models`)
+reviewing the PR diff adversarially. Check CI via `sdlc_next.py pr-checks <pr>`. May
+be one of up to `PR_REVIEW_PARALLELISM` concurrent reviews, each in its own detached
+worktree (`references/parallelism.md`).
 
-Never `gh pr merge` by hand. `merge-pr` owns the merge, the branch deletion, and the
-audit-trail comment.
+**Review against what was supposed to be built, not against what the implementer
+says they built (operator, 2026-09-12).** The spec side of the review is the design
+doc and its acceptance criteria — `lld.md` for a normal-epic child, `architecture.md`
+or `product.md` for a standing one. The PR description and the handoff comment are
+*claims*: useful for knowing where to look, never evidence, and never the standard
+the diff is measured against. An implementation that matches its own write-up
+perfectly and the design not at all is the exact failure this ordering catches.
+
+**What the review covers, in priority order.** This is the industry-standard reviewer
+ordering and it is deliberate — the expensive defects are at the top:
+1. **Design** — does the change belong in the system this way, at this boundary?
+2. **Functionality** — does it do what the acceptance criteria say, including for
+   the user, not just for the happy path?
+3. **Complexity** — is it more convoluted than the problem requires? Would the next
+   reader understand it?
+4. **Tests** — are they present, and are they *good*: driven through the public
+   surface, asserting observable behaviour, and would they actually go red? An
+   existence-only assertion, a test asserting on its own mock's return value, or a
+   test pinned to implementation detail (a **change-detector**, red on every
+   behaviour-preserving refactor) is a finding, not a nit.
+5. **Naming, comments, style, consistency, documentation** — real but cheap; these
+   are where "Nit:" belongs.
+
+**Since `development` writes and validates its own tests, test quality is this
+stage's job.** The `testing` stage was merged into `development` on 2026-09-12, so
+nobody re-runs the implementer's suite as a matter of course. What replaced it is
+narrow and mechanical: `record-local-ci` refuses an attestation without the run's own
+captured output pinned to the current head SHA, and `merge-pr` refuses a stale one.
+Read those attestations — the command, the output, the SHA — as the CI signal they
+stand in for.
+
+**Mutation-probe selectively, don't re-run blanket.** Pick the one or two guards that
+carry the real acceptance, break the behaviour under test in your detached worktree,
+confirm the test goes red, revert (`git status` clean). That is a far stronger signal
+per minute than repeating a suite that already ran. Decide the rest, and say which in
+the review comment:
+- **Skip the full re-run** when the evidence is *strong*: a `record-local-ci`
+  attestation with real captured output on the current head for every main-only
+  suite the diff touches, plus a criterion→test map. Then the review is the diff
+  read, the mutation probe, and static verification only.
+- **Run targeted specs** (foreground, scoped to the surface) when a specific finding
+  needs confirming — a suspected edge case, a claim the diff does not obviously
+  support.
+- **Re-run the suite** when the evidence is thin or suspect: an attestation whose
+  output does not match its claim, a criterion with no named test, a head SHA that
+  moved after the attestation, or a round the orchestrator already had to bounce.
+Never treat "the suites passed" as the reason to skip — the *shape* of the evidence
+is the reason.
+
+**Approve on code health, not on perfection.** A change that definitely improves the
+health of the codebase should go in, even when you can still imagine something
+better; blocking it on preference rather than principle is how a review turns into a
+gate nobody can pass. Technical fact beats taste, the repo's own conventions beat
+personal style, and where the implementer's approach is sound, accept it and move on.
+Reserve `rework` for what is actually wrong — a defect, a criterion unmet, a design
+the change does not fit. Whatever the verdict, the **last** action
+before merging or resuming anyone: `sdlc_next.py record-pr-review <n> --pr <pr>
+--outcome clean|rework --summary "..."`.
+- **Clean review** → `sdlc_next.py merge-pr <pr> --issue <n>` — marks ready,
+  squash-merges, deletes the branch, posts the audit-trail comment and (if the
+  issue auto-closed) the closing confirmation. It re-checks CI internally and
+  raises if not green — don't call `pr-checks` right before purely to pre-confirm;
+  use `pr-checks` only when you need the pending/failed/missing distinction. It
+  also **refuses with `{"merged": false, "behind_main": N}`** when the branch is
+  behind `origin/main` — run `sync-branch` (re-triggers CI), wait for green, re-run
+  `merge-pr` (see `references/parallelism.md`, "Merge-time freshness gate").
+- **`status: missing-checks`** → never poll it (no GHA run is coming on a child
+  PR). Two causes, distinguished by whether the named suite is a main-only one:
+  - **a required suite not yet attested for this head** (the common case, not a
+    defect) → `development` handed off without running `record-local-ci`, or a
+    rework push staled a prior attestation. Fix: run
+    `record-local-ci --pr <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`
+    on the current head, re-running the suite first (the attestation carries that
+    run's own captured output, so there is always a fresh run behind it), then
+    re-check. Do **not** `mark-needs-human` for this.
+  - **a genuine config defect** — some other required workflow renamed out of step
+    with `REQUIRED_WORKFLOWS`, disabled, or `paths:`-mismatched →
+    `mark-needs-human <n> --reason "required workflow reported no check: <names>"`
+    and park — *unless* the PR's own diff touches `.github/workflows/**`, in which
+    case resume `development` with the missing workflow names.
+- **CI pending** → re-check `pr-checks` with reasonable backoff.
+- **Real findings, or CI failed** → resume the `development` agent with specific
+  findings; once fixed, a fresh `pr-review` pass (the diff changed). Valve
+  pairing; on the third bounce dispatch the context-reset replacement `development`
+  agent, on the sixth check the test-only merge-and-file exception above, else
+  `mark-needs-human` and park.
+- **Deeper problem** → standing-epic child: resume `product` (or `architecture`);
+  normal-epic child: resume `lld` if task-local, or the epic deviation escalation
+  if it contradicts the epic's design. PR stays draft meanwhile. If the resumed
+  agent concludes it needs the human → `mark-needs-human` (on the epic, if the
+  epic's architecture was the resumed stage) and park.

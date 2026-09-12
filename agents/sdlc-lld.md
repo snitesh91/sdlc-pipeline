@@ -43,6 +43,62 @@ specifying a new helper, a new module, or a new dependency:
 **Never assume something is missing** because you did not immediately see it. Say what
 you searched for and what you found.
 
+**A claim that something does not exist needs a search that could have found it.**
+Every `lld` in epic #159 bounced at `lld-review`, most of them twice, and the largest
+single cause was a negative asserted from a search that was incapable of returning a
+counterexample. The reviewer's phrase for one of them was *"the sweep offered as proof
+is blind by construction"*.
+
+- *"Two, and only two, bootstrap paths exist in the whole tree"* — false, and the
+  grep offered as proof could not have found the others.
+- A detector resolved one syntactic form of constructs this tree writes several ways.
+  `require()` was invisible to it while live in four files, including the very file
+  the narrowing evidence came from; `it.each` was invisible while live in seven; and
+  `(SKIP ? it.skip : it)(` was invisible while live in the exact file the spec
+  asserted against.
+- A doc-citation sweep was an instance list wearing a sweep's wording, and its file
+  counts did not reproduce: 51 claimed against 60 actual, with "4 new files"
+  enumerating 5.
+
+So whenever you write *only*, *every*, *no other*, *none*, or *all*:
+
+- **Show the search as a command**, with its output, so a reviewer re-runs it rather
+  than re-deriving it.
+- **Give it a positive control**: demonstrate the same search finding a known
+  instance. A search that has never returned a hit in your presence has not been
+  tested, and a negative from an untested search is worth nothing.
+- **Enumerate the syntactic variants the tree actually uses** before claiming a
+  pattern-based search is complete. Grep the tree for the alternate spellings rather
+  than reasoning about which ones "should" be there — `require` alongside `import`,
+  `it.each` and conditional callables alongside bare `it`, aliased and re-exported
+  bindings alongside direct ones. Resolve by binding where you can, not by spelling.
+- **Prefer a count you can reproduce to a count you tallied.** If you state a number
+  of files, state the command that prints it.
+
+**Every number and every boundary you write down carries the source it came from.**
+The two things this stage gets wrong are not design judgements — they are constraints
+restated from memory when the source was one grep away, and both bounce at `lld-review`:
+
+- **A threshold, cap, limit or count you derive from an acceptance criterion is quoted
+  next to the constant** — the criterion's own sentence, verbatim, in the document.
+  Paraphrasing a limit is how it changes magnitude. On #494, `product.md` set the
+  threshold at "a single interactive list" — ten sections of ten rows — and the design
+  restated it as one ten-row section, narrowing the behaviour roughly tenfold with no
+  one able to see the substitution, because the source sentence was not on the page
+  next to the number.
+- **A shared boundary you route a value into is read, not assumed from its name** —
+  the logger, the serializer, the error formatter, the response mapper. When an
+  acceptance criterion constrains what may cross that boundary (privacy, redaction,
+  authorization), open its implementation and quote the line that decides what escapes.
+  On the same child the design passed a caught `Error` to `logger.error(msg, err)`
+  against an AC forbidding message bodies in logs; `NormalisingLogger.dispatch`
+  promotes any `Error` in a call's args straight into the emitted record, and the
+  upstream client's error embeds up to 200 characters of the provider's raw response —
+  routinely the parent's phone number. The name `logger.error` did not say that. The
+  implementation did.
+
+Both rules cost one grep each. `lld-review` will spend a whole round on either.
+
 **Infrastructure authority is not yours.** If this child genuinely needs
 infrastructure the epic's `architecture.md` does not authorise — a metrics sink, a new
 client, a new dependency — that is a deviation, not a detail. Escalate it.
@@ -78,6 +134,17 @@ Cover:
   cover the top-level `test/**` tree too, not just `src/**`** — test files import across
   module boundaries, and a sweep scoped to `src/**` misses them (this narrowing bounced
   epic #430 children A2/A5/B1).
+
+  **A unit's own spec and its test doubles are part of that unit's footprint**, even
+  when your change never opens them. A sibling that rewrites the mechanism your fake
+  imitates makes your spec wrong without touching your spec — and nothing catches it,
+  because both branches are green alone and only the merge is red. On 2026-09-13 two
+  epic-159 children both owned `test/testutil/db-helper.ts`: one added a guard that
+  reads `ds.options.database`, the other moved the deletes onto a pinned
+  `QueryRunner`. Each one's unit test stubbed a `DataSource` carrying only the half
+  its own branch had added, so each passed alone and the merged tree failed three
+  suites and seven tests. List the spec and the double alongside the implementation
+  file, so `list-parallel-ready` sees the collision that actually exists.
 
 Even a child needing no design decisions beyond the epic's `architecture.md` still gets
 an `lld.md` — a short one saying exactly that, with its footprint. Structural
@@ -118,12 +185,24 @@ other open children. Overlap is not automatically wrong — but unnoticed overla
 two parallel children stomp each other. If you find it, say so in the doc so
 `lld-review` can judge it deliberately.
 
-## Exit
+## Exit actions — yours, performed as your last step
 
-Commit and push on `issue-<n>` in the child's worktree, then post a short handoff
-comment linking the doc. **Do not change the Stage field** — it stays `LLD` while
-`lld-review` runs. `lld-review` is mandatory every time and has no confidence-skip;
-it is the only design review a normal-epic child gets, deliberately.
+These were moved here from `references/stage-playbooks.md` on 2026-09-13: they are
+**your** stage's actions and no other stage's, so they live in the one file you are
+guaranteed to read. Opening a human-review gate is the exception and remains the
+orchestrator's, after you return.
+
+### `lld` (normal-epic child) done
+
+In the child's worktree on `issue-<n>` (create
+if first stage). Read the epic's `<docRoot>/epic-<parent>/architecture.md`
+as the design source of truth; the **first move** is the fits-vs-deviates call
+(`references/epics.md`, "Epic-level deviation escalation"). If it fits → write
+`issue-<n>/lld.md` (no altitude requirement): exact files/functions to touch, how it
+maps to the epic design, task-local decisions — **including the parseable
+`## Footprint` section**. Commit, push, short handoff comment. **Do not change the
+Stage field** — stays `LLD` while `lld-review` runs. If it doesn't fit → don't write
+`lld.md`; follow the deviation escalation.
 
 On genuine ambiguity, **stop and report the specific question in your final message**.
 Never guess, never create issues, never change fields yourself.

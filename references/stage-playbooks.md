@@ -205,6 +205,48 @@ The rules that came out of it:
   docs cite that sibling's files, re-check those citations before the PR merges.** It
   is the one moment the pipeline creates staleness by itself rather than inheriting it.
 
+### Attribution is falsifiable — run the check, do not recall it
+
+The rules above govern *where* a citation points. They do not govern whether the words
+you attribute to a source are actually in it, and that is the gap epic #159 lost four
+review rounds to — two of them buying nothing but prose edits, on a branch whose code
+was already proven sound.
+
+Every one of these passed a conscientious author's own reading:
+
+- A `development.md` wrote *Per the footprint note ("keep your changes compatible with
+  that shape and do not remove or relocate those guards")*. That sentence exists in no
+  artifact: zero hits across the whole doc tree, the issue body, and its fifteen
+  comments. Its real origin was **the delegation prompt**. The agent quoted an
+  instruction it had been given and cited it to a design doc.
+- The next round, the same document asserted in four separate places that a spec and
+  its timeouts were untouched, while its own later section correctly described raising
+  them. Self-contradiction inside one file.
+- Another presented a comma-joined paraphrase inside a fenced block introduced as a
+  command "run for real". The real script prints one row per line with identifiers.
+  Its stated diff stat was stale in the same paragraph.
+
+So, as a mechanical pass before any handoff, not as a habit of care:
+
+- **Every quoted string must be reproducible by grep against the file you cite.** If
+  `grep -F "<the quoted words>" <cited file>` returns nothing, the quotation is wrong —
+  delete it or fix it. Quote spans short enough to survive reflowing.
+- **The delegation prompt is not a citable source.** Nothing in it is an artifact;
+  it does not merge, a reader cannot open it, and the next agent gets a different one.
+  A constraint that reached you only through your prompt goes in the document's own
+  voice, unquoted and unattributed.
+- **A fenced block introduced as command output must be bytes you captured.** Redirect
+  to a file and paste from the file, or cite the `record-local-ci` attestation, which
+  already embeds a real run's captured output. Prose describing what a command showed
+  is always acceptable; a fence is a claim of literalness.
+- **Generate every "untouched" / "unchanged" / "out of scope" claim from the diff**,
+  with `git diff --name-only origin/<base>...HEAD`, at the moment you write the
+  sentence. These claims are the most likely in any document to have been true when
+  drafted and false by handoff, because the author keeps working after writing them.
+
+A document that ships squash-merges into `main` as a permanent record. A fabricated
+quotation there invents a directive that some future reader will follow.
+
 ## Compile-checking is not verification
 
 A test runner's `--list`/dry-run mode, a type-check, and a lint pass tell you the code
@@ -245,10 +287,30 @@ tool** (foreground `sleep` is blocked). What must never happen is ending the tur
 "standing by" for a background job or a Monitor notification to resume the agent: the
 notification never arrives, the stage stalls until a human nudges it, and it registers
 as no progress. This recurred across every implementing agent of epic #430
-and killed two agents outright on earlier epics (see `references/history.md`). The rule
-lives in the `sdlc-development`/`sdlc-pr-review`/`sdlc-design-review`
-agent definitions too; it is repeated here because it is a property of the whole
-pipeline, not one stage.
+and killed two agents outright on earlier epics (see `references/history.md`). Those
+three agent definitions used to restate it, and had drifted into three different
+strengths — the weakest of them is what the agent that stalled on 2026-09-13 was
+reading. They now carry the one-sentence contract and point here for the rest.
+
+**Restating this rule has stopped working — so it is now a contract on the final
+message.** It is already stated here, and again in three agent definitions, with two
+agents killed by it on earlier epics and a recurrence across every implementing agent
+of epic #430. On 2026-09-13 an epic-159 agent did it again: it started an e2e run,
+set up a Monitor, and ended its turn saying it would resume when the notification
+arrived. Nothing wakes a subagent. It sat idle until the orchestrator noticed, drove
+the run by hand, and re-messaged it.
+
+**Your final message must declare a terminal state**, and there are exactly three:
+finished, blocked on something named, or stopped for a decision you have stated. Any
+final message whose last act is to wait — "I'll pick this up when the run lands",
+"monitoring for completion", "no further action needed until the notification" — is a
+stall, no matter how much real work preceded it. If a run is still going, wait on it
+in-turn; if you cannot, say so and name what you need, which is a terminal state.
+
+**Orchestrator side:** read every returning agent's final message for this shape before
+acting on its content. A returned agent that declared waiting has not finished, and its
+issue is not at the stage its handoff implies. Re-message it with the result it was
+waiting for rather than treating the stage as complete.
 
 ## Establish a number by running the thing, not by modelling it
 
@@ -336,6 +398,18 @@ For any such child, at **every** stage that touches the class:
   ships looking identical to an audited-clean one — so the inventory the checklist is
   built from must be the sweep's output, not a hand-typed list.
 
+**The narrow scoping of this section is itself a trap — the failure is not confined to
+audit/hardening children.** Any criterion → test map is a completeness claim in prose,
+and the positive control is what falsifies it; a child with an ordinary feature shape
+fails the same way when several criteria share one assertion shape. On #494 — a feature
+child, no class-of-surfaces acceptance anywhere in it — four criteria mapped to tests
+whose only assertion was the reply's *type*, which every reply in that family shares.
+Green suite, complete-looking map, no coverage; the `pr-review` positive control that
+exposed it took one run. So read the rule above as scoped to *any* stage claiming a set
+of criteria is covered, and see the family positive control in `sdlc-development.md`
+("How to write the tests") for the cheap form: one control per family of sibling
+expected values, not one per criterion.
+
 The population of the class is a **requirements** fact, not a `development` call. If
 which controls or which dimensions count is ambiguous ("interactive control" —
 icon-only, or text buttons and pagination too?), that is pinned at `architecture`/`lld`
@@ -401,204 +475,29 @@ requirements). Pipeline tooling (this skill, the agent definitions, and any sibl
 tooling the repo tracks alongside them) is tracked in the repo: when a stage touches
 it, commit that change with the related code.
 
-## Rework and blockers — resume the responsible stage's agent
+## Rework and blockers — what it means for you
 
-(A design-level deviation found by `lld` against a normal epic's approved
-`architecture.md` has its own path — `references/epics.md`, "Epic-level deviation
-escalation". Everything else below applies to any child of any epic.)
+Full routing, resume-message construction, the context-reset replacement and the
+escalation valve moved to `references/rework.md` on 2026-09-13. They are the
+**orchestrator's** decisions — which stage owns a defect, whether a bounce trips the
+valve, what a replacement is told — and they were 198 lines in the file every stage
+agent reads.
 
-If a later stage (`arch-review`/`lld-review`, `pr-review`) finds a real
-problem attributable to an earlier stage, **do not spawn a fresh subagent and do not
-open a separate GitHub issue.** The orchestrator resumes the original subagent owning
-the responsible stage (via `SendMessage` to its tracked ID) with the specific finding
-— that agent still has full working context and only needs to address the delta.
+What binds you, as a stage agent:
 
-- **A stage agent hits genuine ambiguity mid-work** → it stops and reports the
-  specific question in its final message rather than guessing. The orchestrator
-  resumes whichever earlier stage owns the question (product for requirements,
-  architecture/lld for design), gets the decision, and resumes the blocked agent with
-  the answer.
-- **A review finds a defect** → resume the stage that produced it with a specific,
-  actionable finding (file/line references), wait for the fix, re-run the check that
-  failed (often by resuming the reviewing stage's own agent).
-- **A review finds a deeper problem** (correct implementation, wrong requirement;
-  scope conflict) → resume **product** (or **architecture** for design). That agent
-  decides inline: revise the requirement and docs, document an accepted limitation,
-  or conclude it genuinely needs the human — only then `mark-needs-human` and park.
-
-**Where a finding this unit will not fix goes.** Reviewers keep rediscovering this, so
-it is written down now: **a finding lands on the issue that will act on it**, not in the
-thread of the PR that is closing. In order of preference —
-
-1. **The sibling that owns the surface**, if one is open. A `pr-review` finding about a
-   config override that silently voids a sibling's planned change, posted on *that
-   sibling*, becomes half of the sibling's design instead of a note in a merged PR.
-2. **The epic**, when no single child owns it and it must be settled before the epic
-   closes.
-3. **The standing backlog epic** (the one labelled with the config's
-   `pipeline.labels.standing` label) via `create-issue --parent <standing-epic-number>`,
-   for anything real but out of this epic's scope — an `lld` is right to refuse to file
-   findings against another component into the issue it is designing.
-
-**Never leave it only in a closing PR's thread or in a comment on an issue that is
-about to close.** That is a finding deleted: a coverage gap that lives only inside a
-review comment on an already-closed issue is invisible to every sibling that needs it,
-and survives only if one reviewer happens to notice and carry it over by hand (see
-`references/history.md`). This is not the "spin off a ticket instead of fixing it" path
-(`SKILL.md`: everything found *before merge on this unit* is still fixed inline by
-resuming the responsible stage) — it is where the residue goes once this unit is done
-with it.
-
-**When the original agent cannot be resumed, the replacement still starts from the
-existing work — never from zero.** The resume-the-owner rule above assumes the owning
-agent is alive and holds its context. Sometimes it does not: the session crashed, or the
-agent had to be stopped (a stage agent that parks repeatedly waiting on a background job
-must be `TaskStop`ped, and its replacement dispatched fresh — see "a subagent cannot wait
-across turn boundaries").
-
-A fresh agent has none of that context, and its default behaviour is to do the stage
-from the beginning. That is the wrong output twice over: it burns the stage's cost again,
-and it can silently discard work that already passed review. Replacement agents have had
-to be told by hand what was already committed; nothing in the process required it (see
-`references/history.md`).
-
-So a replacement dispatch must carry, explicitly:
-
-- **The doc that already exists and its status** — "`lld.md` is at `<sha>` and passed
-  `lld-review` clean in round 2; it is your design, implement it" or "…and has one
-  blocking finding, quoted below." Re-entering `lld` for rework means *re-reading the
-  approved design and addressing the delta*, never re-deriving it.
-- **What is already committed on the branch**, by SHA and one line each, and that it is
-  good — the replacement builds on it rather than reworking it.
-- **The specific finding**, quoted, with its file:line references.
-- **What the earlier rounds settled and must not be re-run**, same inventory the scoped
-  review round gets above.
-- **Why the original agent is gone**, when the reason is a trap the replacement could
-  walk into as well (a stalled install, a suite run that exceeds a tool timeout).
-
-The test for a good replacement prompt: it should be indistinguishable, in what it asks
-for, from a `SendMessage` to the original agent. If it reads like a fresh assignment,
-the stage will be redone.
-
-**Rework rounds are scoped, not repeated from zero.** A confirming round that
-re-derives the whole original review costs roughly 3× the wall clock for no extra
-rigour — a measured scoped pass ran in under a third of the original round's time and
-still found a blocking issue. The resume message should:
-
-- **Enumerate what the prior round settled** and say plainly "accept these, do not
-  re-run" — the inventory, the measurements, the fits-vs-deviates call, the overlap
-  enumeration, whichever apply.
-- **Scope the new pass to the delta**, plus a regression check that the delta could not
-  have disturbed what was accepted. Prove it, don't assume it: a good scoped round
-  opens with `git diff --stat origin/main` showing the change was doc-only.
-- **Re-derive fully when the delta is code**, or when it touches the premise an earlier
-  conclusion rested on. A doc-only delta cannot move a suite result; a code delta can.
-
-**Escalation valve, per stage pairing**: each recurring problem gets its own counter
-(e.g. `arch-review` <-> `architecture`, `pr-review` <-> `development`,
-`sync-branch-conflict` <-> `development`). The valve has **two stages and a ceiling** —
-`pipeline.escalation.replaceAt` bounces with the incumbent agent (default 3), then a
-replacement up to `needsHumanAt` (default 6); `pairing-counts` echoes both:
-
-- **Bounces 1–3** — resume the pairing's own tracked agent, as always.
-- **At the third bounce without resolution** — do *not* park. **Retire the incumbent
-  and dispatch a replacement agent** for that stage (see "Context-reset replacement"
-  below). The counter does not reset; the replacement owns bounces 4–6.
-- **At the sixth bounce without resolution** — stop looping: `sdlc_next.py
-  mark-needs-human <n> --reason "..."` summarizing the repeated pattern *and* naming
-  what the replacement round changed and did not change, park the issue, return to
-  Step 1.
-
-**One replacement per pairing per unit.** The reset is a one-shot instrument, not a
-loop — a second respawn at bounce 6 is the same intervention that already failed, and
-the failure is then evidence the problem is not context rot.
-
-For the two marker-backed pairings — `pr-review <-> development` and
-`sync-branch-conflict <-> development` — `sdlc_next.py pairing-counts <issue>`
-computes the strike counts mechanically from the issue's own comment markers
-(`rework_since_last_clean` resets on every clean review), so those counters survive
-session boundaries; consult it before deciding a bounce is the third or the sixth. The
-unmarked pairings stay the orchestrator's own session-scoped count.
-
-**Context-reset replacement — how bounce 4 differs from bounce 2.** The generic
-replacement rule above ("the replacement still starts from the existing work — never
-from zero") exists for an agent that *died*: continuity is the goal, because its
-context was good. This one is the opposite case. The incumbent is being retired
-precisely *because* its context is the suspect — three rounds of its own reasoning are
-now sitting in its history, and each round has been anchoring the next on conclusions
-that keep turning out wrong in the same narrow area.
-
-**What resets is the reasoning, not the work.** This is a context reset, never a restart
-from zero: a replacement that re-opens settled ground re-runs the whole stage at full
-cost and hands `arch-review` a brand-new document to review from scratch — which is how
-a stuck pairing becomes an unbounded one. The replacement **inherits every artefact and
-discards only the incumbent's rationale**. Its dispatch carries:
-
-- **The requirements** — `product.md`, and the acceptance criteria in full. The
-  replacement is solving the same problem, not re-scoping it.
-- **The current document as the thing to revise** — `architecture.md` (or `lld.md` /
-  the branch diff) at its current SHA, named as *its* document to edit in place. It
-  revises the disputed sections; it does not rewrite the file.
-- **The review feedback, complete** — every outstanding finding verbatim with its
-  citations, and the earlier rounds' findings too, since the recurrence across rounds
-  is the actual signal.
-- **The class, in one sentence** — what has recurred across all three rounds, as the
-  thing to close structurally rather than instance by instance.
-- **What is settled and out of bounds** — the sections earlier rounds got right, named
-  explicitly. Those are not reopened.
-- **Why the incumbent was retired**, so the replacement knows it is being asked for a
-  different reading of the disputed area, not a faster round 4.
-
-What is **withheld** is narrow and deliberate: the incumbent's rationale for why its
-answers were right, its rejected-option reasoning, and its account of the disputed code.
-The replacement re-derives *that one area* from the files themselves — that
-re-derivation is the entire point of the swap, and inheriting the frame defeats it.
-
-`TaskStop` the incumbent before dispatching, so two agents never hold the same worktree.
-
-The test for a good context-reset prompt: it asks for a fresh reading of one named area
-inside an existing document, and a reader could not mistake it for a fresh assignment.
-If it reads like round 3 continuing, it produces round 3's answer again; if it reads
-like round 1, the loop never terminates.
-
-**The counter counts bounces; the thing that actually repeats is a *class*.** Three
-bounces on unrelated defects is a healthy review. Three bounces on three instances of
-one class means every fix is landing at instance level, and the counter cannot tell the
-difference — it will trip on the third instance on a unit whose real remedy is one
-structural change. That is exactly what the context-reset replacement is for, and why
-the third bounce swaps the agent instead of parking the unit. So:
-
-- **A reviewer whose new finding is another instance of a class already bounced says
-  so, in the verdict** — "REWORK for one new blocking finding *of the same
-  silent-skip class*" — and, better, names the escalation shape in advance: "if a third
-  round produces another, that is an escalation candidate on the pattern rather than a
-  routine bounce".
-- **The orchestrator's resume message then asks for the class, not the case.** Units
-  handled that way have settled within one round: a `development` that restructures so
-  the guarded set is derived live and an unknown case fails instead of passing ("fixes
-  the bounced class at the root, not at the symptom"); an `lld` that deletes a citation
-  which is correct *today* because its shape rots, and sweeps the next instance before
-  it can exist (see `references/history.md`).
-- **A same-class third bounce triggers the context-reset replacement even though the
-  instance is new** — the class, not the instance, is what the replacement is told to
-  close. A same-class *sixth* bounce is the escalation, and the `mark-needs-human`
-  reason names the class, not the last instance.
-
-**Exception — `pr-review` <-> `development` only: test-only findings may
-merge-and-file.** On what would otherwise be the escalating sixth bounce: if every
-outstanding finding is a **test/verification-only gap** (missing/weak coverage, an
-environment limitation, a flaky assertion) and **not** a defect in shipped production
-code (`pr-review` must have independently re-verified the code sound), then file a
-follow-up issue (`create-issue --parent <epic>`, full detail on what's untested and
-why) and merge normally, referencing the follow-up in the merge comment. **Never
-applies** to correctness, security, data-integrity, or unmet-requirement findings —
-those always escalate.
-
-**Genuine cross-issue dependency** — the one case resuming can't fix:
-`sdlc_next.py mark-blocked <issue> --dep <dep-issue>` records the native `blockedBy`
-relationship and posts the comment. Nothing else to maintain: `next-action` derives
-blocked-ness live from the relationship, so the issue becomes eligible on its own the
-moment the blocker closes.
+- **Genuine ambiguity → stop and report the specific question in your final message.**
+  Never guess, never open an issue, never change project fields. The orchestrator
+  resolves it with whichever earlier stage owns the question and resumes you with the
+  answer. Stopping this way is a terminal state, not a failure.
+- **Nothing spins off a separate ticket.** Every problem found before merge is fixed
+  inline by the stage that owns it. You will be resumed with the finding rather than
+  replaced, because you still hold the context.
+- **When you are resumed with a review finding, fix the class, not the listed
+  instance.** A same-class repeat bounce escalates; a patched instance invites the next
+  round. If you believe the finding is wrong, say so with evidence rather than
+  complying silently — see `superpowers:receiving-code-review`.
+- **A rework round runs at full rigour.** It is never the place for a cheaper model,
+  a skipped suite, or a shortened document check.
 
 ## Scope alignment before `product` — ask before authoring
 
@@ -633,473 +532,35 @@ document by then, and corrections go through the normal rework path or Gate A.
 This complements the gates rather than replacing them: Gate A still reviews the
 document; this step makes sure the document is written about the right thing.
 
-## Stage-specific exit actions
+## Stage exit actions live in the agent files
 
-The stage agent performs these itself as its last step — **except** opening a
-human-review gate, which the orchestrator does after the agent returns (see
-`references/gates.md`). Exit actions update the same issue's fields in place — never
-a new issue for a normal handoff.
+Each stage's exit actions moved into that stage's own `agents/sdlc-*.md` on
+2026-09-13. They were 459 lines here — more than a third of this file — and every
+agent read all of them to use one eighth. A rule is honoured where it is read, and an
+agent is guaranteed to read its own definition.
 
-Worktree paths below use the config's `pipeline.worktrees` defaults
+| Stage | Its exit actions |
+|---|---|
+| `product` | `agents/sdlc-product.md` |
+| `product-review` | `agents/sdlc-product-review.md` |
+| `architecture` | `agents/sdlc-architecture.md` |
+| `arch-review`, `lld-review` | `agents/sdlc-design-review.md` |
+| `lld` | `agents/sdlc-lld.md` |
+| `development` | `agents/sdlc-development.md` |
+| `pr-review` | `agents/sdlc-pr-review.md` |
+
+**What stayed the orchestrator's**, in every case:
+
+- **Opening a human-review gate**, after the agent returns — never the agent's
+  (`references/gates.md`).
+- **Posting `start-comment <n> --role <role>`** before a review stage, since the
+  review agent is dispatched after the marker exists.
+- **`merge-lld-doc`** on a clean `lld-review`, which publishes the doc and advances the
+  child to `development` without claiming it (see SKILL.md, "After the subagent
+  returns").
+- Exit actions update the same issue's fields in place — **never a new issue for a
+  normal handoff.**
+
+Worktree paths in those files use the config's `pipeline.worktrees` defaults
 (`<root>/<epicPrefix><n>` → `/tmp/sdlc-epic-<n>`, `<root>/<devPrefix><n>` →
 `/tmp/sdlc-dev-<n>`); see `references/parallelism.md`.
-
-- **`product` done, `unit: "epic"`** — In the epic's own worktree
-  (`/tmp/sdlc-epic-<n>`). Create `epic-<n>` from `main` (first stage to touch it),
-  then **author on the gate sub-branch, not on `epic-<n>`**: `git checkout -b
-  epic-<n>-gate-product`. The epic branch only ever receives merges — see "Opening a
-  gate" in `references/gates.md`; `open-gate --unit epic` refuses if the doc did not
-  reach the sub-branch. Write `<docRoot>/epic-<n>/product.md` as a requirements document covering
-  the whole epic, per Document altitude — organised by **functional area, never by
-  child issue**. Children are the architecture stage's output; a product document that
-  names them is either pre-empting that decomposition or reporting on it, and the
-  requirement is the same whoever ends up implementing it. Commit; push both
-  `epic-<n>` (empty, at `main`'s tip) and `epic-<n>-gate-product`. Update the
-  epic's body with a pointer + brief summary. Set the epic's Effort, and each child's
-  if the epic already has children. Then the orchestrator runs **`product-review`**
-  (below); only on its clean verdict does Gate A follow. **Do not change the Stage
-  field** — it stays `Product` while `product-review` runs.
-
-- **`product` done, `unit: "issue"` (standing-epic child)** — Create `issue-<n>` from
-  `main`. Write `issue-<n>/product.md` as a requirements document with full
-  requirements and acceptance criteria, per Document altitude. Commit, push. Update the
-  issue body with a pointer + summary. Set Effort (if `High`, strongly consider
-  splitting via `create-issue`). Priority normally lives on the epic; set it on the
-  child only to jump the sibling queue. Then the orchestrator runs **`product-review`**
-  (below), and Gate A follows only on a clean verdict. **Do not change the Stage
-  field** — stays `Product` while `product-review` runs.
-
-- **`product-review`** (universal — runs after every `product`) — Orchestrator posts
-  `start-comment <n> --role product-review`, then spawns a fresh subagent of type
-  `sdlc-product-review` (model per `pipeline.models`, default opus) reviewing
-  `product.md` against the real product/codebase for **requirements quality**:
-  acceptance-criteria completeness and testability, scope/decomposition, unstated
-  assumptions, internal consistency. Requirements only — design belongs to
-  `architecture`. There is **no confidence marker** (Gate A is not confidence-gated).
-  Last action, both verdicts: `record-design-review <n> --role product-review
-  --outcome clean|rework`.
-  - **REWORK** → resume the `product` agent to fix the blockers (one thread), then
-    re-review. Loop until clean; the escalation valve tracks the `product-review ↔
-    product` pairing (`pairing-counts`), replacing the agent at `replaceAt` and marking
-    `needs-human` at `needsHumanAt`. Rework rounds are scoped (see "Rework and blockers").
-  - **CLEAN** → the orchestrator resolves the epic's profile and takes Gate A:
-    - `requiresHumanGateA: true` (default profile) → open the human Gate A exactly as
-      before: `open-gate ... --doc product.md --next-stage architecture [--unit epic]`.
-    - `requiresHumanGateA: false` (a standing/RTB profile) → **auto-pass**:
-      `auto-pass-gate-a <n> [--unit epic] --summary "..."` — advances to `architecture`
-      and claims it, no human. See `references/gates.md`, "Gate A configurability".
-
-- **`architecture` done, `unit: "epic"`** — In the epic's worktree, on a fresh
-  `epic-<n>-gate-architecture` cut from `origin/epic-<n>` (`git fetch origin && git
-  checkout -b epic-<n>-gate-architecture origin/epic-<n>`) — **never commit to
-  `epic-<n>` directly**, it only receives merges, and `open-gate --unit epic` refuses
-  a gate whose sub-branch carries nothing over it. A second Gate B round reuses the
-  same branch name, re-cut. Write
-  `epic-<n>/architecture.md` per Document altitude: one design subsection per child
-  plus shared decisions; create/split/merge/modify children here as needed (see
-  `references/epics.md`). Commit, push, short handoff comment linking the doc. **Do
-  not change the Stage field** — stays `Architecture` while `arch-review` runs.
-
-- **`architecture` done, `unit: "issue"` (standing-epic child)** — Continue on
-  `issue-<n>` (or create it, for a bug fast-track). For a fast-track bug, first make
-  the explicit product-input call (`references/epics.md`, "Bug fast-track"). Write
-  `issue-<n>/architecture.md` per Document altitude — if there are genuinely no
-  decisions beyond `product.md`, say so in a short version, but still write it.
-  Commit, push, short handoff comment. **Do not change the Stage field** — stays
-  `Architecture` while `arch-review` runs.
-
-- **`arch-review`** — Orchestrator posts `start-comment <n> --role arch-review`, then
-  spawns a fresh subagent of type `sdlc-design-review` (model per the config's
-  `pipeline.models`) reviewing `architecture.md` (and `product.md`) against the real
-  codebase. Instruct it to end its handoff comment with
-  `<!-- arch-review-confidence: N -->` (0-100; only meaningful on a clean verdict;
-  report low confidence if it found anything).
-
-  **Review altitude — structural soundness, not implementation pre-specification.**
-  Check component boundaries, data/control flow, security and permission logic, major
-  tradeoffs — what's expensive to get wrong and hard for `development` to catch. Do
-  **not** hunt for exhaustive file/line enumerations — verifying the doc's own claimed
-  references is fine when that's how you'd check a boundary or security claim;
-  manufacturing new ones is `development`'s job. A finding that would only add
-  mechanical detail isn't a finding. If something genuinely can't be verified sound
-  without that detail, it's fair game — the bar is "does this matter to soundness".
-
-  Three sections are load-bearing for this review and worth reading first: **Scope**
-  (out-of-scope entries are the declared non-goals — a finding against one is a scope
-  dispute for the human, not a review finding), **Design** (the bet/fallback pair under
-  each major decision — an unstated bet is the finding, and so is a design whose
-  diagram shows boxes rather than the mechanism), and **Non-functional envelope** (an
-  adjective where a measurable scenario belongs is a finding, because nothing
-  downstream can ever prove it met). A collapsed `N/A — <reason>` on a conditional
-  section is only a finding when the trigger demonstrably *did* fire.
-
-  **Length is itself reviewable.** This document is an HLD: prose that would not change
-  an `lld`, an explanation of what already exists, or implementation depth that belongs
-  in a child's `lld.md` are all findings — not stylistic notes. Equally, a *missing*
-  decision hidden by brevity is the more serious finding; brevity is not the goal,
-  altitude is.
-  For an epic-level review, also check across children: overlapping or conflicting
-  subsection scope is a structural finding (a recurring pattern — see
-  `references/history.md`).
-
-  - **Clean, confidence > threshold** → `skip-gate` per `references/gates.md` ("Gate B
-    confidence skip") — issue: continue straight into `development`; epic: epic
-    becomes `epic:architected`, continue into Step 1. Don't park.
-  - **Clean, confidence <= threshold or missing** → orchestrator opens Gate B, parks
-    the unit. Never set Stage to `Development` directly.
-  - **Fixable design issue** → resume the `architecture` agent with the finding;
-    re-verify after. Counts toward the pairing's valve.
-  - **Deeper/requirements-level problem** → resume the `product` agent instead.
-
-- **`lld` (normal-epic child) done** — In the child's worktree on `issue-<n>` (create
-  if first stage). Read the epic's `<docRoot>/epic-<parent>/architecture.md`
-  as the design source of truth; the **first move** is the fits-vs-deviates call
-  (`references/epics.md`, "Epic-level deviation escalation"). If it fits → write
-  `issue-<n>/lld.md` (no altitude requirement): exact files/functions to touch, how it
-  maps to the epic design, task-local decisions — **including the parseable
-  `## Footprint` section**. Commit, push, short handoff comment. **Do not change the
-  Stage field** — stays `LLD` while `lld-review` runs. If it doesn't fit → don't write
-  `lld.md`; follow the deviation escalation.
-
-- **`lld-review`** — Orchestrator posts `start-comment <n> --role lld-review`, then
-  spawns a fresh subagent exactly as `arch-review` (same agent type, same Review
-  altitude, same confidence-marker instruction), reviewing `lld.md` against the epic's
-  `architecture.md` and the real codebase — including footprint parseability and
-  overlap vs active siblings.
-
-  - **Clean (any confidence)** → **no gate, ever** — `lld-review` is the only review
-    a normal-epic child's design gets, deliberately. After `record-design-review`,
-    publish the design and advance the child in one call:
-    `sdlc_next.py merge-lld-doc <n>` — commits this child's `lld.md` onto
-    `epic-<parent>`, pushes and verifies it on origin (siblings pick it up on their
-    next `sync-branch`), then sets Stage to `Development` and clears Pipeline Status
-    — **advance, not claim**. Do **not** follow it with `claim <n> --role development`
-    (and never `skip-gate`/`open-gate` here): the child is now a fresh `next-action` /
-    `list-parallel-ready` unit and is picked by lane and priority alongside any
-    sibling `lld` it unblocked. Scoped no-op for a standing-epic child or a parentless
-    issue; a structured conflict result (never a crash, never an advance) if the epic
-    branch moved under it — re-run once quiet. `references/parallelism.md`,
-    "Publishing lld.md to the epic branch".
-  - **Fixable task-level issue** → resume the `lld` agent; re-verify. Valve pairing
-    `lld-review` <-> `lld`.
-  - **Doesn't fit the epic's design after all** → deviation escalation, as if `lld`
-    itself had found it.
-
-  **Every design review — `arch-review` and `lld-review`, clean or not — ends with
-  `record-design-review`**, before the orchestrator resumes the design agent or moves
-  the unit on:
-
-  ```bash
-  sdlc_next.py record-design-review <n> --role lld-review --outcome clean|rework \
-      --summary "..." [--unit epic]
-  ```
-
-  The design-side twin of `record-pr-review`: it is what lets `pairing-counts` see the
-  `lld-review` <-> `lld` pairing — the one that fires the valve most and had no
-  mechanical counter (see `references/history.md`, 2026-08-28). Read `pairing-counts`
-  (`design_review`) before deciding whether a bounce is routine. **The confidence
-  marker does not substitute for this** — it is meaningless on a rework verdict, which
-  is exactly the verdict a valve counts. Post both.
-
-  **State your axis coverage in the handoff.** A design review that fans out to
-  parallel axes must say, in its own comment, **how many it launched and how many had
-  returned when it formed the verdict** — and if it dropped one, which. A review has
-  posted CLEAN with none of its axes returned; the ones that landed afterwards carried
-  the worst defect of that round, and only the reviewer's own disclosure caught it
-  before the unit moved on (see `references/history.md`). Treat an unqualified claim of
-  coverage as unverified: ask for the count.
-
-- **`development` done** — Implement with TDD per repo conventions, in the child's
-  worktree on `issue-<n>`, in small logical **local** commits. **This stage owns the
-  tests.** There is no separate `testing` stage — it was merged in here on 2026-09-12
-  (`references/history.md`) — so the suite is written, run and evidenced by the same
-  agent that writes the code, and `pr-review` judges whether the tests are any good.
-
-  **The record is the PR description, not a doc file.** What was built, how it maps to
-  the design doc, how to verify it, what was deferred and why, and every deviation from
-  the design as an explicit delta — all of it goes in the PR body, where it merges into
-  `main` with the squash-merge and stays attached to the diff forever. Nothing is
-  written under `<docRoot>/issue-<n>/` by this stage.
-
-  **Push discipline — batch, don't push per commit (operator directive, 2026-09-04).**
-  Commit locally as often as is natural, but **push once per stage cycle**, not after
-  each commit. A push is what a reviewer/CI acts on and, on any `pull_request`-triggered
-  workflow, what spins a runner — so N pushes in one cycle is N× the wasted signal for
-  the same delivered work. Concretely:
-  - **Do not** `git push` after each local commit. Let the commits accumulate on the
-    local `issue-<n>` branch during the cycle.
-  - Push **once**, immediately before `open-dev-pr`, so the branch the PR opens against
-    already carries the whole cycle.
-  - On a **rework** round, same rule: make all the fix commits locally, then push
-    **once** before re-handing off. One push per round, not one per fix.
-  - A mid-cycle push is justified only to hand work off to a human or to unblock a
-    genuinely blocked teammate — not as routine "push as you go". If in doubt, hold the
-    push until the end of the cycle.
-
-  Open the draft PR via
-  `sdlc_next.py open-dev-pr <n> --title "..." --body "..." --summary "..."` — appends
-  `Closes #<n>`, sets Stage to `PR Review`, posts the PR-opened comment. It posts **no**
-  queue marker, deliberately: a PR is not reviewable until its suites are attested. Do
-  not mark it ready or merge it yourself. If a push is ever rejected, stop and report —
-  don't work around it. **On a blocker** (ambiguous requirement, missing design
-  decision): stop and report the specific question in your final message — never create
-  issues or change fields yourself; the orchestrator resumes the right earlier stage.
-
-  **Write tests against behaviour, never against implementation.** A test pinned to how
-  the code works rather than what it guarantees is a *change-detector*: it goes red on
-  every refactor that preserves behaviour, so it reports churn instead of regressions
-  and trains everyone to edit the test until it passes. Drive every test through the
-  public surface — the exported function, the HTTP route, the rendered component — and
-  assert on the observable result, never on a mock's own return value or on a private
-  call sequence. This is the single quality bar `pr-review` applies to your tests.
-
-  **Size your tests down, not up.** Narrow tests that run in one process are fast and
-  deterministic; a broad one that stands up the world is neither, and a suite that
-  leans on the broad ones gets slow enough to be skipped and flaky enough to be ignored.
-  The healthy shape is mostly narrow unit tests over the business logic, a middle band
-  of integration tests over the interactions that actually cross a boundary, and a thin
-  top of end-to-end coverage. Reach for the integration suite when the risk is genuinely
-  in the interaction (a real query against the real Postgres, a real HTTP round trip) —
-  not to re-test logic a unit test already pins.
-
-  **Run the suites yourself and keep the output.** Use the repo's own lint/build/test
-  commands as documented in its `CLAUDE.md` and in the `sdlc-development` agent
-  definition, in the environment the repo mandates (inside its container when it says
-  so — never the host-side equivalent). Redirect each run to a file; you need that file
-  for the attestation. Any command that can outlast the default tool-call timeout needs
-  `run_in_background` plus an in-turn `Monitor` wait, or an explicit ≥600s timeout.
-
-  **Do not run `make e2e`.** A full end-to-end run costs over an hour of wall clock and
-  contends for shared ports and Docker stacks. End-to-end behaviour is proven once, at
-  epic close, against the finished tree (`references/epics.md`, "Epic closing"). If you
-  believe the change genuinely cannot be validated without it, say so in your handoff
-  and stop; do not start a run.
-
-  **Affected-graph scoping (once workspace packages + Turborepo exist).** When the repo
-  has explicit package boundaries and a Turborepo DAG, an intermediate run may be scoped
-  to the affected packages — `turbo run test --filter='...[<base-ref>]'` — with cache
-  reuse, instead of the whole suite every time. Unit tests continuous during
-  development; the integration slice for the affected packages run once, backgrounded,
-  before `open-dev-pr`; the **full** suite run once at epic close. Note the blind spot:
-  raw cross-table SQL against tables a package does not own is invisible to both
-  boundary lint and the affected graph, so the epic-close full run stays its backstop.
-
-  **Completion gates — all of them before the handoff, not after.** Each exists because
-  it was skipped once and something shipped broken:
-
-  1. **Every risk flagged by the design doc is closed against the real system, not
-     mocked away.** A unit test against a mock does not close an integration risk — it
-     tests the mock. Close it against a real database (the repo's integration suites
-     run against one), a real HTTP call, the real queue. If it genuinely cannot be
-     closed here, say so explicitly in the PR description and name what would close it;
-     do not let the mock stand in for the answer.
-  2. **"Manually verified" claims cite evidence, not assertion.** A terminal
-     transcript, a log excerpt, a response body, or numbered repro steps someone else
-     can re-run. The words "manually verified" with nothing attached are treated as
-     not verified — by `pr-review`, and here.
-  3. **Golden-path behaviour is explicitly re-confirmed, not assumed.** Whenever the
-     change touches shared code or error handling, re-run the pre-existing
-     non-edge-case behaviour and record the result. Fixing an edge case while breaking
-     the normal path is the specific failure this gate catches.
-  4. **Every acceptance criterion is checked against the real diff, not against your
-     own commit messages.** Run `git diff origin/<base>...HEAD --name-only` and, for
-     each AC, name the file in that list which satisfies it. An AC whose satisfying
-     file is not in the diff is not done. (Validators have shipped unit-tested and
-     **wired into no entrypoint**, with commit messages reading as a finished build —
-     `references/history.md`, 2026-08-28. A unit test of a function in isolation
-     cannot prove the call site exists.)
-  5. **Every acceptance criterion has at least one test that would fail if the
-     criterion were violated** — a behaviour test, not an existence test. Map criterion
-     → test file and test name, one line each, in the handoff comment. A criterion with
-     no such test is a gap you close before handing off, not one you declare.
-  6. **Mutation-check the guards that matter.** For the tests that carry the real
-     acceptance — not every test — deliberately break the behaviour under test, confirm
-     the test goes red, revert. State the mutation and what went red. A test that stays
-     green against deliberately broken code is a decoration. Leave the tree clean
-     (`git status`) before handing off.
-  7. **A build you cite is a real build.** A stale gitignored `*.tsbuildinfo` makes an
-     incremental `nest build` emit nothing and exit 0 — twice on epic #159 a "passing"
-     build produced no `dist/main.js`. Delete the stale cache or assert the artifact
-     afterwards, and say which. Exit 0 alone is not evidence.
-  8. **Never cite a `file:line` you have not opened in this session.** Anchor every
-     reference to a quote you can produce — `grep -n "<literal string>" <path>` — so it
-     is checkable by the next reader rather than merely plausible. Fabricated citations
-     have shipped from this repo before.
-
-  **Exit, in order.** First, for **each main-only required suite this round actually
-  ran** (suite keys come from the config's `requiredWorkflows[].suite`):
-
-  ```
-  sdlc_next.py record-local-ci --pr <pr> --suite <suite> --sha <HEAD> \
-      --command "<the exact command>" --output <path to that run's captured output>
-  ```
-
-  This is the merge-gate stand-in for the GHA check that no longer runs on a child PR
-  (required suites went main-only for cost — `references/operations.md`, "Local-CI
-  attestation"). **It is also the only thing standing between a self-run suite and the
-  merge gate**, which is why it refuses a summary and demands the run's own captured
-  output pinned to the exact head SHA. Run it on the **current** head, after the last
-  push; a stale attestation from a prior head does not count. Skip it only for a suite
-  you did **not** run (a change confined to one suite's `prefixes` never ran the other,
-  and its tree isn't touched, so the gate won't ask for it).
-
-  Then `sdlc_next.py handoff-to-pr-review <n> --pr <pr> --summary "..."` — **always**,
-  including after rework (the marker is the review queue; never hand-type it). The
-  summary is the handoff comment below; post it as its own comment immediately before
-  the call when it runs long.
-
-  **The handoff comment shape** (evidence-carrying, ≤ 6,000 characters):
-
-  ```markdown
-  ### Commands run
-  | Command | Where | Result |
-  |---|---|---|
-  | `<exact command>` | <container / package dir / repo root> | 142 passed, 0 failed |
-
-  ### Acceptance criteria coverage
-  | Criterion | Test | Mutation-checked? |
-  |---|---|---|
-  | <criterion text> | `<file>` › `<test name>` | yes — inverted the guard, went red |
-
-  ### Not executed
-  - <what, and why it could not run>
-
-  ### Deviations from the design
-  - <the explicit delta, or "none">
-  ```
-
-  **Account for what could not be executed and why** — a suite that needs an external
-  service, a flow only reachable through the UI. Silence reads as "ran and passed"; say
-  it explicitly instead.
-
-  Then either continue straight into `pr-review` in this invocation or leave it for the
-  next `list-ready-for-review` batch — both valid. Either way the start comment is
-  posted when the review actually starts.
-
-- **`pr-review`** — Orchestrator posts `start-comment <n> --role pr-review`, spawns a
-  fresh subagent of type `sdlc-pr-review` (model per the config's `pipeline.models`)
-  reviewing the PR diff adversarially. Check CI via `sdlc_next.py pr-checks <pr>`. May
-  be one of up to `PR_REVIEW_PARALLELISM` concurrent reviews, each in its own detached
-  worktree (`references/parallelism.md`).
-
-  **Review against what was supposed to be built, not against what the implementer
-  says they built (operator, 2026-09-12).** The spec side of the review is the design
-  doc and its acceptance criteria — `lld.md` for a normal-epic child, `architecture.md`
-  or `product.md` for a standing one. The PR description and the handoff comment are
-  *claims*: useful for knowing where to look, never evidence, and never the standard
-  the diff is measured against. An implementation that matches its own write-up
-  perfectly and the design not at all is the exact failure this ordering catches.
-
-  **What the review covers, in priority order.** This is the industry-standard reviewer
-  ordering and it is deliberate — the expensive defects are at the top:
-  1. **Design** — does the change belong in the system this way, at this boundary?
-  2. **Functionality** — does it do what the acceptance criteria say, including for
-     the user, not just for the happy path?
-  3. **Complexity** — is it more convoluted than the problem requires? Would the next
-     reader understand it?
-  4. **Tests** — are they present, and are they *good*: driven through the public
-     surface, asserting observable behaviour, and would they actually go red? An
-     existence-only assertion, a test asserting on its own mock's return value, or a
-     test pinned to implementation detail (a **change-detector**, red on every
-     behaviour-preserving refactor) is a finding, not a nit.
-  5. **Naming, comments, style, consistency, documentation** — real but cheap; these
-     are where "Nit:" belongs.
-
-  **Since `development` writes and validates its own tests, test quality is this
-  stage's job.** The `testing` stage was merged into `development` on 2026-09-12, so
-  nobody re-runs the implementer's suite as a matter of course. What replaced it is
-  narrow and mechanical: `record-local-ci` refuses an attestation without the run's own
-  captured output pinned to the current head SHA, and `merge-pr` refuses a stale one.
-  Read those attestations — the command, the output, the SHA — as the CI signal they
-  stand in for.
-
-  **Mutation-probe selectively, don't re-run blanket.** Pick the one or two guards that
-  carry the real acceptance, break the behaviour under test in your detached worktree,
-  confirm the test goes red, revert (`git status` clean). That is a far stronger signal
-  per minute than repeating a suite that already ran. Decide the rest, and say which in
-  the review comment:
-  - **Skip the full re-run** when the evidence is *strong*: a `record-local-ci`
-    attestation with real captured output on the current head for every main-only
-    suite the diff touches, plus a criterion→test map. Then the review is the diff
-    read, the mutation probe, and static verification only.
-  - **Run targeted specs** (foreground, scoped to the surface) when a specific finding
-    needs confirming — a suspected edge case, a claim the diff does not obviously
-    support.
-  - **Re-run the suite** when the evidence is thin or suspect: an attestation whose
-    output does not match its claim, a criterion with no named test, a head SHA that
-    moved after the attestation, or a round the orchestrator already had to bounce.
-  Never treat "the suites passed" as the reason to skip — the *shape* of the evidence
-  is the reason.
-
-  **Approve on code health, not on perfection.** A change that definitely improves the
-  health of the codebase should go in, even when you can still imagine something
-  better; blocking it on preference rather than principle is how a review turns into a
-  gate nobody can pass. Technical fact beats taste, the repo's own conventions beat
-  personal style, and where the implementer's approach is sound, accept it and move on.
-  Reserve `rework` for what is actually wrong — a defect, a criterion unmet, a design
-  the change does not fit. Whatever the verdict, the **last** action
-  before merging or resuming anyone: `sdlc_next.py record-pr-review <n> --pr <pr>
-  --outcome clean|rework --summary "..."`.
-  - **Clean review** → `sdlc_next.py merge-pr <pr> --issue <n>` — marks ready,
-    squash-merges, deletes the branch, posts the audit-trail comment and (if the
-    issue auto-closed) the closing confirmation. It re-checks CI internally and
-    raises if not green — don't call `pr-checks` right before purely to pre-confirm;
-    use `pr-checks` only when you need the pending/failed/missing distinction. It
-    also **refuses with `{"merged": false, "behind_main": N}`** when the branch is
-    behind `origin/main` — run `sync-branch` (re-triggers CI), wait for green, re-run
-    `merge-pr` (see `references/parallelism.md`, "Merge-time freshness gate").
-  - **`status: missing-checks`** → never poll it (no GHA run is coming on a child
-    PR). Two causes, distinguished by whether the named suite is a main-only one:
-    - **a required suite not yet attested for this head** (the common case, not a
-      defect) → `development` handed off without running `record-local-ci`, or a
-      rework push staled a prior attestation. Fix: run
-      `record-local-ci --pr <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`
-      on the current head, re-running the suite first (the attestation carries that
-      run's own captured output, so there is always a fresh run behind it), then
-      re-check. Do **not** `mark-needs-human` for this.
-    - **a genuine config defect** — some other required workflow renamed out of step
-      with `REQUIRED_WORKFLOWS`, disabled, or `paths:`-mismatched →
-      `mark-needs-human <n> --reason "required workflow reported no check: <names>"`
-      and park — *unless* the PR's own diff touches `.github/workflows/**`, in which
-      case resume `development` with the missing workflow names.
-  - **CI pending** → re-check `pr-checks` with reasonable backoff.
-  - **Real findings, or CI failed** → resume the `development` agent with specific
-    findings; once fixed, a fresh `pr-review` pass (the diff changed). Valve
-    pairing; on the third bounce dispatch the context-reset replacement `development`
-    agent, on the sixth check the test-only merge-and-file exception above, else
-    `mark-needs-human` and park.
-  - **Deeper problem** → standing-epic child: resume `product` (or `architecture`);
-    normal-epic child: resume `lld` if task-local, or the epic deviation escalation
-    if it contradicts the epic's design. PR stays draft meanwhile. If the resumed
-    agent concludes it needs the human → `mark-needs-human` (on the epic, if the
-    epic's architecture was the resumed stage) and park.
-
-## Review-sourced agent-process feedback loop (STAGED — not yet wired)
-
-This is a **staged design**, recorded so a future cycle can build it; it is not active
-today and needs a CLI marker that does not exist yet. The idea (operator, 2026-09-11:
-"reviews should gather feedback on the agent process, like a developer's learning") is
-to turn each cycle's reviews into improvements to the **agent definitions**, not just
-the playbook. Three tiers:
-
-- **Tier 1 — flag, off-gate.** `lld-review` and `pr-review` may emit a short,
-  **non-gating** "Agent-process observations" block about the agent's *method* (not the
-  diff) — and only for recurring/systemic issues, never a one-off. It never affects the
-  verdict.
-- **Tier 2 — threshold.** A marker tags those process-notes so the retro can
-  threshold-aggregate them (act on a class seen ≥N times; ignore singletons). The
-  escalation valve / `pairing-counts` already tracks bounce frequency per pairing and is
-  the natural home for the count.
-- **Tier 3 — the retro edits agent files.** Fixes land in `.claude/agents/sdlc-*.md`
-  (persona / procedure / refusal-criteria) — the developer-growth analogue.
-
-**Hard constraint: agents only FLAG; only the retro EDITS agent files, on a quiet lane.**
-No mid-run self-editing of agent definitions — that is a foot-gun. Attribution is to the
-agent-**type** and the defect-**class**, never to an individual run. Keep it lean:
-capped, off-gate, threshold-gated.
-
-Seed defects observed across epic #430 (the first Tier-3 edits, several already applied
-by the 2026-09-11 retro): (a) footprint/sweep excluding `test/**` (bounced A2/A5/B1);
-(b) enumerate-not-sweep recurrence; (c) export-port adapters returning the raw entity
-instead of a field-by-field projection (GDPR over-disclosure near-miss, A3 #473);
-(d) over-running full IT and parking on a backgrounded suite (all implementing agents).

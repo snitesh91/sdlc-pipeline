@@ -221,7 +221,7 @@ fast-track). `lld`'s first move is deciding whether the fix fits the epic's exis
      `mark-needs-human` **on the epic** — the problem is epic-level.
 
 This is deliberately the *only* extra escalation path this model needs — every other
-rework/blocker case follows `references/stage-playbooks.md`, "Rework and blockers".
+rework/blocker case follows `references/rework.md`.
 
 ## Bug fast-track — architecture first (standing-epic children only)
 

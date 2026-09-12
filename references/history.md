@@ -4,6 +4,226 @@ Provenance for rules that would otherwise read as arbitrary. Newest first. Keep
 entries to a few lines; the rule itself lives in the spine or its reference file —
 this file records *why* and *when*.
 
+## 2026-09-13 — one rule, one home, chosen by scope
+
+Operator: *"the skill is getting complex. Agent is not honoring the agents and skills."*
+
+The skill stated a contract it did not follow. `SKILL.md` said agent files carry
+persona, procedure and `tools:` only, with every pipeline rule in
+`stage-playbooks.md`, *"Two homes for one rule is how rules drift."* Measured: the
+no-park rule had **four** homes and had drifted into three different strengths — the
+playbook cited a whole epic's recurrence and two dead agents, `sdlc-development` said
+only "two agents on this repo died exactly that way", `sdlc-pr-review` said only "the
+review stalls". The agent that stalled on 2026-09-13 was a `development` agent reading
+the weakest copy. Drift was not hypothetical; it was already load-bearing.
+
+Volume compounded it. `Stage-specific exit actions` was **459 of the playbook's 1,199
+lines** and every agent read all of it to use one eighth, alongside 198 lines of rework
+routing that is the orchestrator's decision, not any agent's, and 28 lines describing a
+design explicitly *not wired*.
+
+The fix is not "move everything to one file" — that is what produced a 12,331-word file
+nobody honours. Each rule gets **one home, chosen by who needs it**:
+
+- **Binds every stage** (citation discipline, the no-park contract, the doc set,
+  commenting, what counts as verification) → `stage-playbooks.md`, once.
+- **Binds one stage**, including its own exit actions → that stage's
+  `agents/sdlc-*.md`, once. An agent is guaranteed to read its own definition.
+- **The orchestrator's decisions** (rework routing, resume-message construction, the
+  context-reset replacement, the escalation valve) → new `references/rework.md`, read
+  on demand. The stage-facing half stayed in the playbook.
+- **Not active** (the staged review-sourced feedback loop) → here.
+
+Opening a gate, posting `start-comment`, and `merge-lld-doc` stayed the orchestrator's
+and are named as such in the routing table.
+
+Result: `stage-playbooks.md` 12,331 → 5,912 words (-52%); what a `development` agent
+must read 16,278 → 11,609 (-29%), and it no longer reads six other stages' exit
+actions. The no-park rule now states the terminal-state contract identically in all
+three agent files that carry it, each pointing here for the incident history — the
+first time that rule has said the same thing in every place it appears.
+
+## 2026-09-13 — staged design moved out of the playbook's hot path
+
+Every stage agent Reads `stage-playbooks.md` in full, so a section describing a design
+that is **not active** is pure cost on every delegation. The review-sourced
+agent-process feedback loop is recorded below, unchanged, for the cycle that builds it.
+
+## Review-sourced agent-process feedback loop (STAGED — not yet wired)
+
+This is a **staged design**, recorded so a future cycle can build it; it is not active
+today and needs a CLI marker that does not exist yet. The idea (operator, 2026-09-11:
+"reviews should gather feedback on the agent process, like a developer's learning") is
+to turn each cycle's reviews into improvements to the **agent definitions**, not just
+the playbook. Three tiers:
+
+- **Tier 1 — flag, off-gate.** `lld-review` and `pr-review` may emit a short,
+  **non-gating** "Agent-process observations" block about the agent's *method* (not the
+  diff) — and only for recurring/systemic issues, never a one-off. It never affects the
+  verdict.
+- **Tier 2 — threshold.** A marker tags those process-notes so the retro can
+  threshold-aggregate them (act on a class seen ≥N times; ignore singletons). The
+  escalation valve / `pairing-counts` already tracks bounce frequency per pairing and is
+  the natural home for the count.
+- **Tier 3 — the retro edits agent files.** Fixes land in `.claude/agents/sdlc-*.md`
+  (persona / procedure / refusal-criteria) — the developer-growth analogue.
+
+**Hard constraint: agents only FLAG; only the retro EDITS agent files, on a quiet lane.**
+No mid-run self-editing of agent definitions — that is a foot-gun. Attribution is to the
+agent-**type** and the defect-**class**, never to an individual run. Keep it lean:
+capped, off-gate, threshold-gated.
+
+Seed defects observed across epic #430 (the first Tier-3 edits, several already applied
+by the 2026-09-11 retro): (a) footprint/sweep excluding `test/**` (bounced A2/A5/B1);
+(b) enumerate-not-sweep recurrence; (c) export-port adapters returning the raw entity
+instead of a field-by-field projection (GDPR over-disclosure near-miss, A3 #473);
+(d) over-running full IT and parking on a backgrounded suite (all implementing agents).
+
+## 2026-09-13 — retrospective: epic #159's 21 bounces, and why restating a rule stopped working
+
+Same operator directive as the #494 entry below, applied to epic #159's whole run. The
+counts, read from `pairing-counts` rather than impression: 10 `lld-review` reworks, 5
+`pr-review` reworks, 6 sync conflicts, across 7 children. **Every single `lld` bounced,
+most of them twice** — the design stage, not review, was the epic's expensive one.
+
+Roughly 15 of the 21 share the shape the #494 entry names, which two sessions reached
+independently on the same day: a claim about a source of truth made without reading it.
+What this epic adds is *which* claims, and the uncomfortable finding that *the rules
+already existed*.
+
+- **Attribution, four rounds lost.** A `development.md` quoted *"keep your changes
+  compatible with that shape and do not remove or relocate those guards"* as a footprint
+  note. Zero hits anywhere in the repo: its real origin was **the orchestrator's
+  delegation prompt**. The next round, the same file asserted in four places that a spec
+  and its timeouts were untouched while its own later section correctly described
+  raising them. A third presented a comma-joined paraphrase in a fence introduced as a
+  command "run for real". Two of those rounds bought nothing but prose edits on code
+  already proven sound. `references/stage-playbooks.md` already had a thorough *Citation
+  discipline* section — but it governs *where* a citation points, never whether the
+  attributed words are in the source. New: *Attribution is falsifiable*, as a mechanical
+  pre-handoff pass (grep every quotation; the prompt is not a source; a fence is a claim
+  of literalness; regenerate every "untouched" from `git diff --name-only`), plus the
+  matching completion gate in `agents/sdlc-development.md`.
+- **Negatives from searches that could not have found a counterexample.** *"Two, and
+  only two, bootstrap paths exist in the whole tree"* was false and the proof was, in
+  the reviewer's words, blind by construction. A detector resolved one syntactic form of
+  constructs this tree writes several ways: `require()` invisible while live in four
+  files including the one the evidence came from, `it.each` invisible while live in
+  seven, `(SKIP ? it.skip : it)(` invisible while live in the exact file the spec
+  asserted against. A doc sweep's file counts did not reproduce, 51 against 60 actual.
+  New in `agents/sdlc-lld.md`: any *only/every/no other/none/all* needs the search shown
+  as a command, a positive control proving it can return a hit, and the tree's actual
+  syntactic variants enumerated rather than reasoned about.
+- **The no-park rule failed again, so it became a contract.** *"Subagents finish in one
+  turn — never park awaiting a wake"* was already in the playbook and in three agent
+  definitions, citing two agents killed by it and a recurrence across every implementing
+  agent of epic #430. An epic-159 agent still started an e2e run, set a Monitor, and
+  ended its turn saying it would resume on the notification; it idled until the
+  orchestrator drove the run by hand. Restating it harder has demonstrably stopped
+  working, so the rule now constrains the **final message**: declare finished, blocked,
+  or stopped-for-a-decision — waiting is not terminal — and the orchestrator reads every
+  returning agent's last message for that shape before believing its handoff.
+- **`release_worktree` had been failing 100% of the time.** It calls `git worktree
+  remove` without `--force`; since the skill became a per-unit submodule *inside* each
+  worktree, git refuses every call with "working trees containing submodules cannot be
+  moved or removed". All three of 2026-09-13's merges left their worktree behind,
+  reinstating the 2026-08-20 incident its own docstring describes, where a stale
+  worktree made `list-parallel-ready` read the lane as full and propose nothing with no
+  error anywhere. Adding `--force` erodes no promise: the uncommitted-changes and
+  unpushed-commits refusals both run before the remove, verified independently by a
+  second session.
+- **A footprint must include the unit's own spec and test doubles.** Two children both
+  owned `test/testutil/db-helper.ts`; each one's unit test stubbed a `DataSource`
+  carrying only the half its own branch had added. Both green alone, three suites and
+  seven tests red on the merge. Composes with the same day's `list-parallel-ready` fix
+  for *which* footprints get compared.
+
+- **Neither session knew the skill had a test suite.** Both shipped control-plane
+  changes to `scripts/sdlc_next.py` with no test, in the same retrospective where both
+  were writing rules about not asserting coverage nobody had checked. `Step 5` said
+  edit, append, commit, push — and never mentioned running anything, so nothing pointed
+  at `scripts/tests/test_sdlc_next.py`. It would have caught them: it pins real
+  invocations, and adding `--force` to one `git worktree remove` turned two tests red on
+  the first run. Step 5 now names the suite, requires it green before the branch is
+  pushed, and asks for a regression test paired with a positive control that must stay
+  green, verified against the pre-fix script.
+
+Ops, recorded in the driven repo rather than here: the Docker VM was 8092 MiB with 1024
+MiB of swap on a 48 GB host, exhausted at idle, which cost this epic eight test runs and
+forced heavy Docker work to run one at a time; and the workspace `Makefile` injected a
+hardcoded `POSTGRES_DATA_DIR` that overrode each profile's own, so an isolated epic stack
+came up on the dev stack's data directory and two postmasters on one PGDATA shut the dev
+database down mid-suite.
+
+## 2026-09-13 — retrospective: two bounces on #494, and the two checks that could not fire
+
+Operator directive: treat every bounce as evidence something is wrong, and look for the
+agent-definition change that would have prevented it. Epic #365's child #494 bounced
+twice — once at `lld-review`, once at `pr-review` — and the four blocking findings share
+one shape: **a claim about a source of truth, made without going and reading it.**
+
+- `lld-review` round 1 — the design restated `product.md`'s "a single interactive list"
+  (ten sections of ten rows) as one ten-row section, narrowing AC6 roughly tenfold; and
+  it passed a caught `Error` to `logger.error(msg, err)` against an AC forbidding
+  message bodies in logs, because `NormalisingLogger.dispatch` promotes any `Error` in a
+  call's args into the record and the upstream client's error embeds up to 200 chars of
+  the provider's raw response. Both were one grep from correct. Fix in
+  `agents/sdlc-lld.md`: a derived threshold carries its criterion's sentence quoted next
+  to the constant, and a shared boundary an AC constrains is read, never assumed from
+  its name.
+- `pr-review` round 1 — the implementation widened a `try`/`catch` past task-local
+  decision 4's stated `{interpret, build reply, send}` boundary to include the
+  claim-table `markHandled`, so a bookkeeping failure after an already-charged send
+  marked the claim `FAILED` (immediately reclaimable, no staleness wait) and a
+  redelivery drew a second charged reply — AC23 violated, AC14 inverted. That handoff
+  declared three deviations and missed this one. Fix: a **task-local decision
+  conformance sweep** as a completion gate — walk `lld.md`'s numbered decisions in
+  order, quote the realising code, mark conform/deviate. A deviation the implementer
+  would have noticed is not the kind that ships.
+- `pr-review` round 1 — four criteria mapped to tests whose only assertion was
+  `expect(message.type).toBe('text')`, which all five replies in that family share. The
+  map read complete and the suite was green; swapping the branch to the wrong reply
+  constant left it green at 16/16. The existing positive-control rule
+  (`stage-playbooks.md`, "A completeness claim over a footprint is a sweep") was scoped
+  to class-of-surfaces audit children, so it never fired on a feature child. Two fixes:
+  the section now says the failure is not confined to that shape, and
+  `agents/sdlc-development.md` gains the cheap general form — every map row's assertion
+  must name the criterion's discriminating value, plus **one positive control per
+  family** of sibling expected values rather than one per criterion. Also tightened:
+  "mutation-check the guards that matter" was being read as "the guards you are already
+  confident in", which is what left the four vacuous rows unprobed.
+
+Two more from the same run, not bounces but wasted rounds:
+
+- The attested `test:it` was first run without the backend workflow's own `--runInBand`
+  and returned 247 failures across 51 untouched suites — Postgres connection-pool
+  exhaustion, 15 workers against `max_connections=100` — costing a baseline-worktree
+  reproduction on `origin/epic-365` to prove the diff innocent. `record-local-ci` exists
+  to stand in for that workflow; `requiredWorkflows[].files` names the file. Now a rule:
+  read the workflow and copy its invocation before the run, and treat a cascade across
+  untouched suites as environmental until the workflow's own invocation says otherwise.
+- Seven instances of "the comment asserts totality, the implementation is partial, no
+  test on the partial case", each hit independently by all three `pr-review` axes — a
+  habit, not a slip. `agents/sdlc-development.md` now requires a comment stating a
+  guarantee to be true for every input or to name what it excludes.
+
+Two control-plane defects found the same session, both fixed in `scripts/sdlc_next.py`:
+
+- **`list-parallel-ready` derived collisions and slots from different worktree sets.**
+  The footprint-collision set was built from every live worktree; the slot count was
+  built from the same list *minus* the parked ones. So #494 was reported as "footprint
+  overlaps active/eligible #323" where #323 was another epic's worktree, blocked on an
+  open dependency, correctly excluded from the slot count two loops later and just as
+  correctly unable to collide with anything. The occupied/stale split is now computed
+  once, before both derivations.
+- **`verify-exit` could not verify a `development` handoff at all.** `open-dev-pr` sets
+  the Stage field to `PR Review`, which normalises to `pr-review`; the misuse guard
+  refused every member of `REVIEW_ROLES`, so `--expect-stage development` failed (the
+  field had moved on) and `--expect-stage pr-review` failed as misuse. The pipeline's
+  most bounce-prone handoff was the one handoff the command could not check, and the
+  orchestrator fell back to checking it by hand. The guard now exempts a review role
+  that is also a real `STAGE_FIELD_NAMES` value — which is `pr-review` alone.
+
 ## 2026-09-10 — auto-close-epic behind a config toggle
 
 Operator proposed at the 2026-09-08 retro, approved at the 2026-09-10 retro: let the
