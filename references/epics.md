@@ -254,6 +254,13 @@ into `main`: its own gate docs (on `epic-<n>-gate-<stage>` sub-branches) and eac
 child's `issue-<n>`. The branch takes one merge *from* `origin/main` at close, is
 verified as a whole, and merges to `main` once.
 
+Alongside the branch, an epic may own a **runtime stack** — `provision-epic-stack
+<n>` at its first touch when `pipeline.stack.enabled` — so its e2e-running children
+and its closing run never depend on, or wipe, the shared dev stack
+(`references/parallelism.md`, "Per-epic isolated stack"). Nothing of the epic's git
+work ever runs in the main checkout: `pass-gate`, `merge-lld-doc` and `close-epic`
+operate on `epic-<n>` in its live worktree or an ephemeral one, under the branch's lock.
+
 The point is where conflicts surface. Under trunk-based children, every child
 integrates against a `main` that moves under it, and two siblings can each be green
 independently yet break `main` together — a semantic conflict no textual merge check
@@ -331,7 +338,12 @@ python3 "$SDLC" close-epic <n>
 It is deliberately **two calls, not one**. The first reconciles `epic-<n>` with
 `origin/main` and stops — verification has to run *after* the merge from `main` and
 *before* the merge to `main`. The second merges, once both halves of the closing
-verification are recorded on the thread.
+verification are recorded on the thread. The reconcile runs in the epic branch's own
+(usually ephemeral) worktree under its lock, never the main checkout. **After the
+merge, `teardown-epic-stack <n>`** — compose down with volumes, remove the generated
+profile files and data dir (a no-op unless the epic's stack was provisioned). The
+closing e2e run itself targets that stack, built from the reconciled epic branch, not
+the shared dev one.
 
 **When `pipeline.epicClose.auto` is on, the orchestrator makes the second call
 itself** the moment the close is clean — it does not hand back to the operator. "Clean"

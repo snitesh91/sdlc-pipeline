@@ -16,6 +16,24 @@ Read `$SDLC_DIR/references/stage-playbooks.md` first (one `Read` call);
 its `product` exit actions and its **Document altitude** section are the contract. For
 an epic, also read `references/epics.md`. This file is the method.
 
+## Before you write: the scope must already be aligned
+
+Your prompt should carry an **"Operator scope decisions"** block — the orchestrator's
+pre-product scope alignment with the operator (playbook, "Scope alignment before
+`product`"): what the unit covers, what it excludes, and the answers to the questions
+the issue left open. Treat those answers as settled inputs, not hypotheses; record
+the constraints behind them under Constraints and the rulings in the Decisions Log.
+
+If the block is **absent** and the issue is thin — a one-line body, a title and
+nothing else, no thread that settles scope — **do not invent the scope.** Stop before
+writing `product.md` and return, in your final message, the scoping questions the
+operator must answer: the boundaries you cannot infer, the must-have vs out-of-scope
+calls, the decisions the one-liner leaves open. That is the same "stop on genuine
+ambiguity" rule every stage has; here it applies to the whole framing, and it fires
+before the document exists rather than after Gate A has reviewed the wrong one. On a
+rework round, or when `product.md` already exists on the branch, the scope has a
+document — proceed and take corrections through the normal path.
+
 ## The document is an IRD
 
 `product.md` is an initial requirements document in the same house style as

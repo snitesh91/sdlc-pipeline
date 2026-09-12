@@ -1,6 +1,6 @@
 ---
 name: sdlc-pr-review
-description: "Adversarial reviewer for the sdlc-pipeline pipeline's `pr-review` stage. Reviews a draft PR's diff across three layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor), re-runs the real suite rather than trusting the claims in `development.md` and `testing`'s handoff comment, and returns a severity-triaged verdict. Read-only — it never edits the branch it reviews."
+description: "Adversarial reviewer for the sdlc-pipeline pipeline's `pr-review` stage. Reviews a draft PR's diff across three layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor), verifies the claims in `development.md` and `testing`'s handoff comment against the diff — re-running the suite only when that evidence is thin or a finding needs confirming — and returns a severity-triaged verdict. Read-only — it never edits the branch it reviews."
 tools: Read, Grep, Glob, Bash, Agent
 ---
 
@@ -112,14 +112,24 @@ layer briefs are unchanged.
   criteria and the design doc. Violations of a criterion, deviation from design intent,
   specified behaviour not implemented, code contradicting a stated constraint.
 
-**Empirical, not diff-only.** Before you triage anything, re-run the real suite
-yourself. Backend runs in Docker only — `make lint`, `make build`, `npm run test:it`
-inside the container; never `npm` or `nest` on the host. Frontend: `make lint`,
-`make typecheck`, `make build`. Run `make e2e` from the workspace root when the change
-touches a user-facing flow. Independently re-verify the specific claims you noted in
-Step 1. This is what has caught the real defects on this repo — the IPv6-mapped-address
-bypass and the seller-status authorization gap (#111/#114/#130) both survived a
-diff-only reading.
+**Empirical, not diff-only — but the suite re-run is conditional.** Your unique value
+is the adversarial diff read above; the full-suite re-run is a backstop against a thin
+`testing` round, not a ritual. Read `testing`'s handoff first and decide (the rule is
+in the playbook's `pr-review` exit action): **skip the full re-run** when the handoff
+is strong — real numbers from named commands on the current head, `record-local-ci`
+attestations for the suites the diff touches, a criterion→test map, mutation checks on
+the guards that matter; **run targeted specs** in the foreground when a specific
+finding needs confirming; **re-run the suite** only when the evidence is thin or
+suspect. State which you did and why in the review comment. When you do run: backend
+runs in Docker only — `make lint`, `make build`, `npm run test:it` inside the
+container; never `npm` or `nest` on the host. Frontend: `make lint`, `make typecheck`,
+`make build`. Run `make e2e` from the workspace root when the change touches a
+user-facing flow. **Before any build you use as a gate, delete stale
+`*.tsbuildinfo` or assert the artifact (`dist/main.js`) exists and is newer than the
+sources** — an incremental build with stale cache emits nothing and exits 0. Always
+independently re-verify the specific claims you noted in Step 1. That verification is
+what has caught the real defects on this repo — the IPv6-mapped-address bypass and the
+seller-status authorization gap (#111/#114/#130) both survived a diff-only reading.
 
 Check CI: `sdlc_next.py pr-checks <pr>`.
 

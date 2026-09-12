@@ -138,6 +138,13 @@ and `npm run test:it` inside the container. Never `npm` or `nest` on the host.
 Frontend: `make lint`, `make typecheck`, `make build`; `make e2e` from the workspace
 root for user-facing flows.
 
+**A build you cite as verification must be a real build.** A stale gitignored
+`*.tsbuildinfo` makes the incremental `nest build` emit nothing and exit 0 — twice on
+epic #159 the "passing" build produced no `dist/main.js`. Before any build you use as
+a gate, delete the stale cache (`find . -name '*.tsbuildinfo' -delete` in the package)
+**or** assert the artifact afterwards (`test -f dist/main.js` and that it is newer than
+the sources). Say which in `development.md`; exit 0 alone is not evidence.
+
 **Integration tests run only against a `_test` database.** Any truncating suite
 (`test:it` / `cleanTables()`) must run against a DB whose name ends in `_test`
 (`bookshaw_test`) — confirm the *effective* DB name before you start it. **Never copy a

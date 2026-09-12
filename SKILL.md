@@ -87,14 +87,32 @@ project-specific lives in the repo's `sdlc-pipeline.config.json` (see `README.md
 Before the first command:
 
 ```bash
-export SDLC_DIR="<path-to-this-skill>"                 # this skill's root
-export SDLC="$SDLC_DIR/scripts/sdlc_next.py"           # the control plane
-export GITHUB_TOKEN=$(cat <your GitHub token file>)    # classic PAT (ghp_)
-cd <repo-root>                                         # so config + git resolve
+export SDLC="<stable-skill-path>/scripts/sdlc_next.py"  # the control plane (bootstrap, stable)
+export GITHUB_TOKEN=$(cat <your GitHub token file>)     # classic PAT (ghp_)
+cd <repo-root>                                          # so config + git resolve
 ```
 
-Hand stage subagents the concrete `$SDLC_DIR/references/stage-playbooks.md` path —
-a repo-relative path won't resolve for them.
+**Two paths, resolved from two places — do not conflate them:**
+
+- **`$SDLC` (control plane) is a stable bootstrap path** — the main checkout's
+  `.github/sdlc-pipeline/scripts/sdlc_next.py`, or any fixed clone. It has to exist
+  *before* the unit's worktree does (it is what runs `worktree-add`), so it can never
+  live only inside a per-epic worktree. It is read-only tooling; it never makes the
+  main checkout a git-write target.
+- **`$SDLC_DIR` (agent-facing files: `references/`, `agents/`) is per-unit** — the
+  skill submodule *inside the unit's own worktree*:
+  `<worktree>/<pipeline.skill.submodulePath>` (default
+  `/tmp/sdlc-epic-<n>/.github/sdlc-pipeline`, or the child's `/tmp/sdlc-dev-<n>/…`).
+  `worktree-add` initialises that submodule and returns it as `skill_dir`;
+  `sync-branch` re-syncs it to the branch's pin after every merge. Each epic's stage
+  agents therefore read exactly the skill version its own branch pins — a submodule
+  bump for one epic cannot change another epic's instructions mid-run, and the
+  shared-main-checkout copy is never handed to an agent. Set `$SDLC_DIR` per unit
+  from `worktree-add`/`sync-branch`'s `skill_dir` before delegating, and hand
+  subagents the concrete `$SDLC_DIR/references/stage-playbooks.md` path — a
+  repo-relative path won't resolve for them. (The config file is committed on the
+  branch too, so it is already per-branch.) Mechanics and the git requirement:
+  `references/parallelism.md`, "Concurrent multi-epic isolation".
 
 ## Deterministic control plane
 
@@ -115,7 +133,8 @@ operational failure: stop and report, never retry by hand.
 | `list-parallel-ready <epic> --repo-path <p>` | Dev-lane pool: `lld`/`development`/`testing` children safe to start/resume concurrently |
 | `list-design-ready <epic> --repo-path <p>` | Design-lane pool: a **standing** epic's `product`/`architecture` children safe to start/resume concurrently (empty for a default-profile epic) |
 | `list-ready-for-review <epic>` | Review pool: finished PRs awaiting `pr-review` |
-| `worktree-add <n> [--unit epic]` | The unit's worktree, the one correct way: resumes from `origin/<branch>` when it exists, else branches off the integration base |
+| `worktree-add <n> [--unit epic]` | The unit's worktree, the one correct way: resumes from `origin/<branch>` when it exists, else branches off the integration base; initialises the skill submodule and returns `skill_dir` (the per-unit `$SDLC_DIR`) |
+| `provision-epic-stack <n>` / `teardown-epic-stack <n>` | The epic's isolated runtime stack (own compose project, ports, env/secrets profile, DB data dir) — at epic start / at epic close; no-op unless `pipeline.stack.enabled` |
 | `claim <n> --role <role>` | Stage + In Progress + start comment |
 | `start-comment <n> --role <role>` | Start comment alone (`arch-review` / `lld-review` / `pr-review` / `testing`) |
 | `sync-branch <n> [--unit epic]` | Reconcile the branch with its integration base; structured conflict result |
@@ -135,8 +154,13 @@ operational failure: stop and report, never retry by hand.
 | `close-epic <n>` / `record-epic-verification <n> --kind e2e\|exploratory` | Epic close, two-call shape (`references/epics.md`, "Epic closing") |
 | `auto-pass-gate` / `mark-feedback-received` / `mark-feedback-addressed` / `mark-todo` / `mark-issue-closed` | CI-triggered real-time paths (the gate-auto-advance workflow) |
 
-Branch-touching commands auto-resolve the branch's live worktree; pass `--repo-path`
-only to override.
+**Branch-writing commands never touch the main checkout.** `sync-branch`,
+`merge-lld-doc`, `pass-gate` and `close-epic` take a per-branch lock, then operate in
+the branch's own live worktree or — when nothing holds the branch, the usual case for
+an epic branch — an ephemeral worktree they remove afterwards. `--repo-path` is any
+path inside the repository (where the worktree map is read from), not "the checkout
+to write in"; a branch found checked out in the main checkout is refused with the
+recovery recipe. `references/parallelism.md`, "Concurrent multi-epic isolation".
 
 **What the CLI does not decide**, and this skill does: which stage owns a defect found
 in rework, whether a bounce trips the valve, whether a reported ambiguity is genuine,
@@ -196,6 +220,12 @@ devLane because both stages run opus) via `list-design-ready`. Rework is **one
 development thread per issue**, always. Full mechanics: `references/parallelism.md` —
 read it before starting any concurrent work.
 
+**Across epics:** N invocations on N *different* epics may run at once — every
+branch-writing command locks its branch and works in its own worktree (never the
+main checkout), each unit's agents read their own skill copy, and each epic can own
+its own runtime stack. The one thing that still races is two invocations on the
+*same* epic. `references/parallelism.md`, "Concurrent multi-epic isolation".
+
 ## Step 1 — Pick the one unit to work
 
 ```bash
@@ -233,7 +263,8 @@ a comment) and `check-epics-closeable` (idempotent). Both feed Step 4.
 **When `check-epics-closeable` names an epic and `pipeline.epicClose.auto` is on**
 (`show-config`), the orchestrator closes it rather than handing it to the operator:
 run `close-epic` (first call reconciles), run the two closing verifications, record
-each only if it ran clean, then run `close-epic` again to merge. Escalate instead of
+each only if it ran clean, then run `close-epic` again to merge, then
+`teardown-epic-stack <n>` (no-op unless the stack was provisioned). Escalate instead of
 closing on a Blocker/Critical delta, an open manual-testing bug child, or a
 verification that could not be run — full mechanics and the escalation cases in
 `references/epics.md`, "Epic closing". With the toggle off, `check-epics-closeable`
@@ -255,7 +286,26 @@ python3 "$SDLC" worktree-add <number> [--unit epic]
 
 It fetches, resumes from `origin/<branch>` when that branch exists (never fresh off
 `main`, which drops already-pushed work), and otherwise branches off the unit's
-integration base. Never hand-type `git worktree add`.
+integration base. Never hand-type `git worktree add`. Its `skill_dir` is the unit's
+`$SDLC_DIR` (Setup). **At an epic's first touch, also `provision-epic-stack <n>`**
+when `pipeline.stack.enabled` — the epic's e2e-running children and its closing run
+use that stack, never the shared dev one (`references/parallelism.md`, "Per-epic
+isolated stack").
+
+**Scope alignment before `product` — ask first, author second.** When the unit is
+entering `product` for the first time (no `product.md` on its branch yet — an epic's
+own, or a standing child's), do **not** claim or delegate yet. Epic issues are mostly
+one-liners that do not carry the scope the operator has in mind, and scope discovered
+after `product.md`, `architecture.md`, Gate A/B and child materialisation cascades
+rework through every downstream doc. So: read the issue and its thread, state back a
+concise "this epic covers / excludes / the decisions I see open" summary, and put the
+genuine ambiguities to the operator as questions (`AskUserQuestion` — scope
+boundaries, must-haves vs out-of-scope, decisions the one-liner leaves open) in one
+batch. Feed the answers verbatim into the `product` delegation prompt. This is a
+pre-product interaction, earlier than and distinct from Gate A, and it is one of the
+three things you *do* take to the operator (a product or scope call). Skip it only
+on a rework round or a resume where `product.md` already exists. Detail:
+`references/stage-playbooks.md`, "Scope alignment before `product`".
 
 ## Step 3 — Run this stage, then the next, then the next
 
@@ -279,12 +329,18 @@ orchestrator-direct review path.
 `next-action`'s `stage` says directly whether a child runs `lld` or full
 `architecture`. The Model column is the default; the config's `pipeline.models.<role>` overrides it
 (`show-config`). Pass the result as the `Agent` call's `model` param —
-`opus`/`sonnet` are harness tier aliases, not version pins. The tier is pinned here
+`opus`/`sonnet` are harness tier aliases, not version pins, **and the aliases must
+track the latest model of their tier**: never redirect them to a fixed version (no
+`ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-<x>` in the driven repo's
+`.claude/settings.json`, no versioned id under `pipeline.models`). A pinned alias
+silently runs the pipeline on a stale model as newer ones ship (operator, 2026-09-12;
+the earlier 4.8 pin is retired). The tier is pinned here
 at the call site, not in the agent files, so one definition can run at two tiers and
 a retune is a one-word edit. Opus sits where judgment has no human in front of it
 (`product`, the design pairing, and the two last-checks-before-something-irreversible:
 `lld-review` and `pr-review`); Sonnet on the review-backstopped, higher-frequency
-stages. Retune in `references/history.md` with a dated reason, not by guessing here.
+stages. Retune in `references/history.md` with a dated reason, not by guessing here —
+the latest stage-by-stage evaluation is the 2026-09-12 entry there.
 
 **The table is the default, not a floor — downgrade a genuinely small task** (a
 one-line config change, a typo fix, a rework round applying a fix already specified
@@ -326,7 +382,9 @@ prompt *contains*):
 2. Invoke the role's skills first (only `development` has any).
 3. One `Read` of `$SDLC_DIR/references/stage-playbooks.md` before anything else,
    **plus** the exact doc path it owns (e.g. `<docRoot>/issue-<n>/lld.md`), spelled
-   out. Don't paste the playbook.
+   out. Don't paste the playbook. `$SDLC_DIR` here is the **unit's own** skill copy —
+   the `skill_dir` that `worktree-add`/`sync-branch` returned for this worktree
+   (Setup), never the main checkout's `.github/sdlc-pipeline`.
 4. On genuine ambiguity: **stop and report the specific question in the final
    message** — never guess, create issues, or change fields.
 5. For a normal-epic child's `lld`: the epic's `architecture.md` is the design source

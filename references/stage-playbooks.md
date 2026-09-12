@@ -216,6 +216,18 @@ that test execute.** If it could not run, say so plainly, name the reason, and s
 which criterion is therefore unproven — `pr-review` can then weigh a known gap instead
 of trusting a coverage claim that was never true.
 
+**A green build is not a build either — clear stale incremental state first.** An
+incremental TypeScript build (`nest build`, `tsc -b`) with a stale, gitignored
+`*.tsbuildinfo` on disk decides nothing changed, **emits nothing, and exits 0** — a
+vacuous green. It happened twice in one epic (#323 `development` and `testing` both
+reported a passing build that produced no `dist/main.js`; see `references/history.md`,
+2026-09-12). Standing step for `development`, `testing` and `pr-review`, whenever a
+build is used as a verification gate: **before** the build, remove the stale cache
+(`find <package> -name '*.tsbuildinfo' -delete`, or the repo's clean target) — **or**,
+after it, assert the expected artifact exists and is newer than the sources
+(`test -f dist/main.js && find dist -newer src -type f | head -1`). Exit 0 alone is
+never evidence; state which of the two you did in your handoff.
+
 ## Subagents finish in one turn — never park awaiting a wake
 
 Every stage agent is a subagent, and a subagent is **not** re-invoked across turns:
@@ -555,6 +567,39 @@ those always escalate.
 relationship and posts the comment. Nothing else to maintain: `next-action` derives
 blocked-ness live from the relationship, so the issue becomes eligible on its own the
 moment the blocker closes.
+
+## Scope alignment before `product` — ask before authoring
+
+The `product` stage's input is the issue as written, and an epic issue is usually a
+one-liner. It does not carry the scope the operator has in mind, and every downstream
+document is built from whatever `product.md` decides that scope is. Gate A comes after
+`product.md`; by then the framing is already baked into a requirements document,
+and a scope correction there re-runs `product`, `product-review`, Gate A, and — if it
+reaches architecture — Gate B and the child decomposition too.
+
+So the orchestrator runs a **pre-product scope alignment** the first time a unit
+enters `product` (an epic's own product, or a standing-epic child's — anything with no
+`product.md` on its branch yet), *before* claiming the stage or dispatching the
+agent:
+
+1. Read the issue body and thread, and (for an epic) whatever child issues already
+   exist.
+2. State back, in a few lines, the interpretation: what the epic **covers**, what it
+   **excludes**, and the **decisions the one-liner leaves open**.
+3. Ask the operator the genuine ambiguities in one batch — scope boundaries,
+   must-haves vs out-of-scope, any decision the issue does not settle. As many real
+   questions as there are, none invented for form.
+4. Carry the answers **verbatim** into the `product` delegation prompt as "Operator
+   scope decisions", and tell the agent they are settled inputs, not hypotheses.
+
+The `product` agent's side of the contract: if its prompt carries no scope-alignment
+answers and the issue is thin, it stops and returns scoping questions in its final
+message rather than inventing scope (see the `sdlc-product` definition). Skip the step
+on rework rounds and on a resume where `product.md` already exists — the scope has a
+document by then, and corrections go through the normal rework path or Gate A.
+
+This complements the gates rather than replacing them: Gate A still reviews the
+document; this step makes sure the document is written about the right thing.
 
 ## Stage-specific exit actions
 
@@ -917,10 +962,29 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
 - **`pr-review`** — Orchestrator posts `start-comment <n> --role pr-review`, spawns a
   fresh subagent of type `sdlc-pr-review` (model per the config's `pipeline.models`)
   reviewing the PR diff adversarially: real bugs, security, correctness; verify
-  `development.md`'s claims and `testing`'s handoff comment against the actual diff
-  and by re-running the suite. Check CI via `sdlc_next.py pr-checks <pr>`. May be one
+  `development.md`'s claims and `testing`'s handoff comment against the actual diff.
+  Check CI via `sdlc_next.py pr-checks <pr>`. May be one
   of up to `PR_REVIEW_PARALLELISM` concurrent reviews, each in its own detached
-  worktree (`references/parallelism.md`). Whatever the verdict, the **last** action
+  worktree (`references/parallelism.md`).
+
+  **The suite re-run is conditional, not blanket (operator, 2026-09-12).** The
+  review's unique value is the adversarial three-layer diff read; the full-suite
+  re-run exists only as a backstop against a thin or fabricated `testing` round, and
+  when `testing` was rigorous it costs 25+ minutes of Docker wall-clock for near-zero
+  marginal signal (epic #159). Decide, and say which in the review comment:
+  - **Skip the full re-run** when `testing`'s handoff is *strong*: a Commands-run
+    table with real numbers on the current head, `record-local-ci` attestations for
+    every main-only suite the diff touches, a criterion→test map, and mutation checks
+    on the guards that matter. Then the review is the diff read plus static
+    verification, and targeted runs only.
+  - **Run targeted specs** (foreground, scoped to the surface) when a specific finding
+    needs confirming — a suspected edge case, a claim in `development.md` the diff does
+    not obviously support.
+  - **Re-run the suite** when the evidence is thin or suspect: numbers with no
+    command, a criterion with no named test, no mutation check, a head SHA that moved
+    after the attestation, or a `testing` round the orchestrator already had to bounce.
+  Never treat "testing passed" as the reason to skip — the *shape* of the evidence is
+  the reason. Whatever the verdict, the **last** action
   before merging or resuming anyone: `sdlc_next.py record-pr-review <n> --pr <pr>
   --outcome clean|rework --summary "..."`.
   - **Clean review** → `sdlc_next.py merge-pr <pr> --issue <n>` — marks ready,

@@ -500,10 +500,11 @@ origin/issue-<n>` recreates the local branch at the pushed tip); use the epic-br
 create form only for a genuinely first-touch child with no `origin/issue-<n>` yet.
 
 Which stage creates it: `lld` for a normal-epic child; `product` for a standing-epic
-child; `architecture` for a bug fast-tracked there. Branch-touching commands
-(`sync-branch`/`verify-exit`/`open-gate`/`pass-gate`) auto-resolve this worktree when
-`--repo-path` is omitted — see the note at the end of this file; there is no
-shared-checkout path for a child issue either way.
+child; `architecture` for a bug fast-tracked there. Branch-writing commands
+(`sync-branch`/`pass-gate`/`merge-lld-doc`/`close-epic`) resolve this worktree
+themselves, or create an ephemeral one — see "`--repo-path` means any path inside the
+repository" under "Keeping a branch current"; there is no main-checkout path for any
+branch.
 
 **Releasing the worktree at a stopping point is the script's job, not the
 orchestrator's memory.** `mark-needs-human`, `mark-blocked` and `merge-pr` each call
@@ -570,29 +571,30 @@ conflicts or duplicated diffs. A merge only compares tree content, never ancestr
 This is also why gate PRs are never squash-merged: so a later `sync-branch` merge of
 `main` back into that same branch is a clean no-op, not a phantom diff.
 
-`--repo-path` is optional on every branch-touching command (`sync-branch`,
-`verify-exit`, `open-gate`, `pass-gate`, `merge-lld-doc`): omitted, the command
-resolves the branch's own live worktree from `git worktree list` itself —
-deterministic, and immune to the old forgot-the-flag footgun where "." silently
-targeted the shared checkout. Pass it explicitly only to override (e.g. CI's own
-checkout in `gate-auto-advance.yml`). Fallback when no worktree holds the branch is
-still "." — stand the worktree up first (see the creation commands above) rather than
-relying on that.
+`--repo-path` means **"any path inside the repository"** on every branch-writing
+command (`sync-branch`, `pass-gate`, `merge-lld-doc`, `close-epic`) — it is where the
+worktree map is read from, not the checkout to write in. The command then operates in
+the branch's own live worktree, or in an ephemeral one it creates and removes when
+nothing holds the branch; it never writes in the main checkout (see "Concurrent
+multi-epic isolation" below). `verify-exit` is read-only and still resolves the
+branch's live worktree for its doc listing; `open-gate` reads `origin/<head>` after a
+fetch and needs no working tree at all.
 
-**After any branch-touching op, verify the worktree map — the main checkout must stay
-on `main`.** A `sync-branch`/`merge-lld-doc`/`claim` run from an orchestrator shell
-whose cwd is the main checkout can leave that checkout *on* a pipeline branch
-(`epic-<n>`, `issue-<n>`), which forces the branch's real `/tmp/sdlc-*` worktree into
-**detached HEAD** — twice on epic #430, the second time under a live `development` agent,
-so its commits and uncommitted files sat on a detached HEAD not on `issue-<n>`. Guard:
-after those ops run `git worktree list` and confirm the main checkout is on `main` and
-each `/tmp/sdlc-*` holds its own branch (not detached); pass `--repo-path
-/tmp/sdlc-<...>-<n>` explicitly rather than relying on cwd. Recovery when it has already
-happened (no work lost): commit WIP on the detached HEAD → `git checkout main` in the
-main checkout to free the branch → `git checkout -B issue-<n>` in the `/tmp` worktree
-(carries the WIP) → `git push origin issue-<n>`; verify with `git merge-base
---is-ancestor` that the detached HEAD descends from the branch tip before trusting it.
-Full incident: memory `ops_main_checkout_steals_branch`.
+**The main checkout must be on `main`, and since 2026-09-12 the control plane refuses
+to make it otherwise.** Until then a `sync-branch`/`merge-lld-doc`/`pass-gate` run
+from an orchestrator shell whose cwd was the main checkout could leave that checkout
+*on* a pipeline branch (`epic-<n>`, `issue-<n>`), which forces the branch's real
+`/tmp/sdlc-*` worktree into **detached HEAD** — twice on epic #430 (once under a live
+`development` agent, so its commits and uncommitted files sat on a detached HEAD), four
+more times on epics #159/#365, and once onto a *peer session's* branch. Every one of
+those commands now takes the branch's lock and works in its own worktree; if it finds
+the branch already checked out in the main checkout it **refuses** with the recovery
+recipe rather than operating there. Recovery when the state is already present (no
+work lost): commit WIP on the detached HEAD → `git checkout main` in the main checkout
+to free the branch → `git checkout -B issue-<n>` in the `/tmp` worktree (carries the
+WIP) → `git push origin issue-<n>`; verify with `git merge-base --is-ancestor` that
+the detached HEAD descends from the branch tip before trusting it. Incidents: memory
+`ops_main_checkout_steals_branch`, `sdlc_merge_lld_doc_branch_steal_bug`.
 
 ## Publishing lld.md to the epic branch — durable design, sibling visibility
 
@@ -616,8 +618,148 @@ still-open `issue-<n>` branch, and every sibling picks it up in-tree on its next
 - **Scope: normal-epic children only.** A standing-epic child (integrates into `main`,
   not an epic branch) or a parentless issue is a structured no-op at exit 0, never an
   error.
-- **Idempotent.** Identical content already on the epic branch → `up-to-date` no-op;
-  safe to re-run (a re-review, a crashed session).
-- **A push refused because the epic branch advanced under it** returns a structured
-  `conflict` result at exit 0 (same spirit as `sync-branch`'s conflict), not a crash —
-  re-run to reconcile and retry. Any genuine operational git failure still raises.
+- **Idempotent, judged on origin.** The doc's blob on `origin/issue-<n>` is compared
+  with its blob on `origin/epic-<parent>` — identical → `up-to-date` with
+  `verified_on_origin: true`; safe to re-run. The local tree is never the reference:
+  the 2026-09-12 defect was exactly a re-run comparing a working tree that already
+  held the doc (committed on a stale base, push rejected) to itself and reporting
+  `up-to-date` while `origin/epic-<n>` never received the file (memory
+  `sdlc_merge_lld_doc_branch_steal_bug`).
+- **`merged: true` is only reported after a post-push fetch shows the blob on
+  `origin/epic-<parent>`.** The commit is replayed from origin's current tip
+  (`checkout -B epic-<n> origin/epic-<n>`, then the doc from `origin/issue-<n>`), so a
+  stale doc-only commit from an earlier rejected attempt is discarded and redone;
+  unpushed local commits touching anything *else* on the epic branch make it refuse.
+- **A push refused because the epic branch advanced under it** is retried once from
+  the re-fetched tip; still refused → a structured `conflict` result at exit 0 whose
+  reason says the doc is **not** on origin (same spirit as `sync-branch`'s conflict),
+  never a crash and never a false success. Any genuine operational git failure still
+  raises.
+
+## Concurrent multi-epic isolation — N invocations on N epics, zero shared mutable state
+
+Operator goal (2026-09-12): the skill must run N instances on N *different* epics at
+once. Two shared singletons made that impossible and had to go together: the one main
+git checkout, and the one shared dev Docker stack/DB/ports. A third, quieter one —
+every instance reading the *same* `.github/sdlc-pipeline` copy in the main checkout —
+went with them. What follows is what the control plane now guarantees, and what it
+still does not.
+
+### Git — the main checkout is never a write target
+
+- **Every branch-writing command works in a worktree that holds its branch, never the
+  main checkout.** `sync-branch`, `merge-lld-doc`, `pass-gate` and `close-epic` resolve
+  the branch's live worktree from `git worktree list`; when nothing holds it (the
+  normal state of an epic branch at gate-pass, doc-publish and close time) they create
+  an **ephemeral** worktree at `<worktrees.root>/<ephemeralPrefix><branch>-<pid>` from
+  `origin/<branch>`, operate, and remove it if it is clean and fully pushed (a retained
+  tree is reported as `retained_worktree` in the result). A branch found checked out
+  in the main checkout — the stolen state — is **refused** with the recovery recipe.
+  A local ref carrying unpushed commits with no worktree is refused too, never reset.
+- **Per-branch lock.** Each of those commands holds an exclusive `flock` on
+  `<pipeline.locks.dir>/<branch>.lock` for its whole run (`waitSeconds`, default 600,
+  then a `BranchLocked` error naming the file). Keyed by branch, so operations on
+  different branches never contend — different epics, different children, no
+  serialisation. Two sessions on the same branch queue instead of racing.
+- **`open-gate` cites `origin/<head>`** after a fetch — the PR is opened against
+  origin, so a local HEAD could only ever cite a SHA the PR does not contain, and
+  reading origin needs no working tree.
+- **What is still shared, deliberately:** the repository's object store and worktree
+  map (one clone, many worktrees — that is the point), and the dev-lane / review-pool
+  caps, which `list-parallel-ready` counts off the *machine's* live worktrees. Across
+  N instances on one clone that makes the caps machine-wide, which is the right
+  reading: the binding constraint is the machine ("The machine's resource cap is the
+  real cap" above), not the invocation.
+
+### Each unit reads its own skill copy
+
+- **Two paths.** `$SDLC` (the control-plane script) is a **stable bootstrap path** —
+  the main checkout's `.github/sdlc-pipeline/scripts/sdlc_next.py` or any fixed clone.
+  It has to exist before the unit's worktree does, because it is what creates that
+  worktree, so it cannot live only inside a per-epic tree; it is read-only tooling.
+  `$SDLC_DIR` (the agent-facing `references/` and `agents/`) is **per unit**:
+  `<worktree>/<pipeline.skill.submodulePath>`. Every stage agent reads its playbook
+  and persona at the skill commit *its own branch pins*.
+- **`worktree-add` initialises the submodule.** A linked worktree's submodule
+  directory is empty after `git worktree add`; the command runs `git submodule update
+  --init -- <submodulePath>` in the new tree and returns `skill_dir` + `skill_commit`.
+  Set `$SDLC_DIR` from that before delegating.
+- **`sync-branch` re-syncs it after every merge.** Merging the integration base can
+  move the submodule gitlink; a merge alone leaves the working files at the *old* pin
+  (`modified (new commit)` in `git status`). `sync-branch` runs the same `submodule
+  update --init` after a successful reconcile — and only in a live worktree, never in
+  an ephemeral one. Timing is what makes this safe: `sync-branch` fires between stage
+  agents (SKILL.md, "After the subagent returns"), which is the one naturally quiet
+  point per worktree. Never run it under a live agent of the same unit; nothing else
+  in the pipeline needs to.
+- **Consequence:** a submodule bump merged for one epic reaches another epic's agents
+  only when *that* epic's branch takes the bump through its own `sync-branch`, at its
+  own transition. The retro rule "merge a retrospective only when the lane is quiet"
+  (SKILL.md Step 5) now scopes to the epic being bumped, not the whole machine. The
+  config file (`sdlc-pipeline.config.json`) is committed on the branch, so it was
+  already per-branch.
+- **Git requirement — verified, and checked at runtime.** Submodules inside linked
+  worktrees only isolate if git gives each worktree its own submodule gitdir under
+  `$GIT_COMMON_DIR/worktrees/<id>/modules/<name>` (older gits shared one
+  `.git/modules/<name>` across worktrees, and git's own `worktree` docs still call
+  multiple checkouts of a superproject with submodules incomplete). Verified
+  empirically on 2026-09-12 with git 2.50.1 (Apple Git-155): a linked worktree's init
+  cloned into `.git/worktrees/<wt>/modules/.github/sdlc-pipeline`, checked out the
+  branch's pin while the main checkout stayed on its own, and after a merge moved the
+  gitlink `submodule update --init` brought the files to the new pin with a clean
+  status. Rather than trust a version floor nobody could source, `init_skill_submodule`
+  **asserts the per-worktree gitdir after every init** (`rev-parse --absolute-git-dir`
+  must contain `/worktrees/`) and that `probeFile` is present, and refuses with an
+  upgrade message otherwise. Each init is a clone of the skill repo from the URL in
+  `.gitmodules` — small, and paid once per worktree.
+
+### Per-epic isolated stack — the runtime half
+
+`make e2e` against the shared dev stack (`localhost:3001`, the shared `bookshaw` DB)
+made every e2e run depend on shared reference data and exposed it to a stray
+`cleanTables()` from a concurrent backend-IT run — which blocked #509 on epic #159.
+The isolation is **config-only** on the origin repo: compose is parametrised by
+`COMPOSE_PROJECT_NAME`, `FRONTEND_PORT`, `BACKEND_PORT`, `DB_PORT_EXPOSE`,
+`BACKEND_DEBUG_PORT` (this one *must* move too or `9229` collides), `POSTGRES_DATA_DIR`,
+`ENV_FILE`, `SECRETS_FILE`. The "secret" is a plain file copy of `.secrets.dev` — the
+sandbox blocks reading secret values, not copying the file — so no human step.
+
+```bash
+python3 "$SDLC" provision-epic-stack <n>     # at the epic's first touch (or before its first e2e child)
+#   -> .env.epic<n> = .env.dev with distinct ports (+stride×slot, bumped while any port is bound),
+#      COMPOSE_PROJECT_NAME=sdlc-epic<n>, POSTGRES_DATA_DIR=.docker/postgres-data-epic<n>;
+#      cp .secrets.dev .secrets.epic<n>; runs upCommand then seedCommand; returns ports + a `use` line
+python3 "$SDLC" teardown-epic-stack <n>      # after close-epic's merge
+#   -> downCommand (compose down -v), rm the two profile files and the data dir
+```
+
+Both are structured no-ops while `pipeline.stack.enabled` is false, and provisioning
+is idempotent (an existing profile is reused, ports read back). Tell every stage that
+runs e2e for the epic to use the returned `use` line
+(`COMPOSE_PROJECT_NAME=<project> make <target> PROFILE=<profile>`) and the returned
+ports, never the dev ones. **Build from the code under test:** a child validating its
+own e2e fixes runs `make fullstack-d`/`make e2e` *from its own worktree* with the epic
+profile, since its changes are not on the epic branch until it merges; the epic-close
+full run builds from the epic integration branch.
+
+**DESIGN — deferred, not built (state it, don't fake it):**
+
+- **One stack per epic, not per child.** Two children of one epic that both need a
+  stack at the same time still share it (and the IT-heavy-stage cap keeps that to one
+  at a time anyway). A per-child profile is the same recipe with `profileTemplate`
+  keyed by child number; it is not wired because nothing has needed it yet.
+- **Not auto-invoked.** `next-action` does not call provision/teardown; the
+  orchestrator does, at the epic's first touch and after the closing merge (SKILL.md
+  Steps 1–2). Wiring it into `worktree-add --unit epic` / `close-epic` was left out so
+  a repo without a parametrised compose never has an epic start fail on Docker.
+- **Seeding is a config string** (`seedCommand`); the origin repo's seed for e2e
+  users/profiles is still the open gap recorded in `references/epics.md` ("a
+  verification could not be obtained") — the stack helper runs whatever the repo
+  provides and does not solve that.
+- **Same-epic double invocation still races.** The lock is per branch; two
+  invocations driving the same epic still collide on stage claims and the review
+  pool exactly as "Epic number is mandatory" warns. A per-epic invocation lock is the
+  obvious next step and is deliberately not in this change.
+- **The Docker resource cap stays machine-wide.** N isolated stacks are N sets of
+  containers on one VM; the "at most one Docker-IT-heavy stage" rule above is now a
+  per-machine rule the N instances cannot see each other enforce.
