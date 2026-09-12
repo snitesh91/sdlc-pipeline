@@ -2666,7 +2666,20 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], issue: int,
     internal replay from the new tip), or no `lld.md` on `origin/issue-<n>`,
     returns a structured result at exit 0 (`conflict`/`reason`), not an uncaught
     crash -- modelled on `cmd_sync_branch`'s conflict handling. A genuine
-    operational git failure still propagates as GhError (exit 1)."""
+    operational git failure still propagates as GhError (exit 1).
+
+    **Advance-not-claim (2026-09-12).** Once the doc is verified on origin
+    (`merged: true`, or `up-to-date` with `verified_on_origin`), this command
+    also advances the child's Stage to `development` and clears its Pipeline
+    Status -- exactly what `pass-gate --unit epic` / `live=False` do, and
+    deliberately **not** a `claim`. The child then surfaces as a fresh
+    `next-action` / `list-parallel-ready` unit at `development`, so one
+    orchestrator pass can return a *mix* of lanes (this child's `development`
+    plus the sibling `lld`s it just unblocked) instead of being forced to chain
+    straight into development for whichever child's lld finished first. This is a
+    scheduling mechanism only, never an "all llds before any development"
+    policy -- an independent child still flows lld->development without waiting
+    on siblings. See `_advance_after_lld_publish` for the crash-safety argument."""
     issues = {i["number"]: i for i in gh.issue_list()}
     entry = issues.get(issue)
     if entry is None:
@@ -2686,7 +2699,47 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], issue: int,
     src_ref = f"origin/{issue_branch(issue)}"
     with branch_lock(epic), BranchWorkspace(epic, repo_path, runner) as ws:
         result = _publish_lld_doc(gh, ws.path, issue, epic, doc_path, src_ref, runner)
+    result = _advance_after_lld_publish(gh, issue, entry, result)
     return _with_workspace(result, ws)
+
+
+def _advance_after_lld_publish(gh: GitHub, issue: int, entry: dict, result: dict) -> dict:
+    """Stage -> `development`, Pipeline Status cleared -- **no claim** -- once
+    `_publish_lld_doc` has verified the doc on origin. Returns `result` with
+    `advanced`/`next_stage`/`claimed` added.
+
+    Gated on `verified_on_origin`, not on `merged`: the doc reaches origin and
+    the field write are two separate side effects, and a crash between them
+    must leave a re-run that lands on `up-to-date` still able to advance.
+    Gated on the child's Stage being `lld`: a re-run after the advance (or on a
+    child already past it) writes nothing -- idempotent, like every other
+    marker/field write here.
+
+    Write order matters. Stage is set **before** Pipeline Status is cleared, so
+    the only crash-window state is `Stage=development, Pipeline Status=in-progress`,
+    which `next-action` reads as `resume` at `development` -- the same work,
+    picked up from `origin/issue-<n>` + the published `lld.md`. The other order
+    would leave `Stage=lld, Pipeline Status=unset`, which `next-action` would
+    read as a *fresh* `lld` and redo a reviewed design. Before this command
+    advanced anything, the crash-window state after `merge-lld-doc` was
+    `Stage=lld, in-progress` with a clean review marker -- an ambiguous resume
+    that the orchestrator had to disambiguate from the thread. Now every
+    persisted state maps to exactly one next step."""
+    if not result.get("verified_on_origin"):
+        return {**result, "advanced": False}
+    stage = current_stage(entry)
+    if stage != "lld":
+        return {**result, "advanced": False,
+                "reason_not_advanced": f"Stage is {stage!r}, not 'lld' — nothing to advance"}
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    gh.set_stage_field(issue, "development")
+    gh.clear_pipeline_status_field(issue)
+    gh.issue_comment(issue,
+        f"➡️ `lld-review` clean and `lld.md` published — Stage advanced to `development` "
+        f"(not claimed). `next-action` / `list-parallel-ready` pick it up as a fresh unit, "
+        f"alongside any sibling `lld` it unblocked.\n\n"
+        f"<!-- stage-transition: lld-review->development @ {timestamp} -->")
+    return {**result, "advanced": True, "next_stage": "development", "claimed": False}
 
 
 def _blob_at(repo_path: str, ref: str, path: str, runner: Runner) -> Optional[str]:
@@ -4406,8 +4459,9 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_sync_branch(GitHub(), a.repo_path, a.issue, a.unit))
     p = sub.add_parser("merge-lld-doc",
                         help="Publish a normal-epic child's lld.md onto its epic branch as soon "
-                             "as lld-review is CLEAN — durable design + sibling visibility; "
-                             "no-op for a standing-epic child or a parentless issue")
+                             "as lld-review is CLEAN, then advance its Stage to development "
+                             "(NOT claimed -- next-action/list-parallel-ready pick it up as a "
+                             "fresh unit); no-op for a standing-epic child or a parentless issue")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
                     help="Any path inside the repository; the doc is published from the epic branch's own live worktree or an ephemeral one, never the main checkout")

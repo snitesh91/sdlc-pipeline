@@ -138,7 +138,7 @@ operational failure: stop and report, never retry by hand.
 | `claim <n> --role <role>` | Stage + In Progress + start comment |
 | `start-comment <n> --role <role>` | Start comment alone (`arch-review` / `lld-review` / `pr-review` / `testing`) |
 | `sync-branch <n> [--unit epic]` | Reconcile the branch with its integration base; structured conflict result |
-| `merge-lld-doc <n>` | Publish a normal-epic child's clean `lld.md` onto the epic branch |
+| `merge-lld-doc <n>` | Publish a normal-epic child's clean `lld.md` onto the epic branch, then **advance** it to `development` (Stage set, Pipeline Status cleared — never claimed) |
 | `verify-exit <n> --expect-stage <s> [--pr <pr>] [--unit epic]` | Post-handoff state check |
 | `open-gate` / `check-gate` / `pass-gate` / `skip-gate` | Human-review gates (`references/gates.md`) |
 | `open-dev-pr <n> ...` | Draft PR + Stage=Testing + handoff comment |
@@ -250,8 +250,9 @@ child (`list-parallel-ready`). For a **standing** epic, also run `list-design-re
 to fan out children still in `product`/`architecture` (up to `parallelism.designLane`,
 default 2); for a default-profile epic it returns empty, since epic-self design is a
 single serial unit. **Always run `list-parallel-ready` immediately after
-every `merge-pr`**: a merge is the one event that unblocks a sibling, and an
-un-requeried child idles through a whole stage.
+every `merge-pr` and every `merge-lld-doc`**: a merge is the event that unblocks a
+sibling, and `merge-lld-doc` is the event that turns a child into a `development`
+unit — an un-requeried child idles through a whole stage.
 
 **A `blockedBy` edge is not automatically a whole-child stop.** It usually constrains
 `development` onward, not `lld` — start the design stage concurrently and sequence
@@ -431,7 +432,18 @@ conflict result routes per `references/parallelism.md`, "Git-conflict handling".
 Confirm the previous stage left a comment on the issue; if not, get one.
 
 **On a CLEAN `lld-review` of a normal-epic child**: `record-design-review`, then
-`merge-lld-doc <n>`, then `claim <n> --role development`. No gate.
+`merge-lld-doc <n>` — which publishes the doc **and advances the child to
+`development` without claiming it** (`advanced: true, claimed: false`). No gate,
+and **no `claim <n> --role development` here**: the child is now a fresh Step 1 unit.
+Go back to Step 1 / `list-parallel-ready` and let scheduling pick it — one pass can
+then hand out that `development` *and* the sibling `lld`s it just unblocked, by lane
+and priority rather than by whichever lld happened to finish first. This is a
+scheduling mechanism, not a policy: an independent child still flows straight from
+`lld` to `development` on the next pick; nothing waits for "all llds first". Crash-safe
+by construction — every persisted state after `merge-lld-doc` maps to one next step
+(`references/parallelism.md`, "Publishing lld.md to the epic branch"). A child whose
+`lld-review` was recorded clean but whose Stage is still `LLD` has simply not had
+`merge-lld-doc` run yet: run it.
 
 **Stage exit actions** — what each stage does last, every verdict branch — live in
 `references/stage-playbooks.md`, "Stage-specific exit actions". Follow them exactly;

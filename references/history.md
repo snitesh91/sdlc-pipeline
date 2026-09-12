@@ -1247,6 +1247,36 @@ upgrade trigger) is recommended as safe and awaits operator sign-off before it g
 epics of `pairing-counts` data. Recorded here rather than guessed into the table, per
 the model-table paragraph's own rule.
 
+## 2026-09-12 (c) — lld/development decoupling, comment size caps, product WIP cap
+
+Three operator-approved backlog items landed on a quiet lane after the main 2026-09-12
+retro (`6c691b5`). Each was already recorded as a memory; this is the why in one place.
+
+### 1. `merge-lld-doc` advances to `development` instead of the orchestrator claiming it (`sdlc_next.py`, `SKILL.md`, `stage-playbooks.md`, `parallelism.md`)
+
+**Why.** The clean-`lld-review` exit was `record-design-review` → `merge-lld-doc` →
+`claim development`, so the orchestrator was forced to chain straight into development
+for whichever child's lld happened to finish first. Operator (2026-09-12): decouple, so
+a single `next-action` pass can return a *mix* by lane — one `development` for the
+child that just cleared review plus the sibling `lld`s it unblocked — scheduled by lane
+and priority. Bonus defect it removes: a crash between `merge-lld-doc` and `claim` left
+`Stage=LLD, in-progress` with a clean review marker, an ambiguous resume. The
+prerequisite (the origin-verified `merge-lld-doc` reconcile, item 2 of the main retro)
+had already shipped.
+
+**What changed.** `merge-lld-doc` sets Stage → `Development` and clears Pipeline Status
+once the doc is verified on origin (`merged: true` *or* `up-to-date`), gated on the
+child still being at `LLD`; Stage is written before the status clear so the only crash
+window reads as `resume/development`. It never claims (no `in-progress`, no start
+comment) — the `pass-gate --unit epic` / `live=False` shape. Result carries
+`advanced`/`next_stage`/`claimed: false`; a conflict or refusal advances nothing.
+`SKILL.md`'s clean-lld-review exit and the playbook's `lld-review` exit action drop the
+`claim` step and say re-run `list-parallel-ready` after every `merge-lld-doc`. **Scope
+guard, per operator ("definitely not all"):** mechanism only, not an all-llds-first
+policy; no profile toggle was added. Companion practice already in the playbook:
+`sync-branch` before every transition, which the wider lld→dev gap makes more
+important.
+
 ## 2026-09-12 — product-review & arch-review → fable (tier change)
 Moved `product-review` and `arch-review` from opus to fable in the SKILL.md model table.
 Both are backstopped by a human gate immediately after (Gate A / Gate B), so a cheaper

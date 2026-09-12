@@ -606,14 +606,38 @@ instead:
 python3 "$SDLC" merge-lld-doc <n>   # auto-resolves the epic branch's worktree
 ```
 
-Run it right after `record-design-review`, before `claim <n> --role development` (see
-`references/stage-playbooks.md`, the `lld-review` exit action). It takes
-`<docRoot>/issue-<n>/lld.md` verbatim from `origin/issue-<n>` and commits
-**only that one file** onto `epic-<parent>` as a doc-only commit, then pushes — not a
-merge of the whole child branch, so none of the child's in-progress code goes with it.
-Two payoffs: the low-level design is durable on the epic branch independent of the
-still-open `issue-<n>` branch, and every sibling picks it up in-tree on its next
-`sync-branch`, so cross-child overlap checks read the real committed design.
+Run it right after `record-design-review` (see `references/stage-playbooks.md`, the
+`lld-review` exit action). It takes `<docRoot>/issue-<n>/lld.md` verbatim from
+`origin/issue-<n>` and commits **only that one file** onto `epic-<parent>` as a
+doc-only commit, then pushes — not a merge of the whole child branch, so none of the
+child's in-progress code goes with it. Two payoffs: the low-level design is durable on
+the epic branch independent of the still-open `issue-<n>` branch, and every sibling
+picks it up in-tree on its next `sync-branch`, so cross-child overlap checks read the
+real committed design.
+
+**It also advances the child — advance-not-claim (2026-09-12).** Once the doc is
+verified on origin, the command sets Stage to `Development` and clears Pipeline
+Status, exactly as `pass-gate --unit epic` hands off to children: no `in-progress`, no
+start comment, no `claim`. `development` is then a *fresh* `next-action` /
+`list-parallel-ready` unit — so a single orchestrator pass can return, say, one
+`development` plus the two sibling `lld`s that were `blockedBy` it, scheduled by lane
+and priority instead of chained opportunistically onto whichever lld finished first.
+Mechanism only: an independent child still goes `lld` → `development` on the very next
+pick; this is **not** "all llds merge before any development starts".
+
+- **Every persisted state maps to one next step** (the old chain left `Stage=LLD,
+  in-progress` with a clean review marker after a crash — an ambiguous resume). Stage
+  is written *before* the status clear, so the only crash window is `Stage=Development,
+  in-progress`, which `next-action` reads as `resume` at `development` — the same work,
+  from `origin/issue-<n>` + the published doc. A crash *before* the field write leaves
+  `Stage=LLD` with the doc already on origin; the re-run lands on `up-to-date`
+  (verified on origin) and still advances. A child already at `Development` is left
+  untouched (`advanced: false`).
+- **`sync-branch` still runs first, every transition.** Decoupling widens the gap
+  between the lld merge and the development pick, so the worktree freshness rule
+  ("Keeping a branch current") matters more here, not less.
+- **Not advanced on a conflict or refusal** — the doc is not on origin, so the child
+  stays at `LLD`; re-run once the branch is quiet.
 
 - **Scope: normal-epic children only.** A standing-epic child (integrates into `main`,
   not an epic branch) or a parentless issue is a structured no-op at exit 0, never an

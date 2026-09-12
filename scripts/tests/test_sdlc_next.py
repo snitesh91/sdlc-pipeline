@@ -3433,20 +3433,49 @@ class _Dispatch:
         return self.r.call(argv)
 
 
+def _advance_to_development_responses(number):
+    """The advance-not-claim field writes `merge-lld-doc` issues once the doc is
+    verified on origin: node-id lookup, Stage -> Development, Pipeline Status
+    deleted. Returns (responses, stage_argv, delete_argv) so a test can assert
+    order and absence."""
+    from sdlc_next import (_ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
+                            _DELETE_ISSUE_FIELD_VALUE_MUTATION, STAGE_FIELD_ID, STAGE_OPTION_IDS,
+                            PIPELINE_STATUS_FIELD_ID)
+    node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=number)}")
+    stage_argv = ("gh", "api", "graphql", "-f",
+        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id=f'ISSUE_{number}', field_id=STAGE_FIELD_ID, option_id=STAGE_OPTION_IDS['development'])}")
+    delete_argv = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id=f'ISSUE_{number}', field_id=PIPELINE_STATUS_FIELD_ID)}")
+    responses = {
+        node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": f"ISSUE_{number}"}}}}),
+        stage_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": number}}}}),
+        delete_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": number}}}}),
+    }
+    return responses, stage_argv, delete_argv
+
+
+def _in_progress_set_argv(number):
+    from sdlc_next import _SET_ISSUE_FIELD_MUTATION, PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
+    return ("gh", "api", "graphql", "-f",
+            f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id=f'ISSUE_{number}', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['in-progress'])}")
+
+
 def test_merge_lld_doc_happy_path_commits_and_pushes_to_epic_branch():
     from sdlc_next import GitHub, cmd_merge_lld_doc
     epic = _epic(110, labels=["epic:architected"])
-    child = _issue(185, stage="lld", parent=110)
-    gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])})
+    child = _issue(185, stage="lld", status="in-progress", parent=110)
+    advance, stage_argv, delete_argv = _advance_to_development_responses(185)
+    gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([epic, child]), **advance})
     gh_runner.prefix_responses = {("gh", "issue", "comment", "185"): ""}
     gh = GitHub(runner=gh_runner)
     runner = _Dispatch(_lld_git())
     result = cmd_merge_lld_doc(gh, "/epic-110", 185, runner=runner)
     assert result == {"issue": 185, "merged": True, "epic_branch": "epic-110",
-                      "commit": "deadbeef", "verified_on_origin": True, "attempts": 1}
-    comment_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"])
-    body = comment_call[comment_call.index("--body") + 1]
-    assert "<!-- lld-doc-published: epic-110:deadbeef" in body
+                      "commit": "deadbeef", "verified_on_origin": True, "attempts": 1,
+                      "advanced": True, "next_stage": "development", "claimed": False}
+    comment_calls = [c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"]]
+    bodies = [c[c.index("--body") + 1] for c in comment_calls]
+    assert any("<!-- lld-doc-published: epic-110:deadbeef" in b for b in bodies)
     # Doc-only: the child branch is never merged, only its one lld.md path touched.
     assert ["git", "-C", "/epic-110", "merge", "origin/issue-185"] not in runner.calls
     # Replayed from origin's tip, never from whatever the local branch held.
@@ -3456,19 +3485,125 @@ def test_merge_lld_doc_happy_path_commits_and_pushes_to_epic_branch():
     assert ["git", "-C", "/epic-110", "fetch", "origin"] in runner.calls[push_i + 1:]
 
 
-def test_merge_lld_doc_idempotent_noop_when_origin_already_has_the_doc():
-    # Identical blob on origin/epic-110 and origin/issue-185: nothing is reset,
-    # committed or pushed, and the no-op says it was judged on origin.
+def test_merge_lld_doc_advances_stage_to_development_without_claiming():
+    # Advance-not-claim (2026-09-12): after the doc is verified on origin, Stage
+    # -> Development and Pipeline Status cleared, in that order -- and NOTHING
+    # sets in-progress or posts a "Picking this up" start comment. The child is
+    # then a fresh next-action / list-parallel-ready unit, not an auto-chained one.
     from sdlc_next import GitHub, cmd_merge_lld_doc
     epic = _epic(110, labels=["epic:architected"])
-    child = _issue(185, stage="lld", parent=110)
-    gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])}))
+    child = _issue(185, stage="lld", status="in-progress", parent=110)
+    advance, stage_argv, delete_argv = _advance_to_development_responses(185)
+    gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([epic, child]), **advance})
+    gh_runner.prefix_responses = {("gh", "issue", "comment", "185"): ""}
+    gh = GitHub(runner=gh_runner)
+    result = cmd_merge_lld_doc(gh, "/epic-110", 185, runner=_Dispatch(_lld_git()))
+    assert result["advanced"] is True and result["claimed"] is False
+    assert result["next_stage"] == "development"
+    calls = [tuple(c) for c in gh_runner.calls]
+    # Stage set strictly before the status delete: the only crash-window state is
+    # Stage=development + in-progress, which next-action reads as resume/development.
+    assert calls.index(stage_argv) < calls.index(delete_argv)
+    assert _in_progress_set_argv(185) not in calls
+    bodies = [c[c.index("--body") + 1] for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"]]
+    assert not any("Picking this up" in b for b in bodies)
+    assert any("<!-- stage-transition: lld-review->development @" in b for b in bodies)
+    # The publish marker is posted before the advance comment.
+    assert [("lld-doc-published" in b, "stage-transition" in b) for b in bodies] == [(True, False), (False, True)]
+
+
+def test_merge_lld_doc_idempotent_noop_when_origin_already_has_the_doc():
+    # Identical blob on origin/epic-110 and origin/issue-185: nothing is reset,
+    # committed or pushed, and the no-op says it was judged on origin. The doc
+    # being verified on origin STILL advances a child left at `lld` -- this is
+    # exactly the re-run after a crash between the push and the field write.
+    from sdlc_next import GitHub, cmd_merge_lld_doc
+    epic = _epic(110, labels=["epic:architected"])
+    child = _issue(185, stage="lld", status="in-progress", parent=110)
+    advance, stage_argv, delete_argv = _advance_to_development_responses(185)
+    gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([epic, child]), **advance})
+    gh_runner.prefix_responses = {("gh", "issue", "comment", "185"): ""}
+    gh = GitHub(runner=gh_runner)
     runner = _Dispatch(_lld_git(origin_blob_before="blobNEW"))
     result = cmd_merge_lld_doc(gh, "/epic-110", 185, runner=runner)
     assert result == {"issue": 185, "merged": False, "epic_branch": "epic-110",
-                      "reason": "up-to-date", "verified_on_origin": True}
+                      "reason": "up-to-date", "verified_on_origin": True,
+                      "advanced": True, "next_stage": "development", "claimed": False}
     assert not any(c[3] in ("push", "commit") for c in runner.calls)
     assert ["git", "-C", "/epic-110", "checkout", "-B", "epic-110", "origin/epic-110"] not in runner.calls
+    assert stage_argv in [tuple(c) for c in gh_runner.calls]
+
+
+def test_merge_lld_doc_rerun_on_a_child_already_at_development_writes_no_fields():
+    # Idempotent after the advance: Stage is already Development, so a re-run
+    # (or a sync-triggered re-publish) touches no field and posts no transition.
+    from sdlc_next import GitHub, cmd_merge_lld_doc
+    epic = _epic(110, labels=["epic:architected"])
+    child = _issue(185, stage="development", parent=110)
+    gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])})
+    gh = GitHub(runner=gh_runner)
+    result = cmd_merge_lld_doc(gh, "/epic-110", 185, runner=_Dispatch(_lld_git(origin_blob_before="blobNEW")))
+    assert result["reason"] == "up-to-date" and result["verified_on_origin"] is True
+    assert result["advanced"] is False and "development" in result["reason_not_advanced"]
+    # The only gh call is the issue list: no node-id lookup, no field mutation, no comment.
+    assert gh_runner.calls == [_list_argv()]
+
+
+def test_merge_lld_doc_does_not_advance_when_publish_was_not_verified():
+    # A rejected push (conflict) or a refusal leaves the child exactly where it
+    # was: still `lld`, still in-progress, no transition comment. Advancing on an
+    # unpublished doc would hand development a design its siblings cannot see.
+    from sdlc_next import GitHub, cmd_merge_lld_doc, GhError
+    epic = _epic(110, labels=["epic:architected"])
+    child = _issue(185, stage="lld", status="in-progress", parent=110)
+    gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])})
+    gh = GitHub(runner=gh_runner)
+    inner = _lld_git()
+    push_argv = ("git", "-C", "/epic-110", "push", "origin", "epic-110")
+    base_call = inner.call
+
+    def call(argv):
+        if tuple(argv) == push_argv:
+            inner.calls.append(argv)
+            raise GhError("command failed (1): git push\n ! [rejected] non-fast-forward")
+        return base_call(argv)
+    inner.call = call
+    result = cmd_merge_lld_doc(gh, "/epic-110", 185, runner=_Dispatch(inner))
+    assert result["conflict"] is True and result["advanced"] is False
+    assert "next_stage" not in result
+    assert all(c[:3] != ["gh", "issue", "comment"] for c in gh_runner.calls)
+    assert len([c for c in gh_runner.calls if c[:3] == ["gh", "api", "graphql"]]) == 1  # the issue list only
+
+
+def test_next_action_picks_an_lld_merged_child_as_a_fresh_development_unit():
+    # The persisted state merge-lld-doc leaves (Stage=development, Pipeline Status
+    # unset) is a plain delegate/development for next-action -- not a resume, not
+    # an lld -- and it ranks against sibling llds by the ordinary sort_key, so one
+    # pass can hand out a development and the llds it unblocked side by side.
+    from sdlc_next import GitHub, decide_next_action
+    epic = _epic(110, labels=["epic:architected"])
+    merged = _issue(185, stage="development", parent=110, created="2026-08-02T00:00:00Z")
+    sibling = _issue(186, stage="lld", parent=110, created="2026-08-01T00:00:00Z")
+    responses = {tuple(_list_argv()): _list_response([epic, merged, sibling])}
+    responses.update(_no_blockers_responses(185, 186))
+    gh = GitHub(runner=ScriptedRunner(responses))
+    # Older sibling wins on sort_key -- the merged child is NOT jumped ahead.
+    assert decide_next_action(gh, 110) == {"action": "delegate", "issue": 186, "unit": "issue", "stage": "lld"}
+    responses[tuple(_list_argv())] = _list_response([epic, merged])
+    gh = GitHub(runner=ScriptedRunner(responses))
+    assert decide_next_action(gh, 110) == {"action": "delegate", "issue": 185, "unit": "issue",
+                                            "stage": "development"}
+
+
+def test_next_action_resumes_development_after_a_crash_between_the_two_advance_writes():
+    # Crash after Stage=development but before the status clear: in-progress at
+    # development -> resume/development. Never a fresh lld.
+    from sdlc_next import GitHub, decide_next_action
+    epic = _epic(110, labels=["epic:architected"])
+    child = _issue(185, stage="development", status="in-progress", parent=110)
+    gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])}))
+    assert decide_next_action(gh, 110) == {"action": "resume", "issue": 185, "unit": "issue",
+                                            "stage": "development"}
 
 
 def test_merge_lld_doc_regression_local_tree_holding_the_doc_is_not_up_to_date():
@@ -3480,7 +3615,8 @@ def test_merge_lld_doc_regression_local_tree_holding_the_doc_is_not_up_to_date()
     from sdlc_next import GitHub, cmd_merge_lld_doc
     epic = _epic(110, labels=["epic:architected"])
     child = _issue(185, stage="lld", parent=110)
-    gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])})
+    advance, _, _ = _advance_to_development_responses(185)
+    gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([epic, child]), **advance})
     gh_runner.prefix_responses = {("gh", "issue", "comment", "185"): ""}
     gh = GitHub(runner=gh_runner)
     inner = _lld_git(commit_sha="c0ffee")

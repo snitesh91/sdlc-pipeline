@@ -737,15 +737,17 @@ Worktree paths below use the config's `pipeline.worktrees` defaults
 
   - **Clean (any confidence)** → **no gate, ever** — `lld-review` is the only review
     a normal-epic child's design gets, deliberately. After `record-design-review`,
-    publish the design to the epic branch:
+    publish the design and advance the child in one call:
     `sdlc_next.py merge-lld-doc <n>` — commits this child's `lld.md` onto
-    `epic-<parent>` and pushes it, so the low-level design is durable there independent
-    of the child branch and siblings pick it up on their next `sync-branch` (better
-    cross-child overlap checks). Scoped no-op for a standing-epic child or a parentless
-    issue; a structured conflict result (never a crash) if the epic branch moved under
-    it. Then claim `development` directly:
-    `sdlc_next.py claim <n> --role development` (never `skip-gate`/`open-gate` here).
-    Continue immediately.
+    `epic-<parent>`, pushes and verifies it on origin (siblings pick it up on their
+    next `sync-branch`), then sets Stage to `Development` and clears Pipeline Status
+    — **advance, not claim**. Do **not** follow it with `claim <n> --role development`
+    (and never `skip-gate`/`open-gate` here): the child is now a fresh `next-action` /
+    `list-parallel-ready` unit and is picked by lane and priority alongside any
+    sibling `lld` it unblocked. Scoped no-op for a standing-epic child or a parentless
+    issue; a structured conflict result (never a crash, never an advance) if the epic
+    branch moved under it — re-run once quiet. `references/parallelism.md`,
+    "Publishing lld.md to the epic branch".
   - **Fixable task-level issue** → resume the `lld` agent; re-verify. Valve pairing
     `lld-review` <-> `lld`.
   - **Doesn't fit the epic's design after all** → deviation escalation, as if `lld`
