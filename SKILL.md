@@ -230,6 +230,7 @@ operational failure: stop and report, never retry by hand.
 | `list-needs-human` / `check-epics-closeable` / `retro-check [--mark-done --count <n>]` | End-of-invocation sweeps |
 | `sync-skill [--ref <ref>]` | Bump the skill submodule + re-vendor `.claude/agents/` (Step 5's manual bump/re-vendor, automated); stages both, does not commit |
 | `close-epic <n>` / `record-epic-verification <n> --kind e2e\|exploratory` | Epic close, two-call shape (`references/epics.md`, "Epic closing") |
+| `check-initiative-closeable <n>` / `record-initiative-verification <n> --summary` / `close-initiative <n>` | V2 Initiative close, one-call shape ("Closing an Initiative", above) |
 | `auto-pass-gate` / `mark-feedback-received` / `mark-feedback-addressed` / `mark-todo` / `mark-issue-closed` | CI-triggered real-time paths (the gate-auto-advance workflow) |
 
 **Branch-writing commands never touch the main checkout.** `sync-branch`,
@@ -360,6 +361,31 @@ closing on a Blocker/Critical delta, an open manual-testing bug child, or a
 verification that could not be run — full mechanics and the escalation cases in
 `references/epics.md`, "Epic closing". With the toggle off, `check-epics-closeable`
 just feeds Step 4 for the operator to act on.
+
+### Closing an Initiative — V2, fully automated
+
+`decide_next_action`'s Initiative branch (`_decide_initiative_next_action`) notices
+once every Epic cut from an Initiative is closed, and says so in a `none` result's
+`reason` rather than dispatching anything itself — same "next-action surfaces it, the
+orchestrator acts" shape as `check-epics-closeable` above, one tier up. On seeing that:
+
+1. `python3 "$SDLC" check-initiative-closeable <initiative>` — confirms every cut Epic
+   is actually closed (mechanical re-check, not a re-derivation).
+2. Delegate `sdlc-initiative-close` — a product-manager-role pass that starts the
+   delivered application (every cut Epic is already merged to `main`) and validates it
+   against every requirement in the Initiative's own `product.md`. It always records
+   its verification, met or not (`record-initiative-verification`).
+3. **Every requirement met** → `python3 "$SDLC" close-initiative <initiative>` — one
+   call, not two: an Initiative branch never itself merges to `main` (only its Gate A
+   doc did, onto `initiative-<n>`; see `initiative_branch`), so there is nothing to
+   reconcile or merge here, just the issue to close.
+4. **Anything not met** → file the gap (a Task against the relevant cut Epic, or judge
+   it out of scope and say why) and stop — do not close. Re-run from step 2 once fixed.
+
+**No human gate anywhere in this flow** — Gate A (the human review of `product.md`
+itself) already happened before any Epic was cut; validating the delivered result
+against that already-approved doc is the pipeline's own job, same as an Epic's e2e+
+exploratory pair needing no separate human sign-off either.
 
 ## Step 2 — Claim it
 

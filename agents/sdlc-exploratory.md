@@ -31,8 +31,14 @@ Aim at:
 - **Behaviour that passes and is still wrong.** A guard that returns the right status
   for the wrong reason. An empty list where an error belonged. A redirect that lands
   somewhere plausible but not correct.
-- **The seams the epic itself moved.** Read the epic's `architecture.md` and go
-  specifically where it says the boundaries now are.
+- **Architecture conformance, not just the seams it moved.** Read the epic's
+  `architecture.md` in full and check the delivered system against it directly: does
+  every boundary/data-flow/component decision it states actually hold in the running
+  system, or did development quietly deviate without anyone re-reviewing the change?
+  A deviation that works is still a finding here — `architecture.md` is the epic's
+  approved design, and a system that no longer matches it is undocumented drift the
+  next epic will design against a stale picture of. Go specifically where the doc says
+  the boundaries now are, and name any place the running system disagrees with it.
 
 ## Rules
 
@@ -64,6 +70,11 @@ repo were lost that way. Blocking calls, or stop and report. Docker only, per th
   problem → **a `Bug` child of this epic**, and it blocks the close.
 - **Normal / Low** — an unmapped surface, a non-reproducible flake, or a pre-existing
   problem this epic did not touch → **the standing RTB epic**.
+- **Architecture deviation with no functional defect** — the system works but no longer
+  matches what `architecture.md` states → not a bug, but call it out explicitly in your
+  findings comment as its own line; it does not block the close, but the doc is now
+  stale and someone should reconcile it (update the doc, or file the drift as its own
+  RTB item — the orchestrator decides which).
 
 You may not create issues yourself. List each finding with its severity, its evidence,
 and its destination in your final message; the orchestrator files them.

@@ -1558,6 +1558,86 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     return {"epic": epic, "merged": True, "pr": pr_number, "branch": branch}
 
 
+_INITIATIVE_VERIFICATION_MARKER = re.compile(
+    r"<!--\s*initiative-verification:\s*(\w+):(\d+)\s*(?:@[^>]*?)?-->")
+
+
+def missing_initiative_verification(comments: list) -> list:
+    """Closing an Initiative needs exactly one kind of evidence: a `requirements`
+    pass -- an agent playing the product-manager role, running the actually
+    delivered application (every cut Epic already merged to `main` by the time
+    this runs) and validating it against every requirement in the Initiative's
+    own `product.md`. Unlike an Epic's e2e+exploratory pair, there is no second
+    kind and no branch-reconcile ordering concern here: an Initiative branch
+    never merges to `main` at all (see `initiative_branch`), so there is no
+    "describes a different tree" trap to guard against -- by the time this is
+    called every cut Epic is already closed onto the one tree there is."""
+    seen = any(_INITIATIVE_VERIFICATION_MARKER.search(c.get("body", "")) for c in comments)
+    if seen:
+        return []
+    return ["no `requirements` closing-verification evidence (a PM-role pass "
+            "validating the delivered app against product.md was never recorded)"]
+
+
+def cmd_record_initiative_verification(gh: GitHub, initiative: int, summary: str) -> dict:
+    """Post an Initiative's closing verification as durable thread evidence --
+    same "never hand-type the marker" reasoning as `cmd_record_epic_verification`,
+    one tier up: `close-initiative` reads it back, and a verification that lives
+    only in a session's memory reads to the next session as one that never ran."""
+    timestamp = _utc_now_marker()
+    gh.issue_comment(initiative,
+        f"🧪 Requirements validation — closing verification for #{initiative}. {summary}\n\n"
+        f"<!-- initiative-verification: requirements:{initiative} @ {timestamp} -->")
+    return {"initiative": initiative, "kind": "requirements", "recorded": True}
+
+
+def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
+    """Is this Initiative ready for its own close validation? Every Epic cut
+    from it (a native sub-issue classified "epic") must be closed -- the same
+    "children all closed" question `check-epics-closeable` asks one tier down,
+    without that command's doc/dependents machinery: an Initiative carries no
+    design docs of its own past `product.md` and has no branch that ever merges
+    anywhere, so there is nothing else here to auto-verify."""
+    all_issues = gh.issue_list()
+    by_number = {i["number"]: i for i in all_issues}
+    initiative_issue = by_number.get(initiative)
+    if initiative_issue is None or not is_initiative(initiative_issue):
+        raise GhError(f"#{initiative} is not an Initiative -- pass the Initiative's own issue number")
+    cut_epics = [i for i in all_issues if i.get("parent")
+                 and i["parent"]["number"] == initiative and is_epic_unit(i)]
+    if not cut_epics:
+        return {"initiative": initiative, "closeable": False,
+                "reason": "no Epics have been cut from this Initiative yet"}
+    open_epics = sorted(i["number"] for i in cut_epics if i["state"] != "CLOSED")
+    if open_epics:
+        return {"initiative": initiative, "closeable": False, "open_epics": open_epics,
+                "reason": f"{len(open_epics)} cut Epic(s) still open: "
+                          f"{', '.join(f'#{n}' for n in open_epics)}"}
+    return {"initiative": initiative, "closeable": True,
+            "epics": sorted(i["number"] for i in cut_epics)}
+
+
+def cmd_close_initiative(gh: GitHub, initiative: int) -> dict:
+    """Closes the Initiative issue itself, once every cut Epic is closed and the
+    requirements-validation verification is recorded. Unlike `close-epic`, this
+    is **one call, not two**: there is no branch to reconcile or merge here --
+    an Initiative branch's only job was carrying Gate A's `product.md`; per
+    `initiative_branch`, it never itself merges to `main`. Every refusal is a
+    structured exit-0 result, never an exception -- "not ready yet" is the
+    normal state here too."""
+    check = cmd_check_initiative_closeable(gh, initiative)
+    if not check["closeable"]:
+        return {"initiative": initiative, "closed": False,
+                **{k: v for k, v in check.items() if k not in ("closeable",)}}
+    detail = gh.issue_view(initiative)
+    missing = missing_initiative_verification(detail.get("comments", []))
+    if missing:
+        return {"initiative": initiative, "closed": False, "missing_verification": missing,
+                "reason": f"closing verification incomplete: {'; '.join(missing)}"}
+    gh.issue_close(initiative)
+    return {"initiative": initiative, "closed": True, "epics": check["epics"]}
+
+
 def find_gate_comments_cutoff(pr: dict) -> str:
     cutoff = pr["createdAt"]
     for c in pr.get("comments", []):
@@ -5448,6 +5528,24 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_record_epic_verification(get_work_item_provider(), a.epic, a.kind, a.summary))
     p = sub.add_parser("check-epics-closeable")
     p.set_defaults(func=lambda a: cmd_check_epics_closeable(get_work_item_provider()))
+    p = sub.add_parser("close-initiative",
+                        help="V2: close the Initiative issue once every cut Epic is closed and "
+                             "the requirements-validation verification is recorded. One call, "
+                             "not two -- an Initiative branch never merges to main")
+    p.add_argument("initiative", type=int)
+    p.set_defaults(func=lambda a: cmd_close_initiative(get_work_item_provider(), a.initiative))
+    p = sub.add_parser("record-initiative-verification",
+                        help="V2: record an Initiative's closing verification -- a PM-role pass "
+                             "validating the delivered app against product.md")
+    p.add_argument("initiative", type=int)
+    p.add_argument("--summary", required=True)
+    p.set_defaults(func=lambda a: cmd_record_initiative_verification(
+        get_work_item_provider(), a.initiative, a.summary))
+    p = sub.add_parser("check-initiative-closeable",
+                        help="V2: is this Initiative ready for its close validation -- every "
+                             "cut Epic closed?")
+    p.add_argument("initiative", type=int)
+    p.set_defaults(func=lambda a: cmd_check_initiative_closeable(get_work_item_provider(), a.initiative))
     p = sub.add_parser("provision-epic-stack",
                         help="Stand up the epic's isolated runtime stack (own compose project, "
                              "ports, env/secrets profile, DB data dir) -- see pipeline.stack; "

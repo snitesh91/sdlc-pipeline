@@ -117,7 +117,14 @@ not even-slicing), and `lld-review` judges both the design and the carving. Ever
 Epic always carries two standing Tasks — Integration-test and e2e-test — that write
 the coverage a normal Task's unit tests don't; `pr-review` reviews what a normal
 Task's PR actually contains, and epic-close reuses the standing Tasks' attestations
-rather than re-running suites.
+rather than re-running suites; its exploratory pass also checks the delivered system
+against the epic's `architecture.md` directly, not just for behavioral bugs.
+
+Closing an Initiative is a new, fully automated step: once every Epic cut from it is
+closed, a `sdlc-initiative-close` pass plays the product-manager role — starts the
+delivered application and validates it against every requirement in the Initiative's
+own `product.md` — before `close-initiative` closes the issue. No human gate; see
+SKILL.md's "Closing an Initiative".
 
 Issue/work-item tracking is now behind a `WorkItemProvider` interface
 (`typing.Protocol`, `scripts/sdlc_next.py`) — `GitHub` is the only implementation
@@ -141,11 +148,12 @@ cp workflows/gate-auto-advance.yml <repo>/.github/workflows/  # needs secret SDL
 mkdir -p <repo>/<docRoot>/_templates && cp templates/*.template.md <repo>/<docRoot>/_templates/
 ```
 
-- **Agent definitions** (`agents/`): `sdlc-product`, `sdlc-architecture`,
-  `sdlc-design-review`, `sdlc-lld`, `sdlc-development`,
-  `sdlc-pr-review`, `sdlc-exploratory`. Each carries persona, procedure, refusal
-  criteria and `tools:` only; pipeline rules stay in `references/stage-playbooks.md`.
-  They reference the skill only as `$SDLC_DIR/...` (see Setup step 3).
+- **Agent definitions** (`agents/`): `sdlc-product`, `sdlc-product-review`,
+  `sdlc-architecture`, `sdlc-design-review`, `sdlc-lld`, `sdlc-development`,
+  `sdlc-pr-review`, `sdlc-exploratory`, `sdlc-initiative-close` (V2). Each carries
+  persona, procedure, refusal criteria and `tools:` only; pipeline rules stay in
+  `references/stage-playbooks.md`. They reference the skill only as `$SDLC_DIR/...`
+  (see Setup step 3).
 - **`workflows/gate-auto-advance.yml`** calling `auto-pass-gate`, `mark-todo`,
   `mark-issue-closed` (real-time gate backstop; `next-action` works without it, just
   later). Assumes the skill is the `.github/sdlc-pipeline` submodule.

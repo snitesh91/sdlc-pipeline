@@ -6649,3 +6649,118 @@ def test_decide_next_action_initiative_gate_a_passed_all_epics_closed():
     result = decide_next_action(gh, 40)
     assert result["action"] == "none"
     assert "initiative-close" in result["reason"]
+
+
+# --- closing an Initiative (V2) ---
+
+def test_check_initiative_closeable_true_when_all_cut_epics_closed():
+    from sdlc_next import GitHub, cmd_check_initiative_closeable
+    initiative = _issue(40, labels=["type:initiative"])
+    e1 = _issue(41, parent=40, labels=["type:epic"], state="CLOSED")
+    e2 = _issue(42, parent=40, labels=["type:epic"], state="CLOSED")
+    runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative, e1, e2])})
+    gh = GitHub(runner=runner)
+    result = cmd_check_initiative_closeable(gh, 40)
+    assert result == {"initiative": 40, "closeable": True, "epics": [41, 42]}
+
+
+def test_check_initiative_closeable_false_with_open_epics_listed():
+    from sdlc_next import GitHub, cmd_check_initiative_closeable
+    initiative = _issue(40, labels=["type:initiative"])
+    e1 = _issue(41, parent=40, labels=["type:epic"], state="CLOSED")
+    e2 = _issue(42, parent=40, labels=["type:epic"], state="OPEN")
+    runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative, e1, e2])})
+    gh = GitHub(runner=runner)
+    result = cmd_check_initiative_closeable(gh, 40)
+    assert result["closeable"] is False
+    assert result["open_epics"] == [42]
+
+
+def test_check_initiative_closeable_false_when_no_epics_cut_yet():
+    from sdlc_next import GitHub, cmd_check_initiative_closeable
+    initiative = _issue(40, labels=["type:initiative"])
+    runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative])})
+    gh = GitHub(runner=runner)
+    result = cmd_check_initiative_closeable(gh, 40)
+    assert result == {"initiative": 40, "closeable": False,
+                       "reason": "no Epics have been cut from this Initiative yet"}
+
+
+def test_check_initiative_closeable_rejects_non_initiative():
+    from sdlc_next import GitHub, GhError, cmd_check_initiative_closeable
+    epic = _epic(90)
+    runner = ScriptedRunner({tuple(_list_argv()): _list_response([epic])})
+    gh = GitHub(runner=runner)
+    try:
+        cmd_check_initiative_closeable(gh, 90)
+        assert False, "expected GhError"
+    except GhError as e:
+        assert "is not an Initiative" in str(e)
+
+
+def test_missing_initiative_verification_detects_absence_and_presence():
+    from sdlc_next import missing_initiative_verification
+    assert missing_initiative_verification([]) != []
+    assert missing_initiative_verification(
+        [{"body": "<!-- initiative-verification: requirements:40 @ 2026-09-14T00:00:00Z -->"}]) == []
+
+
+def test_record_initiative_verification_posts_marked_comment():
+    from sdlc_next import GitHub, cmd_record_initiative_verification
+    runner = ScriptedRunner()
+    runner.prefix_responses = {("gh", "issue", "comment", "40"): ""}
+    gh = GitHub(runner=runner)
+    result = cmd_record_initiative_verification(gh, 40, "Every requirement in product.md checked live.")
+    assert result == {"initiative": 40, "kind": "requirements", "recorded": True}
+    comment_call = next(c for c in runner.calls if c[:3] == ["gh", "issue", "comment"])
+    body = comment_call[comment_call.index("--body") + 1]
+    assert "<!-- initiative-verification: requirements:40 @" in body
+
+
+def test_close_initiative_refuses_when_not_closeable():
+    from sdlc_next import GitHub, cmd_close_initiative
+    initiative = _issue(40, labels=["type:initiative"])
+    e1 = _issue(41, parent=40, labels=["type:epic"], state="OPEN")
+    runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative, e1])})
+    gh = GitHub(runner=runner)
+    result = cmd_close_initiative(gh, 40)
+    assert result["closed"] is False
+    assert result["open_epics"] == [41]
+    assert not any(c[:3] == ["gh", "issue", "close"] for c in runner.calls)
+
+
+def test_close_initiative_refuses_when_verification_missing():
+    from sdlc_next import GitHub, cmd_close_initiative
+    initiative = _issue(40, labels=["type:initiative"])
+    e1 = _issue(41, parent=40, labels=["type:epic"], state="CLOSED")
+    runner = ScriptedRunner({
+        tuple(_list_argv()): _list_response([initiative, e1]),
+        ("gh", "issue", "view", "40", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": []}),
+    })
+    gh = GitHub(runner=runner)
+    result = cmd_close_initiative(gh, 40)
+    assert result["closed"] is False
+    assert "missing_verification" in result
+    assert not any(c[:3] == ["gh", "issue", "close"] for c in runner.calls)
+
+
+def test_close_initiative_closes_when_clean():
+    from sdlc_next import GitHub, cmd_close_initiative
+    initiative = _issue(40, labels=["type:initiative"])
+    e1 = _issue(41, parent=40, labels=["type:epic"], state="CLOSED")
+    runner = ScriptedRunner({
+        tuple(_list_argv()): _list_response([initiative, e1]),
+        ("gh", "issue", "view", "40", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [
+                {"body": "<!-- initiative-verification: requirements:40 @ 2026-09-14T00:00:00Z -->"},
+            ]}),
+    })
+    runner.prefix_responses = {("gh", "issue", "close", "40"): ""}
+    gh = GitHub(runner=runner)
+    result = cmd_close_initiative(gh, 40)
+    assert result == {"initiative": 40, "closed": True, "epics": [41]}
+    close_call = next(c for c in runner.calls if c[:3] == ["gh", "issue", "close"])
+    assert close_call[:6] == ["gh", "issue", "close", "40", "--repo", "owner/repo"]
