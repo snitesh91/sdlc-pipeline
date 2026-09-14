@@ -833,7 +833,7 @@ def test_check_epics_closeable_skips_epic_with_open_children():
 
 def test_claim_sets_stage_and_status_fields_and_posts_start_comment():
     from sdlc_next import (GitHub, cmd_claim, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
-                            _ISSUE_EPIC_CHECK_QUERY, STAGE_FIELD_ID, STAGE_OPTION_IDS,
+                            STAGE_FIELD_ID, STAGE_OPTION_IDS,
                             PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS)
     from tests.test_sdlc_next import ScriptedRunner
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}")
@@ -841,15 +841,10 @@ def test_claim_sets_stage_and_status_fields_and_posts_start_comment():
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=STAGE_FIELD_ID, option_id=STAGE_OPTION_IDS['architecture'])}")
     status_mutation_argv = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['in-progress'])}")
-    epic_check_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=9)}")
     runner = ScriptedRunner({
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
         stage_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
         status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
-        # issue #9 here is an ordinary Task child, not an epic -- no board Status write follows.
-        epic_check_argv: json.dumps({"data": {"repository": {"issue": {
-            "issueType": {"name": "Task"}, "parent": {"number": 92}, "labels": {"nodes": []},
-        }}}}),
         ("gh", "issue", "comment", "9", "--repo", "owner/repo",
          "--body", "🚧 Picking this up — architecture stage starting."): "",
     })
@@ -858,115 +853,13 @@ def test_claim_sets_stage_and_status_fields_and_posts_start_comment():
     assert runner.calls.count(list(node_id_argv)) == 2
     assert list(stage_mutation_argv) in runner.calls
     assert list(status_mutation_argv) in runner.calls
-    assert list(epic_check_argv) in runner.calls
 
 
-def test_claim_sets_board_status_in_progress_for_normal_epic():
-    """A normal (not standing/legacy) epic claiming its own product/architecture
-    stage also flips the board's Status to In Progress."""
-    from sdlc_next import (GitHub, cmd_claim, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
-                            _ISSUE_EPIC_CHECK_QUERY, _ISSUE_PROJECT_ITEM_QUERY,
-                            _SET_PROJECT_STATUS_MUTATION, STAGE_FIELD_ID, STAGE_OPTION_IDS,
-                            PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS,
-                            PROJECT_ID, PROJECT_NUMBER, STATUS_FIELD_ID, STATUS_OPTION_IDS)
-    from tests.test_sdlc_next import ScriptedRunner
-    node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=110)}")
-    stage_mutation_argv = ("gh", "api", "graphql", "-f",
-        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_110', field_id=STAGE_FIELD_ID, option_id=STAGE_OPTION_IDS['product'])}")
-    status_mutation_argv = ("gh", "api", "graphql", "-f",
-        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_110', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['in-progress'])}")
-    epic_check_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=110)}")
-    project_item_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_PROJECT_ITEM_QUERY.format(n=110)}")
-    board_status_argv = ("gh", "api", "graphql", "-f",
-        f"query={_SET_PROJECT_STATUS_MUTATION.format(project_id=PROJECT_ID, item_id='ITEM_110', field_id=STATUS_FIELD_ID, option_id=STATUS_OPTION_IDS['in-progress'])}")
-    runner = ScriptedRunner({
-        node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_110"}}}}),
-        stage_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 110}}}}),
-        status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 110}}}}),
-        epic_check_argv: json.dumps({"data": {"repository": {"issue": {
-            "issueType": {"name": "Feature"}, "parent": None, "labels": {"nodes": []},
-        }}}}),
-        project_item_argv: json.dumps({"data": {"repository": {"issue": {"projectItems": {"nodes": [
-            {"id": "ITEM_110", "project": {"number": PROJECT_NUMBER}},
-        ]}}}}}),
-        board_status_argv: json.dumps({"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "ITEM_110"}}}}),
-        ("gh", "issue", "comment", "110", "--repo", "owner/repo",
-         "--body", "🚧 Picking this up — product stage starting."): "",
-    })
-    gh = GitHub(runner=runner)
-    assert cmd_claim(gh, 110, "product") == {"issue": 110, "claimed": True}
-    assert list(board_status_argv) in runner.calls
-
-
-def test_claim_skips_board_status_for_standing_epic():
-    from sdlc_next import (GitHub, cmd_claim, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
-                            _ISSUE_EPIC_CHECK_QUERY, STAGE_FIELD_ID, STAGE_OPTION_IDS,
-                            PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS)
-    from tests.test_sdlc_next import ScriptedRunner
-    node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=94)}")
-    stage_mutation_argv = ("gh", "api", "graphql", "-f",
-        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_94', field_id=STAGE_FIELD_ID, option_id=STAGE_OPTION_IDS['product'])}")
-    status_mutation_argv = ("gh", "api", "graphql", "-f",
-        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_94', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['in-progress'])}")
-    epic_check_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=94)}")
-    runner = ScriptedRunner({
-        node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_94"}}}}),
-        stage_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 94}}}}),
-        status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 94}}}}),
-        epic_check_argv: json.dumps({"data": {"repository": {"issue": {
-            "issueType": {"name": "Feature"}, "parent": None,
-            "labels": {"nodes": [{"name": "epic:standing"}]},
-        }}}}),
-        ("gh", "issue", "comment", "94", "--repo", "owner/repo",
-         "--body", "🚧 Picking this up — product stage starting."): "",
-    })
-    gh = GitHub(runner=runner)
-    # No project_item_id/set_project_status call is scripted -- ScriptedRunner
-    # raises AssertionError on any unscripted call, so this itself proves the
-    # standing epic never reaches a board-status write.
-    assert cmd_claim(gh, 94, "product") == {"issue": 94, "claimed": True}
-
-
-def test_set_project_status_swallows_missing_project_item():
-    """An issue not (yet) on the board -- no project item -- is a silent no-op,
-    never a failure, since board Status is a convenience, not load-bearing."""
-    from sdlc_next import GitHub, _ISSUE_PROJECT_ITEM_QUERY
-    from tests.test_sdlc_next import ScriptedRunner
-    project_item_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_PROJECT_ITEM_QUERY.format(n=999)}")
-    runner = ScriptedRunner({
-        project_item_argv: json.dumps({"data": {"repository": {"issue": {"projectItems": {"nodes": []}}}}}),
-    })
-    gh = GitHub(runner=runner)
-    gh.set_project_status(999, "done")  # must not raise
-    assert list(project_item_argv) in runner.calls
-
-
-def test_set_project_status_swallows_graphql_failure():
-    """A transient GraphQL failure writing the board's Status field is swallowed,
-    not raised -- it must never fail the caller (a stage claim, a workflow run)."""
-    from sdlc_next import (GitHub, _ISSUE_PROJECT_ITEM_QUERY, _SET_PROJECT_STATUS_MUTATION,
-                            PROJECT_ID, PROJECT_NUMBER, STATUS_FIELD_ID, STATUS_OPTION_IDS)
-    from tests.test_sdlc_next import ScriptedRunner
-    project_item_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_PROJECT_ITEM_QUERY.format(n=110)}")
-    board_status_argv = ("gh", "api", "graphql", "-f",
-        f"query={_SET_PROJECT_STATUS_MUTATION.format(project_id=PROJECT_ID, item_id='ITEM_110', field_id=STATUS_FIELD_ID, option_id=STATUS_OPTION_IDS['done'])}")
-    runner = ScriptedRunner({
-        project_item_argv: json.dumps({"data": {"repository": {"issue": {"projectItems": {"nodes": [
-            {"id": "ITEM_110", "project": {"number": PROJECT_NUMBER}},
-        ]}}}}}),
-    })
-    runner.fail_on.add(board_status_argv)
-    gh = GitHub(runner=runner)
-    gh.set_project_status(110, "done")  # must not raise despite the scripted failure
-
-
-def test_mark_issue_closed_clears_stage_sets_done_and_board_status_for_epic():
+def test_mark_issue_closed_clears_stage_and_sets_done_for_epic():
     from sdlc_next import (GitHub, cmd_mark_issue_closed, _ISSUE_EPIC_CHECK_QUERY,
-                            _ISSUE_PROJECT_ITEM_QUERY, _SET_PROJECT_STATUS_MUTATION,
                             _ISSUE_NODE_ID_QUERY, _DELETE_ISSUE_FIELD_VALUE_MUTATION,
                             _SET_ISSUE_FIELD_MUTATION, STAGE_FIELD_ID,
-                            PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS,
-                            PROJECT_ID, PROJECT_NUMBER, STATUS_FIELD_ID, STATUS_OPTION_IDS)
+                            PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS)
     from tests.test_sdlc_next import ScriptedRunner
     epic_check_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=110)}")
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=110)}")
@@ -974,9 +867,6 @@ def test_mark_issue_closed_clears_stage_sets_done_and_board_status_for_epic():
         f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_110', field_id=STAGE_FIELD_ID)}")
     set_done_argv = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_110', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['done'])}")
-    project_item_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_PROJECT_ITEM_QUERY.format(n=110)}")
-    board_status_argv = ("gh", "api", "graphql", "-f",
-        f"query={_SET_PROJECT_STATUS_MUTATION.format(project_id=PROJECT_ID, item_id='ITEM_110', field_id=STATUS_FIELD_ID, option_id=STATUS_OPTION_IDS['done'])}")
     runner = ScriptedRunner({
         epic_check_argv: json.dumps({"data": {"repository": {"issue": {
             "issueType": {"name": "Feature"}, "parent": None, "labels": {"nodes": []},
@@ -984,16 +874,11 @@ def test_mark_issue_closed_clears_stage_sets_done_and_board_status_for_epic():
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_110"}}}}),
         clear_stage_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 110}}}}),
         set_done_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 110}}}}),
-        project_item_argv: json.dumps({"data": {"repository": {"issue": {"projectItems": {"nodes": [
-            {"id": "ITEM_110", "project": {"number": PROJECT_NUMBER}},
-        ]}}}}}),
-        board_status_argv: json.dumps({"data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "ITEM_110"}}}}),
     })
     gh = GitHub(runner=runner)
     assert cmd_mark_issue_closed(gh, 110) == {"issue": 110, "is_epic": True, "marked_done": True}
     assert list(clear_stage_argv) in runner.calls
     assert list(set_done_argv) in runner.calls
-    assert list(board_status_argv) in runner.calls
 
 
 def test_mark_issue_closed_clears_stage_and_sets_done_for_non_epic():
@@ -6262,6 +6147,9 @@ def test_merge_epic_lld_doc_advances_every_freshly_created_task_and_skips_alread
 
     gh_runner = ScriptedRunner({
         tuple(_list_argv()): _list_response([epic, fresh_task_1, fresh_task_2, already_advanced]),
+        ("gh", "issue", "view", "110", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"labels": [{"name": "epic:architected"}]}),
         **advance_501, **advance_502,
     })
     gh_runner.prefix_responses[("gh", "issue", "comment")] = ""
@@ -6276,6 +6164,9 @@ def test_merge_epic_lld_doc_advances_every_freshly_created_task_and_skips_alread
     result = cmd_merge_lld_doc(gh, path, 110, runner=git_runner, unit="epic")
     assert result["merged"] is True
     assert sorted(result["advanced_tasks"]) == [501, 502]
+    # Already epic:architected (mocked above) -- the idempotency check must
+    # skip re-clearing fields / re-adding the label, not just skip erroring.
+    assert not any(c[:3] == ["gh", "issue", "edit"] for c in gh_runner.calls)
 
     # The already-advanced Task got no field write and no new comment at all.
     graphql_calls = [c for c in gh_runner.calls if c[:3] == ["gh", "api", "graphql"]]
@@ -6283,6 +6174,50 @@ def test_merge_epic_lld_doc_advances_every_freshly_created_task_and_skips_alread
         assert "ISSUE_503" not in c[-1] or "updateIssueFieldValue" not in c[-1]
     comment_calls = [c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"]]
     assert not any(c[3] == "503" for c in comment_calls)
+
+
+def test_merge_epic_lld_doc_completes_the_epics_own_design_phase():
+    # Live-testing finding (2026-09-14): before this, a V2 epic's architecture
+    # gate claims `lld` instead of marking done (see `_complete_epic_architecture`),
+    # so nothing ever set `epic:architected` for a V2 epic at all --
+    # list-parallel-ready refused every Task forever with "epic is not
+    # epic:architected yet". merge-lld-doc is the only place left to do it,
+    # once the epic's one lld pass is confirmed on origin.
+    from sdlc_next import (GitHub, cmd_merge_lld_doc, _ISSUE_NODE_ID_QUERY,
+                            _DELETE_ISSUE_FIELD_VALUE_MUTATION, STAGE_FIELD_ID,
+                            PIPELINE_STATUS_FIELD_ID)
+    path = "/epic-120"
+    doc = "docs/sdlc/epic-120/lld.md"
+    epic = _epic(120)  # not yet epic:architected
+    fresh_task = _issue(701, parent=120, issue_type="Task", labels=["type:task"])
+    advance_701, _, _ = _advance_to_development_responses(701)
+    node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=120)}")
+    del_stage_argv = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_120', field_id=STAGE_FIELD_ID)}")
+    del_status_argv = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_120', field_id=PIPELINE_STATUS_FIELD_ID)}")
+    gh_runner = ScriptedRunner({
+        tuple(_list_argv()): _list_response([epic, fresh_task]),
+        ("gh", "issue", "view", "120", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"labels": []}),
+        node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_120"}}}}),
+        del_stage_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 120}}}}),
+        del_status_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 120}}}}),
+        **advance_701,
+    })
+    gh_runner.prefix_responses = {("gh", "issue", "comment"): "",
+                                   ("gh", "issue", "edit", "120"): ""}
+    gh = GitHub(runner=gh_runner)
+    git_runner = ScriptedRunner({
+        **_live_wt("epic-120", path=path),
+        ("git", "-C", path, "fetch", "origin"): "",
+        ("git", "-C", path, "rev-parse", "--verify", "--quiet", f"origin/epic-120:{doc}"): "blobXYZ\n",
+    })
+    result = cmd_merge_lld_doc(gh, path, 120, runner=git_runner, unit="epic")
+    assert result["merged"] is True
+    edit_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "edit"])
+    assert "epic:architected" in edit_call
 
 
 def test_v2_full_lifecycle_initiative_to_epic_to_task_smoke():
@@ -6349,6 +6284,15 @@ def test_v2_full_lifecycle_initiative_to_epic_to_task_smoke():
         json.dumps({"data": {"addSubIssue": {"subIssue": {"number": 41}}}})
     a41c, r41c = epic_check(41, parent=40, labels=["type:epic"])
     gh_responses[a41c] = r41c
+    gh_responses[("gh", "issue", "view", "41", "--repo", "owner/repo",
+                  "--json", "number,title,labels,body,state,comments")] = \
+        json.dumps({"labels": []})
+    del_stage_41 = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_41', field_id=STAGE_FIELD_ID)}")
+    del_status_41 = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_41', field_id=PIPELINE_STATUS_FIELD_ID)}")
+    gh_responses[del_stage_41] = json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 41}}}})
+    gh_responses[del_status_41] = json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 41}}}})
 
     gh_responses[("gh", "api", "repos/owner/repo/issues", "-f", "title=Task: parse WhatsApp payload",
                   "-f", "body=Carved by epic-41's lld.", "-f", "labels[]=type:task")] = \
@@ -6521,7 +6465,7 @@ def test_pass_gate_unit_epic_v2_claims_lld_instead_of_completing_architecture():
     # any Task starts. Fields only clear later, when `_merge_epic_lld_doc`
     # confirms the epic's own lld.md reached origin.
     from sdlc_next import (GitHub, cmd_pass_gate, _ISSUE_NODE_ID_QUERY,
-                            _SET_ISSUE_FIELD_MUTATION, _ISSUE_PROJECT_ITEM_QUERY,
+                            _SET_ISSUE_FIELD_MUTATION,
                             STAGE_FIELD_ID, STAGE_OPTION_IDS, PIPELINE_STATUS_FIELD_ID,
                             PIPELINE_STATUS_OPTION_IDS)
     git_runner = ScriptedRunner({
@@ -6537,8 +6481,6 @@ def test_pass_gate_unit_epic_v2_claims_lld_instead_of_completing_architecture():
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_41', field_id=STAGE_FIELD_ID, option_id=STAGE_OPTION_IDS['lld'])}")
     status_mut = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_41', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['in-progress'])}")
-    project_item_argv = ("gh", "api", "graphql", "-f",
-        f"query={_ISSUE_PROJECT_ITEM_QUERY.format(n=41)}")
     gh_runner = ScriptedRunner({
         ("gh", "issue", "view", "41", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
@@ -6547,7 +6489,6 @@ def test_pass_gate_unit_epic_v2_claims_lld_instead_of_completing_architecture():
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_41"}}}}),
         stage_mut: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 41}}}}),
         status_mut: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 41}}}}),
-        project_item_argv: json.dumps({"data": {"repository": {"issue": {"projectItems": {"nodes": []}}}}}),
     })
     gh_runner.prefix_responses = {("gh", "issue", "comment", "41"): ""}
     gh = GitHub(runner=gh_runner)

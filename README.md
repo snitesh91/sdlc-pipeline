@@ -35,14 +35,20 @@ sdlc.config.sample.json     template config — copy into your repo and fill in
    or under `.config/` / `.claude/`), or via `$SDLC_CONFIG`. Nothing is baked into
    the skill, so a missing config is a loud error, never a silent run on placeholders.
 
-2. **Look up your GitHub Projects-v2 schema ids** (the `projectFields` block). These
-   are per-repo/-org ids for your provisioned issue types and single-select fields.
-   Introspect them once, e.g.:
+2. **Look up your GitHub custom Issue Types/Fields ids** (the `projectFields` block).
+   Despite the name, these are **not** Projects-v2 board fields — `Stage`, `Pipeline
+   Status`, `Priority`, `Effort` and your Issue Types are GitHub's org-level custom
+   Issue Types/Issue Fields (Settings → Issue types / Issue fields for your org),
+   automatically available on every repo in the org once created there, once. No
+   Projects v2 board is required anywhere in this skill. Provision them once (via the
+   org settings UI) and introspect the ids once, e.g.:
 
    ```bash
    gh api graphql -f query='query { repository(owner:"OWNER", name:"REPO") {
      issueTypes(first:20){nodes{id name}} } }'
-   # and the org/project field + option ids via the projectV2 / field queries
+   gh api graphql -f query='query { organization(login:"ORG") {
+     issueFields(first:20){nodes{
+       ... on IssueFieldSingleSelect { id name options { id name } } }} } }'
    ```
 
 3. **Import the skill into your repo.** Recommended layout: a git submodule (so CI
@@ -171,9 +177,10 @@ rule), and write the commit yourself so its message names why you're re-syncing.
 Still external — not in this repository:
 
 - **The `superpowers` plugin** (the `development` agent invokes three of its skills).
-- **GitHub Projects v2 custom issue fields** `Stage`, `Pipeline Status`, `Priority`,
-  `Effort` with the option names the sample config lists, plus issue types
-  Task/Bug/Feature.
+- **GitHub's org-level custom Issue Fields** `Stage`, `Pipeline Status`, `Priority`,
+  `Effort` with the option names the sample config lists, plus custom Issue Types
+  (Task/Bug/Feature, and Initiative/Epic for V2) — provisioned once per org via
+  Settings → Issue types / Issue fields, not a Projects-v2 board.
 
 `references/stage-playbooks.md` and `references/parallelism.md` still quote the
 origin repo's own commands and limits (`make lint`, `npm run test:it`, `make e2e`,

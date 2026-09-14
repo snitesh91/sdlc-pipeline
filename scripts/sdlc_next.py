@@ -369,19 +369,6 @@ PIPELINE_STATUS_FIELD_NAMES = {
 # `feedback-received` issue as gate-pending at all.
 GATE_PENDING_STATUSES = ("awaiting-human-review", "feedback-received")
 
-# The board's own native Projects-v2 "Status" field (Todo/In Progress/Done) --
-# genuinely distinct from the "Pipeline Status" Issue Field above (see the
-# "Note" under "Repo access" in references/operations.md: Projects v2 access was unavailable
-# for a while, which is why Pipeline Status exists as a separate Issue Field in
-# the first place). This one is a human-facing board convenience, set only for
-# a normal epic's own start/close (see "Epic board Status" in references/epics.md) -- never
-# read back by any pipeline decision, so a write failure here is always
-# swallowed, not raised (see GitHub.set_project_status).
-PROJECT_ID = _PF["projectId"]
-PROJECT_NUMBER = _PF["projectNumber"]
-STATUS_FIELD_ID = _PF["statusFieldId"]
-STATUS_OPTION_IDS = _PF["statusOptionIds"]
-
 Runner = Callable[[list], str]
 
 
@@ -431,8 +418,6 @@ class WorkItemProvider(Protocol):
     def issue_create(self, title: str, body: str, labels: list) -> int: ...
     def issue_comment(self, number: int, body: str) -> None: ...
     def issue_close(self, number: int) -> None: ...
-    def project_item_id(self, number: int) -> Optional[str]: ...
-    def set_project_status(self, number: int, status: str) -> None: ...
     def blocked_by(self, number: int) -> list: ...
     def add_blocked_by(self, issue_number: int, blocking_number: int) -> None: ...
     def blocking(self, number: int) -> list: ...
@@ -554,34 +539,6 @@ class GitHub:
         directly on that dict instead -- re-fetching per issue here would be an
         N+1 GraphQL call per pass."""
         return classify_unit_from_issue(self.issue_epic_info(number))
-
-    def project_item_id(self, number: int) -> Optional[str]:
-        """The Projects-v2 item id for `number` within the board (PROJECT_NUMBER)
-        -- distinct from the issue's own node id, since Projects v2 field
-        mutations are scoped to a project item, not the issue itself. None if
-        this issue isn't (yet) on the board."""
-        data = self.graphql(_ISSUE_PROJECT_ITEM_QUERY.format(n=number))
-        for item in data["repository"]["issue"]["projectItems"]["nodes"]:
-            if item["project"]["number"] == PROJECT_NUMBER:
-                return item["id"]
-        return None
-
-    def set_project_status(self, number: int, status: str):
-        """Best-effort write to the board's native Projects-v2 "Status" field
-        (Todo/In Progress/Done) -- see "Epic board Status" in references/epics.md. Distinct
-        from set_pipeline_status_field above (a different, load-bearing field):
-        this one is a human-facing board convenience only, so a missing project
-        item or a transient GraphQL failure is swallowed here, never raised --
-        it must never block or fail a stage claim or a workflow run."""
-        item_id = self.project_item_id(number)
-        if item_id is None:
-            return
-        try:
-            self.graphql(_SET_PROJECT_STATUS_MUTATION.format(
-                project_id=PROJECT_ID, item_id=item_id, field_id=STATUS_FIELD_ID,
-                option_id=STATUS_OPTION_IDS[status]))
-        except GhError:
-            pass
 
     def blocked_by(self, number: int) -> list:
         """Open issue numbers blocking `number`, via the native blockedBy relationship
@@ -1189,23 +1146,6 @@ _ISSUE_EPIC_CHECK_QUERY = """query {{ repository(owner:"__OWNER__", name:"__NAME
     labels(first: 20) {{ nodes {{ name }} }}
   }}
 }} }}"""
-
-_ISSUE_PROJECT_ITEM_QUERY = """query {{ repository(owner:"__OWNER__", name:"__NAME__") {{
-  issue(number: {n}) {{
-    projectItems(first: 10) {{ nodes {{ id project {{ number }} }} }}
-  }}
-}} }}"""
-
-_SET_PROJECT_STATUS_MUTATION = """mutation {{
-  updateProjectV2ItemFieldValue(input: {{
-    projectId: "{project_id}"
-    itemId: "{item_id}"
-    fieldId: "{field_id}"
-    value: {{ singleSelectOptionId: "{option_id}" }}
-  }}) {{
-    projectV2Item {{ id }}
-  }}
-}}"""
 
 _BLOCKED_BY_QUERY = """query {{ repository(owner:"__OWNER__", name:"__NAME__") {{
   issue(number: {n}) {{ blockedBy(first: 20) {{ nodes {{ number state }} }} }}
@@ -3086,25 +3026,8 @@ def cmd_claim(gh: GitHub, issue: int, role: str) -> dict:
                        f"{sorted(STAGE_OPTION_IDS)}")
     gh.set_stage_field(issue, role)
     gh.set_pipeline_status_field(issue, "in-progress")
-    _maybe_mark_epic_in_progress(gh, issue)
     _post_start_comment(gh, issue, role)
     return {"issue": issue, "claimed": True}
-
-
-def _maybe_mark_epic_in_progress(gh: GitHub, issue: int):
-    """Sets the board's native Status field to "In Progress" the moment a normal
-    epic starts or resumes its own Product/Architecture phase -- see "Epic board
-    Status" in references/epics.md. A no-op for a child issue. Deliberately excluded for a
-    standing epic (`is_epic_standing`) -- it never claims an epic-level stage
-    (its children run the old per-issue flow instead), so this never fires for
-    it either way; the operator tracks its board Status by hand. (An
-    `epic:legacy` epic is never passed here at all -- `decide_next_action`
-    skips it before `claim` is ever called on it or any of its children.)
-    Best-effort by construction (set_project_status swallows its own
-    failures), so this can never block or fail the claim itself."""
-    info = gh.issue_epic_info(issue)
-    if is_epic_unit(info) and not is_epic_standing(info):
-        gh.set_project_status(issue, "in-progress")
 
 
 def cmd_start_comment(gh: GitHub, issue: int, role: str) -> dict:
@@ -3481,6 +3404,18 @@ def _merge_epic_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
             f"`list-parallel-ready` pick it up as a fresh unit.\n\n"
             f"<!-- stage-transition: lld-review->development @ {timestamp} -->")
         advanced.append(number)
+    # The epic's own design phase (architecture + its one lld pass) is now
+    # fully done -- same "children may proceed" signal `_complete_epic_architecture`
+    # gives V1 right after architecture Gate B, just one phase later here. Without
+    # this, `epic:architected` never gets set for a V2 epic at all: its
+    # architecture-gate completion claims `lld` instead of marking done (see
+    # `_complete_epic_architecture`), so this is the only place left to do it.
+    # Idempotent: a re-run of this command after a crash mid-way finds the label
+    # already there and the fields already clear -- both writes are no-ops in
+    # substance, just repeated.
+    if not has_label(gh.issue_view(epic), LABELS["architected"]):
+        gh.clear_stage_and_status_fields(epic)
+        gh.issue_edit(epic, add_labels=[LABELS["architected"]])
     return _with_workspace({"epic": epic, "merged": True, "advanced_tasks": advanced}, ws)
 
 
@@ -4703,26 +4638,17 @@ def cmd_mark_issue_closed(gh: GitHub, issue: int) -> dict:
     `merge-pr` call, silently missing any issue a human closed by hand. Moving
     this to the same real-time `issues: closed` trigger `mark-epic-done`
     (this command's predecessor) already used covers every closure path
-    uniformly, the same way `mark-epic-done` already did for the board Status
-    half of this.
+    uniformly.
 
     Every closed issue: Stage is cleared (`clear_stage_field` -- "current
     stage" is meaningless once closed) and Pipeline Status is set to `Done`
     (`set_pipeline_status_field(..., "done")` -- **not** deleted, unlike the
     old behavior; a closed issue has a real, meaningful terminal state now that
-    the field has a `Done` option, added 2026-08-20 alongside this change).
-    If `issue` is also an epic, the board's native Status field additionally
-    flips to `Done` too (unchanged from `mark-epic-done`'s prior behavior) --
-    applies to every epic regardless of standing/legacy status, since a human
-    closing any epic is real completion signal worth reflecting on the board,
-    even one whose children never ran the epic-level flow in the first place."""
+    the field has a `Done` option, added 2026-08-20 alongside this change)."""
     info = gh.issue_epic_info(issue)
     gh.clear_stage_field(issue)
     gh.set_pipeline_status_field(issue, "done")
-    epic = is_epic(info)
-    if epic:
-        gh.set_project_status(issue, "done")
-    return {"issue": issue, "is_epic": epic, "marked_done": True}
+    return {"issue": issue, "is_epic": is_epic(info), "marked_done": True}
 
 
 # Tracked file holding the closed-issue count at the last completed retrospective

@@ -1,5 +1,5 @@
 {
-  "_comment": "Template config for the sdlc-pipeline skill. Copy this into the repo you want to drive as `sdlc-pipeline.config.json` (or `.claude/sdlc-pipeline.config.json`) and replace every value below. The skill itself is generic and ships no real config. The projectFields ids are GitHub Projects-v2 schema ids for YOUR repo \u2014 look them up once via `gh api graphql` introspection. See README.md.",
+  "_comment": "Template config for the sdlc-pipeline skill. Copy this into the repo you want to drive as `sdlc-pipeline.config.json` (or `.claude/sdlc-pipeline.config.json`) and replace every value below. The skill itself is generic and ships no real config. Despite the `projectFields` name, none of this is a GitHub Projects-v2 board field -- every id here is one of GitHub's ORG-LEVEL custom Issue Types/Issue Fields (the same family: Settings -> Issue types / Issue fields for your org), automatically available on every repo in the org once created, no Projects-v2 board required at all. Look every id up once via `gh api graphql` introspection. See README.md.",
   "repo": "owner/repo",
   "docRoot": "docs/sdlc",
   "tokenPath": "~/.github-token",
@@ -67,14 +67,6 @@
       "needs-human": "STATUS_NEEDS_HUMAN_ID",
       "feedback-received": "STATUS_FEEDBACK_RECEIVED_ID",
       "done": "STATUS_DONE_ID"
-    },
-    "projectId": "PROJECT_ID",
-    "projectNumber": 1,
-    "statusFieldId": "BOARD_STATUS_FIELD_ID",
-    "statusOptionIds": {
-      "todo": "BOARD_TODO_ID",
-      "in-progress": "BOARD_IN_PROGRESS_ID",
-      "done": "BOARD_DONE_ID"
     }
   },
   "pipeline": {
