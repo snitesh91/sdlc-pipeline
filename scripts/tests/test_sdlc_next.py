@@ -2636,6 +2636,57 @@ def test_open_gate_unit_epic_gate_b_uses_architecture_gate_sub_branch():
     assert pr_create_call[pr_create_call.index("--head") + 1] == "epic-5-gate-architecture"
 
 
+def test_open_gate_unit_initiative_opens_gate_sub_branch_against_initiative_branch():
+    # Same shape as `unit=epic`, one tier up: `product.md` (Gate A, the only
+    # gate an Initiative ever has) is authored on `initiative-<n>-gate-product`,
+    # opened against `initiative-<n>`, never `main`.
+    from sdlc_next import GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, \
+        PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
+    git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): "",
+                                 ("git", "-C", "/repo", "rev-parse", "origin/initiative-40-gate-product"): "cafe1234\n"})
+    node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=40)}")
+    status_mutation_argv = ("gh", "api", "graphql", "-f",
+        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_40', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['awaiting-human-review'])}")
+    gh_runner = ScriptedRunner({
+        node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_40"}}}}),
+        status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 40}}}}),
+        ("gh", "api", "repos/owner/repo/compare/initiative-40...initiative-40-gate-product",
+         "--jq", ".ahead_by"): "1\n",
+    })
+    gh_runner.prefix_responses = {
+        ("gh", "pr", "create"): "https://github.com/owner/repo/pull/500\n",
+        ("gh", "issue", "comment", "40"): "",
+    }
+    gh = GitHub(runner=gh_runner)
+    result = cmd_open_gate(gh, "/repo", 40, "WhatsApp initiative", "product.md",
+                            "architecture", "Locked Initiative-level requirements.",
+                            unit="initiative", runner=git_runner)
+    assert result == {"issue": 40, "unit": "initiative", "gate_pr": 500, "stage": "product",
+                      "sha": "cafe1234", "head": "initiative-40-gate-product", "base": "initiative-40"}
+    pr_create_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "pr", "create"])
+    assert pr_create_call[pr_create_call.index("--base") + 1] == "initiative-40"
+    assert pr_create_call[pr_create_call.index("--head") + 1] == "initiative-40-gate-product"
+    assert "main" not in pr_create_call
+    comment_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"])
+    body = comment_call[comment_call.index("--body") + 1]
+    assert "docs/sdlc/initiative-40/product.md" in body
+
+
+def test_open_gate_unit_initiative_refuses_when_the_gate_sub_branch_was_never_pushed():
+    from sdlc_next import GitHub, GhError, cmd_open_gate
+    git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): ""})
+    gh_runner = ScriptedRunner()
+    gh_runner.fail_on = {("gh", "api", "repos/owner/repo/compare/initiative-40...initiative-40-gate-product",
+                           "--jq", ".ahead_by")}
+    gh = GitHub(runner=gh_runner)
+    try:
+        cmd_open_gate(gh, "/repo", 40, "WhatsApp initiative", "product.md", "architecture",
+                       "x", unit="initiative", runner=git_runner)
+        assert False, "expected GhError"
+    except GhError as e:
+        assert "never committed to initiative-40 directly" in str(e)
+
+
 def test_open_gate_unit_issue_still_targets_main_from_issue_branch():
     # Standing-epic child gates are unchanged by the 2026-09-06 epic-gate rerouting.
     from sdlc_next import GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, \
@@ -2711,6 +2762,48 @@ def test_pass_gate_unit_epic_at_architecture_completes_epic_instead_of_claiming_
     assert stage_writes == []
 
 
+def test_pass_gate_unit_initiative_completes_gate_a_instead_of_claiming_architecture():
+    # The merged Initiative gate landed on `initiative-40` (its head was the gate
+    # sub-branch), so the Initiative worktree reconciles with
+    # `origin/initiative-40` -- and an Initiative never claims "architecture",
+    # since it has none; it hands off to the orchestrator cutting Epics instead.
+    from sdlc_next import GitHub, cmd_pass_gate, _ISSUE_NODE_ID_QUERY, _DELETE_ISSUE_FIELD_VALUE_MUTATION, \
+        STAGE_FIELD_ID, PIPELINE_STATUS_FIELD_ID
+    git_runner = ScriptedRunner({
+        **_live_wt("initiative-40"),
+        ("git", "-C", "/repo", "fetch", "origin"): "",
+        ("git", "-C", "/repo", "checkout", "initiative-40"): "",
+        ("git", "-C", "/repo", "merge", "origin/initiative-40"): "",
+        ("git", "-C", "/repo", "push", "origin", "initiative-40"): "",
+    })
+    node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=40)}")
+    del_stage_argv = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_40', field_id=STAGE_FIELD_ID)}")
+    del_status_argv = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_40', field_id=PIPELINE_STATUS_FIELD_ID)}")
+    gh_runner = ScriptedRunner({
+        ("gh", "issue", "view", "40", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": "<!-- gate-pr: product:500 -->"}]}),
+        node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_40"}}}}),
+        del_stage_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 40}}}}),
+        del_status_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 40}}}}),
+    })
+    gh_runner.prefix_responses = {("gh", "issue", "comment", "40"): ""}
+    gh = GitHub(runner=gh_runner)
+    result = cmd_pass_gate(gh, "/repo", issue=40, gate_pr=500, stage="product",
+                            unit="initiative", runner=git_runner)
+    assert result == {"issue": 40, "unit": "initiative", "initiative_gate_a_complete": True}
+    assert ["git", "-C", "/repo", "merge", "origin/initiative-40"] in git_runner.calls
+    assert ["git", "-C", "/repo", "merge", "origin/main"] not in git_runner.calls
+    # Never writes a Stage-field value (e.g. "Architecture") for an Initiative.
+    stage_writes = [c for c in gh_runner.calls if "updateIssueFieldValue" in " ".join(c)]
+    assert stage_writes == []
+    comment_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"])
+    body = comment_call[comment_call.index("--body") + 1]
+    assert "cut Epics" in body
+
+
 def test_skip_gate_unit_epic_completes_epic_without_opening_a_gate():
     from sdlc_next import GitHub, cmd_skip_gate, _ISSUE_NODE_ID_QUERY, _DELETE_ISSUE_FIELD_VALUE_MUTATION, \
         _ISSUE_EPIC_CHECK_QUERY, STAGE_FIELD_ID, PIPELINE_STATUS_FIELD_ID
@@ -2776,6 +2869,26 @@ def test_verify_exit_uses_epic_docs_dir_for_unit_epic(tmp_path):
     git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
     gh = GitHub(runner=gh_runner)
     result = cmd_verify_exit(gh, str(tmp_path), 92, expect_stage="architecture", unit="epic", runner=git_runner)
+    assert result["docs_present"] == ["product.md"]
+
+
+def test_verify_exit_uses_initiative_docs_dir_for_unit_initiative(tmp_path):
+    from sdlc_next import GitHub, cmd_verify_exit, _ISSUE_FIELDS_QUERY
+    docs_dir = tmp_path / "docs" / "sdlc" / "initiative-40"
+    docs_dir.mkdir(parents=True)
+    (docs_dir / "product.md").write_text("x")
+    fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=40)}")
+    gh_runner = ScriptedRunner({
+        ("gh", "issue", "view", "40", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"labels": []}),
+        fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
+            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "Product"},
+        ]}}}}}),
+    })
+    git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
+    gh = GitHub(runner=gh_runner)
+    result = cmd_verify_exit(gh, str(tmp_path), 40, expect_stage="product", unit="initiative", runner=git_runner)
     assert result["docs_present"] == ["product.md"]
 
 
@@ -4917,6 +5030,25 @@ def test_worktree_add_epic_unit_branches_off_main_into_epic_path():
     assert cmd_worktree_add(gh, 110, unit="epic", runner=runner)["path"] == "/tmp/sdlc-epic-110"
 
 
+def test_worktree_add_initiative_unit_branches_off_main_into_initiative_path():
+    # V2: an Initiative branch is cut straight from `main`, same shape as an
+    # epic branch one tier up -- own worktree prefix, own branch prefix.
+    from sdlc_next import GitHub, cmd_worktree_add
+    gh = GitHub(runner=ScriptedRunner({}))
+    runner = ScriptedRunner({
+        **_wt_list_main(),
+        ("git", "-C", ".", "fetch", "origin"): "",
+        ("git", "-C", ".", "branch", "-r", "--list", "origin/initiative-40"): "",
+        ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-initiative-40", "-b", "initiative-40",
+         "origin/main"): "",
+    })
+    runner.fail_on = {("git", "-C", "/tmp/sdlc-initiative-40", "ls-files", "--error-unmatch",
+                        ".github/sdlc-pipeline")}
+    result = cmd_worktree_add(gh, 40, unit="initiative", runner=runner)
+    assert result["path"] == "/tmp/sdlc-initiative-40"
+    assert result["branch"] == "initiative-40"
+
+
 def test_worktree_add_noop_when_branch_already_checked_out():
     from sdlc_next import GitHub, cmd_worktree_add
     gh = GitHub(runner=ScriptedRunner({}))
@@ -5321,6 +5453,36 @@ def test_auto_pass_gate_a_advances_child_of_no_human_profile():
     assert list(stage_mut) in runner.calls
     comment_calls = [c for c in runner.calls if c[:3] == ["gh", "issue", "comment"]]
     assert any("Gate A auto-passed" in c[-1] for c in comment_calls)
+
+
+def test_auto_pass_gate_a_unit_initiative_completes_gate_a_without_claiming_architecture():
+    # An Initiative auto-passing Gate A must not claim "architecture" (it has
+    # none) -- it hands off to the orchestrator cutting Epics, same as the
+    # human-gated path in `_complete_initiative_gate_a`.
+    from sdlc_next import (GitHub, cmd_auto_pass_gate_a, _ISSUE_NODE_ID_QUERY,
+                            _DELETE_ISSUE_FIELD_VALUE_MUTATION, STAGE_FIELD_ID,
+                            PIPELINE_STATUS_FIELD_ID)
+    from tests.test_sdlc_next import ScriptedRunner
+    a40, r40 = _epic_check(40, labels=["epic:standing"])  # requiresHumanGateA False
+    node_id = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=40)}")
+    del_stage = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_40', field_id=STAGE_FIELD_ID)}")
+    del_status = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_40', field_id=PIPELINE_STATUS_FIELD_ID)}")
+    runner = ScriptedRunner({
+        a40: r40,
+        node_id: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_40"}}}}),
+        del_stage: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 40}}}}),
+        del_status: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 40}}}}),
+    })
+    runner.prefix_responses = {("gh", "issue", "comment", "40"): ""}
+    gh = GitHub(runner=runner)
+    result = cmd_auto_pass_gate_a(gh, issue=40, stage="product", summary="Clean.", unit="initiative")
+    assert result == {"issue": 40, "unit": "initiative", "initiative_gate_a_complete": True}
+    stage_writes = [c for c in runner.calls if "updateIssueFieldValue" in " ".join(c)]
+    assert stage_writes == []
+    comment_calls = [c for c in runner.calls if c[:3] == ["gh", "issue", "comment"]]
+    assert any("cut Epics" in c[-1] for c in comment_calls)
 
 
 # --- citations (cite / verify-citations / verify-exit citations_ok) ---
@@ -5916,11 +6078,12 @@ def test_cmd_create_issue_defaults_to_task_type():
     assert ("set_issue_type", 42, "Task") in calls
 
 
-def test_cmd_create_issue_v2_passes_through_an_explicit_type():
+def test_cmd_create_issue_v2_type_reaches_set_issue_type_when_natively_provisioned():
     # Positive control for the 2026-09-14 fix: before it, every issue created
     # here was hardcoded Task regardless of caller intent, so an Epic created
     # by the V2 orchestrator would misclassify as a Task. type_name must reach
-    # set_issue_type unchanged.
+    # set_issue_type unchanged when it IS a provisioned native Issue Type
+    # (e.g. an org repo that provisioned Epic -- see ISSUE_TYPE_IDS).
     from sdlc_next import cmd_create_issue
 
     calls = []
@@ -5935,9 +6098,48 @@ def test_cmd_create_issue_v2_passes_through_an_explicit_type():
         def add_sub_issue(self, parent_number, child_number):
             pass
 
-    result = cmd_create_issue(FakeGH(), "title", "body", 9, [], type_name="Epic")
-    assert result == {"issue": 42, "parent": 9, "type": "Epic"}
-    assert calls == ["Epic"]
+    result = cmd_create_issue(FakeGH(), "title", "body", 9, ["priority:high"], type_name="Task")
+    assert result == {"issue": 42, "parent": 9, "type": "Task"}
+    assert calls == ["Task"]
+
+
+def test_cmd_create_issue_skips_native_type_when_classification_falls_back_to_a_label():
+    # A personal (non-org) repo can never provision "Epic"/"Initiative" as a
+    # native GitHub Issue Type -- custom Issue Types are org-level only, at any
+    # plan tier. The sample config's classification.epic rule is label-based
+    # for exactly this reason, so cutting an Epic there must not fail just
+    # because "Epic" isn't (and can never be) in projectFields.issueTypeIds --
+    # the label the caller already passed is the real classification signal.
+    from sdlc_next import cmd_create_issue
+
+    calls = []
+
+    class FakeGH:
+        def issue_create(self, title, body, labels):
+            return 43
+
+        def set_issue_type(self, number, type_name):
+            calls.append(type_name)  # must NOT be reached
+
+        def add_sub_issue(self, parent_number, child_number):
+            pass
+
+    result = cmd_create_issue(FakeGH(), "title", "body", 40, ["type:epic"], type_name="Epic")
+    assert result == {"issue": 43, "parent": 40, "type": "Epic"}
+    assert calls == []
+
+
+def test_cmd_create_issue_still_fails_loudly_when_type_has_no_native_or_label_fallback():
+    # Negative control: a kind with NEITHER a provisioned native Issue Type NOR
+    # a label-based classification rule configured can never be classified
+    # later -- this must still surface set_issue_type's clear error, not create
+    # an unclassifiable issue silently.
+    from sdlc_next import GitHub, GhError, cmd_create_issue
+    import pytest
+    create_argv = ("gh", "api", "repos/owner/repo/issues", "-f", "title=title", "-f", "body=body")
+    gh = GitHub(runner=ScriptedRunner({create_argv: json.dumps({"number": 44})}))
+    with pytest.raises(GhError, match="not in projectFields.issueTypeIds"):
+        cmd_create_issue(gh, "title", "body", 9, [], type_name="Bogus")
 
 
 def test_set_issue_type_refuses_an_unconfigured_type_with_a_clear_error():
@@ -6020,3 +6222,165 @@ def test_merge_epic_lld_doc_advances_every_freshly_created_task_and_skips_alread
         assert "ISSUE_503" not in c[-1] or "updateIssueFieldValue" not in c[-1]
     comment_calls = [c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"]]
     assert not any(c[3] == "503" for c in comment_calls)
+
+
+def test_v2_full_lifecycle_initiative_to_epic_to_task_smoke():
+    """End-to-end smoke test of the whole V2 Initiative -> Epic -> Task chain,
+    against the real GitHub provider and the sample config's label-based
+    classification -- not a per-function unit test, but every real V2 command
+    invoked in the sequence the orchestrator actually runs them, against one
+    shared mocked GitHub, to catch wiring gaps a function-isolated test would
+    miss (branch-name mismatches between commands, a doc path one command
+    writes that another reads differently, etc.):
+
+    1. worktree-add --unit initiative (branch cut from main)
+    2. open-gate + pass-gate --unit initiative (Gate A, no architecture claimed)
+    3. create-issue --parent <initiative> --type Epic --label type:epic
+       (orchestrator cutting an Epic) -> classify_unit confirms "epic"
+    4. worktree-add --unit epic for that Epic
+    5. create-issue --parent <epic> --type Task --label type:task (lld creating
+       a Task) -> classify_unit confirms "task"
+    6. merge-lld-doc --unit epic advances that fresh Task to development
+    """
+    from sdlc_next import (GitHub, cmd_worktree_add, cmd_open_gate, cmd_pass_gate,
+                            cmd_create_issue, cmd_merge_lld_doc, ISSUE_TYPE_IDS,
+                            _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
+                            _SET_ISSUE_TYPE_MUTATION, _ADD_SUB_ISSUE_MUTATION,
+                            _DELETE_ISSUE_FIELD_VALUE_MUTATION, _ISSUE_EPIC_CHECK_QUERY,
+                            STAGE_FIELD_ID, PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS)
+
+    def node_id(n):
+        return (("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=n)}"),
+                json.dumps({"data": {"repository": {"issue": {"id": f"ISSUE_{n}"}}}}))
+
+    def epic_check(n, parent=None, labels=()):
+        return (("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=n)}"),
+                json.dumps({"data": {"repository": {"issue": {
+                    "issueType": None, "parent": {"number": parent} if parent else None,
+                    "labels": {"nodes": [{"name": l} for l in labels]}}}}}))
+
+    gh_responses = {}
+    gh_prefixes = {("gh", "pr", "create"): "https://github.com/owner/repo/pull/500\n",
+                    ("gh", "issue", "comment"): ""}
+
+    a40, r40 = node_id(40)
+    gh_responses[a40] = r40
+    status_await_40 = ("gh", "api", "graphql", "-f",
+        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_40', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['awaiting-human-review'])}")
+    gh_responses[status_await_40] = json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 40}}}})
+    gh_responses[("gh", "api", "repos/owner/repo/compare/initiative-40...initiative-40-gate-product",
+                  "--jq", ".ahead_by")] = "1\n"
+    gh_responses[("gh", "issue", "view", "40", "--repo", "owner/repo",
+                  "--json", "number,title,labels,body,state,comments")] = \
+        json.dumps({"comments": [{"body": "<!-- gate-pr: product:500 -->"}]})
+    del_stage_40 = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_40', field_id=STAGE_FIELD_ID)}")
+    del_status_40 = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_40', field_id=PIPELINE_STATUS_FIELD_ID)}")
+    gh_responses[del_stage_40] = json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 40}}}})
+    gh_responses[del_status_40] = json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 40}}}})
+
+    gh_responses[("gh", "api", "repos/owner/repo/issues", "-f", "title=Epic: WhatsApp booklist lookup",
+                  "-f", "body=Slice of Initiative #40.", "-f", "labels[]=type:epic")] = \
+        json.dumps({"number": 41})
+    a41, r41 = node_id(41)
+    gh_responses[a41] = r41
+    gh_responses[("gh", "api", "graphql", "-f",
+        f"query={_ADD_SUB_ISSUE_MUTATION.format(parent_id='ISSUE_40', child_id='ISSUE_41')}")] = \
+        json.dumps({"data": {"addSubIssue": {"subIssue": {"number": 41}}}})
+    a41c, r41c = epic_check(41, parent=40, labels=["type:epic"])
+    gh_responses[a41c] = r41c
+
+    gh_responses[("gh", "api", "repos/owner/repo/issues", "-f", "title=Task: parse WhatsApp payload",
+                  "-f", "body=Carved by epic-41's lld.", "-f", "labels[]=type:task")] = \
+        json.dumps({"number": 42})
+    a42, r42 = node_id(42)
+    gh_responses[a42] = r42
+    gh_responses[("gh", "api", "graphql", "-f",
+        f"query={_SET_ISSUE_TYPE_MUTATION.format(issue_id='ISSUE_42', type_id=ISSUE_TYPE_IDS['Task'])}")] = \
+        json.dumps({"data": {"updateIssueIssueType": {"issue": {"number": 42}}}})
+    gh_responses[("gh", "api", "graphql", "-f",
+        f"query={_ADD_SUB_ISSUE_MUTATION.format(parent_id='ISSUE_41', child_id='ISSUE_42')}")] = \
+        json.dumps({"data": {"addSubIssue": {"subIssue": {"number": 42}}}})
+    a42c, r42c = epic_check(42, parent=41, labels=["type:task"])
+    gh_responses[a42c] = r42c
+
+    gh_responses[tuple(_list_argv())] = _list_response([
+        _epic(41, labels=["type:epic"]), _issue(42, parent=41, issue_type="Task", labels=["type:task"])])
+    advance_42, _, _ = _advance_to_development_responses(42)
+    gh_responses.update(advance_42)
+
+    gh_runner = ScriptedRunner(gh_responses)
+    gh_runner.prefix_responses = gh_prefixes
+    gh = GitHub(runner=gh_runner)
+
+    # 1. Cut the Initiative's own worktree, off `main`.
+    wt_runner = ScriptedRunner({
+        **_wt_list_main(),
+        ("git", "-C", ".", "fetch", "origin"): "",
+        ("git", "-C", ".", "branch", "-r", "--list", "origin/initiative-40"): "",
+        ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-initiative-40", "-b", "initiative-40",
+         "origin/main"): "",
+    })
+    wt_runner.fail_on = {("git", "-C", "/tmp/sdlc-initiative-40", "ls-files", "--error-unmatch",
+                           ".github/sdlc-pipeline")}
+    wt_result = cmd_worktree_add(gh, 40, unit="initiative", runner=wt_runner)
+    assert wt_result["branch"] == "initiative-40"
+
+    # 2. Gate A: open, then pass -- must complete Gate A, not claim "architecture".
+    gate_git_runner = ScriptedRunner({
+        ("git", "-C", "/repo", "fetch", "origin"): "",
+        ("git", "-C", "/repo", "rev-parse", "origin/initiative-40-gate-product"): "cafe1234\n",
+    })
+    open_result = cmd_open_gate(gh, "/repo", 40, "WhatsApp Initiative", "product.md",
+                                 "architecture", "Locked Initiative-level requirements.",
+                                 unit="initiative", runner=gate_git_runner)
+    assert open_result["gate_pr"] == 500
+
+    pass_git_runner = ScriptedRunner({
+        **_live_wt("initiative-40"),
+        ("git", "-C", "/repo", "fetch", "origin"): "",
+        ("git", "-C", "/repo", "checkout", "initiative-40"): "",
+        ("git", "-C", "/repo", "merge", "origin/initiative-40"): "",
+        ("git", "-C", "/repo", "push", "origin", "initiative-40"): "",
+    })
+    pass_result = cmd_pass_gate(gh, "/repo", issue=40, gate_pr=500, stage="product",
+                                 unit="initiative", runner=pass_git_runner)
+    assert pass_result == {"issue": 40, "unit": "initiative", "initiative_gate_a_complete": True}
+
+    # 3. Orchestrator cuts an Epic from the approved Initiative.
+    epic_result = cmd_create_issue(gh, "Epic: WhatsApp booklist lookup", "Slice of Initiative #40.",
+                                    parent=40, labels=["type:epic"], type_name="Epic")
+    assert epic_result == {"issue": 41, "parent": 40, "type": "Epic"}
+    assert gh.classify_unit(41) == "epic"
+
+    # 4. The Epic's own worktree, off `main` (an Epic's integration base).
+    epic_wt_runner = ScriptedRunner({
+        **_wt_list_main(),
+        ("git", "-C", ".", "fetch", "origin"): "",
+        ("git", "-C", ".", "branch", "-r", "--list", "origin/epic-41"): "",
+        ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-epic-41", "-b", "epic-41",
+         "origin/main"): "",
+    })
+    epic_wt_runner.fail_on = {("git", "-C", "/tmp/sdlc-epic-41", "ls-files", "--error-unmatch",
+                                ".github/sdlc-pipeline")}
+    epic_wt_result = cmd_worktree_add(gh, 41, unit="epic", runner=epic_wt_runner)
+    assert epic_wt_result["path"] == "/tmp/sdlc-epic-41"
+
+    # 5. `lld` carves a Task under the Epic.
+    task_result = cmd_create_issue(gh, "Task: parse WhatsApp payload", "Carved by epic-41's lld.",
+                                    parent=41, labels=["type:task"], type_name="Task")
+    assert task_result == {"issue": 42, "parent": 41, "type": "Task"}
+    assert gh.classify_unit(42) == "task"
+
+    # 6. `lld-review` clean -> merge-lld-doc advances the fresh Task to development.
+    doc_path = "docs/sdlc/epic-41/lld.md"
+    merge_git_runner = ScriptedRunner({
+        **_live_wt("epic-41", path="/epic-41"),
+        ("git", "-C", "/epic-41", "fetch", "origin"): "",
+        ("git", "-C", "/epic-41", "rev-parse", "--verify", "--quiet",
+         f"origin/epic-41:{doc_path}"): "blobABC\n",
+    })
+    merge_result = cmd_merge_lld_doc(gh, "/epic-41", 41, runner=merge_git_runner, unit="epic")
+    assert merge_result["merged"] is True
+    assert merge_result["advanced_tasks"] == [42]

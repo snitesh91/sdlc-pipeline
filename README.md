@@ -98,6 +98,37 @@ Repo-specific *commands* (lint, test, e2e) are not config — they belong in the
 `sdlc-*` agent definitions and the repo's own `CLAUDE.md`, which every stage agent
 already reads.
 
+## V2: Initiative-driven lifecycle, pluggable issue tracking
+
+Two lifecycles now coexist:
+
+- **Engineering-driven** (unchanged in spirit from V1) — a bare Epic, manual scope,
+  no product doc. `architecture` asks its own clarifying questions if scope is unclear.
+- **Initiative-driven** — product-motivated work. `product` writes one IRD for the
+  whole Initiative (market/competitive research, vision-doc awareness, sizing against
+  the vision and backlog); once Gate A passes, **the orchestrator itself** — not a
+  subagent — cuts Epics from it (`create-issue --parent <initiative-n> --type Epic`,
+  see SKILL.md's "Cutting Epics from an approved Initiative"). Each Epic then runs
+  independently from there.
+
+Within an Epic, `lld` moved from Task-level to Epic-level: one `lld.md` covers every
+Task, `lld` itself creates the Task issues (carving footprint/dependency boundaries,
+not even-slicing), and `lld-review` judges both the design and the carving. Every
+Epic always carries two standing Tasks — Integration-test and e2e-test — that write
+the coverage a normal Task's unit tests don't; `pr-review` reviews what a normal
+Task's PR actually contains, and epic-close reuses the standing Tasks' attestations
+rather than re-running suites.
+
+Issue/work-item tracking is now behind a `WorkItemProvider` interface
+(`typing.Protocol`, `scripts/sdlc_next.py`) — `GitHub` is the only implementation
+today; a `pipeline.workItemProvider.type` other than `"github"` is a refusal, not a
+silent fallback. Unit classification (Initiative vs. Epic vs. Task) reads
+`pipeline.classification`, defaulting to labels rather than GitHub custom Issue
+Types, since Issue Types are an organization-level feature unavailable on a personal
+repo at any plan tier. Code hosting (PR/merge/CI) stays git-protocol/github.com —
+deliberately not abstracted. A second provider (Jira), a Confluence doc-store, and a
+`CodeHostProvider` for non-GitHub code hosting are documented seams, not built.
+
 ## Installing the shipped pieces
 
 `SKILL.md` assumes these exist in the repo you drive. The first three ship here —

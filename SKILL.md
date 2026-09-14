@@ -147,6 +147,12 @@ subagent — reads the approved `initiative-<n>/product.md` and cuts it into Epi
   of view — it exists, but nothing can tell it apart from a Task later. Every Epic
   is a native sub-issue of its Initiative, same invariant as Epic-number-mandatory
   below one level up.
+  `--type Epic` is best-effort: custom GitHub Issue Types are organization-level
+  only, unavailable on a personal repo at any plan tier, so `create-issue`
+  silently skips the native-type write whenever `pipeline.classification.epic`
+  is label-based (the label is the real signal there) — it only fails loudly
+  when a kind has neither a provisioned native type nor a label rule to fall
+  back on, meaning nothing could ever classify it later.
 - This is the one point in the Initiative-driven flow that is **not** a subagent
   delegation — the orchestrator does it directly, the same way it already owns
   Step 1's routing decisions without delegating them.

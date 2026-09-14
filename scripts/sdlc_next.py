@@ -152,11 +152,13 @@ HUMAN_ASSIGNEE = CONFIG["humanAssignee"]
 _PIPELINE_DEFAULTS = {
     "labels": {"standing": "epic:standing", "legacy": "epic:legacy",
                "architected": "epic:architected"},
-    "branches": {"issuePrefix": "issue-", "epicPrefix": "epic-", "gateSuffix": "-gate-"},
+    "branches": {"issuePrefix": "issue-", "epicPrefix": "epic-",
+                 "initiativePrefix": "initiative-", "gateSuffix": "-gate-"},
     # `ephemeralPrefix` names the throwaway worktree a branch-touching command
     # stands up when no live worktree holds its target branch -- the main checkout
     # is never a git-write target (see `branch_workspace`).
     "worktrees": {"root": "/tmp", "devPrefix": "sdlc-dev-", "epicPrefix": "sdlc-epic-",
+                  "initiativePrefix": "sdlc-initiative-",
                   "reviewPrefix": "sdlc-review-", "ephemeralPrefix": "sdlc-tmp-"},
     # Per-branch flock so two sessions (or two lanes of one session) never run a
     # branch-touching command on the same branch concurrently. `dir` may use
@@ -275,6 +277,10 @@ PIPELINE = _pipeline_config()
 LABELS = PIPELINE["labels"]
 ISSUE_BRANCH_PREFIX = PIPELINE["branches"]["issuePrefix"]
 EPIC_BRANCH_PREFIX = PIPELINE["branches"]["epicPrefix"]
+# V2: the Initiative tier gets the same branch-naming treatment as Epic --
+# INITIATIVE_BRANCH_PREFIX default "initiative-", read via .get so a config that
+# predates this key (any V1-only repo) still loads.
+INITIATIVE_BRANCH_PREFIX = PIPELINE["branches"].get("initiativePrefix", "initiative-")
 # Joins an epic branch name to the gate stage it is carrying a doc for:
 # `epic-<n>` + `-gate-` + `product` -> `epic-5-gate-product`. See `epic_gate_branch`.
 GATE_BRANCH_SUFFIX = PIPELINE["branches"]["gateSuffix"]
@@ -1235,6 +1241,27 @@ def epic_gate_branch(epic: int, stage: str) -> str:
     return f"{epic_branch(epic)}{GATE_BRANCH_SUFFIX}{stage}"
 
 
+def initiative_branch(initiative: int) -> str:
+    """V2's Initiative-tier twin of `epic_branch` -- same lifecycle, one tier up.
+    Cut from `origin/main` when the Initiative starts, never committed to
+    directly: only the gate branch carrying its `product.md` merges into it.
+    Unlike an Epic branch, an Initiative branch never itself merges to `main` --
+    the orchestrator cuts Epics from the approved `product.md` and each Epic runs
+    its own independent lifecycle from there (see V2-SPEC.md); the Initiative
+    branch's job ends once Gate A passes."""
+    return f"{INITIATIVE_BRANCH_PREFIX}{initiative}"
+
+
+def initiative_gate_branch(initiative: int, stage: str) -> str:
+    """The short-lived sub-branch an Initiative-level gate doc is authored on
+    (default `initiative-<n>-gate-<stage>`), cut from `origin/initiative-<n>` --
+    same shape as `epic_gate_branch`, one tier up. V2's Initiative only ever runs
+    `product` (product-review, Gate A), never `architecture`, so `stage` is
+    `"product"` in practice, but the parameter stays general for consistency with
+    `epic_gate_branch`'s own shape."""
+    return f"{initiative_branch(initiative)}{GATE_BRANCH_SUFFIX}{stage}"
+
+
 def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
     """Which branch this unit's work integrates into.
 
@@ -1251,8 +1278,10 @@ def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
     * **A top-level issue with no parent epic.** Nothing to integrate into.
 
     An epic's *own* unit resolves to `main`: the epic branch is what merges
-    there at close."""
-    if unit == "epic":
+    there at close. An Initiative's own unit also resolves to `main` -- an
+    Initiative branch is cut straight off `main` and never itself merges back
+    (see `initiative_branch`); only its Gate A doc matters, not a merge base."""
+    if unit in ("epic", "initiative"):
         return "main"
     # `parent` comes from `issue_list`'s GraphQL, never from `issue_view` -- `gh
     # issue view --json` has no such field, and asking for one is a hard error.
@@ -1837,9 +1866,15 @@ def worktree_path_for_branch(branch: str, runner: Runner = _default_runner,
 
 def worktree_path(unit: str, number: int) -> str:
     """Where the orchestrator keeps this unit's worktree, from `pipeline.worktrees`
-    (default `/tmp/sdlc-dev-<n>` for a child, `/tmp/sdlc-epic-<n>` for an epic)."""
+    (default `/tmp/sdlc-dev-<n>` for a child, `/tmp/sdlc-epic-<n>` for an epic,
+    `/tmp/sdlc-initiative-<n>` for an Initiative)."""
     w = PIPELINE["worktrees"]
-    prefix = w["epicPrefix"] if unit == "epic" else w["devPrefix"]
+    if unit == "epic":
+        prefix = w["epicPrefix"]
+    elif unit == "initiative":
+        prefix = w["initiativePrefix"]
+    else:
+        prefix = w["devPrefix"]
     return os.path.join(w["root"], f"{prefix}{number}")
 
 
@@ -1959,7 +1994,12 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
       (`origin/epic-<parent>` for a normal-epic child, `origin/main` for a
       standing-epic child, a parentless issue, or an epic's own branch).
     Always fetches first so every origin ref read is current."""
-    branch = epic_branch(number) if unit == "epic" else issue_branch(number)
+    if unit == "epic":
+        branch = epic_branch(number)
+    elif unit == "initiative":
+        branch = initiative_branch(number)
+    else:
+        branch = issue_branch(number)
     path = worktree_path(unit, number)
     existing = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
     if existing:
@@ -2871,6 +2911,19 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
                 f"committed on {base}, this needs operator approval: move those "
                 f"commits onto {head} (cut from the epic's clean base), force-rewind "
                 f"{base} to it, push both, then re-run open-gate.")
+    elif unit == "initiative":
+        # Same shape as the epic branch above, one tier up: `product.md` is
+        # authored on `initiative-<n>-gate-product`, opened against
+        # `initiative-<n>` -- Gate A is the only gate an Initiative ever has.
+        head, base = initiative_gate_branch(issue, stage), initiative_branch(issue)
+        ahead = gh.branch_ahead_by(head, base=base)
+        if not ahead:
+            detail = ("does not exist on origin" if ahead is None
+                      else f"carries no commits over {base}")
+            raise GhError(
+                f"gate branch {head} {detail} -- an Initiative's {doc} is authored "
+                f"on that disposable sub-branch, never committed to {base} directly "
+                f"(see \"Opening a gate\" in references/gates.md).")
     else:
         head, base = branch, "main"
     # The SHA the gate comment cites is the PUSHED head -- `origin/<head>` after a
@@ -3318,6 +3371,25 @@ def _complete_epic_architecture(gh: GitHub, epic_number: int, note: str) -> dict
     return {"issue": epic_number, "unit": "epic", "epic_architecture_complete": True}
 
 
+def _complete_initiative_gate_a(gh: GitHub, initiative_number: int, note: str) -> dict:
+    """Marks an Initiative's Gate A passed. Unlike an Epic or a Task, an Initiative
+    has no next *stage* to claim -- `product` is the only stage it ever runs. What
+    comes next is the orchestrator itself cutting Epics from the approved
+    `product.md` (SKILL.md, "Cutting Epics from an approved Initiative"), a manual
+    step outside this control plane, not a delegation this command should start.
+    So this only clears the Initiative's own Stage/Pipeline Status fields (same
+    "no current stage of its own anymore" spirit as `_complete_epic_architecture`)
+    and leaves a comment pointing the orchestrator at that next step."""
+    gh.clear_stage_and_status_fields(initiative_number)
+    timestamp = _utc_now_marker()
+    gh.issue_comment(initiative_number,
+        f"✅ Initiative Gate A passed — {note} Orchestrator: cut Epics from the "
+        f"approved `initiative-{initiative_number}/product.md` next (see \"Cutting "
+        f"Epics from an approved Initiative\" in SKILL.md).\n\n"
+        f"<!-- stage-transition: initiative-gate-a->epics-cut @ {timestamp} -->")
+    return {"issue": initiative_number, "unit": "initiative", "initiative_gate_a_complete": True}
+
+
 def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: str,
                    unit: str = "issue", runner: Runner = _default_runner,
                    live: bool = True) -> dict:
@@ -3360,11 +3432,17 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
         raise GhError(f"issue #{issue}'s gate-pr marker says this gate belongs to stage="
                        f"{actual_stage!r}, not stage={stage!r} -- pass next-action's own 'stage' "
                        f"field verbatim; it is the gate's owning doc-stage, not a target you pick")
-    branch = f"{unit}-{issue}"
+    if unit == "epic":
+        branch = epic_branch(issue)
+    elif unit == "initiative":
+        branch = initiative_branch(issue)
+    else:
+        branch = f"{unit}-{issue}"
     # A merged per-issue gate landed on `main`, so the issue branch reconciles
-    # with `origin/main`. A merged epic gate landed on `epic-<n>` itself (its head
-    # was the `epic-<n>-gate-<stage>` sub-branch), so the epic worktree reconciles
-    # with `origin/epic-<n>` -- `main` is not involved until `close-epic`. The
+    # with `origin/main`. A merged epic (or Initiative) gate landed on the unit's
+    # own branch itself (its head was the `<unit>-<n>-gate-<stage>` sub-branch), so
+    # that worktree reconciles with `origin/<unit>-<n>` -- `main` is not involved
+    # until `close-epic` (an Initiative never itself merges to `main` at all). The
     # epic's integration base is still `main`; `sync-branch --unit epic` keeps
     # using it. See "The epic integration branch" in references/epics.md.
     # Under the branch lock, in the branch's own (or an ephemeral) worktree --
@@ -3372,11 +3450,15 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
     # the command that most often borrowed the main checkout for it (epic #365).
     with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
         git_reconcile_branch(ws.path, branch,
-                              base=epic_branch(issue) if unit == "epic" else "main",
+                              base=branch if unit in ("epic", "initiative") else "main",
                               runner=runner)
     if unit == "epic" and stage == "architecture":
         return _with_workspace(_complete_epic_architecture(
             gh, issue, f"human review confirmed for `architecture.md` — merged via #{gate_pr}."),
+            ws)
+    if unit == "initiative":
+        return _with_workspace(_complete_initiative_gate_a(
+            gh, issue, f"human review confirmed for `product.md` — merged via #{gate_pr}."),
             ws)
     next_stage = STAGE_AFTER_GATE[stage]
     timestamp = _utc_now_marker()
@@ -3399,12 +3481,14 @@ GATE_B_SKIP_CONFIDENCE_THRESHOLD = PIPELINE["gates"]["skipConfidenceThreshold"]
 
 
 def _profile_for_unit(gh: GitHub, issue: int, unit: str) -> dict:
-    """The behavioural profile governing `issue`: its own for unit='epic', else its
-    parent epic's (a child inherits its epic's profile -- the profile-selecting label,
-    e.g. `epic:standing`/`RTB`, lives on the epic, not the child). Falls back to the
-    all-defaults profile if the epic can't be resolved."""
+    """The behavioural profile governing `issue`: its own for unit='epic' or
+    unit='initiative' (an Initiative is top-level, same as an epic -- it has no
+    parent to inherit from), else its parent epic's (a child inherits its epic's
+    profile -- the profile-selecting label, e.g. `epic:standing`/`RTB`, lives on
+    the epic, not the child). Falls back to the all-defaults profile if the epic
+    can't be resolved."""
     info = gh.issue_epic_info(issue)
-    if unit != "epic":
+    if unit not in ("epic", "initiative"):
         parent = info.get("parent")
         info = gh.issue_epic_info(parent["number"]) if parent else None
     return resolve_profile(info)
@@ -3465,6 +3549,13 @@ def cmd_auto_pass_gate_a(gh: GitHub, issue: int, stage: str, summary: str,
     if profile["gates"]["requiresHumanGateA"]:
         raise GhError(f"profile '{profile['name']}' requires a human at Gate A "
                        f"(requiresHumanGateA: true) -- open a gate, do not auto-pass")
+    if unit == "initiative":
+        # An Initiative never claims "architecture" -- it has none. Same
+        # hand-off-to-orchestrator shape as a human-merged Gate A
+        # (_complete_initiative_gate_a), just with no PR to cite.
+        return _complete_initiative_gate_a(
+            gh, issue, f"profile '{profile['name']}' needs no human review of "
+                       f"`product.md` (requiresHumanGateA: false). {summary}")
     next_stage = STAGE_AFTER_GATE[stage]  # "architecture"
     timestamp = _utc_now_marker()
     gh.issue_comment(issue,
@@ -4480,9 +4571,24 @@ def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: lis
 
     Enforces the "every issue has a parent" invariant at its one entry point:
     sets the type and links it as a sub-issue of `parent` immediately, rather
-    than leaving that to a follow-up step that could be skipped."""
+    than leaving that to a follow-up step that could be skipped.
+
+    `type_name` not being a provisioned native Issue Type is only a hard error
+    when nothing else can classify this issue later. If `pipeline.classification`
+    has a label-based rule for this kind (`type_name.lower()`), the label the
+    caller already passed in `labels` is the actual classification signal --
+    custom Issue Types are an organization-level GitHub feature, unavailable on
+    a personal repo at any plan tier, so a personal repo's Epic/Initiative can
+    *never* be provisioned as a native type and must not be forced to fail
+    here. Otherwise (no native type, no label fallback) this issue could never
+    be classified by anything, so it fails loudly via `set_issue_type`'s own
+    clear error rather than creating an unclassifiable issue silently."""
     number = gh.issue_create(title, body, labels)
-    gh.set_issue_type(number, type_name)
+    kind = type_name.lower()
+    rule = PIPELINE.get("classification", {}).get(kind)
+    classified_by_label = bool(rule) and rule.get("field") == "label"
+    if type_name in ISSUE_TYPE_IDS or not classified_by_label:
+        gh.set_issue_type(number, type_name)
     gh.add_sub_issue(parent, number)
     return {"issue": number, "parent": parent, "type": type_name}
 
@@ -4904,7 +5010,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--doc", required=True, choices=["product.md", "architecture.md"])
     p.add_argument("--next-stage", required=True)
     p.add_argument("--summary", required=True)
-    p.add_argument("--unit", default="issue", choices=["issue", "epic"])
+    p.add_argument("--unit", default="issue", choices=["issue", "epic", "initiative"])
     p.set_defaults(func=lambda a: cmd_open_gate(
         get_work_item_provider(), a.repo_path, a.issue, a.title, a.doc, a.next_stage, a.summary, a.unit))
     p = sub.add_parser("pass-gate")
@@ -4913,7 +5019,7 @@ def main(argv: Optional[list] = None) -> int:
                     help="Any path inside the repository (base for the worktree map); the command operates in the branch's own live worktree or an ephemeral one, never the main checkout")
     p.add_argument("--gate-pr", type=int, required=True)
     p.add_argument("--stage", required=True, choices=["product", "architecture"])
-    p.add_argument("--unit", default="issue", choices=["issue", "epic"])
+    p.add_argument("--unit", default="issue", choices=["issue", "epic", "initiative"])
     p.set_defaults(func=lambda a: cmd_pass_gate(get_work_item_provider(), a.repo_path, a.issue, a.gate_pr, a.stage, a.unit))
     p = sub.add_parser("skip-gate")
     p.add_argument("issue", type=int)
@@ -4928,7 +5034,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--stage", default="product", choices=["product"])
     p.add_argument("--summary", required=True)
-    p.add_argument("--unit", default="issue", choices=["issue", "epic"])
+    p.add_argument("--unit", default="issue", choices=["issue", "epic", "initiative"])
     p.set_defaults(func=lambda a: cmd_auto_pass_gate_a(get_work_item_provider(), a.issue, a.stage, a.summary, a.unit))
     p = sub.add_parser("auto-pass-gate")
     p.add_argument("--pr", type=int, required=True)
@@ -4959,7 +5065,7 @@ def main(argv: Optional[list] = None) -> int:
                     help="Any path inside the repository (base for the worktree map); the command operates in the branch's own live worktree or an ephemeral one, never the main checkout")
     p.add_argument("--expect-stage", required=True)
     p.add_argument("--pr", type=int, default=None)
-    p.add_argument("--unit", default="issue", choices=["issue", "epic"])
+    p.add_argument("--unit", default="issue", choices=["issue", "epic", "initiative"])
     p.set_defaults(func=lambda a: cmd_verify_exit(
         get_work_item_provider(), a.repo_path, a.issue, a.expect_stage, a.pr, a.unit))
     p = sub.add_parser("cite",
@@ -4992,7 +5098,7 @@ def main(argv: Optional[list] = None) -> int:
                              "origin/<branch> when it exists, else branches off the "
                              "integration base")
     p.add_argument("number", type=int)
-    p.add_argument("--unit", choices=["issue", "epic"], default="issue")
+    p.add_argument("--unit", choices=["issue", "epic", "initiative"], default="issue")
     p.add_argument("--repo-path", default=".", help="The shared main checkout")
     p.set_defaults(func=lambda a: cmd_worktree_add(get_work_item_provider(), a.number, a.unit, a.repo_path))
 
@@ -5009,7 +5115,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
                     help="Any path inside the repository (base for the worktree map); the command operates in the branch's own live worktree or an ephemeral one, never the main checkout")
-    p.add_argument("--unit", default="issue", choices=["issue", "epic"])
+    p.add_argument("--unit", default="issue", choices=["issue", "epic", "initiative"])
     p.set_defaults(func=lambda a: cmd_sync_branch(get_work_item_provider(), a.repo_path, a.issue, a.unit))
     p = sub.add_parser("merge-lld-doc",
                         help="V1 (--unit issue, default): publish a normal-epic child's lld.md "
