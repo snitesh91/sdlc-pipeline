@@ -171,21 +171,31 @@ difference — it will trip on the third instance on a unit whose real remedy is
 structural change. That is exactly what the context-reset replacement is for, and why
 the third bounce swaps the agent instead of parking the unit. So:
 
-- **A reviewer whose new finding is another instance of a class already bounced says
-  so, in the verdict** — "REWORK for one new blocking finding *of the same
-  silent-skip class*" — and, better, names the escalation shape in advance: "if a third
-  round produces another, that is an escalation candidate on the pattern rather than a
-  routine bounce".
+- **Same-class recurrence must be a marker, not a sentence.** This bullet used to ask
+  only for prose in the verdict ("REWORK for one new blocking finding *of the same
+  silent-skip class*") — and on #157's #504 (2026-09-14) a reviewer wrote exactly that,
+  by name, "escalate on the pattern," at two separate rounds, and nothing escalated,
+  because nothing parses a verdict's prose on every resume decision. `record-design-review`
+  and `record-pr-review` now take `--same-class-recurrence`: pass it when this round's
+  blocking finding is the same defect class as an earlier round's on this unit, and it
+  lands in the marker `pairing-counts` reads back as `same_class_recurrence_count`.
+  **Any count >= 1 there is its own escalation signal** — check it before every resume
+  decision on a pairing with a nonzero rework count, the same way `rework_since_last_clean`
+  is already checked, rather than re-reading the verdict prose for the sentence.
 - **The orchestrator's resume message then asks for the class, not the case.** Units
   handled that way have settled within one round: a `development` that restructures so
   the guarded set is derived live and an unknown case fails instead of passing ("fixes
   the bounced class at the root, not at the symptom"); an `lld` that deletes a citation
   which is correct *today* because its shape rots, and sweeps the next instance before
   it can exist (see `references/history.md`).
-- **A same-class third bounce triggers the context-reset replacement even though the
-  instance is new** — the class, not the instance, is what the replacement is told to
-  close. A same-class *sixth* bounce is the escalation, and the `mark-needs-human`
-  reason names the class, not the last instance.
+- **A same-class recurrence triggers the context-reset replacement (or, if the
+  replacement has already been spent on this pairing, `mark-needs-human` directly) as
+  soon as `same_class_recurrence_count` is nonzero — do not wait for the generic
+  bounce number to reach 3 or 6.** The generic thresholds are a backstop for problems
+  with no other signal; a same-class marker *is* the stronger signal, and #504 was
+  still on its regular counter (bounce 4, replacement already used at bounce 3) when a
+  fourth same-class instance landed. The class, not the instance, is what the
+  replacement — or the `mark-needs-human` reason — names.
 
 **Exception — `pr-review` <-> `development` only: test-only findings may
 merge-and-file.** On what would otherwise be the escalating sixth bounce: if every

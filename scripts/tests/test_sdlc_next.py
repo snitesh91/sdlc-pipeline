@@ -1400,16 +1400,69 @@ def test_retro_check_missing_watermark_reads_as_zero(tmp_path):
                                                     "run_retro": True}
 
 
-def test_retro_check_mark_done_writes_current_count_as_watermark(tmp_path):
+def test_retro_check_mark_done_without_count_falls_back_to_live_count(tmp_path):
+    # Backward-compatible default when the caller omits --count -- flagged in the
+    # result so it's visible, not silent.
     from sdlc_next import GitHub, cmd_retro_check, RETRO_WATERMARK_FILE
     wm = tmp_path / RETRO_WATERMARK_FILE
     wm.parent.mkdir(parents=True)
     gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "12\n"}))
     result = cmd_retro_check(gh, str(tmp_path), mark_done=True)
-    assert result == {"closed_count": 12, "watermark": 12, "marked_done": True}
+    assert result == {"closed_count": 12, "watermark": 12, "marked_done": True,
+                       "count_was_live_fallback": True}
     assert wm.read_text().strip() == "12"
     gh2 = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "13\n"}))
     assert cmd_retro_check(gh2, str(tmp_path))["run_retro"] is False
+
+
+def test_retro_check_mark_done_with_count_stamps_the_captured_trigger_count(tmp_path):
+    # Positive control for the 2026-09-14 fix: the retro was triggered when the
+    # live count was 120 (captured by the caller); by the time --mark-done runs,
+    # 10 more issues closed (live count 130) during the fix work. The watermark
+    # must land on the captured 120, not the now-live 130, so those 10 issues stay
+    # in scope for the next retro's evidence sweep instead of being silently
+    # absorbed as reviewed.
+    from sdlc_next import GitHub, cmd_retro_check, RETRO_WATERMARK_FILE
+    wm = tmp_path / RETRO_WATERMARK_FILE
+    wm.parent.mkdir(parents=True)
+    wm.write_text("115\n")
+    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "130\n"}))
+    result = cmd_retro_check(gh, str(tmp_path), mark_done=True, count=120)
+    assert result == {"closed_count": 130, "watermark": 120, "marked_done": True,
+                       "count_was_live_fallback": False}
+    assert wm.read_text().strip() == "120"
+    # The 10 issues closed between trigger and mark-done (121-130) are still
+    # in scope -- five more (135) fires the next retro, not ten more (140).
+    gh2 = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "125\n"}))
+    assert cmd_retro_check(gh2, str(tmp_path))["run_retro"] is True
+
+
+def test_retro_check_mark_done_rejects_a_count_behind_the_existing_watermark(tmp_path):
+    # Negative control: a stale/wrong --count that would move the watermark
+    # backwards must be refused, not silently applied.
+    from sdlc_next import GitHub, GhError, cmd_retro_check, RETRO_WATERMARK_FILE
+    wm = tmp_path / RETRO_WATERMARK_FILE
+    wm.parent.mkdir(parents=True)
+    wm.write_text("120\n")
+    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "130\n"}))
+    import pytest
+    with pytest.raises(GhError, match="behind the existing watermark"):
+        cmd_retro_check(gh, str(tmp_path), mark_done=True, count=100)
+    assert wm.read_text().strip() == "120"  # untouched
+
+
+def test_retro_check_mark_done_rejects_a_count_ahead_of_the_live_count(tmp_path):
+    # Negative control: a --count claiming more closes than have actually
+    # happened must be refused, not silently applied.
+    from sdlc_next import GitHub, GhError, cmd_retro_check, RETRO_WATERMARK_FILE
+    wm = tmp_path / RETRO_WATERMARK_FILE
+    wm.parent.mkdir(parents=True)
+    wm.write_text("115\n")
+    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "120\n"}))
+    import pytest
+    with pytest.raises(GhError, match="ahead of the live closed count"):
+        cmd_retro_check(gh, str(tmp_path), mark_done=True, count=121)
+    assert wm.read_text().strip() == "115"  # untouched
 
 
 def test_claim_raises_on_unknown_role():
@@ -1443,6 +1496,7 @@ def test_pairing_counts_derives_bounces_from_markers():
         "pr_review_rework_since_last_clean": 2,
         "pr_review_total_rework": 3,
         "pr_review_total_clean": 1,
+        "pr_review_same_class_recurrence_count": 0,
         "sync_conflict_count": 1,
         "design_review": {},
     }
@@ -1472,11 +1526,13 @@ def test_pairing_counts_tracks_design_reviews_per_role():
     # Three lld-review bounces with no clean between them -- this is the shape the
     # valve escalates on, and the count a fresh session must be able to recover.
     assert result["design_review"]["lld-review"] == {
-        "rework_since_last_clean": 3, "total_rework": 3, "total_clean": 0}
+        "rework_since_last_clean": 3, "total_rework": 3, "total_clean": 0,
+        "same_class_recurrence_count": 0}
     # arch-review's clean verdict resets its own counter and does not touch
     # lld-review's -- the whole reason roles are keyed separately.
     assert result["design_review"]["arch-review"] == {
-        "rework_since_last_clean": 0, "total_rework": 1, "total_clean": 1}
+        "rework_since_last_clean": 0, "total_rework": 1, "total_clean": 1,
+        "same_class_recurrence_count": 0}
     # A review that never ran on this unit has no key at all, rather than a
     # zeroed entry that reads like "ran and found nothing".
     assert "pr-review" not in result["design_review"]
@@ -1491,6 +1547,90 @@ def test_record_design_review_refuses_an_unknown_role():
     with pytest.raises(GhError, match="role must be one of"):
         cmd_record_design_review(GitHub(runner=ScriptedRunner({})), 9,
                                  "pr-review", "clean", "s")
+
+
+def test_record_design_review_refuses_same_class_recurrence_on_a_clean_verdict():
+    # Negative control: a clean verdict has no defect class to recur -- the flag
+    # only makes sense paired with outcome="rework".
+    import pytest
+    from sdlc_next import GitHub, GhError, cmd_record_design_review
+    with pytest.raises(GhError, match="only makes sense on outcome='rework'"):
+        cmd_record_design_review(GitHub(runner=ScriptedRunner({})), 9,
+                                 "lld-review", "clean", "s", same_class_recurrence=True)
+
+
+def test_record_design_review_embeds_the_same_class_marker_and_pairing_counts_reads_it_back():
+    # Positive control for the 2026-09-14 fix: #157's #504 had a reviewer write
+    # "escalate on the pattern" in verdict prose at two separate rounds and
+    # nothing acted on it. same_class_recurrence=True must produce a marker
+    # cmd_pairing_counts actually counts, not just a headline sentence.
+    from sdlc_next import GitHub, cmd_record_design_review, cmd_pairing_counts, REPO
+    posted = {}
+
+    class RecordingGitHub(GitHub):
+        def issue_comment(self, issue, body):
+            posted["body"] = body
+
+    gh = RecordingGitHub(runner=ScriptedRunner({}))
+    result = cmd_record_design_review(gh, 9, "lld-review", "rework", "same miss again",
+                                      same_class_recurrence=True)
+    assert result["same_class_recurrence"] is True
+    assert "same-class:true" in posted["body"]
+    assert "escalation candidate" in posted["body"]
+
+    runner = ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", REPO,
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": posted["body"]}]}),
+    })
+    counts = cmd_pairing_counts(GitHub(runner=runner), 9)
+    assert counts["design_review"]["lld-review"]["same_class_recurrence_count"] == 1
+
+
+def test_record_design_review_without_the_flag_leaves_same_class_count_at_zero():
+    # Negative control: an ordinary rework (no same-class flag) must not be
+    # miscounted as a same-class recurrence.
+    from sdlc_next import GitHub, cmd_record_design_review, cmd_pairing_counts, REPO
+    posted = {}
+
+    class RecordingGitHub(GitHub):
+        def issue_comment(self, issue, body):
+            posted["body"] = body
+
+    gh = RecordingGitHub(runner=ScriptedRunner({}))
+    cmd_record_design_review(gh, 9, "lld-review", "rework", "a fresh defect")
+    assert "same-class" not in posted["body"]
+
+    runner = ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", REPO,
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": posted["body"]}]}),
+    })
+    counts = cmd_pairing_counts(GitHub(runner=runner), 9)
+    assert counts["design_review"]["lld-review"]["same_class_recurrence_count"] == 0
+
+
+def test_record_pr_review_embeds_the_same_class_marker_and_pairing_counts_reads_it_back():
+    from sdlc_next import GitHub, cmd_record_pr_review, cmd_pairing_counts, REPO
+    posted = {}
+
+    class RecordingGitHub(GitHub):
+        def issue_comment(self, issue, body):
+            posted["body"] = body
+
+    gh = RecordingGitHub(runner=ScriptedRunner({}))
+    result = cmd_record_pr_review(gh, 9, 42, "rework", "same miss again",
+                                  same_class_recurrence=True)
+    assert result["same_class_recurrence"] is True
+    assert "same-class:true" in posted["body"]
+
+    runner = ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", REPO,
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": posted["body"]}]}),
+    })
+    counts = cmd_pairing_counts(GitHub(runner=runner), 9)
+    assert counts["pr_review_same_class_recurrence_count"] == 1
 
 
 def test_checks_status_pending_if_any_check_still_pending():
@@ -4824,6 +4964,89 @@ def test_init_skill_submodule_refuses_a_shared_non_per_worktree_gitdir():
     with pytest.raises(GhError) as exc:
         init_skill_submodule(wt, runner=runner)
     assert "not per-worktree" in str(exc.value)
+
+
+class _CountingRunner:
+    """Like ScriptedRunner, but a rev-parse HEAD called twice (before and after a
+    checkout) needs to return two different shas -- a plain argv->str dict can't
+    express that, since both calls share the identical key."""
+
+    def __init__(self, checkout_argv, shas, extra: dict | None = None):
+        self.checkout_argv = list(checkout_argv)
+        self.shas = list(shas)
+        self.extra = dict(extra or {})
+        self.calls: list[list[str]] = []
+        self._rev_parse_calls = 0
+
+    def __call__(self, argv):
+        self.calls.append(argv)
+        key = tuple(argv)
+        if key[-2:] == ("rev-parse", "HEAD"):
+            sha = self.shas[self._rev_parse_calls]
+            self._rev_parse_calls += 1
+            return sha + "\n"
+        if argv == self.checkout_argv or key in self.extra:
+            return self.extra.get(key, "")
+        raise AssertionError(f"unexpected invocation: {argv}")
+
+
+def test_sync_skill_bumps_submodule_and_vendors_agents(tmp_path):
+    from sdlc_next import cmd_sync_skill, PIPELINE
+    sub = PIPELINE["skill"]["submodulePath"]
+    skill_dir = tmp_path / sub
+    (skill_dir / "agents").mkdir(parents=True)
+    (skill_dir / "agents" / "sdlc-product.md").write_text(
+        "Read <requirements-dir>/IRD-*.md, write <docRoot>/epic-<n>/product.md, "
+        "token at <your-token-file>.\n")
+    (skill_dir / "agents" / "sdlc-development.md").write_text("Nothing to substitute.\n")
+
+    runner = _CountingRunner(
+        checkout_argv=["git", "-C", str(skill_dir), "checkout", "--detach", "v2"],
+        shas=["old111", "new222"],
+        extra={("git", "-C", str(skill_dir), "fetch", "origin"): "",
+               ("git", "-C", str(tmp_path), "add", "--", sub): "",
+               ("git", "-C", str(tmp_path), "add", "--", ".claude/agents"): ""})
+
+    result = cmd_sync_skill(str(tmp_path), ref="v2", runner=runner)
+
+    assert result["old_sha"] == "old111"
+    assert result["new_sha"] == "new222"
+    assert result["changed"] is True
+    assert set(result["agents_vendored"]) == {"sdlc-product.md", "sdlc-development.md"}
+    vendored = (tmp_path / ".claude" / "agents" / "sdlc-product.md").read_text()
+    assert "<requirements-dir>" not in vendored
+    assert "<docRoot>" not in vendored
+    assert "<your-token-file>" not in vendored
+    assert runner.checkout_argv in runner.calls
+    assert ["git", "-C", str(tmp_path), "add", "--", sub] in runner.calls
+    assert ["git", "-C", str(tmp_path), "add", "--", ".claude/agents"] in runner.calls
+
+
+def test_sync_skill_raises_on_an_unconfigured_placeholder(tmp_path):
+    # Negative control: a template placeholder with no configured value must not
+    # vendor a literal `<requirements-dir>` into a driven repo's agent file --
+    # simulated by monkeypatching REQUIREMENTS_DIR to None (an older config that
+    # predates the key).
+    import sdlc_next
+    from sdlc_next import cmd_sync_skill, GhError, PIPELINE
+    import pytest
+    sub = PIPELINE["skill"]["submodulePath"]
+    skill_dir = tmp_path / sub
+    (skill_dir / "agents").mkdir(parents=True)
+    (skill_dir / "agents" / "sdlc-product.md").write_text("Needs <requirements-dir>.\n")
+    runner = _CountingRunner(
+        checkout_argv=["git", "-C", str(skill_dir), "checkout", "--detach", "origin/main"],
+        shas=["old111", "old111"],
+        extra={("git", "-C", str(skill_dir), "fetch", "origin"): "",
+               ("git", "-C", str(tmp_path), "add", "--", sub): ""})
+    original = sdlc_next.REQUIREMENTS_DIR
+    sdlc_next.REQUIREMENTS_DIR = None
+    try:
+        with pytest.raises(GhError, match="requirements-dir"):
+            cmd_sync_skill(str(tmp_path), runner=runner)
+    finally:
+        sdlc_next.REQUIREMENTS_DIR = original
+    assert not (tmp_path / ".claude" / "agents" / "sdlc-product.md").exists()
 
 
 def test_sync_branch_reinits_the_skill_submodule_after_the_merge_in_a_live_worktree():

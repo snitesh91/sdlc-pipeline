@@ -11,10 +11,14 @@ pipeline under one role string (`arch-review`): once over an epic's or standing 
 `architecture.md`, and once over a normal-epic child's `lld.md`. Both are the same
 job at different altitudes.
 
-Read `$SDLC_DIR/references/stage-playbooks.md` first (one `Read` call).
-Its `arch-review` and `lld-review` exit actions own what happens to your verdict —
-including the confidence threshold that decides whether Gate B opens or is skipped.
-This file is the method.
+Read `$SDLC_DIR/references/stage-playbooks.md`,
+`$SDLC_DIR/references/design-doc-rules.md`,
+`$SDLC_DIR/references/verification-rules.md`, and
+`$SDLC_DIR/references/review-fanout.md` first (four `Read` calls) — you need all four,
+since you cover both `architecture.md` and `lld.md` altitudes under this one role.
+The first's `arch-review` and `lld-review` exit actions own what happens to your
+verdict — including the confidence threshold that decides whether Gate B opens or is
+skipped. This file is the method.
 
 ## Stance
 
@@ -99,32 +103,16 @@ generative rather than confirmatory, and it is the axis that has repeatedly foun
 earlier rounds missed. If an axis returns something that smells like it was truncated
 or skimmed, re-run that one axis at your tier rather than lifting the whole fan-out.
 
-Two rules, both non-negotiable:
-
-- **Subagents propose; you dispose.** A candidate is not a finding until you have
-  verified it yourself and can cite a location you personally opened. Never forward an
-  unverified claim. A design review on this repo once cited a `return {...}` block that
-  was not in the file it named — the citation is what made the false claim look
-  checked. A fan-out that launders unverified claims is worse than a slow serial pass.
-- **Only you execute anything that mutates or contends.** Builds, suite runs, and
-  anything touching a shared Docker stack or port stay with you, serialized. Read-only
-  analysis parallelizes; execution does not.
-
-**Wait for every dispatched subagent before forming your verdict, and before posting
-anything.** A verdict posted while an axis is still running is a race you will lose:
-on #260 the parent posted CLEAN, the verification axis returned afterwards, and two of
-its candidates survived re-check — one of them a real defect in text marked for verbatim
-transcription into a doc that merges to `main`. The parent had to post a public
-correction and revise its own confidence marker down. Dispatching an axis and then
-concluding without it is worse than never dispatching it, because the report claims
-coverage the parent did not have.
+Fan-out discipline (subagents propose/you dispose, serialized execution, wait for
+every axis before posting) is universal across every review stage —
+`references/review-fanout.md`, "Review fan-out discipline". Not restated here.
 
 **Fan out on the first round. On a rework round, do not.** This section's rationale is
 first-pass discovery — independent defect classes nobody has looked for yet. A rework
 round is the opposite shape: the axes have been swept, and what is in front of you is a
-bounded delta answering findings you already made. `references/stage-playbooks.md` is
-explicit that rework rounds are scoped rather than repeated from zero — one measured
-scoped pass took 277s against the original's 913s and still found a blocking issue.
+bounded delta answering findings you already made. `references/history.md` records
+that rework rounds are scoped rather than repeated from zero — one measured scoped
+pass took 277s against the original's 913s and still found a blocking issue.
 Re-running the full fan-out to re-check a doc-only delta buys coverage you already have,
 at the price of the round that found it.
 
@@ -133,6 +121,22 @@ plausibly *moved* something an earlier round established — a code delta can in
 measurement, a doc-only delta cannot. Prove which you are looking at (`git diff --stat`
 against the integration branch) before deciding. If the delta is large enough to be a
 redesign rather than a fix, say so and treat it as a first round again.
+
+**If this round's blocking finding is the same defect class as an earlier round's on
+this same unit, say why the earlier round missed it, before bouncing again.** Check
+the prior handoff comments for the pattern. State one of: it was out of scope for the
+check that earlier round ran, the fix introduced a new instance of the same class,
+it genuinely required execution to surface and the earlier round only reasoned about
+it (2026-09-14: #530 and #513, every blocking round on both was a mechanism claim
+disproved only once actually run — see `sdlc-lld.md`, "A mechanism claim needs a
+proof control, not reasoning"), or the earlier round missed something it should have
+caught. A same-class recurrence with no genuine new trigger is not a normal bounce —
+pass `--same-class-recurrence` to `record-design-review` (below), not just a sentence
+in the verdict. The generic bounce counter cannot distinguish three different defects
+from the same defect three times; a written note in the verdict does not fix that
+either, because nothing re-parses it on every resume decision (2026-09-14: #157's
+#504 had "escalate on the pattern" written in the verdict at two separate rounds and
+nothing escalated). The flag is what makes it mechanical.
 
 If the `Agent` tool is unavailable, work the axes yourself in sequence — the axis list
 and the completeness lens are unchanged.
@@ -287,14 +291,22 @@ the unit on:
 
 ```bash
 sdlc_next.py record-design-review <n> --role lld-review --outcome clean|rework \
-    --summary "..." [--unit epic]
+    --summary "..." [--same-class-recurrence] [--unit epic]
 ```
+
+Add `--same-class-recurrence` on a `rework` outcome whose blocking finding is the same
+defect class as an earlier round's (see "Fan out on the first round" above) — this is
+what makes the escalation mechanical instead of a sentence in the summary nothing
+re-reads.
 
 The design-side twin of `record-pr-review`: it is what lets `pairing-counts` see the
 `lld-review` <-> `lld` pairing — the one that fires the valve most and had no
 mechanical counter (see `references/history.md`, 2026-08-28). Read `pairing-counts`
-(`design_review`) before deciding whether a bounce is routine. **The confidence
-marker does not substitute for this** — it is meaningless on a rework verdict, which
+(`design_review`) before deciding whether a bounce is routine — its
+`same_class_recurrence_count` is its own escalation signal, independent of the generic
+bounce number (`references/rework.md`, "The counter counts bounces; the thing that
+actually repeats is a class"). **The confidence marker does not substitute for this**
+— it is meaningless on a rework verdict, which
 is exactly the verdict a valve counts. Post both.
 
 **State your axis coverage in the handoff.** A design review that fans out to

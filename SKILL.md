@@ -28,7 +28,10 @@ which flags problems in its handoff instead.
 | `references/parallelism.md` | Starting or resuming any child work or review pool; anything touching worktrees, branches, `sync-branch`, git conflicts, merge freshness, or an agent dying mid-stage |
 | `references/gates.md` | Opening, checking, passing, or skipping a human-review gate; addressing gate feedback |
 | `references/rework.md` | A review returned a finding, a stage reported ambiguity, a bounce may trip the escalation valve, or you are writing a replacement agent's resume message |
-| `references/stage-playbooks.md` | Delegating any stage (its exit actions live here); **the one file a stage subagent is told to Read** — docs, altitude, commenting, rework rules |
+| `references/stage-playbooks.md` | Delegating any stage (its exit actions live here); **every stage subagent is told to Read this one** — the rules that bind every role: docs, citation, one-turn-finish, commenting, rework |
+| `references/design-doc-rules.md` | `product.md`/`architecture.md` content rules and the pre-`product` scope-alignment step — `product`, `product-review`, `architecture`, and `design-review` are told to Read it; `lld`, `development`, `pr-review`, `exploratory` are not |
+| `references/verification-rules.md` | Proving a claim by running it, not asserting it — `architecture`, `lld`, `development`, `pr-review`, and `design-review` are told to Read it; `product`, `product-review`, `exploratory` are not |
+| `references/review-fanout.md` | Subagent-dispatch discipline for a review stage's first round — `product-review`, `design-review`, and `pr-review` are told to Read it; the other five roles are not |
 | `references/epics.md` | Epic-level phase, child sizing and footprints, deviation escalation, bug fast-track, epic closing, board status |
 | `references/operations.md` | Token and repo access, issue taxonomy (fields), auto-merge policy, local-CI attestation |
 | `references/continuous-mode.md` | Operator asked for unattended looping |
@@ -112,7 +115,8 @@ cd <repo-root>                                          # so config + git resolv
   bump for one epic cannot change another epic's instructions mid-run, and the
   shared-main-checkout copy is never handed to an agent. Set `$SDLC_DIR` per unit
   from `worktree-add`/`sync-branch`'s `skill_dir` before delegating, and hand
-  subagents the concrete `$SDLC_DIR/references/stage-playbooks.md` path — a
+  subagents the concrete `$SDLC_DIR` value in their prompt — each agent file's own
+  "first move" names the `references/*.md` paths it reads relative to that; a
   repo-relative path won't resolve for them. (The config file is committed on the
   branch too, so it is already per-branch.) Mechanics and the git requirement:
   `references/parallelism.md`, "Concurrent multi-epic isolation".
@@ -153,7 +157,8 @@ operational failure: stop and report, never retry by hand.
 | `mark-blocked` / `mark-needs-human` / `pause-for-epic-regate` | Park a unit (the first two also release its worktree) |
 | `pairing-counts <n>` | Marker-derived escalation-valve strike counts, with the configured thresholds |
 | `show-config` | Effective tunables (`pipeline` block over defaults) — read it once per invocation |
-| `list-needs-human` / `check-epics-closeable` / `retro-check [--mark-done]` | End-of-invocation sweeps |
+| `list-needs-human` / `check-epics-closeable` / `retro-check [--mark-done --count <n>]` | End-of-invocation sweeps |
+| `sync-skill [--ref <ref>]` | Bump the skill submodule + re-vendor `.claude/agents/` (Step 5's manual bump/re-vendor, automated); stages both, does not commit |
 | `close-epic <n>` / `record-epic-verification <n> --kind e2e\|exploratory` | Epic close, two-call shape (`references/epics.md`, "Epic closing") |
 | `auto-pass-gate` / `mark-feedback-received` / `mark-feedback-addressed` / `mark-todo` / `mark-issue-closed` | CI-triggered real-time paths (the gate-auto-advance workflow) |
 
@@ -318,7 +323,7 @@ batch. Feed the answers verbatim into the `product` delegation prompt. This is a
 pre-product interaction, earlier than and distinct from Gate A, and it is one of the
 three things you *do* take to the operator (a product or scope call). Skip it only
 on a rework round or a resume where `product.md` already exists. Detail:
-`references/stage-playbooks.md`, "Scope alignment before `product`".
+`references/design-doc-rules.md`, "Scope alignment before `product`".
 
 ## Step 3 — Run this stage, then the next, then the next
 
@@ -330,9 +335,9 @@ orchestrator-direct review path.
 | Role | Trigger | `subagent_type` | Model | Doc it owns |
 |---|---|---|---|---|
 | `product` | `stage:product` (epic or standing child) | `sdlc-product` | opus | `<unit>-<n>/product.md` |
-| `product-review` | right after `product` | `sdlc-product-review` | fable | none (comment only) — universal; blocker bounces `product`, clean goes to Gate A |
+| `product-review` | right after `product` | `sdlc-product-review` | opus | none (comment only) — universal; blocker bounces `product`, clean goes to Gate A |
 | `architecture` | `stage:architecture` (epic or standing child) | `sdlc-architecture` | opus | `<unit>-<n>/architecture.md` (epic level also creates/splits children, sets Effort) |
-| `arch-review` | right after `architecture` | `sdlc-design-review` | fable | none (comment only) |
+| `arch-review` | right after `architecture` | `sdlc-design-review` | opus | none (comment only) |
 | `lld` | `stage:lld` (normal-epic child) | `sdlc-lld` | sonnet | `issue-<n>/lld.md` |
 | `lld-review` | right after `lld` | `sdlc-design-review` | opus | none — **mandatory, never confidence-skipped** |
 | `development` | `stage:development` | `sdlc-development` | sonnet | none — the PR description is the record; suite evidence is the `record-local-ci` attestations |
@@ -355,19 +360,21 @@ silently runs the pipeline on a stale model as newer ones ship (operator, 2026-0
 the earlier 4.8 pin is retired). The tier is pinned here
 at the call site, not in the agent files, so one definition can run at two tiers and
 a retune is a one-word edit. Opus sits where a mistake has no human in front of it:
-the `product` and `architecture` authoring, and the two last-checks-before-something-irreversible
-(`lld-review`, `pr-review`). **`product-review` and `arch-review` run on `fable`** — both are
-backstopped by a human gate right after them (Gate A after `product-review`, Gate B after
-`arch-review`), so a cheaper adversarial pass is acceptable there; `lld-review`/`pr-review`
-stay opus because nothing human follows them. Sonnet on the review-backstopped,
-higher-frequency stages (`lld`, `development`). Retune in
+the `product` and `architecture` authoring, the two last-checks-before-something-irreversible
+(`lld-review`, `pr-review`), and the two adversarial reviews backstopped by a human gate
+right after them (`product-review` before Gate A, `arch-review` before Gate B) — see
+2026-09-14 below for why those two are opus, not a cheaper tier. Sonnet on the
+review-backstopped, higher-frequency stages (`lld`, `development`). Retune in
 `references/history.md` with a dated reason, not by guessing here — the latest
 stage-by-stage evaluation is the 2026-09-12 entry there.
 
-> **Resolved (operator, 2026-09-12):** a `fable`-run `arch-review` *may* drive the Gate B
-> confidence-skip, and the bar stays at `gates.skipConfidenceThreshold` (default 95) — fable
-> is trusted to emit an honest confidence, and 95 is a high enough bar that a fable skip is
-> acceptable. No force-open, no raised threshold, no opus-only carve-out.
+> **Reverted (operator, 2026-09-14):** `product-review` and `arch-review` moved back to
+> `opus`. The 2026-09-12 move to `fable` was reasoned as "a cheaper adversarial pass" —
+> that premise was wrong. Fable is priced at $10/$50 per MTok against opus's $5/$25 (see
+> `references/history.md`, "Fable pricing"): **fable costs 2x opus, not less.** The
+> 2026-09-12(d) Gate-B-confidence-skip resolution for a fable-run `arch-review` is now
+> moot — `arch-review` is opus again, so the standard opus-confidence-skip applies with
+> no special case.
 
 **The table is the default, not a floor — downgrade a genuinely small task** (a
 one-line config change, a typo fix, a rework round applying a fix already specified
@@ -392,20 +399,30 @@ and `superpowers:systematic-debugging` first. **Exclude**
 `superpowers:finishing-a-development-branch` (integration decision is fixed: draft PR,
 stop) and `superpowers:using-git-worktrees` (the orchestrator owns worktrees).
 
-**One rule, one home — and the home is chosen by scope** (2026-09-13). A rule that
-binds every stage (citation discipline, the no-park contract, the doc set, commenting,
-what counts as verification) lives once in `references/stage-playbooks.md`. A rule that
-binds one stage — how that stage works, and **its own exit actions** — lives once in
-that stage's `agents/sdlc-*.md`. Every agent Reads the playbook first and is guaranteed
-to read its own definition, so each rule reaches whoever needs it without being stated
-twice.
+**One rule, one home — and the home is chosen by scope** (2026-09-13, refined
+2026-09-14). A rule that binds every stage (citation discipline, the no-park contract,
+the doc set, commenting) lives once in `references/stage-playbooks.md`, which every
+agent Reads first. A rule that binds some, but not all, roles lives once in the
+narrower file that names exactly which roles read it: `references/design-doc-rules.md`
+(the `product.md`/`architecture.md` content rules, scope alignment before `product` —
+`product`, `product-review`, `architecture`, `design-review`), `references/verification-rules.md`
+(what counts as verification, run-the-thing/completeness-sweep — `architecture`, `lld`,
+`development`, `pr-review`, `design-review`), and `references/review-fanout.md`
+(subagent-dispatch discipline — `product-review`, `design-review`, `pr-review`). A rule
+that binds one stage — how that stage works, and **its own exit actions** — lives once
+in that stage's `agents/sdlc-*.md`. Each agent's own file names exactly which
+`references/*.md` files it Reads, so a rule reaches whoever needs it without being
+stated twice or read by a role it does not bind.
 
 This replaced "agent files carry persona, procedure and `tools:` only", which the skill
 stated and did not follow: the no-park rule had four homes and had drifted into three
 different strengths, the weakest being what the agent that stalled on 2026-09-13 was
 reading. Exit actions were 459 lines of the playbook that every agent read to use one
-eighth of. Two homes for one rule really is how rules drift — the fix was to give each
-rule exactly one home, not to move them all to the same file.
+eighth of; on 2026-09-14 the same shape recurred one level down — every role read the
+altitude, verification, and fan-out rules regardless of whether its own role needed
+them, so those three moved to their own files with each role's own file naming which
+ones it Reads. Two homes for one rule really is how rules drift — the fix was to give
+each rule exactly one home, not to move them all to the same file.
 
 ### The delegation prompt
 
@@ -417,9 +434,11 @@ prompt *contains*):
    that fetches it rather than pasting it** — pasted threads truncate prompts
    mid-instruction (`references/history.md`).
 2. Invoke the role's skills first (only `development` has any).
-3. One `Read` of `$SDLC_DIR/references/stage-playbooks.md` before anything else,
-   **plus** the exact doc path it owns (e.g. `<docRoot>/issue-<n>/lld.md`), spelled
-   out. Don't paste the playbook. `$SDLC_DIR` here is the **unit's own** skill copy —
+3. `$SDLC_DIR` in the prompt, so the agent's own "first move" instructions — a `Read`
+   of `references/stage-playbooks.md` plus whichever narrower `references/*.md` files
+   its own role names (design-doc, verification, or review-fanout rules) — resolve.
+   **Plus** the exact doc path it owns (e.g. `<docRoot>/issue-<n>/lld.md`), spelled
+   out. Don't paste any of these files. `$SDLC_DIR` here is the **unit's own** skill copy —
    the `skill_dir` that `worktree-add`/`sync-branch` returned for this worktree
    (Setup), never the main checkout's `.github/sdlc-pipeline`.
 4. On genuine ambiguity: **stop and report the specific question in the final
@@ -497,14 +516,16 @@ python3 "$SDLC" retro-check
 ```
 
 `run_retro` is true once `pipeline.retro.everyClosedIssues` (default 5) issues have
-closed since the last retrospective. The watermark file (`pipeline.retro.watermarkFile`,
-default `<docRoot>/retro-watermark`) is **state of the driven repo**; the fixes go to
-**the skill repo**, which is a separate git repository (`$SDLC_DIR`, typically a
-submodule such as `.github/sdlc-pipeline`). When true: grep the recently merged units'
-handoff comments and docs for recurring friction — bouncing pairings
-(`pairing-counts` gives the marker-backed ones), docs too thin for the next stage, dead
-references, gates too strict or loose. **This file and its references are the primary
-fix target.** Present findings in chat and ask before editing. Once approved:
+closed since the last retrospective. **Capture the `closed_count` this invocation
+returns — that number is what `--mark-done` stamps later, not whatever the live count
+has become by then.** The watermark file (`pipeline.retro.watermarkFile`, default
+`<docRoot>/retro-watermark`) is **state of the driven repo**; the fixes go to **the
+skill repo**, which is a separate git repository (`$SDLC_DIR`, typically a submodule
+such as `.github/sdlc-pipeline`). When true: grep the recently merged units' handoff
+comments and docs for recurring friction — bouncing pairings (`pairing-counts` gives
+the marker-backed ones), docs too thin for the next stage, dead references, gates too
+strict or loose. **This file and its references are the primary fix target.** Present
+findings in chat and ask before editing. Once approved:
 
 1. In `$SDLC_DIR`: `git checkout -B retro/<date> origin/main`, edit `SKILL.md` /
    `references/*` / `agents/*`, append the dated why to `references/history.md`,
@@ -524,11 +545,21 @@ fix target.** Present findings in chat and ask before editing. Once approved:
    changes untested, neither knowing the suite existed — in the same retrospective
    where both were writing rules about not asserting coverage nobody had checked.
 2. A finding about an agent's procedure lands twice: the template in `$SDLC_DIR/agents/`
-   and the driven repo's filled-in copy in `.claude/agents/`.
-3. In the driven repo: bump the submodule to the merged skill commit, run
-   `retro-check --mark-done`, and commit the watermark and the submodule pointer
-   together (message naming the retrospective). That commit is the record of
-   "retro done at skill version X".
+   and the driven repo's filled-in copy in `.claude/agents/`. `sync-skill` (below)
+   re-vendors this half mechanically; it does not write `references/history.md` or
+   any prose — that stays a hand-authored part of step 1.
+3. In the driven repo: `python3 "$SDLC" sync-skill` bumps the submodule to the merged
+   skill commit and re-vendors `.claude/agents/`, staging both — then run
+   `retro-check --mark-done --count <the closed_count captured at Step 5's start>`,
+   and commit the watermark and the submodule pointer together (message naming the
+   retrospective). That commit is the record of "retro done at skill version X".
+   **Always pass `--count`.** Fix work and the evidence sweep take real time, during
+   which more issues close; `--mark-done` without `--count` falls back to whatever
+   the live count is *at that later moment* and stamps it as the watermark, silently
+   marking every issue closed in between as covered by a sweep that never read them
+   (2026-09-14: the fallback exists only for backward compatibility and flags itself
+   via `count_was_live_fallback` in the result — treat that flag as true meaning
+   "re-run with the right `--count`", not as a pass).
 
 **A retrospective is merged only when the lane is quiet** — no live stage agent. Stage
 agents Read the playbook from `$SDLC_DIR` mid-run; bumping the submodule under one

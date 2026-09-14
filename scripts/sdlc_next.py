@@ -91,6 +91,11 @@ DOC_ROOT = CONFIG["docRoot"]
 # Where the classic-PAT GitHub token is read from; surfaced only in the runnable
 # command strings this CLI hands back to the orchestrator.
 TOKEN_PATH = CONFIG["tokenPath"]
+# Where this repo's requirements documents live, e.g. `<requirements-dir>/IRD-*.md`
+# in `agents/sdlc-product.md`. Optional -- only `sync-skill`'s agent re-vendor needs
+# it, and only when a template actually references the placeholder, so an existing
+# config that predates this key keeps loading.
+REQUIREMENTS_DIR = CONFIG.get("requirementsDir")
 STAGE_AFTER_GATE = {"product": "architecture", "architecture": "development"}
 
 # How many finished PRs (within the one epic the operator named -- see "Epic
@@ -364,6 +369,13 @@ Runner = Callable[[list], str]
 
 class GhError(RuntimeError):
     pass
+
+
+def _utc_now_marker() -> str:
+    """The one timestamp format every stage-transition marker comment uses. A single
+    call site means a format change (e.g. adding milliseconds) is a one-line edit
+    instead of a find-and-fix across every marker-writing command."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _default_runner(argv: list) -> str:
@@ -880,7 +892,9 @@ _STAGE_TRANSITION_MARKER = re.compile(r"<!--\s*stage-transition:\s*(\S+?)->(\S+?
 # agent: an issue sits at Stage = Testing / Pipeline Status = In Progress both
 # before *and* during rework, so neither field can distinguish "awaiting review"
 # from "already reviewed, dev is fixing it". See "Parallel PR review" in references/parallelism.md.
-_PR_REVIEW_OUTCOME_MARKER = re.compile(r"<!--\s*pr-review-outcome:\s*(\w+):(\d+)\s*(?:@[^>]*?)?-->")
+_PR_REVIEW_OUTCOME_MARKER = re.compile(
+    r"<!--\s*pr-review-outcome:\s*(\w+):(\d+)(?:\s+same-class:(true|false))?"
+    r"\s*(?:@[^>]*?)?-->")
 # Posted by `cmd_sync_branch` when reconciling with origin/main hit real unmerged
 # paths -- persists the sync-branch-conflict <-> development escalation-valve
 # pairing on the issue thread so `cmd_pairing_counts` (and a fresh session) can
@@ -908,7 +922,8 @@ _SYNC_CONFLICT_MARKER = re.compile(r"<!--\s*sync-conflict:\s*(\S+)\s*(?:@[^>]*?)
 # have resumed with it silently reset to zero, leaving the valve unenforceable
 # exactly where it fires most.
 _DESIGN_REVIEW_OUTCOME_MARKER = re.compile(
-    r"<!--\s*design-review-outcome:\s*(\w+):(\S+?)\s*(?:@[^>]*?)?-->")
+    r"<!--\s*design-review-outcome:\s*(\w+):(\S+?)(?:\s+same-class:(true|false))?"
+    r"\s*(?:@[^>]*?)?-->")
 
 # Local-CI attestation, added 2026-09-04 with the main-only-CI cost cut. The
 # backend/frontend suites no longer run on child PRs in GitHub Actions (they run
@@ -1268,7 +1283,7 @@ def cmd_record_epic_verification(gh: GitHub, epic: int, kind: str, summary: str)
     Never hand-type the marker -- `close-epic` reads it back, and an evidence
     line that lives only in a session's memory reads to the next session as a
     run that never happened."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     label = "Full e2e suite" if kind == "e2e" else "Exploratory pass"
     gh.issue_comment(epic,
         f"🧪 {label} — closing verification for #{epic}. {summary}\n\n"
@@ -1305,7 +1320,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         # an ephemeral one under the branch lock, never in the main checkout.
         with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
             git_reconcile_branch(ws.path, branch, base="main", runner=runner)
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        timestamp = _utc_now_marker()
         gh.issue_comment(epic,
             f"🔄 Reconciled `{branch}` with `origin/main` ({behind} commit(s) picked up). "
             f"Closing verification must now run against **this** tree — the full e2e suite and "
@@ -1753,6 +1768,67 @@ def init_skill_submodule(worktree: str, runner: Runner = _default_runner) -> dic
                       f"{skill_dir} -- the pinned skill commit is not checked out")
     pinned = runner(["git", "-C", skill_dir, "rev-parse", "HEAD"]).strip()
     return {"skill_dir": skill_dir, "skill_commit": pinned}
+
+
+_AGENT_TEMPLATE_PLACEHOLDERS = {
+    "<docRoot>": lambda: DOC_ROOT,
+    "<your-token-file>": lambda: TOKEN_PATH,
+    "<requirements-dir>": lambda: REQUIREMENTS_DIR,
+}
+
+
+def cmd_sync_skill(repo_path: str = ".", ref: Optional[str] = None,
+                    runner: Runner = _default_runner) -> dict:
+    """The in-place update SKILL.md's retro Step 5 otherwise spells out as manual
+    `git` + copy-paste: bump `pipeline.skill.submodulePath` to `ref` (default the
+    skill's `origin/main`) and re-vendor `$SDLC_DIR/agents/*.md` into the driven
+    repo's `.claude/agents/`, substituting the same placeholders the manual process
+    always has (`<docRoot>`, `<your-token-file>`, `<requirements-dir>`). Stages both
+    (`git add`) but does not commit -- the commit message names the retrospective,
+    which only the caller knows.
+
+    Does not itself decide whether the lane is quiet; SKILL.md's rule stands --
+    run this only when no stage agent is reading `$SDLC_DIR` mid-turn.
+
+    A template placeholder with no configured value raises rather than vendoring a
+    literal `<requirements-dir>` into a driven repo's `.claude/agents/` -- that
+    silently ships an agent that reads its own doc root as a literal string."""
+    sub = (PIPELINE["skill"].get("submodulePath") or "").strip("/")
+    if not sub:
+        raise GhError("pipeline.skill.submodulePath is empty -- nothing to sync")
+    skill_dir = os.path.join(repo_path, sub)
+    old_sha = runner(["git", "-C", skill_dir, "rev-parse", "HEAD"]).strip()
+    runner(["git", "-C", skill_dir, "fetch", "origin"])
+    runner(["git", "-C", skill_dir, "checkout", "--detach", ref or "origin/main"])
+    new_sha = runner(["git", "-C", skill_dir, "rev-parse", "HEAD"]).strip()
+    runner(["git", "-C", repo_path, "add", "--", sub])
+
+    agents_src = os.path.join(skill_dir, "agents")
+    agents_dst = os.path.join(repo_path, ".claude", "agents")
+    os.makedirs(agents_dst, exist_ok=True)
+    vendored = []
+    for name in sorted(os.listdir(agents_src)):
+        if not name.endswith(".md"):
+            continue
+        with open(os.path.join(agents_src, name)) as f:
+            content = f.read()
+        for token, getval in _AGENT_TEMPLATE_PLACEHOLDERS.items():
+            if token not in content:
+                continue
+            value = getval()
+            if value is None:
+                raise GhError(
+                    f"{name} contains {token} but the pipeline config has no value "
+                    f"for it -- set the corresponding key in sdlc-pipeline.config.json "
+                    f"before running sync-skill")
+            content = content.replace(token, value)
+        with open(os.path.join(agents_dst, name), "w") as f:
+            f.write(content)
+        vendored.append(name)
+    runner(["git", "-C", repo_path, "add", "--", os.path.join(".claude", "agents")])
+
+    return {"submodule_path": sub, "old_sha": old_sha, "new_sha": new_sha,
+            "changed": old_sha != new_sha, "agents_vendored": vendored}
 
 
 def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: str = ".",
@@ -2402,7 +2478,7 @@ def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> d
     Does not touch Stage (already `PR Review` from `open-dev-pr`) or Pipeline
     Status (still `In Progress`) -- a queued-for-review issue is not a *new* state,
     it's the same one, now with a marked handoff."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     gh.issue_comment(issue,
         f"✅ Development complete. {summary} "
         f"PR #{pr} is queued for `pr-review`.\n\n"
@@ -2413,27 +2489,41 @@ def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> d
 PR_REVIEW_OUTCOMES = ("clean", "rework")
 
 
-def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary: str) -> dict:
+def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary: str,
+                         same_class_recurrence: bool = False) -> dict:
     """Records that a `pr-review` pass ran on this issue's PR and what it found --
     the last action of every review, clean or not, **before** `merge-pr` or a
     rework resume. Posts one comment carrying the
-    `<!-- pr-review-outcome: <outcome>:<pr> @ <ts> -->` marker
+    `<!-- pr-review-outcome: <outcome>:<pr> [same-class:true] @ <ts> -->` marker
     `list-ready-for-review` reads back, so a PR under rework is never handed to a
     second, concurrent review agent (see `cmd_list_ready_for_review`).
 
     `outcome` is `clean` (nothing found; merging next) or `rework` (findings sent
     back to `development`). Recording it on the clean path too is not redundant:
     the merge can fail or be delayed by CI, and the issue stays listable until it
-    actually closes."""
+    actually closes.
+
+    `same_class_recurrence=True` -- pass it when this round's finding is the same
+    defect class as an earlier round's on this PR. See `cmd_record_design_review`
+    for why this needs to be a marker `cmd_pairing_counts` reads, not a sentence
+    in the verdict prose that nothing acts on."""
     if outcome not in PR_REVIEW_OUTCOMES:
         raise GhError(f"outcome must be one of {PR_REVIEW_OUTCOMES}, got {outcome!r}")
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if same_class_recurrence and outcome != "rework":
+        raise GhError("same_class_recurrence only makes sense on outcome='rework' "
+                       "-- a clean verdict has no defect class to recur")
+    timestamp = _utc_now_marker()
     headline = ("🔍 PR review complete — no findings; proceeding to merge."
                 if outcome == "clean" else
                 "🔁 PR review complete — findings sent back to `development` for rework.")
+    if same_class_recurrence:
+        headline += " **Same defect class as an earlier round — escalation candidate.**"
+    same_class_field = " same-class:true" if same_class_recurrence else ""
     gh.issue_comment(issue, f"{headline} {summary}\n\n"
-                             f"<!-- pr-review-outcome: {outcome}:{pr} @ {timestamp} -->")
-    return {"issue": issue, "pr": pr, "outcome": outcome, "recorded": True}
+                             f"<!-- pr-review-outcome: {outcome}:{pr}"
+                             f"{same_class_field} @ {timestamp} -->")
+    return {"issue": issue, "pr": pr, "outcome": outcome,
+            "same_class_recurrence": same_class_recurrence, "recorded": True}
 
 
 # How much of a suite run's captured output an attestation embeds. Enough to show
@@ -2504,7 +2594,7 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
     if not (command or "").strip():
         raise GhError("--command is required: the exact command the suite was run with")
     evidence = read_ci_evidence(output)
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     fence = "```"
     gh.pr_comment(pr, f"🧪 Local CI attested — `{suite}` suite passed locally against "
                        f"`{sha}` (main-only GHA CI; this is the merge-gate stand-in).\n\n"
@@ -2521,17 +2611,29 @@ DESIGN_REVIEW_ROLES = ("product-review", "arch-review", "lld-review")
 
 
 def cmd_record_design_review(gh: GitHub, issue: int, role: str, outcome: str,
-                             summary: str, unit: str = "issue") -> dict:
+                             summary: str, unit: str = "issue",
+                             same_class_recurrence: bool = False) -> dict:
     """Records that `arch-review` or `lld-review` ran and what it concluded --
     the design-side twin of `record-pr-review`, and the last action of every
     design review, clean or not, before the orchestrator resumes the design agent
     or moves the unit on.
 
     Posts one comment carrying
-    `<!-- design-review-outcome: <outcome>:<role> @ <ts> -->`, which
-    `cmd_pairing_counts` reads back per role. Added 2026-08-28 out of epic #98's
-    retrospective -- see `_DESIGN_REVIEW_OUTCOME_MARKER` for why the pairing that
-    fires the valve most often had no counter until then.
+    `<!-- design-review-outcome: <outcome>:<role> [same-class:true] @ <ts> -->`,
+    which `cmd_pairing_counts` reads back per role. Added 2026-08-28 out of epic
+    #98's retrospective -- see `_DESIGN_REVIEW_OUTCOME_MARKER` for why the pairing
+    that fires the valve most often had no counter until then.
+
+    `same_class_recurrence=True` -- pass it when this round's blocking finding is
+    the same defect class as an earlier round's on this unit (the review agent's
+    own instructions call for this, see "Fan-out"/"rework" sections). This is the
+    mechanical form of "escalate on the pattern": on #157's #504 (2026-09-14) a
+    reviewer wrote that sentence in the verdict prose at two separate rounds and
+    nothing acted on it, because nothing parses a verdict's prose. A same-class
+    marker is what `references/rework.md`'s escalation valve reads instead of the
+    generic bounce count, so a same-class recurrence escalates on its own terms
+    the first time `cmd_pairing_counts` reports it, not on whichever bounce number
+    the generic counter happens to be at.
 
     This does **not** replace the `arch-review-confidence` marker, which
     `skip-gate` reads and which answers a different question (how much to trust a
@@ -2541,14 +2643,22 @@ def cmd_record_design_review(gh: GitHub, issue: int, role: str, outcome: str,
         raise GhError(f"role must be one of {DESIGN_REVIEW_ROLES}, got {role!r}")
     if outcome not in PR_REVIEW_OUTCOMES:
         raise GhError(f"outcome must be one of {PR_REVIEW_OUTCOMES}, got {outcome!r}")
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if same_class_recurrence and outcome != "rework":
+        raise GhError("same_class_recurrence only makes sense on outcome='rework' "
+                       "-- a clean verdict has no defect class to recur")
+    timestamp = _utc_now_marker()
     headline = (f"🔍 `{role}` complete — no findings."
                 if outcome == "clean" else
                 f"🔁 `{role}` complete — findings sent back for rework.")
+    if same_class_recurrence:
+        headline += " **Same defect class as an earlier round — escalation candidate.**"
+    same_class_field = " same-class:true" if same_class_recurrence else ""
     gh.issue_comment(issue, f"{headline} {summary}\n\n"
-                             f"<!-- design-review-outcome: {outcome}:{role} @ {timestamp} -->")
+                             f"<!-- design-review-outcome: {outcome}:{role}"
+                             f"{same_class_field} @ {timestamp} -->")
     return {"issue": issue, "unit": unit, "role": role,
-            "outcome": outcome, "recorded": True}
+            "outcome": outcome, "same_class_recurrence": same_class_recurrence,
+            "recorded": True}
 
 
 def _post_start_comment(gh: GitHub, issue: int, role: str):
@@ -2664,7 +2774,7 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
         draft=False,
     )
     gh.set_pipeline_status_field(issue, "awaiting-human-review")
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     doc_verb = "Requirements locked" if stage == "product" else "Design locked"
     comment = (
         f"✅ {doc_verb} — see `{DOC_ROOT}/{branch}/{doc}` (`{sha}`). {summary}\n\n"
@@ -2794,7 +2904,7 @@ def cmd_sync_branch(gh: GitHub, repo_path: Optional[str], issue: int, unit: str 
             # survive a crashed session, and the sync-branch-conflict <->
             # development escalation-valve pairing must be reconstructible from the
             # thread (cmd_pairing_counts reads this marker back).
-            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            timestamp = _utc_now_marker()
             gh.issue_comment(issue,
                 f"⚠️ Merge conflict reconciling `{branch}` with `origin/{base}` — "
                 f"{len(e.files)} file(s): {', '.join(f'`{f}`' for f in e.files)}. "
@@ -2919,7 +3029,7 @@ def _advance_after_lld_publish(gh: GitHub, issue: int, entry: dict, result: dict
     if stage != "lld":
         return {**result, "advanced": False,
                 "reason_not_advanced": f"Stage is {stage!r}, not 'lld' — nothing to advance"}
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     gh.set_stage_field(issue, "development")
     gh.clear_pipeline_status_field(issue)
     gh.issue_comment(issue,
@@ -3002,7 +3112,7 @@ def _publish_lld_doc(gh: GitHub, epic_path: str, issue: int, epic: str, doc_path
                     "reason": f"push to {epic} returned success but origin/{epic} does not "
                               f"carry {doc_path} at the published blob — refusing to report "
                               f"merged; inspect origin/{epic} and re-run"}
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        timestamp = _utc_now_marker()
         gh.issue_comment(issue,
             f"📄 Published `lld.md` to `{epic}` (`{sha}`) — the low-level design is now durable "
             f"on the epic branch, independent of `{issue_branch(issue)}`, and siblings pick it "
@@ -3028,7 +3138,7 @@ def _complete_epic_architecture(gh: GitHub, epic_number: int, note: str) -> dict
     does. See "Epic-level stages" in references/epics.md."""
     gh.clear_stage_and_status_fields(epic_number)
     gh.issue_edit(epic_number, add_labels=[LABELS["architected"]])
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     gh.issue_comment(epic_number,
         f"🏗️ Epic architecture phase complete — {note} Child issues become eligible for "
         f"`lld` onward starting the next `/sdlc-pipeline` pass.\n\n"
@@ -3097,19 +3207,16 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
             gh, issue, f"human review confirmed for `architecture.md` — merged via #{gate_pr}."),
             ws)
     next_stage = STAGE_AFTER_GATE[stage]
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
+    prefix = f"✅ Human review confirmed for `{stage}.md` — merged via #{gate_pr} — "
+    marker = f"<!-- stage-transition: human-review:{stage}->{next_stage} @ {timestamp} -->"
     if live:
-        gh.issue_comment(issue,
-            f"✅ Human review confirmed for `{stage}.md` — merged via #{gate_pr} — "
-            f"proceeding to `{next_stage}` stage.\n\n"
-            f"<!-- stage-transition: human-review:{stage}->{next_stage} @ {timestamp} -->")
+        gh.issue_comment(issue, f"{prefix}proceeding to `{next_stage}` stage.\n\n{marker}")
         cmd_claim(gh, issue, next_stage)
     else:
         gh.issue_comment(issue,
-            f"✅ Human review confirmed for `{stage}.md` — merged via #{gate_pr} — "
-            f"Stage advanced to `{next_stage}`. Pick up with `/sdlc-pipeline` whenever "
-            f"you're ready to run this stage.\n\n"
-            f"<!-- stage-transition: human-review:{stage}->{next_stage} @ {timestamp} -->")
+            f"{prefix}Stage advanced to `{next_stage}`. Pick up with `/sdlc-pipeline` "
+            f"whenever you're ready to run this stage.\n\n{marker}")
         gh.set_stage_field(issue, next_stage)
         gh.clear_pipeline_status_field(issue)
     return _with_workspace({"issue": issue, "unit": unit, "next_stage": next_stage,
@@ -3155,7 +3262,7 @@ def cmd_skip_gate(gh: GitHub, issue: int, stage: str, confidence: int, summary: 
                        f"{threshold}% threshold) that `architecture.md` is "
                        f"structurally sound — skipped Gate B. {summary}")
     next_stage = STAGE_AFTER_GATE[stage]
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     gh.issue_comment(issue,
         f"⚡ Gate B skipped — arch-review reported {confidence}% confidence "
         f"(> {threshold}% threshold) that `architecture.md` is "
@@ -3187,7 +3294,7 @@ def cmd_auto_pass_gate_a(gh: GitHub, issue: int, stage: str, summary: str,
         raise GhError(f"profile '{profile['name']}' requires a human at Gate A "
                        f"(requiresHumanGateA: true) -- open a gate, do not auto-pass")
     next_stage = STAGE_AFTER_GATE[stage]  # "architecture"
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     gh.issue_comment(issue,
         f"⚡ Gate A auto-passed — profile '{profile['name']}' needs no human review of "
         f"`product.md` (requiresHumanGateA: false). {summary} Proceeding directly to "
@@ -4071,23 +4178,43 @@ RETRO_WATERMARK_FILE = PIPELINE["retro"]["watermarkFile"]
 RETRO_EVERY = PIPELINE["retro"]["everyClosedIssues"]
 
 
-def cmd_retro_check(gh: GitHub, repo_path: str = ".", mark_done: bool = False) -> dict:
+def cmd_retro_check(gh: GitHub, repo_path: str = ".", mark_done: bool = False,
+                     count: Optional[int] = None) -> dict:
     """`run_retro` is true once >= 5 issues have closed since the last completed
-    retrospective. `--mark-done` records the current count as the new watermark
-    (a local file write -- commit it with the retro's own skill-edit commit)."""
+    retrospective. `--mark-done --count N` records N as the new watermark -- N
+    must be the `closed_count` this same command returned at the invocation that
+    found `run_retro: true`, captured by the caller and carried through the fix
+    work, not re-read live. The live count moves while the retro's evidence sweep
+    and fix land (2026-09-14: watermark stayed at 171 through an evidence sweep and
+    a four-item fix while the repo's own closed count kept climbing); stamping
+    that later, larger live count as the watermark silently marks every issue that
+    closed in between as reviewed by a sweep that never looked at them -- the next
+    retro's sweep starts counting friction only from the inflated number forward.
+    `--mark-done` without `--count` falls back to the live count for backward
+    compatibility, and the result says so via `count_was_live_fallback` -- prefer
+    always passing `--count`."""
     path = os.path.join(repo_path, RETRO_WATERMARK_FILE)
     watermark = 0
     if os.path.isfile(path):
         with open(path) as f:
             watermark = int(f.read().strip() or 0)
-    count = gh.closed_issue_count()
+    live_count = gh.closed_issue_count()
     if mark_done:
+        used_live_fallback = count is None
+        stamp = live_count if used_live_fallback else count
+        if stamp < watermark:
+            raise GhError(f"--count {stamp} is behind the existing watermark {watermark} -- "
+                           f"the watermark must not move backwards")
+        if stamp > live_count:
+            raise GhError(f"--count {stamp} is ahead of the live closed count {live_count} -- "
+                           f"pass the count captured when run_retro went true, not a guess")
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w") as f:
-            f.write(f"{count}\n")
-        return {"closed_count": count, "watermark": count, "marked_done": True}
-    return {"closed_count": count, "watermark": watermark,
-            "run_retro": count - watermark >= RETRO_EVERY}
+            f.write(f"{stamp}\n")
+        return {"closed_count": live_count, "watermark": stamp, "marked_done": True,
+                "count_was_live_fallback": used_live_fallback}
+    return {"closed_count": live_count, "watermark": watermark,
+            "run_retro": live_count - watermark >= RETRO_EVERY}
 
 
 def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
@@ -4105,9 +4232,19 @@ def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
     `lld-review <-> lld` (`design-review-outcome` markers, reported per role under
     `design_review`).
     `testing <-> development` still leaves no marker and remains the
-    orchestrator's own session-scoped count."""
+    orchestrator's own session-scoped count.
+
+    `same_class_recurrence_count` (top-level, for `pr-review`, and per role under
+    `design_review`) counts `same-class:true` markers -- added 2026-09-14 because
+    the generic bounce count does not distinguish three different defects from the
+    same defect three times, and a reviewer's own "escalate on the pattern" note in
+    verdict prose changes nothing unless something reads it back. **Any count >= 1
+    here is its own escalation signal, independent of `replace_at`/`needs_human_at`**
+    -- see `references/rework.md`, "Same-class recurrence must be a marker, not a
+    sentence"."""
     comments = gh.issue_view(issue).get("comments", [])
     rework_since_clean = total_rework = total_clean = sync_conflicts = 0
+    pr_review_same_class = 0
     design_review: dict = {}
     for c in comments:
         body = c.get("body", "")
@@ -4116,6 +4253,8 @@ def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
             if m.group(1) == "rework":
                 total_rework += 1
                 rework_since_clean += 1
+                if m.group(3) == "true":
+                    pr_review_same_class += 1
             else:
                 total_clean += 1
                 rework_since_clean = 0
@@ -4125,10 +4264,13 @@ def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
         if d:
             outcome, role = d.group(1), d.group(2)
             counts = design_review.setdefault(
-                role, {"rework_since_last_clean": 0, "total_rework": 0, "total_clean": 0})
+                role, {"rework_since_last_clean": 0, "total_rework": 0, "total_clean": 0,
+                       "same_class_recurrence_count": 0})
             if outcome == "rework":
                 counts["total_rework"] += 1
                 counts["rework_since_last_clean"] += 1
+                if d.group(3) == "true":
+                    counts["same_class_recurrence_count"] += 1
             else:
                 counts["total_clean"] += 1
                 counts["rework_since_last_clean"] = 0
@@ -4138,6 +4280,7 @@ def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
             "pr_review_rework_since_last_clean": rework_since_clean,
             "pr_review_total_rework": total_rework,
             "pr_review_total_clean": total_clean,
+            "pr_review_same_class_recurrence_count": pr_review_same_class,
             "sync_conflict_count": sync_conflicts,
             # Keyed by role (`arch-review` / `lld-review`) rather than flattened:
             # a unit can bounce on both, and the valve counts them as separate
@@ -4515,7 +4658,12 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--outcome", required=True, choices=list(PR_REVIEW_OUTCOMES))
     p.add_argument("--summary", required=True,
                     help="One sentence: what the review checked and concluded")
-    p.set_defaults(func=lambda a: cmd_record_pr_review(GitHub(), a.issue, a.pr, a.outcome, a.summary))
+    p.add_argument("--same-class-recurrence", action="store_true",
+                    help="This round's finding is the same defect class as an earlier "
+                         "round's on this PR -- the mechanical escalation signal, not a "
+                         "sentence in the verdict prose")
+    p.set_defaults(func=lambda a: cmd_record_pr_review(
+        GitHub(), a.issue, a.pr, a.outcome, a.summary, a.same_class_recurrence))
     p = sub.add_parser("record-local-ci",
                         help="development's evidence-carrying attestation that a main-only "
                              "suite (backend/frontend) passed locally against a given commit -- "
@@ -4544,8 +4692,12 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--summary", required=True,
                     help="One sentence: what the review checked and concluded")
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
+    p.add_argument("--same-class-recurrence", action="store_true",
+                    help="This round's finding is the same defect class as an earlier "
+                         "round's on this unit -- the mechanical escalation signal, "
+                         "not a sentence in the verdict prose")
     p.set_defaults(func=lambda a: cmd_record_design_review(
-        GitHub(), a.issue, a.role, a.outcome, a.summary, a.unit))
+        GitHub(), a.issue, a.role, a.outcome, a.summary, a.unit, a.same_class_recurrence))
     p = sub.add_parser("check-gate")
     p.add_argument("issue", type=int)
     p.set_defaults(func=lambda a: cmd_check_gate(GitHub(), a))
@@ -4658,6 +4810,15 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--repo-path", default=".", help="The shared main checkout")
     p.set_defaults(func=lambda a: cmd_worktree_add(GitHub(), a.number, a.unit, a.repo_path))
 
+    p = sub.add_parser("sync-skill",
+                        help="Bump the skill submodule to --ref (default origin/main) "
+                             "and re-vendor .claude/agents/ from its templates. Stages "
+                             "both; does not commit. Run only on a quiet lane.")
+    p.add_argument("--repo-path", default=".", help="The driven repo's root")
+    p.add_argument("--ref", default=None,
+                    help="Skill commit/branch to bump to (default: origin/main)")
+    p.set_defaults(func=lambda a: cmd_sync_skill(a.repo_path, a.ref))
+
     p = sub.add_parser("sync-branch")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
@@ -4713,9 +4874,14 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--repo-path", default=".",
                     help="Repo root holding the tracked retro-watermark file")
     p.add_argument("--mark-done", action="store_true",
-                    help="Record the current closed count as the new watermark "
-                         "(commit the file with the retro's own commit)")
-    p.set_defaults(func=lambda a: cmd_retro_check(GitHub(), a.repo_path, a.mark_done))
+                    help="Record --count (or the live count, if omitted) as the new "
+                         "watermark (commit the file with the retro's own commit)")
+    p.add_argument("--count", type=int, default=None,
+                    help="The closed_count from the retro-check that found run_retro: "
+                         "true -- pass this back verbatim so issues closed after the "
+                         "retro was triggered, during the fix work, aren't silently "
+                         "counted as reviewed")
+    p.set_defaults(func=lambda a: cmd_retro_check(GitHub(), a.repo_path, a.mark_done, a.count))
     p = sub.add_parser("show-config",
                         help="Print the effective pipeline tunables (config `pipeline` "
                              "block merged over defaults) plus repo/docRoot/parallelism")

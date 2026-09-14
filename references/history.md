@@ -4,6 +4,222 @@ Provenance for rules that would otherwise read as arbitrary. Newest first. Keep
 entries to a few lines; the rule itself lives in the spine or its reference file —
 this file records *why* and *when*.
 
+## 2026-09-14 — retrospective: model-tier revert, IT scoping, mechanism-proof gap, review recurrence
+
+**`product-review`/`arch-review` reverted from `fable` back to `opus`, repeating a
+lesson this file already recorded.** The 2026-09-12 move to `fable` (`6c691b5`) was
+reasoned as "a cheaper adversarial pass" — the same premise the 2026-08-28 entry
+above already disproved for `architecture`/`arch-review`: Fable is $10/$50 per MTok
+against Opus's $5/$25, 2x costlier in both directions, not cheaper. That 2026-08-24
+pin was reverted four days later on exactly this evidence; the 2026-09-12 retro
+re-introduced it anyway without checking this file for a prior decision on the same
+axis. Operator: noticed via unexpectedly fast weekly-quota burn after the 2026-09-12
+change. Fix: both roles back to `opus` in `SKILL.md`'s model table (the code default
+in `scripts/sdlc_next.py` was never actually changed to `fable` — only the doc was,
+so the two had silently disagreed since 2026-09-12). The 2026-09-12(d) Gate-B
+fable-confidence-skip carve-out is moot now that `arch-review` is opus again.
+
+**Backend `test:it` scoped to touched domains during `development`.** Bookshaw's
+`test:it` is one flat `jest --testPathPattern=test/` command — every child ran all 17
+`test/<domain>` suites regardless of what it touched; the `sdlc-development.md`
+"affected-graph scoping" prose assumed Turborepo's affected-package filter narrowed
+this, but nothing wires a `src/modules/<x>` package to its `test/<x>` folder. Checked
+against epic #159's approved architecture (`epic-159` branch): its CI-GATE child
+audits `backend-ci.yml`/`frontend-ci.yml` *trigger* path filters (package-level: does
+backend CI run at all) and keeps CI's own IT run as the full suite — a different
+layer from this fix, which is scoped to what the `development` stage agent runs
+*locally*, before a PR exists. No overlap. Fix: map touched `src/modules/<x>` /
+`src/common` dirs to matching `test/<x>` folders and scope the local run to those;
+a shared/`src/common` or migration touch falls back to the full suite.
+
+**Mechanism-correctness claims need a proof control, same bar as completeness
+sweeps.** Issues #530 (4 rework rounds) and #513 (redesign, 2 rounds) — every single
+blocking `lld-review` finding across both was the same class: `lld.md` asserted how a
+runtime/library mechanism behaves (Postgres connection pooling, jest's mock-registry
+scoping, pdfmake's font encoding, Docker mount-path identity, CI env-var resolution
+order) from reasoning, disproved the moment the reviewer actually ran a throwaway
+repro. `sdlc-lld.md` already mandates proof-by-execution for search-completeness
+claims ("only/every/no other") but had no equivalent for mechanism claims. Fix: added
+a parallel rule in `sdlc-lld.md` — a mechanism-behavior claim needs a throwaway
+positive+negative control run before submission, not an assertion from reasoning.
+
+**Review recurrence: state why the earlier round missed it, before bouncing again.**
+Issue #521 bounced 4x on the same defect class (2x `lld-review`, 2x `pr-review`) —
+every bounce was a real, proven defect, and the reviewer flagged "escalation
+candidate" at round 2 and 3, but the pipeline kept re-dispatching `development`
+instead of escalating or rerouting; the generic 3-strike replace counter never fired
+because it counts total bounces, not same-class recurrence. Separately: nitpick/docs
+findings were already correctly non-blocking everywhere (`product-review`,
+`arch-review`/`lld-review`, `pr-review` all already split Blocking/Non-blocking with
+"style, naming, formatting are never blocking" — nothing to fix there; the actual gap
+was real defects recurring, not nitpicks over-bouncing). Fix: `sdlc-product-review.md`,
+`sdlc-design-review.md`, `sdlc-pr-review.md` — when a blocking finding repeats an
+earlier round's defect class on the same unit, the writeup states why the earlier
+round missed it (out of scope, a new code path the fix introduced, needed execution
+to surface, reviewer miss) before bouncing again; a genuine recurring blind spot
+escalates to `needs-human`/reroute regardless of the generic strike count.
+
+**`retro-check --mark-done` was stamping a moving target as the watermark.**
+Operator: *"how do we know till what point retro was actually completed — if retro
+triggered at 120 but by the time the skill is updated the count reached 130, were the
+last 10 actually retro'd?"* They weren't: `cmd_retro_check` re-read the **live**
+closed-issue count at `--mark-done` time rather than using the count from the
+invocation that found `run_retro: true`, so every issue that closed during the fix
+work and evidence sweep got silently absorbed into "reviewed" without ever being
+swept. Fix: `--mark-done` now takes `--count <n>`, the `closed_count` the triggering
+`retro-check` returned; it's validated to sit between the existing watermark and the
+live count (refuses to move backwards or claim closes that haven't happened), and
+`SKILL.md`'s Step 5 says to capture and carry that number through. Omitting `--count`
+still falls back to the live count for compatibility, flagged in the result via
+`count_was_live_fallback` so the risky path is visible rather than silent.
+
+**Added `sync-skill`, the in-place update this retro process didn't have.**
+Operator asked whether any command let a driven repo bump/re-vendor the skill
+in-place; there wasn't one — `SKILL.md`'s Step 5 described the submodule bump and the
+`agents/` → `.claude/agents/` re-vendor as manual `git` and copy-paste, the only step
+in that section with no named command. Added `sync-skill [--ref <ref>]`: bumps
+`pipeline.skill.submodulePath` to `ref` (default `origin/main`), re-vendors
+`.claude/agents/*.md` from the bumped templates substituting `<docRoot>`,
+`<your-token-file>`, and the newly-added `requirementsDir` config key (for
+`<requirements-dir>`, previously filled by hand with no config-backed source), and
+stages both — it does not commit, since the commit message naming the retrospective
+is the operator's to write. Raises rather than vendoring a literal unresolved
+placeholder when a config value is missing. Still subject to the existing quiet-lane
+rule below: `sync-skill` doesn't check that itself, the operator does.
+
+## 2026-09-14 (c) — duplication pass: same rule, three copies, in three places
+
+Operator asked for a full duplication sweep of the skill. Three findings, all fixed:
+
+**`agents/sdlc-development.md` restated its own completion-gate checklist 2-3
+times.** The canonical `## The completion gates` list, a condensed echo mid-file
+(the decision-sweep and the #494 `--runInBand` story, both restated a second time),
+and a third, unheaded copy of the same 8-item list right before the exit actions —
+only 2 of that third copy's items were actually new. Merged the 2 new items into the
+one canonical list, deleted both restatements, left one-line pointers back to the
+canonical section instead. The citation rule was tripled the same way (once
+correctly, per `references/stage-playbooks.md`'s "Citation discipline", twice more
+inside this same file) — both in-file copies deleted, one pointer left.
+
+**The review fan-out rules (`subagents propose/you dispose`, serialize execution,
+wait for every axis before posting) were copy-pasted near-verbatim into
+`sdlc-design-review.md`, `sdlc-product-review.md`, and `sdlc-pr-review.md`,
+including the #260 incident story twice.** Hoisted into
+`references/stage-playbooks.md` as "Review fan-out discipline" (the file already
+guaranteed by `SKILL.md` to be read by every stage); each of the three agent files
+now states only its own axis/layer list plus a pointer.
+
+**`scripts/sdlc_next.py`: the UTC marker-timestamp format string was constructed
+independently at 14 call sites.** No comment justified the repetition — a format
+change (e.g. adding milliseconds) meant finding and fixing 14 places by hand. Added
+one `_utc_now_marker()` helper; all 14 sites now call it. `cmd_pass_gate`'s two
+branches also each built the same comment prefix independently — factored into a
+shared `prefix` variable, branches now differ only in their actual suffix.
+
+None of these changed behavior — every existing test stayed green, byte-identical
+output where a test pinned exact comment text.
+
+## 2026-09-14 (d) — real-doc audit: restated facts in product.md, review-history ledgers in lld.md/architecture.md
+
+Operator asked for a read of real recent `product.md`/`architecture.md`/`lld.md`
+output, from a reviewer's-effort angle ("bigger content is difficult to review so
+write only what matters"), before touching the agent files further.
+
+**`product.md` restates the same fact across sections.** Epic #365's `product.md`
+stated its two-level-catalog shape and its 10-row limit four times each, across
+Background, Constraints, User Experience and Decisions Log, worded differently each
+time — no new information, just four places a later edit has to keep in sync. The
+template already asks for a compressed Decisions Log; execution drifted from it.
+Added a fifth rule to `sdlc-product.md`, "Say each fact once," with a before-handoff
+grep-for-restatement check.
+
+**`lld.md` (and, preventively, `architecture.md`) can grow a permanent ledger of its
+own review history.** Issue #494's `lld.md` reached 1,771 lines carrying three full
+"round N findings — disposition" sections baked in from its rework rounds — the same
+information already lives correctly, once, in each review's own handoff comment.
+No instruction was causing this (checked `sdlc-lld.md`, `references/rework.md`,
+`references/stage-playbooks.md` — none mention "disposition" or "round N"); it was
+emergent agent behavior with nothing telling it not to. Added an explicit rule to both
+`sdlc-lld.md` and `sdlc-architecture.md`: a rework round edits the design in place,
+disposition goes in the handoff comment, the document never carries its own review
+history. `architecture.md` itself was found lean in both epics sampled — not a current
+problem, the rule is added there as insurance against the same drift lld.md showed.
+
+`architecture.md` verdict: already appropriately dense, not a target — every line
+checked was decision-relevant (option tables, an explicit invariant proof, honest
+bet/fallback framing).
+
+## 2026-09-14 (e) — stage-playbooks.md split by role, so a role reads less
+
+Operator: divide `stage-playbooks.md` if it helps context load. Fork audit had already
+found the one real excess: every one of the 8 roles read all 594 lines regardless of
+role, including sections relevant to only 1-2 stages.
+
+**Split into 4 files, kept `stage-playbooks.md` as the universal core** (per-issue
+docs, citation discipline, one-turn-finish, commenting, rework/blockers pointer, exit
+actions pointer — read by all 8, unchanged). Three new files, each role-scoped:
+`design-doc-rules.md` (Document altitude, Scope alignment before `product` — read by
+`product`, `product-review`, `architecture`, `design-review`), `verification-rules.md`
+(Compile-checking is not verification, Establish a number by running the thing, A
+completeness claim over a footprint is a sweep — read by `architecture`, `lld`,
+`development`, `pr-review`, `design-review`), `review-fanout.md` (Review fan-out
+discipline — read by `product-review`, `design-review`, `pr-review`).
+
+Net reduction per role: `exploratory` 594 -> 305 lines (49%); `lld`/`development`
+594 -> ~450 (24%); `product` 594 -> ~459 (23%); `product-review`/`pr-review`
+594 -> ~485 (18%); `architecture` 594 -> ~574 (3%, needs nearly all of it);
+`design-review` reads all four (serves both `arch-review` and `lld-review` altitudes
+under one role) — no reduction there, by design, not an oversight.
+
+**Found and fixed two pre-existing stale citations while auditing every pointer to a
+moved section**: `sdlc-architecture.md` and `sdlc-development.md` both cited
+"Context-reset replacement" to `stage-playbooks.md`, but that content has lived in
+`references/rework.md` since the 2026-09-13 split — never updated when it moved.
+Every other citation to a section that changed file (in `agents/*.md`,
+`references/epics.md`, `references/parallelism.md`, `SKILL.md`) was updated to the new
+filename; `references/history.md`'s own past entries were left as-is — they record
+where a rule lived *at the time*, not a live pointer.
+
+## 2026-09-14 (f) — epic #157's 5-round bounces: same-class recurrence becomes a marker
+
+Operator noticed epic #157's children (#499-#506) bouncing `lld-review` 3-5 times
+each and asked whether task division/dependency-DAG shape was the cause. It wasn't:
+`architecture.md` had already partitioned correctly (module boundaries, #504 as sole
+migrations writer, explicit cross-references) and no round bounced on an actual
+sibling-footprint collision. The real causes, found by reading every bounce:
+
+**#504 (4 rounds, stuck at 0 clean): an inventory built by reading code, not by a
+sweep.** The AC4 "every priority query" population missed a real query in each of 4
+straight rounds — a different one each time. The reviewer wrote "escalate on the
+pattern" at rounds 2 *and* 3; nothing escalated, because that sentence is prose in a
+verdict and nothing re-reads verdict prose on every resume decision. This is the same
+completeness-claim-needs-a-sweep rule already in `verification-rules.md`, just never
+recognized as covering an *inventory of items to act on* (one level earlier than a
+criterion or a test) — extended the rule to name this shape explicitly.
+
+**The escalation valve's own design already called for "say so in the verdict"
+(`references/rework.md`) — that was the actual bug.** A same-class recurrence had no
+mechanical signal, only a sentence the orchestrator had to remember to re-read on
+every single resume decision. Fixed at the source: `record-design-review` and
+`record-pr-review` both take `--same-class-recurrence` now, embedding
+`same-class:true` in their existing outcome marker; `pairing-counts` reports it as
+`same_class_recurrence_count` (per role for design reviews, top-level for pr-review).
+Any nonzero count is its own escalation signal, independent of the generic
+`replaceAt`/`needsHumanAt` thresholds — `rework.md`'s "the thing that actually repeats
+is a class" bullet now points at the marker instead of asking for a sentence.
+`sdlc-design-review.md`, `sdlc-product-review.md`, and `sdlc-pr-review.md` all
+instruct passing the flag instead of writing the sentence.
+
+**Minor: #499's round-4 finding "flagged to #504" never reached #504's thread** —
+a coordination note lived only in #499's own doc, which #504 had no reason to
+re-read. `sdlc-lld.md`'s sibling-footprint check now says a finding naming a specific
+sibling posts as a comment on that sibling's own issue, not only in your own doc.
+
+**#499's 5 rounds and most of #503's 4 were not a process failure** — each surfaced a
+genuinely distinct real defect in dense SQL/index work, which is the review doing its
+job, just expensively. Nothing changed for that case; a same-class marker would not
+have fired on it, correctly.
+
 ## 2026-09-13 — one rule, one home, chosen by scope
 
 Operator: *"the skill is getting complex. Agent is not honoring the agents and skills."*

@@ -96,7 +96,7 @@ Both cases are now **profiles** (above), not hardcoded labels:
 
 `docs/sdlc/epic-<n>/product.md` and `.../architecture.md` — same filenames,
 same "Document altitude" rules and templates as per-issue docs (see
-`references/stage-playbooks.md`), and the two are structured differently from each
+`references/design-doc-rules.md`), and the two are structured differently from each
 other at the epic level:
 
 - **`product.md` is organised by functional area, never by child issue.** At the time

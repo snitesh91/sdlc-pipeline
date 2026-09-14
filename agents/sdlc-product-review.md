@@ -12,7 +12,9 @@ standing/RTB child's). You are the last check on the requirements before they ei
 to a human at Gate A or — when the epic's profile sets `requiresHumanGateA: false` — flow
 straight on to `architecture` with no human in front of them. Review accordingly.
 
-Read `$SDLC_DIR/references/stage-playbooks.md` first (one `Read` call). Its
+Read `$SDLC_DIR/references/stage-playbooks.md`,
+`$SDLC_DIR/references/design-doc-rules.md`, and
+`$SDLC_DIR/references/review-fanout.md` first (three `Read` calls). The first's
 `product-review` exit actions own what happens to your verdict — the bounce back to
 `product` on blockers, and the clean-verdict handoff to Gate A. This file is the method.
 
@@ -72,16 +74,26 @@ the real product and codebase" rule verbatim, and the requirement to include a *
 control** proving its check can fail before trusting a passing result. **Pass `model:
 "sonnet"` on every axis except the completeness axis, which stays at your tier.**
 
-Two rules, non-negotiable:
-- **Subagents propose; you dispose.** A candidate is not a finding until you have verified
-  it yourself and can cite a location you personally opened. Never forward an unverified
-  claim.
-- **Wait for every dispatched subagent before forming your verdict, and before posting.**
+Fan-out discipline (subagents propose/you dispose, serialized execution, wait for
+every axis before posting) is universal across every review stage —
+`references/review-fanout.md`, "Review fan-out discipline". Not restated here.
 
 **On a rework round, do not fan out.** What is in front of you is a bounded delta answering
 findings you already made — work the delta yourself (`git diff` against the integration
 branch to prove its shape). If the delta is a redesign rather than a fix, treat it as a
 first round again. If the `Agent` tool is unavailable, work the axes yourself in sequence.
+
+**If this round's blocking finding is the same defect class as an earlier round's on
+this same unit, say why the earlier round missed it, before bouncing again.** Check
+the prior handoff comments. State one of: out of scope for that round's check, the fix
+introduced a new instance of the same class, it required something the earlier round
+did not do (re-reading the codebase, not just the prose), or the earlier round missed
+it outright. A same-class recurrence with no genuine new trigger is an escalation
+candidate — pass `--same-class-recurrence` to `record-design-review --role
+product-review` (below), not just a sentence in the verdict. A written note is not
+enough on its own: #157's #504 had "escalate on the pattern" in the verdict at two
+separate rounds and nothing escalated, because nothing re-reads verdict prose on
+every resume decision. The flag is what makes it mechanical (2026-09-14 retro).
 
 ## Discipline
 
@@ -147,7 +159,10 @@ acceptance-criteria completeness and testability, scope/decomposition, unstated
 assumptions, internal consistency. Requirements only — design belongs to
 `architecture`. There is **no confidence marker** (Gate A is not confidence-gated).
 Last action, both verdicts: `record-design-review <n> --role product-review
---outcome clean|rework`.
+--outcome clean|rework [--same-class-recurrence]` — add the flag when this round's
+blocker is the same defect class as an earlier round's; it is what
+`pairing-counts`'s `same_class_recurrence_count` reads back, and its own escalation
+signal independent of the generic bounce count (`references/rework.md`).
 - **REWORK** → resume the `product` agent to fix the blockers (one thread), then
   re-review. Loop until clean; the escalation valve tracks the `product-review ↔
   product` pairing (`pairing-counts`), replacing the agent at `replaceAt` and marking
