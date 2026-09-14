@@ -153,7 +153,8 @@ operational failure: stop and report, never retry by hand.
 | `mark-blocked` / `mark-needs-human` / `pause-for-epic-regate` | Park a unit (the first two also release its worktree) |
 | `pairing-counts <n>` | Marker-derived escalation-valve strike counts, with the configured thresholds |
 | `show-config` | Effective tunables (`pipeline` block over defaults) — read it once per invocation |
-| `list-needs-human` / `check-epics-closeable` / `retro-check [--mark-done]` | End-of-invocation sweeps |
+| `list-needs-human` / `check-epics-closeable` / `retro-check [--mark-done --count <n>]` | End-of-invocation sweeps |
+| `sync-skill [--ref <ref>]` | Bump the skill submodule + re-vendor `.claude/agents/` (Step 5's manual bump/re-vendor, automated); stages both, does not commit |
 | `close-epic <n>` / `record-epic-verification <n> --kind e2e\|exploratory` | Epic close, two-call shape (`references/epics.md`, "Epic closing") |
 | `auto-pass-gate` / `mark-feedback-received` / `mark-feedback-addressed` / `mark-todo` / `mark-issue-closed` | CI-triggered real-time paths (the gate-auto-advance workflow) |
 
@@ -499,14 +500,16 @@ python3 "$SDLC" retro-check
 ```
 
 `run_retro` is true once `pipeline.retro.everyClosedIssues` (default 5) issues have
-closed since the last retrospective. The watermark file (`pipeline.retro.watermarkFile`,
-default `<docRoot>/retro-watermark`) is **state of the driven repo**; the fixes go to
-**the skill repo**, which is a separate git repository (`$SDLC_DIR`, typically a
-submodule such as `.github/sdlc-pipeline`). When true: grep the recently merged units'
-handoff comments and docs for recurring friction — bouncing pairings
-(`pairing-counts` gives the marker-backed ones), docs too thin for the next stage, dead
-references, gates too strict or loose. **This file and its references are the primary
-fix target.** Present findings in chat and ask before editing. Once approved:
+closed since the last retrospective. **Capture the `closed_count` this invocation
+returns — that number is what `--mark-done` stamps later, not whatever the live count
+has become by then.** The watermark file (`pipeline.retro.watermarkFile`, default
+`<docRoot>/retro-watermark`) is **state of the driven repo**; the fixes go to **the
+skill repo**, which is a separate git repository (`$SDLC_DIR`, typically a submodule
+such as `.github/sdlc-pipeline`). When true: grep the recently merged units' handoff
+comments and docs for recurring friction — bouncing pairings (`pairing-counts` gives
+the marker-backed ones), docs too thin for the next stage, dead references, gates too
+strict or loose. **This file and its references are the primary fix target.** Present
+findings in chat and ask before editing. Once approved:
 
 1. In `$SDLC_DIR`: `git checkout -B retro/<date> origin/main`, edit `SKILL.md` /
    `references/*` / `agents/*`, append the dated why to `references/history.md`,
@@ -526,11 +529,21 @@ fix target.** Present findings in chat and ask before editing. Once approved:
    changes untested, neither knowing the suite existed — in the same retrospective
    where both were writing rules about not asserting coverage nobody had checked.
 2. A finding about an agent's procedure lands twice: the template in `$SDLC_DIR/agents/`
-   and the driven repo's filled-in copy in `.claude/agents/`.
-3. In the driven repo: bump the submodule to the merged skill commit, run
-   `retro-check --mark-done`, and commit the watermark and the submodule pointer
-   together (message naming the retrospective). That commit is the record of
-   "retro done at skill version X".
+   and the driven repo's filled-in copy in `.claude/agents/`. `sync-skill` (below)
+   re-vendors this half mechanically; it does not write `references/history.md` or
+   any prose — that stays a hand-authored part of step 1.
+3. In the driven repo: `python3 "$SDLC" sync-skill` bumps the submodule to the merged
+   skill commit and re-vendors `.claude/agents/`, staging both — then run
+   `retro-check --mark-done --count <the closed_count captured at Step 5's start>`,
+   and commit the watermark and the submodule pointer together (message naming the
+   retrospective). That commit is the record of "retro done at skill version X".
+   **Always pass `--count`.** Fix work and the evidence sweep take real time, during
+   which more issues close; `--mark-done` without `--count` falls back to whatever
+   the live count is *at that later moment* and stamps it as the watermark, silently
+   marking every issue closed in between as covered by a sweep that never read them
+   (2026-09-14: the fallback exists only for backward compatibility and flags itself
+   via `count_was_live_fallback` in the result — treat that flag as true meaning
+   "re-run with the right `--count`", not as a pass).
 
 **A retrospective is merged only when the lane is quiet** — no live stage agent. Stage
 agents Read the playbook from `$SDLC_DIR` mid-run; bumping the submodule under one

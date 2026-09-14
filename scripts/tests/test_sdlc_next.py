@@ -1400,16 +1400,69 @@ def test_retro_check_missing_watermark_reads_as_zero(tmp_path):
                                                     "run_retro": True}
 
 
-def test_retro_check_mark_done_writes_current_count_as_watermark(tmp_path):
+def test_retro_check_mark_done_without_count_falls_back_to_live_count(tmp_path):
+    # Backward-compatible default when the caller omits --count -- flagged in the
+    # result so it's visible, not silent.
     from sdlc_next import GitHub, cmd_retro_check, RETRO_WATERMARK_FILE
     wm = tmp_path / RETRO_WATERMARK_FILE
     wm.parent.mkdir(parents=True)
     gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "12\n"}))
     result = cmd_retro_check(gh, str(tmp_path), mark_done=True)
-    assert result == {"closed_count": 12, "watermark": 12, "marked_done": True}
+    assert result == {"closed_count": 12, "watermark": 12, "marked_done": True,
+                       "count_was_live_fallback": True}
     assert wm.read_text().strip() == "12"
     gh2 = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "13\n"}))
     assert cmd_retro_check(gh2, str(tmp_path))["run_retro"] is False
+
+
+def test_retro_check_mark_done_with_count_stamps_the_captured_trigger_count(tmp_path):
+    # Positive control for the 2026-09-14 fix: the retro was triggered when the
+    # live count was 120 (captured by the caller); by the time --mark-done runs,
+    # 10 more issues closed (live count 130) during the fix work. The watermark
+    # must land on the captured 120, not the now-live 130, so those 10 issues stay
+    # in scope for the next retro's evidence sweep instead of being silently
+    # absorbed as reviewed.
+    from sdlc_next import GitHub, cmd_retro_check, RETRO_WATERMARK_FILE
+    wm = tmp_path / RETRO_WATERMARK_FILE
+    wm.parent.mkdir(parents=True)
+    wm.write_text("115\n")
+    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "130\n"}))
+    result = cmd_retro_check(gh, str(tmp_path), mark_done=True, count=120)
+    assert result == {"closed_count": 130, "watermark": 120, "marked_done": True,
+                       "count_was_live_fallback": False}
+    assert wm.read_text().strip() == "120"
+    # The 10 issues closed between trigger and mark-done (121-130) are still
+    # in scope -- five more (135) fires the next retro, not ten more (140).
+    gh2 = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "125\n"}))
+    assert cmd_retro_check(gh2, str(tmp_path))["run_retro"] is True
+
+
+def test_retro_check_mark_done_rejects_a_count_behind_the_existing_watermark(tmp_path):
+    # Negative control: a stale/wrong --count that would move the watermark
+    # backwards must be refused, not silently applied.
+    from sdlc_next import GitHub, GhError, cmd_retro_check, RETRO_WATERMARK_FILE
+    wm = tmp_path / RETRO_WATERMARK_FILE
+    wm.parent.mkdir(parents=True)
+    wm.write_text("120\n")
+    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "130\n"}))
+    import pytest
+    with pytest.raises(GhError, match="behind the existing watermark"):
+        cmd_retro_check(gh, str(tmp_path), mark_done=True, count=100)
+    assert wm.read_text().strip() == "120"  # untouched
+
+
+def test_retro_check_mark_done_rejects_a_count_ahead_of_the_live_count(tmp_path):
+    # Negative control: a --count claiming more closes than have actually
+    # happened must be refused, not silently applied.
+    from sdlc_next import GitHub, GhError, cmd_retro_check, RETRO_WATERMARK_FILE
+    wm = tmp_path / RETRO_WATERMARK_FILE
+    wm.parent.mkdir(parents=True)
+    wm.write_text("115\n")
+    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "120\n"}))
+    import pytest
+    with pytest.raises(GhError, match="ahead of the live closed count"):
+        cmd_retro_check(gh, str(tmp_path), mark_done=True, count=121)
+    assert wm.read_text().strip() == "115"  # untouched
 
 
 def test_claim_raises_on_unknown_role():
@@ -4824,6 +4877,89 @@ def test_init_skill_submodule_refuses_a_shared_non_per_worktree_gitdir():
     with pytest.raises(GhError) as exc:
         init_skill_submodule(wt, runner=runner)
     assert "not per-worktree" in str(exc.value)
+
+
+class _CountingRunner:
+    """Like ScriptedRunner, but a rev-parse HEAD called twice (before and after a
+    checkout) needs to return two different shas -- a plain argv->str dict can't
+    express that, since both calls share the identical key."""
+
+    def __init__(self, checkout_argv, shas, extra: dict | None = None):
+        self.checkout_argv = list(checkout_argv)
+        self.shas = list(shas)
+        self.extra = dict(extra or {})
+        self.calls: list[list[str]] = []
+        self._rev_parse_calls = 0
+
+    def __call__(self, argv):
+        self.calls.append(argv)
+        key = tuple(argv)
+        if key[-2:] == ("rev-parse", "HEAD"):
+            sha = self.shas[self._rev_parse_calls]
+            self._rev_parse_calls += 1
+            return sha + "\n"
+        if argv == self.checkout_argv or key in self.extra:
+            return self.extra.get(key, "")
+        raise AssertionError(f"unexpected invocation: {argv}")
+
+
+def test_sync_skill_bumps_submodule_and_vendors_agents(tmp_path):
+    from sdlc_next import cmd_sync_skill, PIPELINE
+    sub = PIPELINE["skill"]["submodulePath"]
+    skill_dir = tmp_path / sub
+    (skill_dir / "agents").mkdir(parents=True)
+    (skill_dir / "agents" / "sdlc-product.md").write_text(
+        "Read <requirements-dir>/IRD-*.md, write <docRoot>/epic-<n>/product.md, "
+        "token at <your-token-file>.\n")
+    (skill_dir / "agents" / "sdlc-development.md").write_text("Nothing to substitute.\n")
+
+    runner = _CountingRunner(
+        checkout_argv=["git", "-C", str(skill_dir), "checkout", "--detach", "v2"],
+        shas=["old111", "new222"],
+        extra={("git", "-C", str(skill_dir), "fetch", "origin"): "",
+               ("git", "-C", str(tmp_path), "add", "--", sub): "",
+               ("git", "-C", str(tmp_path), "add", "--", ".claude/agents"): ""})
+
+    result = cmd_sync_skill(str(tmp_path), ref="v2", runner=runner)
+
+    assert result["old_sha"] == "old111"
+    assert result["new_sha"] == "new222"
+    assert result["changed"] is True
+    assert set(result["agents_vendored"]) == {"sdlc-product.md", "sdlc-development.md"}
+    vendored = (tmp_path / ".claude" / "agents" / "sdlc-product.md").read_text()
+    assert "<requirements-dir>" not in vendored
+    assert "<docRoot>" not in vendored
+    assert "<your-token-file>" not in vendored
+    assert runner.checkout_argv in runner.calls
+    assert ["git", "-C", str(tmp_path), "add", "--", sub] in runner.calls
+    assert ["git", "-C", str(tmp_path), "add", "--", ".claude/agents"] in runner.calls
+
+
+def test_sync_skill_raises_on_an_unconfigured_placeholder(tmp_path):
+    # Negative control: a template placeholder with no configured value must not
+    # vendor a literal `<requirements-dir>` into a driven repo's agent file --
+    # simulated by monkeypatching REQUIREMENTS_DIR to None (an older config that
+    # predates the key).
+    import sdlc_next
+    from sdlc_next import cmd_sync_skill, GhError, PIPELINE
+    import pytest
+    sub = PIPELINE["skill"]["submodulePath"]
+    skill_dir = tmp_path / sub
+    (skill_dir / "agents").mkdir(parents=True)
+    (skill_dir / "agents" / "sdlc-product.md").write_text("Needs <requirements-dir>.\n")
+    runner = _CountingRunner(
+        checkout_argv=["git", "-C", str(skill_dir), "checkout", "--detach", "origin/main"],
+        shas=["old111", "old111"],
+        extra={("git", "-C", str(skill_dir), "fetch", "origin"): "",
+               ("git", "-C", str(tmp_path), "add", "--", sub): ""})
+    original = sdlc_next.REQUIREMENTS_DIR
+    sdlc_next.REQUIREMENTS_DIR = None
+    try:
+        with pytest.raises(GhError, match="requirements-dir"):
+            cmd_sync_skill(str(tmp_path), runner=runner)
+    finally:
+        sdlc_next.REQUIREMENTS_DIR = original
+    assert not (tmp_path / ".claude" / "agents" / "sdlc-product.md").exists()
 
 
 def test_sync_branch_reinits_the_skill_submodule_after_the_merge_in_a_live_worktree():

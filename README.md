@@ -92,6 +92,7 @@ under `pipeline` in the config, each with a default (see `sdlc.config.sample.jso
 | `pipeline.continuous.cycleCap` | 8 | Merges per unattended run before pausing for the operator |
 | `pipeline.models.<role>` | opus/sonnet per `SKILL.md` table | Model tier passed to each stage's `Agent` call |
 | `pipeline.docTemplates` | `_templates` | Template folder under `docRoot` |
+| `requirementsDir` | none (optional; top-level, not under `pipeline`) | Where this repo's requirements docs live, e.g. `<requirements-dir>/IRD-*.md` in `agents/sdlc-product.md`. Only needed by `sync-skill`'s agent re-vendor, and only if a template references the placeholder — an existing config without it keeps working until then |
 
 Repo-specific *commands* (lint, test, e2e) are not config — they belong in the
 `sdlc-*` agent definitions and the repo's own `CLAUDE.md`, which every stage agent
@@ -118,6 +119,15 @@ mkdir -p <repo>/<docRoot>/_templates && cp templates/*.template.md <repo>/<docRo
   `mark-issue-closed` (real-time gate backstop; `next-action` works without it, just
   later). Assumes the skill is the `.github/sdlc-pipeline` submodule.
 - **Doc templates** (`templates/`) → `<docRoot>/_templates/{product,architecture}.template.md`.
+
+Re-syncing later, once the skill has moved past the commit you first installed: use
+`python3 "$SDLC" sync-skill` instead of repeating the manual `cp` and placeholder edits
+above by hand. It bumps `pipeline.skill.submodulePath` to `--ref` (default
+`origin/main`) and re-vendors `.claude/agents/*.md` from the bumped templates with the
+same three placeholders (`<docRoot>`, `<your-token-file>`, `<requirements-dir>`)
+substituted from your config, staging both changes (`git add`) without committing —
+run it only when no stage agent has a live turn in progress (`SKILL.md`'s retro Step 5
+rule), and write the commit yourself so its message names why you're re-syncing.
 
 Still external — not in this repository:
 

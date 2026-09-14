@@ -91,6 +91,11 @@ DOC_ROOT = CONFIG["docRoot"]
 # Where the classic-PAT GitHub token is read from; surfaced only in the runnable
 # command strings this CLI hands back to the orchestrator.
 TOKEN_PATH = CONFIG["tokenPath"]
+# Where this repo's requirements documents live, e.g. `<requirements-dir>/IRD-*.md`
+# in `agents/sdlc-product.md`. Optional -- only `sync-skill`'s agent re-vendor needs
+# it, and only when a template actually references the placeholder, so an existing
+# config that predates this key keeps loading.
+REQUIREMENTS_DIR = CONFIG.get("requirementsDir")
 STAGE_AFTER_GATE = {"product": "architecture", "architecture": "development"}
 
 # How many finished PRs (within the one epic the operator named -- see "Epic
@@ -1753,6 +1758,67 @@ def init_skill_submodule(worktree: str, runner: Runner = _default_runner) -> dic
                       f"{skill_dir} -- the pinned skill commit is not checked out")
     pinned = runner(["git", "-C", skill_dir, "rev-parse", "HEAD"]).strip()
     return {"skill_dir": skill_dir, "skill_commit": pinned}
+
+
+_AGENT_TEMPLATE_PLACEHOLDERS = {
+    "<docRoot>": lambda: DOC_ROOT,
+    "<your-token-file>": lambda: TOKEN_PATH,
+    "<requirements-dir>": lambda: REQUIREMENTS_DIR,
+}
+
+
+def cmd_sync_skill(repo_path: str = ".", ref: Optional[str] = None,
+                    runner: Runner = _default_runner) -> dict:
+    """The in-place update SKILL.md's retro Step 5 otherwise spells out as manual
+    `git` + copy-paste: bump `pipeline.skill.submodulePath` to `ref` (default the
+    skill's `origin/main`) and re-vendor `$SDLC_DIR/agents/*.md` into the driven
+    repo's `.claude/agents/`, substituting the same placeholders the manual process
+    always has (`<docRoot>`, `<your-token-file>`, `<requirements-dir>`). Stages both
+    (`git add`) but does not commit -- the commit message names the retrospective,
+    which only the caller knows.
+
+    Does not itself decide whether the lane is quiet; SKILL.md's rule stands --
+    run this only when no stage agent is reading `$SDLC_DIR` mid-turn.
+
+    A template placeholder with no configured value raises rather than vendoring a
+    literal `<requirements-dir>` into a driven repo's `.claude/agents/` -- that
+    silently ships an agent that reads its own doc root as a literal string."""
+    sub = (PIPELINE["skill"].get("submodulePath") or "").strip("/")
+    if not sub:
+        raise GhError("pipeline.skill.submodulePath is empty -- nothing to sync")
+    skill_dir = os.path.join(repo_path, sub)
+    old_sha = runner(["git", "-C", skill_dir, "rev-parse", "HEAD"]).strip()
+    runner(["git", "-C", skill_dir, "fetch", "origin"])
+    runner(["git", "-C", skill_dir, "checkout", "--detach", ref or "origin/main"])
+    new_sha = runner(["git", "-C", skill_dir, "rev-parse", "HEAD"]).strip()
+    runner(["git", "-C", repo_path, "add", "--", sub])
+
+    agents_src = os.path.join(skill_dir, "agents")
+    agents_dst = os.path.join(repo_path, ".claude", "agents")
+    os.makedirs(agents_dst, exist_ok=True)
+    vendored = []
+    for name in sorted(os.listdir(agents_src)):
+        if not name.endswith(".md"):
+            continue
+        with open(os.path.join(agents_src, name)) as f:
+            content = f.read()
+        for token, getval in _AGENT_TEMPLATE_PLACEHOLDERS.items():
+            if token not in content:
+                continue
+            value = getval()
+            if value is None:
+                raise GhError(
+                    f"{name} contains {token} but the pipeline config has no value "
+                    f"for it -- set the corresponding key in sdlc-pipeline.config.json "
+                    f"before running sync-skill")
+            content = content.replace(token, value)
+        with open(os.path.join(agents_dst, name), "w") as f:
+            f.write(content)
+        vendored.append(name)
+    runner(["git", "-C", repo_path, "add", "--", os.path.join(".claude", "agents")])
+
+    return {"submodule_path": sub, "old_sha": old_sha, "new_sha": new_sha,
+            "changed": old_sha != new_sha, "agents_vendored": vendored}
 
 
 def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: str = ".",
@@ -4071,23 +4137,43 @@ RETRO_WATERMARK_FILE = PIPELINE["retro"]["watermarkFile"]
 RETRO_EVERY = PIPELINE["retro"]["everyClosedIssues"]
 
 
-def cmd_retro_check(gh: GitHub, repo_path: str = ".", mark_done: bool = False) -> dict:
+def cmd_retro_check(gh: GitHub, repo_path: str = ".", mark_done: bool = False,
+                     count: Optional[int] = None) -> dict:
     """`run_retro` is true once >= 5 issues have closed since the last completed
-    retrospective. `--mark-done` records the current count as the new watermark
-    (a local file write -- commit it with the retro's own skill-edit commit)."""
+    retrospective. `--mark-done --count N` records N as the new watermark -- N
+    must be the `closed_count` this same command returned at the invocation that
+    found `run_retro: true`, captured by the caller and carried through the fix
+    work, not re-read live. The live count moves while the retro's evidence sweep
+    and fix land (2026-09-14: watermark stayed at 171 through an evidence sweep and
+    a four-item fix while the repo's own closed count kept climbing); stamping
+    that later, larger live count as the watermark silently marks every issue that
+    closed in between as reviewed by a sweep that never looked at them -- the next
+    retro's sweep starts counting friction only from the inflated number forward.
+    `--mark-done` without `--count` falls back to the live count for backward
+    compatibility, and the result says so via `count_was_live_fallback` -- prefer
+    always passing `--count`."""
     path = os.path.join(repo_path, RETRO_WATERMARK_FILE)
     watermark = 0
     if os.path.isfile(path):
         with open(path) as f:
             watermark = int(f.read().strip() or 0)
-    count = gh.closed_issue_count()
+    live_count = gh.closed_issue_count()
     if mark_done:
+        used_live_fallback = count is None
+        stamp = live_count if used_live_fallback else count
+        if stamp < watermark:
+            raise GhError(f"--count {stamp} is behind the existing watermark {watermark} -- "
+                           f"the watermark must not move backwards")
+        if stamp > live_count:
+            raise GhError(f"--count {stamp} is ahead of the live closed count {live_count} -- "
+                           f"pass the count captured when run_retro went true, not a guess")
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w") as f:
-            f.write(f"{count}\n")
-        return {"closed_count": count, "watermark": count, "marked_done": True}
-    return {"closed_count": count, "watermark": watermark,
-            "run_retro": count - watermark >= RETRO_EVERY}
+            f.write(f"{stamp}\n")
+        return {"closed_count": live_count, "watermark": stamp, "marked_done": True,
+                "count_was_live_fallback": used_live_fallback}
+    return {"closed_count": live_count, "watermark": watermark,
+            "run_retro": live_count - watermark >= RETRO_EVERY}
 
 
 def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
@@ -4658,6 +4744,15 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--repo-path", default=".", help="The shared main checkout")
     p.set_defaults(func=lambda a: cmd_worktree_add(GitHub(), a.number, a.unit, a.repo_path))
 
+    p = sub.add_parser("sync-skill",
+                        help="Bump the skill submodule to --ref (default origin/main) "
+                             "and re-vendor .claude/agents/ from its templates. Stages "
+                             "both; does not commit. Run only on a quiet lane.")
+    p.add_argument("--repo-path", default=".", help="The driven repo's root")
+    p.add_argument("--ref", default=None,
+                    help="Skill commit/branch to bump to (default: origin/main)")
+    p.set_defaults(func=lambda a: cmd_sync_skill(a.repo_path, a.ref))
+
     p = sub.add_parser("sync-branch")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
@@ -4713,9 +4808,14 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--repo-path", default=".",
                     help="Repo root holding the tracked retro-watermark file")
     p.add_argument("--mark-done", action="store_true",
-                    help="Record the current closed count as the new watermark "
-                         "(commit the file with the retro's own commit)")
-    p.set_defaults(func=lambda a: cmd_retro_check(GitHub(), a.repo_path, a.mark_done))
+                    help="Record --count (or the live count, if omitted) as the new "
+                         "watermark (commit the file with the retro's own commit)")
+    p.add_argument("--count", type=int, default=None,
+                    help="The closed_count from the retro-check that found run_retro: "
+                         "true -- pass this back verbatim so issues closed after the "
+                         "retro was triggered, during the fix work, aren't silently "
+                         "counted as reviewed")
+    p.set_defaults(func=lambda a: cmd_retro_check(GitHub(), a.repo_path, a.mark_done, a.count))
     p = sub.add_parser("show-config",
                         help="Print the effective pipeline tunables (config `pipeline` "
                              "block merged over defaults) plus repo/docRoot/parallelism")

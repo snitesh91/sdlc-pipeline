@@ -59,6 +59,34 @@ round missed it (out of scope, a new code path the fix introduced, needed execut
 to surface, reviewer miss) before bouncing again; a genuine recurring blind spot
 escalates to `needs-human`/reroute regardless of the generic strike count.
 
+**`retro-check --mark-done` was stamping a moving target as the watermark.**
+Operator: *"how do we know till what point retro was actually completed — if retro
+triggered at 120 but by the time the skill is updated the count reached 130, were the
+last 10 actually retro'd?"* They weren't: `cmd_retro_check` re-read the **live**
+closed-issue count at `--mark-done` time rather than using the count from the
+invocation that found `run_retro: true`, so every issue that closed during the fix
+work and evidence sweep got silently absorbed into "reviewed" without ever being
+swept. Fix: `--mark-done` now takes `--count <n>`, the `closed_count` the triggering
+`retro-check` returned; it's validated to sit between the existing watermark and the
+live count (refuses to move backwards or claim closes that haven't happened), and
+`SKILL.md`'s Step 5 says to capture and carry that number through. Omitting `--count`
+still falls back to the live count for compatibility, flagged in the result via
+`count_was_live_fallback` so the risky path is visible rather than silent.
+
+**Added `sync-skill`, the in-place update this retro process didn't have.**
+Operator asked whether any command let a driven repo bump/re-vendor the skill
+in-place; there wasn't one — `SKILL.md`'s Step 5 described the submodule bump and the
+`agents/` → `.claude/agents/` re-vendor as manual `git` and copy-paste, the only step
+in that section with no named command. Added `sync-skill [--ref <ref>]`: bumps
+`pipeline.skill.submodulePath` to `ref` (default `origin/main`), re-vendors
+`.claude/agents/*.md` from the bumped templates substituting `<docRoot>`,
+`<your-token-file>`, and the newly-added `requirementsDir` config key (for
+`<requirements-dir>`, previously filled by hand with no config-backed source), and
+stages both — it does not commit, since the commit message naming the retrospective
+is the operator's to write. Raises rather than vendoring a literal unresolved
+placeholder when a config value is missing. Still subject to the existing quiet-lane
+rule below: `sync-skill` doesn't check that itself, the operator does.
+
 ## 2026-09-13 — one rule, one home, chosen by scope
 
 Operator: *"the skill is getting complex. Agent is not honoring the agents and skills."*
