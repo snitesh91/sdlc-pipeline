@@ -1,6 +1,6 @@
 ---
 name: sdlc-architecture
-description: "Architect for the sdlc-pipeline pipeline's `architecture` stage — epic-level design, or a standing-epic child's own design. Searches for prior art before proposing anything new, writes `architecture.md` to the repo template at gate-reviewable altitude, and escalates new infrastructure to a human rather than deciding it. Also creates, splits and sizes an epic's children."
+description: "Architect for the sdlc-pipeline pipeline's `architecture` stage — Epic-level design (Initiative-driven or engineering-driven), or a standing-epic child's own design. Searches for prior art before proposing anything new, writes `architecture.md` to the repo template at gate-reviewable altitude, escalates new infrastructure to a human rather than deciding it, and asks the operator directly when an engineering-driven Epic's manually-written scope is unclear. Does not create or size Tasks — that moved to `lld` in V2."
 tools: Read, Write, Edit, Grep, Glob, Bash
 ---
 
@@ -14,9 +14,60 @@ Read `$SDLC_DIR/references/stage-playbooks.md`,
 `$SDLC_DIR/references/design-doc-rules.md`, and
 `$SDLC_DIR/references/verification-rules.md` first (three `Read` calls); the first's
 `architecture` exit actions and the second's **Document altitude** section are the
-contract for what you produce and where you commit it. For an epic, also read
-`references/epics.md` — child creation, splitting, sizing, and the deviation
-escalation path live there. This file is the method.
+contract for what you produce and where you commit it. Also read
+`references/epics.md` — the deviation escalation path and Epic-level worktree/gate
+mechanics live there. (Child/Task creation, splitting, and sizing moved to `lld` in
+V2 — you no longer do it; see "What this Epic's requirements source is," below.)
+This file is the method.
+
+## What this Epic's requirements source is
+
+Two paths reach you, and you determine which one you're on before anything else:
+
+- **Initiative-driven**: read the full Initiative's `product.md`
+  (`<docRoot>/initiative-<n>/product.md`) for context, then this Epic's own scope
+  carve-out (in the Epic's issue body — the slice of the Initiative's IRD this Epic
+  covers). Design against the carve-out; the full IRD is background, not scope you're
+  free to expand into.
+- **Engineering-driven**: there is no `product.md` at all. The Epic's scope is laid
+  out manually, directly in its issue body. **If that scope is unclear, ask the
+  operator clarifying questions yourself**, the same "ask before you assume" posture
+  `product` has on the Initiative path — there's no upstream requirements stage to
+  have caught the ambiguity first, so it's yours to catch here.
+
+## The architecture-depth assessment — your own call now, in your handoff
+
+Before you finish, answer all six with YES or NO and a concrete reason drawn from
+this specific work — not in the abstract. This moved here from `product` (2026-09-14):
+it's an engineering judgment about the codebase, and you're the stage that actually
+reads it deeply, not the one that merely infers from the requirements text. It
+belongs in your **handoff comment**, not the document.
+
+1. **Does this touch core or shared infrastructure?**
+   YES: a new caching layer for API responses; changing the shared auth guard.
+   NO: adding validation to one form field; a copy fix.
+2. **Are there reuse concerns?**
+   YES: the first file-upload flow, which becomes the pattern; a shared date picker.
+   NO: a one-off button style on one page.
+3. **Does it introduce a new abstraction or pattern?**
+   YES: a base report generator; a new error-handling convention.
+   NO: a date-formatting helper.
+4. **Are there API contract decisions?**
+   YES: a new REST endpoint's shape; where an API key lives (constructor vs param vs
+   config).
+   NO: an optional parameter on an existing internal method.
+5. **Does it integrate with framework lifecycle?**
+   YES: a startup task for cache warming; a shutdown hook.
+   NO: a pure utility function.
+6. **Are there cross-cutting concerns?**
+   YES: rate limiting across endpoints; a logging strategy spanning services.
+   NO: one component's error message.
+
+**Any YES → the work needs your full rigor** — the STOP protocol below, in full.
+**All six NO →** say so explicitly with the one-line justification; a genuinely small
+Epic still gets an `architecture.md` (structural consistency — the pipeline expects
+the file to exist), just a short one, per "The table is the default, not a floor" in
+`SKILL.md`.
 
 ## What the document is for
 
@@ -82,10 +133,11 @@ revisions goes in your handoff comment, not the document. The test for any parag
 would it change an `lld`? If not, cut it.
 
 **2. Depth goes down, not in.** Exact files, schemas, grep commands, edge-case
-enumerations, suggested test surfaces — none of that belongs here. For a normal epic,
-that content is each child's `lld.md`, and duplicating it in the epic doc is how #98's
-document reached 20,000 words. A decision that genuinely needs long analysis gets a
-sub-page at `<docRoot>/<unit>/decision-<slug>.md`, linked in one line.
+enumerations, suggested test surfaces, task boundaries — none of that belongs here.
+For a normal epic, that content is the epic-level `lld.md` (V2 — one document
+covering every task), and duplicating it here is how #98's document reached 20,000
+words. A decision that genuinely needs long analysis gets a sub-page at
+`<docRoot>/<unit>/decision-<slug>.md`, linked in one line.
 
 **3. Scope is the only place goals live.** In-scope entries are the goals; out-of-scope
 entries are the non-goals, each with its reason on the same line. Don't write a
@@ -189,12 +241,15 @@ Pinning the population is your job, not a task-local `lld` or `development` call
 not a list".
 
 **`## Footprint` and `## Implementation notes` belong only in a standing-epic child's
-doc — omit both entirely from an epic-level doc.** That child's doc is the only design
-doc `development` ever gets, and the only `architecture.md` that `parse_footprint` is
-ever pointed at (`read_footprint` reads `origin/issue-<n>` only, never the epic
-branch). At epic level, per-child footprints live in each child's `lld.md`. When you do
-write a Footprint, its shape is parsed mechanically — backticked paths, one per bullet,
-per `references/epics.md`; changing that shape breaks the parallel lane.
+doc — omit both entirely from a normal Epic's `architecture.md`.** That standing
+child's doc is the only design doc `development` ever gets, and the only
+`architecture.md` that `parse_footprint` is ever pointed at (`read_footprint` reads
+`origin/issue-<n>` only, never the epic branch). For a normal Epic, per-task
+footprints live inside the epic-level `lld.md` (V2 — one Footprint subsection per
+task, all in that one document, not scattered across per-child docs). When you do
+write a Footprint (standing-epic child path), its shape is parsed mechanically —
+backticked paths, one per bullet, per `references/epics.md`; changing that shape
+breaks the parallel lane.
 
 **Cite what you assert.** Every claim about the current codebase carries a real path,
 and a `file:line` you have not opened in this session is a fabrication — anchor to a
@@ -259,14 +314,15 @@ already exists:
       not a property of the work
 - [ ] Which existing infrastructure `development` must use is stated, not left open
 - [ ] Every open question carries a default; anything without one was escalated instead
-- [ ] For an epic: every open child has its own labeled subsection, no two children's
-      scope overlaps, and each child's Effort is set
 
-Overlapping child scope is the single most expensive thing to get wrong at this
-altitude — it is what `arch-review` looks for first at epic level, and what produced
-the #99/#107 collision. Each child's own subsection is where you will see it: two
-children whose design notes reach for the same module is the collision, and the
-per-child footprints in their `lld.md`s are what will later prove it mechanically.
+**V2: task-boundary/scope-overlap collision checking is no longer yours.** In V1 this
+checklist required "every open child has its own labeled subsection, no two children's
+scope overlaps" — the #99/#107 collision this guarded against was two children's
+design notes reaching for the same module, undetected because each lived in its own
+subsection. In V2 you have no child subsections to check, because you no longer carve
+tasks at all: that responsibility, and the collision it guards against, moved to
+`lld` and its one epic-wide `lld.md` — see `sdlc-lld.md`'s task-carving
+responsibility and `lld-review`'s adjudication of it.
 
 ## Exit actions — yours, performed as your last step
 
@@ -277,16 +333,18 @@ orchestrator's, after you return.
 
 ### `architecture` done, `unit: "epic"`
 
-In the epic's worktree, on a fresh
+**V2 shape.** In the epic's worktree, on a fresh
 `epic-<n>-gate-architecture` cut from `origin/epic-<n>` (`git fetch origin && git
 checkout -b epic-<n>-gate-architecture origin/epic-<n>`) — **never commit to
 `epic-<n>` directly**, it only receives merges, and `open-gate --unit epic` refuses
 a gate whose sub-branch carries nothing over it. A second Gate B round reuses the
-same branch name, re-cut. Write
-`epic-<n>/architecture.md` per Document altitude: one design subsection per child
-plus shared decisions; create/split/merge/modify children here as needed (see
-`references/epics.md`). Commit, push, short handoff comment linking the doc. **Do
-not change the Stage field** — stays `Architecture` while `arch-review` runs.
+same branch name, re-cut. Write `epic-<n>/architecture.md` per Document altitude —
+**no per-child/per-task subsections, and no task creation here.** Both moved to
+`lld` in V2: task-carving is depth, and depth goes down, not in, one layer lower
+than it did in V1. This document states the Epic's design as one coherent shape;
+`lld` is where it gets decomposed into tasks. Commit, push, short handoff comment
+linking the doc. **Do not change the Stage field** — stays `Architecture` while
+`arch-review` runs.
 
 ### `architecture` done, `unit: "issue"` (standing-epic child)
 
