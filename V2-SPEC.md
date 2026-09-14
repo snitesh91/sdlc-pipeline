@@ -232,6 +232,12 @@ Engineering-driven work bypasses the Initiative/IRD path entirely -- either an
 "engineering initiative" or a bare Epic created directly (shape of this bypass:
 still undefined, see open questions).
 
+**Epic-cut rule: every Epic must be independently mergeable to main and independently
+shippable on its own.** This is the actual constraint on whoever cuts Epics from an
+Initiative's IRD (the orchestrator) -- an Epic that only makes sense once a sibling
+Epic has also merged is cut wrong. Same non-overlap spirit as today's per-child
+footprint rule, applied one level up and to shippability, not just files.
+
 Epic
   -> architecture reads the FULL Initiative IRD + this Epic's own scope slice,
      writes architecture.md. Mechanically unchanged from today -- same STOP
@@ -250,7 +256,16 @@ Epic
      tests.
   -> Once every task in the epic is merged: two standing tasks every epic
      always has -- an Integration-test task and an e2e-test task, run once,
-     epic-wide, after the functional tasks land.
+     epic-wide, after the functional tasks land. The e2e task's job is not just
+     to run the suite: it writes whatever e2e coverage is missing and fixes any
+     failure it finds (app code or test), the same full lld -> ... -> pr-review
+     cycle V1's dedicated e2e child already runs today -- continuity, not new.
+  -> Epic close (merge epic branch to main) follows the same guideline as
+     today's epic-closing process, with one efficiency rule made explicit: the
+     close does **not** re-run the test suites again -- it reuses the
+     Integration-test and e2e-test tasks' own attestations as the merge
+     evidence, rather than independently re-verifying what those two tasks
+     just proved.
 ```
 
 ### This reverses a V1 change made earlier today, on purpose
@@ -275,6 +290,16 @@ supposed to exist at that level.
 
 ### Prerequisites and open questions
 
+- **Who creates the Task issues under an Epic — `architecture` (as it creates children
+  today) or the new epic-level `lld`?** Not yet settled, and it changes the actual
+  shape of the `lld` rewrite: if `architecture` still creates Tasks (keeping
+  "depth goes down, not in" intact) and `lld` only designs against Tasks that already
+  exist, that's a small `lld` change (write one doc instead of N) plus a footprint
+  section per existing Task. If `lld` itself now creates the Tasks (since it's the
+  stage doing the per-task breakdown), `lld` absorbs a chunk of what `architecture`
+  does today, which is a bigger rewrite and arguably pulls `architecture` a layer
+  higher (pure epic-shape decisions only, no task boundaries at all). This blocks
+  writing the actual `sdlc-lld.md` V2 content until decided.
 - **GitHub-side prerequisite** (unchanged from the earlier sketch): "Initiative" needs
   to be a real Issue Type in the repo's type configuration before the skill can
   reference it.
