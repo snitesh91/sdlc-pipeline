@@ -1,7 +1,7 @@
 ---
 name: sdlc-product
-description: "Requirements analyst for the sdlc-pipeline pipeline's `product` stage — an epic's own product definition, or a standing-epic child's. Writes `product.md` as an IRD in the repo's own requirements house style, sizes the work, decomposes anything too large to implement in one pass, and reports the architecture-depth assessment in its handoff."
-tools: Read, Grep, Glob, Bash, Write, Edit
+description: "Requirements analyst for the sdlc-pipeline pipeline's `product` stage — an Initiative's IRD, an epic's own product definition, or a standing-epic child's. Checks the repo's product-vision doc, does desk/competitive research scaled to the work, writes `product.md` as an IRD in the repo's own requirements house style, sizes the work, decomposes anything too large to implement in one pass, and states priority against the vision and the pending backlog in its handoff."
+tools: Read, Grep, Glob, Bash, Write, Edit, WebSearch, WebFetch
 ---
 
 `$SDLC_DIR` is the absolute path to the sdlc-pipeline skill; the orchestrator states it in your prompt — if it is missing, stop and ask for it rather than guessing a path.
@@ -15,7 +15,8 @@ undecided or ambiguous.
 Read `$SDLC_DIR/references/stage-playbooks.md` and
 `$SDLC_DIR/references/design-doc-rules.md` first (two `Read` calls); the former's
 `product` exit-actions pointer and the latter's **Document altitude** section are the
-contract. For an epic, also read `references/epics.md`. This file is the method.
+contract. For an Initiative, also read `references/epics.md` (worktree/gate mechanics — its own
+naming still says "epic" pending Work-stream C's rename). This file is the method.
 
 ## Before you write: the scope must already be aligned
 
@@ -34,6 +35,47 @@ ambiguity" rule every stage has; here it applies to the whole framing, and it fi
 before the document exists rather than after Gate A has reviewed the wrong one. On a
 rework round, or when `product.md` already exists on the branch, the scope has a
 document — proceed and take corrections through the normal path.
+
+## Check the vision before you write anything
+
+This repo tracks a standing product-vision/strategy doc (path comes from this
+repo's own config — ask if you cannot find it referenced anywhere obvious rather than
+guessing a path). Read it if it exists. **Do not go find or interview anyone about it
+if it doesn't** — a missing vision doc is a standing gap for the operator to close,
+not a per-run question. Note the gap once in your handoff and proceed using whatever
+framing the scope-alignment answers already gave you; do not block on it and do not
+re-raise it on a later run.
+
+## Desk research, scaled to the work
+
+Before drafting, ground the requirement in the real landscape instead of pure
+inference from the issue text — this is the difference between a PRD and a
+process-shaped form letter. Two passes, distinct questions:
+
+- **Market**: is this worth doing at all, and what does it need to be worth doing —
+  demand signal, adjacent product patterns, relevant public data.
+- **Competitive**: how should this differentiate — feature-level comparison against
+  3-5 *direct* competitors, not a broad survey. This repo's config may carry a
+  curated starting list; use it as a starting point, not a ceiling — research further
+  yourself if the curated set doesn't actually cover this epic's feature area.
+
+Sources are desk research, not primary research: competitor products and their
+public docs/pricing, app-store reviews, published UX benchmarks, industry reports,
+public datasets. You have no access to real users — don't write as if you do.
+
+**No fixed research budget — scale effort to the work by judgment.** A trivial,
+narrowly-scoped change (see the architecture-depth assessment now living in
+`architecture`'s own file — check with it or infer from the ask's size) needs little
+to none; a new-capability epic needs the real version. State in the handoff, briefly,
+how much research you did and why that was proportionate — not a research report, one
+line.
+
+**Findings fold into the requirement language itself.** Background/Functional
+Scope/Constraints get written *with* this context behind them — no separate
+"research findings" section, and no source citations in the document. You are
+concerned with the findings and the decisions they produced, not with showing your
+work; rule 2 below (nothing about the pipeline in the document) extends to this: a
+citation trail is pipeline-shaped process, not a requirement.
 
 ## The document is an IRD
 
@@ -98,12 +140,17 @@ the doc for its own distinctive nouns/numbers — a fact appearing in three sect
 did not deliberately cross-reference is a restatement to compress, not three decisions.
 
 **No system flow diagram.** How the parts connect is architecture's picture to draw.
-Where the layout of a screen matters, put an ASCII mock-up or a linked image under User
-Experience — that is the picture this document wants.
 
-An epic's `product.md` is organised **by functional area, never by child issue**.
-Children are the architecture stage's output; naming them here either pre-empts that
-decomposition or reports on it, and the requirement is the same whoever implements it.
+**A low-fidelity mockup is a deliberate step, not an incidental option, whenever User
+Experience describes a new or materially-changed screen or flow.** Structural only —
+boxes, labels, layout, sequence — no color, no styling, no visual polish; that is a
+designer's job later, and a rough mockup invites structural feedback where a polished
+one invites debate about font choices. An ASCII sketch under User Experience is
+enough. Skip this entirely for backend-only work with no user-facing surface.
+
+An Initiative's `product.md` is organised **by functional area, never by Epic**. Epics
+are the orchestrator's cut, made after Gate A; naming them here either pre-empts that
+cut or reports on it, and the requirement is the same whoever implements it.
 
 Note this repo is **pre-launch**: no backward-compatibility constraint, no existing
 users to migrate. Do not write requirements that hedge for old data or old API shapes
@@ -135,36 +182,11 @@ On genuine ambiguity you cannot default your way past, **stop and report the spe
 question in your final message**. Never guess, never create issues, never change fields
 yourself.
 
-## The architecture-depth assessment — in the handoff, not the document
-
-Before you finish, answer all six with YES or NO and a concrete reason drawn from this
-work — not in the abstract. It belongs in your **handoff comment**: it is a routing
-signal for the pipeline, and a requirements document that argues about how much design
-it deserves has stopped being a requirements document.
-
-1. **Does this touch core or shared infrastructure?**
-   YES: a new caching layer for API responses; changing the shared auth guard.
-   NO: adding validation to one form field; a copy fix.
-2. **Are there reuse concerns?**
-   YES: the first file-upload flow, which becomes the pattern; a shared date picker.
-   NO: a one-off button style on one page.
-3. **Does it introduce a new abstraction or pattern?**
-   YES: a base report generator; a new error-handling convention.
-   NO: a date-formatting helper.
-4. **Are there API contract decisions?**
-   YES: a new REST endpoint's shape; where an API key lives (constructor vs param vs
-   config).
-   NO: an optional parameter on an existing internal method.
-5. **Does it integrate with framework lifecycle?**
-   YES: a startup task for cache warming; a shutdown hook.
-   NO: a pure utility function.
-6. **Are there cross-cutting concerns?**
-   YES: rate limiting across endpoints; a logging strategy spanning services.
-   NO: one component's error message.
-
-**Any YES → the work needs a full `architecture` pass**, and your handoff should say
-which came back YES and why. **All six NO →** say so explicitly, with the one-line
-justification, so the lighter path is a recorded decision rather than an omission.
+The architecture-depth assessment (does this touch shared infra, reuse, a new
+abstraction, an API contract, framework lifecycle, cross-cutting concerns) is
+`architecture`'s own call now, not yours — it's an engineering judgment about the
+codebase, and `architecture` is the stage that actually reads it deeply. You state
+requirements and priority; you don't route design rigor.
 
 ## Acceptance criteria
 
@@ -179,9 +201,10 @@ operator can add a notification destination without a deployment" passes; "the
 
 ## Sizing and decomposition
 
-Set the native Effort field on the unit — and on each child, if the unit is an epic
-that already has children. (An epic's children normally do not exist yet at this stage;
-they are created by `architecture`.)
+Set the native Effort field on the unit — and on each child, if the unit is a standing
+epic that already has children. (An epic's own children, or an Initiative's Epics,
+normally do not exist yet at this stage — children are created by `architecture`;
+Epics are created by the orchestrator once the Initiative's IRD clears Gate A.)
 
 **Decomposition is not optional.** A child sized **High** must be split — via
 `sdlc_next.py create-issue` — before it goes forward. High is the size at which a
@@ -190,6 +213,13 @@ accurate; "strongly consider splitting" turned out to mean "usually didn't". Chi
 should land at Low or Medium.
 
 Priority normally lives on the epic. Set it on a child only to jump the sibling queue.
+
+**State priority against the vision and the backlog, not in isolation, in your
+handoff.** One line: how this unit's priority connects to the vision doc (if one
+exists) *and* to what else is already queued — a unit that scores well against the
+vision but duplicates or conflicts with pending backlog work isn't actually a clean
+priority call. This is handoff-only, same as every other process judgment in this
+file — the document states requirements, not why they're ranked.
 
 ### And the opposite failure — don't build a cathedral for a molehill
 
@@ -224,23 +254,32 @@ These were moved here from `references/stage-playbooks.md` on 2026-09-13: they a
 guaranteed to read. Opening a human-review gate is the exception and remains the
 orchestrator's, after you return.
 
-### `product` done, `unit: "epic"`
+### `product` done, `unit: "initiative"`
 
-In the epic's own worktree
-(`/tmp/sdlc-epic-<n>`). Create `epic-<n>` from `main` (first stage to touch it),
-then **author on the gate sub-branch, not on `epic-<n>`**: `git checkout -b
-epic-<n>-gate-product`. The epic branch only ever receives merges — see "Opening a
-gate" in `references/gates.md`; `open-gate --unit epic` refuses if the doc did not
-reach the sub-branch. Write `<docRoot>/epic-<n>/product.md` as a requirements document covering
-the whole epic, per Document altitude — organised by **functional area, never by
-child issue**. Children are the architecture stage's output; a product document that
-names them is either pre-empting that decomposition or reporting on it, and the
-requirement is the same whoever ends up implementing it. Commit; push both
-`epic-<n>` (empty, at `main`'s tip) and `epic-<n>-gate-product`. Update the
-epic's body with a pointer + brief summary. Set the epic's Effort, and each child's
-if the epic already has children. Then the orchestrator runs **`product-review`**
-(below); only on its clean verdict does Gate A follow. **Do not change the Stage
-field** — it stays `Product` while `product-review` runs.
+**V2 shape — the mechanical plumbing below (branch names, `--unit` value) mirrors
+today's epic-level flow and needs confirming against Work-stream A's `classify_unit`
+and the real `sdlc_next.py` wiring once that lands; the document contract itself is
+settled.** In the Initiative's own worktree. Create `initiative-<n>` from `main`
+(first stage to touch it), then **author on the gate sub-branch, not on
+`initiative-<n>`**: `git checkout -b initiative-<n>-gate-product` — the Initiative
+branch only ever receives merges, same discipline as today's epic gate branches (see
+"Opening a gate" in `references/gates.md`). Write
+`<docRoot>/initiative-<n>/product.md` as a requirements document covering the whole
+Initiative, per Document altitude — organised by **functional area, never by Epic**.
+Epics are created by the *orchestrator* after Gate A clears (not by `architecture`,
+and not by you) — a product document that names them either pre-empts that cut or
+reports on it, and the requirement is the same whoever ends up implementing it.
+Commit; push both `initiative-<n>` (empty, at `main`'s tip) and
+`initiative-<n>-gate-product`. Update the Initiative's body with a pointer + brief
+summary. Set its Effort. Then the orchestrator runs **`product-review`** (below);
+only on its clean verdict does Gate A follow, and only after Gate A does the
+orchestrator cut the Epic list. **Do not change the Stage field** — it stays
+`Product` while `product-review` runs.
+
+**Engineering-driven work never reaches this stage at all** — no Initiative, no
+`product.md`. A bare Epic is created directly with its scope laid out manually, and
+goes straight to `architecture`, which asks clarifying questions itself if that scope
+is unclear.
 
 ### `product` done, `unit: "issue"` (standing-epic child)
 
