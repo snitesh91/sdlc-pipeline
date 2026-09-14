@@ -2737,6 +2737,7 @@ def test_pass_gate_unit_epic_at_architecture_completes_epic_instead_of_claiming_
         f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_92', field_id=STAGE_FIELD_ID)}")
     del_status_argv = ("gh", "api", "graphql", "-f",
         f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_92', field_id=PIPELINE_STATUS_FIELD_ID)}")
+    a92c, r92c = _epic_check(92)  # V1 epic: Feature, no parent, no classification label
     gh_runner = ScriptedRunner({
         ("gh", "issue", "view", "92", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
@@ -2744,6 +2745,7 @@ def test_pass_gate_unit_epic_at_architecture_completes_epic_instead_of_claiming_
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_92"}}}}),
         del_stage_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 92}}}}),
         del_status_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 92}}}}),
+        a92c: r92c,
     })
     gh_runner.prefix_responses = {
         ("gh", "issue", "edit", "92"): "",
@@ -2789,7 +2791,8 @@ def test_pass_gate_unit_initiative_completes_gate_a_instead_of_claiming_architec
         del_stage_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 40}}}}),
         del_status_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 40}}}}),
     })
-    gh_runner.prefix_responses = {("gh", "issue", "comment", "40"): ""}
+    gh_runner.prefix_responses = {("gh", "issue", "comment", "40"): "",
+                                   ("gh", "issue", "edit", "40"): ""}
     gh = GitHub(runner=gh_runner)
     result = cmd_pass_gate(gh, "/repo", issue=40, gate_pr=500, stage="product",
                             unit="initiative", runner=git_runner)
@@ -2802,6 +2805,8 @@ def test_pass_gate_unit_initiative_completes_gate_a_instead_of_claiming_architec
     comment_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"])
     body = comment_call[comment_call.index("--body") + 1]
     assert "cut Epics" in body
+    edit_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "edit"])
+    assert "initiative:gate-a-passed" in edit_call
 
 
 def test_skip_gate_unit_epic_completes_epic_without_opening_a_gate():
@@ -3048,6 +3053,7 @@ def test_auto_pass_gate_completes_epic_architecture_for_merged_epic_gate():
     status_delete_argv = ("gh", "api", "graphql", "-f",
         f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_92', field_id=PIPELINE_STATUS_FIELD_ID)}")
     fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=92)}")
+    a92c, r92c = _epic_check(92)  # V1 epic: Feature, no parent, no classification label
     gh_runner = ScriptedRunner({
         ("gh", "pr", "view", "40", "--repo", REPO,
          "--json", "number,headRefName,baseRefName,state,mergedAt,body"):
@@ -3066,6 +3072,7 @@ def test_auto_pass_gate_completes_epic_architecture_for_merged_epic_gate():
         stage_delete_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 92}}}}),
         status_delete_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 92}}}}),
         ("gh", "issue", "edit", "92", "--repo", REPO, "--add-label", "epic:architected"): "",
+        a92c: r92c,
     })
     gh_runner.prefix_responses = {("gh", "issue", "comment", "92"): ""}
     gh = GitHub(runner=gh_runner)
@@ -4409,6 +4416,8 @@ def test_list_parallel_ready_bootstraps_fresh_lld_child_with_no_branch_yet():
                              f"origin/issue-{n}:docs/sdlc/issue-{n}/architecture.md"))
         runner.fail_on.add(("git", "-C", "/repo", "show-ref", "--verify", "--quiet",
                              f"refs/remotes/origin/issue-{n}"))
+    # No V2 epic-level lld.md exists here either (V1 scenario).
+    runner.fail_on.add(("git", "-C", "/repo", "show", "origin/epic-110:docs/sdlc/epic-110/lld.md"))
     gh = GitHub(runner=runner)
     result = cmd_list_parallel_ready(gh, "/repo", 110, runner=runner)
     assert [c["issue"] for c in result["parallel_ready"]] == [201, 202]
@@ -4438,6 +4447,8 @@ def test_list_parallel_ready_still_skips_started_lld_child_missing_footprint():
     }
     responses.update(_no_blockers_responses(201))
     runner = ScriptedRunner(responses)
+    # No V2 epic-level lld.md exists here either (V1 scenario).
+    runner.fail_on.add(("git", "-C", "/repo", "show", "origin/epic-110:docs/sdlc/epic-110/lld.md"))
     gh = GitHub(runner=runner)
     result = cmd_list_parallel_ready(gh, "/repo", 110, runner=runner)
     assert result["parallel_ready"] == []
@@ -5475,7 +5486,8 @@ def test_auto_pass_gate_a_unit_initiative_completes_gate_a_without_claiming_arch
         del_stage: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 40}}}}),
         del_status: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 40}}}}),
     })
-    runner.prefix_responses = {("gh", "issue", "comment", "40"): ""}
+    runner.prefix_responses = {("gh", "issue", "comment", "40"): "",
+                                ("gh", "issue", "edit", "40"): ""}
     gh = GitHub(runner=runner)
     result = cmd_auto_pass_gate_a(gh, issue=40, stage="product", summary="Clean.", unit="initiative")
     assert result == {"issue": 40, "unit": "initiative", "initiative_gate_a_complete": True}
@@ -6129,6 +6141,32 @@ def test_cmd_create_issue_skips_native_type_when_classification_falls_back_to_a_
     assert calls == []
 
 
+def test_cmd_create_issue_refuses_before_creating_when_label_fallback_forgot_the_label():
+    # opus-review finding: the label-fallback guard above only checked that a
+    # NATIVE type wasn't required -- it never checked the caller actually put
+    # the classifying label in `labels`. Omitting it used to sail through and
+    # create a permanently unclassifiable issue, only noticed on read-back
+    # (exactly the "uncreated-in-vain" failure SKILL.md warns about). Must
+    # refuse BEFORE `issue_create` runs -- no orphan issue left behind.
+    from sdlc_next import GhError, cmd_create_issue
+
+    class FakeGH:
+        def issue_create(self, title, body, labels):
+            raise AssertionError("must not create an issue that can never be classified")
+
+        def set_issue_type(self, number, type_name):
+            raise AssertionError("unreachable")
+
+        def add_sub_issue(self, parent_number, child_number):
+            raise AssertionError("unreachable")
+
+    try:
+        cmd_create_issue(FakeGH(), "title", "body", 40, [], type_name="Epic")
+        assert False, "expected GhError"
+    except GhError as e:
+        assert "type:epic" in str(e) and "isn't in labels" in str(e)
+
+
 def test_cmd_create_issue_still_fails_loudly_when_type_has_no_native_or_label_fallback():
     # Negative control: a kind with NEITHER a provisioned native Issue Type NOR
     # a label-based classification rule configured can never be classified
@@ -6192,9 +6230,9 @@ def test_merge_epic_lld_doc_advances_every_freshly_created_task_and_skips_alread
     path = "/epic-110"
     doc = "docs/sdlc/epic-110/lld.md"
     epic = _epic(110, labels=["epic:architected"])
-    fresh_task_1 = _issue(501, parent=110, issue_type="Task")
-    fresh_task_2 = _issue(502, parent=110, issue_type="Task")
-    already_advanced = _issue(503, parent=110, issue_type="Task", stage="development")
+    fresh_task_1 = _issue(501, parent=110, issue_type="Task", labels=["type:task"])
+    fresh_task_2 = _issue(502, parent=110, issue_type="Task", labels=["type:task"])
+    already_advanced = _issue(503, parent=110, issue_type="Task", labels=["type:task"], stage="development")
 
     advance_501, _, _ = _advance_to_development_responses(501)
     advance_502, _, _ = _advance_to_development_responses(502)
@@ -6261,7 +6299,7 @@ def test_v2_full_lifecycle_initiative_to_epic_to_task_smoke():
 
     gh_responses = {}
     gh_prefixes = {("gh", "pr", "create"): "https://github.com/owner/repo/pull/500\n",
-                    ("gh", "issue", "comment"): ""}
+                    ("gh", "issue", "comment"): "", ("gh", "issue", "edit"): ""}
 
     a40, r40 = node_id(40)
     gh_responses[a40] = r40
@@ -6384,3 +6422,230 @@ def test_v2_full_lifecycle_initiative_to_epic_to_task_smoke():
     merge_result = cmd_merge_lld_doc(gh, "/epic-41", 41, runner=merge_git_runner, unit="epic")
     assert merge_result["merged"] is True
     assert merge_result["advanced_tasks"] == [42]
+
+
+# --- opus review blocker fixes (2026-09-14): is_epic_unit/classify_unit wired
+# into the routing layer, and V2 Task footprints readable from an Epic's own
+# lld.md -- see README.md's V2 section and SKILL.md for the mechanics these
+# make actually reachable end to end. ---
+
+def _labeled(issue: dict) -> dict:
+    """`_issue()`'s `labels` are raw strings, meant to flow through
+    `_list_response`'s own `{"name": n}` wrapping. A test that hands the dict
+    straight to a pure classifier function (bypassing `_list_response`) needs
+    that wrapping done here instead."""
+    return {**issue, "labels": [{"name": n} for n in issue.get("labels", [])]}
+
+
+def test_is_epic_unit_recognizes_v1_and_v2_epics_but_not_a_v2_task():
+    from sdlc_next import is_epic_unit, is_v2_epic, is_initiative
+    v1_epic = _labeled(_epic(90))  # Feature, no parent, no classification label
+    v2_epic = _labeled(_issue(41, parent=40, issue_type="Task", labels=["type:epic"]))
+    v2_task = _labeled(_issue(42, parent=41, issue_type="Task", labels=["type:task"]))
+    v2_initiative = _labeled(_issue(40, labels=["type:initiative"]))
+    assert is_epic_unit(v1_epic) is True
+    assert is_epic_unit(v2_epic) is True
+    assert is_v2_epic(v1_epic) is False  # V1's own epic never matches classify_unit
+    assert is_epic_unit(v2_task) is False
+    assert is_initiative(v2_initiative) is True
+    assert is_epic_unit(v2_initiative) is False
+
+
+def test_decide_next_action_accepts_a_v2_epic_and_starts_it_at_architecture_not_product():
+    # Before the opus-review fix, is_epic() rejected every V2 Epic (it always
+    # has an Initiative parent) with "#N is not an epic". A V2 Epic also never
+    # runs its own `product` phase -- product.md already exists at the
+    # Initiative (or never exists at all, engineering-driven) -- so its first
+    # delegation must be `architecture`, not V1's default `product`.
+    from sdlc_next import GitHub, decide_next_action
+    v2_epic = _epic(41, labels=["type:epic"])
+    v2_epic["parent"] = {"number": 40}
+    runner = ScriptedRunner({tuple(_list_argv()): _list_response([v2_epic]),
+                              **_no_blockers_responses(41)})
+    gh = GitHub(runner=runner)
+    result = decide_next_action(gh, 41)
+    assert result == {"action": "delegate", "issue": 41, "unit": "epic", "stage": "architecture"}
+
+
+def test_decide_next_action_v1_epic_still_starts_at_product():
+    # Regression guard: a V1 epic (parentless Feature, no classification label)
+    # is unaffected by the V2 default-stage change.
+    from sdlc_next import GitHub, decide_next_action
+    v1_epic = _epic(90)
+    runner = ScriptedRunner({tuple(_list_argv()): _list_response([v1_epic]),
+                              **_no_blockers_responses(90)})
+    gh = GitHub(runner=runner)
+    result = decide_next_action(gh, 90)
+    assert result == {"action": "delegate", "issue": 90, "unit": "epic", "stage": "product"}
+
+
+def test_decide_next_action_rejects_a_plain_child_issue_number():
+    # A child/Task number (not an epic, not a V2 epic, not an initiative) must
+    # still raise -- is_epic_unit's union does not widen what counts as a
+    # top-level unit.
+    from sdlc_next import GitHub, GhError, decide_next_action
+    task = _issue(42, parent=41, labels=["type:task"])
+    runner = ScriptedRunner({tuple(_list_argv()): _list_response([task])})
+    gh = GitHub(runner=runner)
+    try:
+        decide_next_action(gh, 42)
+        assert False, "expected GhError"
+    except GhError as e:
+        assert "not an epic" in str(e)
+
+
+def test_pass_gate_unit_epic_v2_claims_lld_instead_of_completing_architecture():
+    # A V2 Epic's architecture Gate B passing does NOT complete the epic (no
+    # `epic:architected` label, no fields cleared) -- it claims `lld` on the
+    # epic itself instead, since V2's lld is epic-level and runs once before
+    # any Task starts. Fields only clear later, when `_merge_epic_lld_doc`
+    # confirms the epic's own lld.md reached origin.
+    from sdlc_next import (GitHub, cmd_pass_gate, _ISSUE_NODE_ID_QUERY,
+                            _SET_ISSUE_FIELD_MUTATION, _ISSUE_PROJECT_ITEM_QUERY,
+                            STAGE_FIELD_ID, STAGE_OPTION_IDS, PIPELINE_STATUS_FIELD_ID,
+                            PIPELINE_STATUS_OPTION_IDS)
+    git_runner = ScriptedRunner({
+        **_live_wt("epic-41"),
+        ("git", "-C", "/repo", "fetch", "origin"): "",
+        ("git", "-C", "/repo", "checkout", "epic-41"): "",
+        ("git", "-C", "/repo", "merge", "origin/epic-41"): "",
+        ("git", "-C", "/repo", "push", "origin", "epic-41"): "",
+    })
+    a41c, r41c = _epic_check(41, parent=40, labels=["type:epic"])
+    node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=41)}")
+    stage_mut = ("gh", "api", "graphql", "-f",
+        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_41', field_id=STAGE_FIELD_ID, option_id=STAGE_OPTION_IDS['lld'])}")
+    status_mut = ("gh", "api", "graphql", "-f",
+        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_41', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['in-progress'])}")
+    project_item_argv = ("gh", "api", "graphql", "-f",
+        f"query={_ISSUE_PROJECT_ITEM_QUERY.format(n=41)}")
+    gh_runner = ScriptedRunner({
+        ("gh", "issue", "view", "41", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": "<!-- gate-pr: architecture:150 -->"}]}),
+        a41c: r41c,
+        node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_41"}}}}),
+        stage_mut: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 41}}}}),
+        status_mut: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 41}}}}),
+        project_item_argv: json.dumps({"data": {"repository": {"issue": {"projectItems": {"nodes": []}}}}}),
+    })
+    gh_runner.prefix_responses = {("gh", "issue", "comment", "41"): ""}
+    gh = GitHub(runner=gh_runner)
+    result = cmd_pass_gate(gh, "/repo", issue=41, gate_pr=150, stage="architecture",
+                            unit="epic", runner=git_runner)
+    assert result == {"issue": 41, "unit": "epic", "epic_lld_claimed": True}
+    edit_calls = [c for c in gh_runner.calls if c[:3] == ["gh", "issue", "edit"]]
+    assert edit_calls == []  # never adds epic:architected here
+    comment_calls = [c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"]]
+    assert any("own `lld` stage" in c[c.index("--body") + 1] for c in comment_calls)
+
+
+def test_parse_task_footprint_slices_correct_task_subsection():
+    from sdlc_next import parse_task_footprint
+    doc = (
+        "# lld.md\n\n"
+        "## Task #501: parse payload\n"
+        "Some prose.\n\n"
+        "## Footprint\n"
+        "- `backend/src/whatsapp/parse.ts`\n\n"
+        "## Task #502: persist result\n"
+        "Some other prose.\n\n"
+        "## Footprint\n"
+        "- `backend/src/whatsapp/store.ts`\n"
+    )
+    assert parse_task_footprint(doc, 501) == ["backend/src/whatsapp/parse.ts"]
+    assert parse_task_footprint(doc, 502) == ["backend/src/whatsapp/store.ts"]
+    assert parse_task_footprint(doc, 999) == []
+
+
+def test_list_parallel_ready_reads_v2_task_footprint_from_epic_level_lld_doc():
+    # Blocker #2 (opus review): a V2 Task has no `issue-<n>/lld.md` of its own
+    # -- before the fix, `read_footprint` never looked at the Epic's own
+    # `epic-<n>/lld.md`, so `list-parallel-ready` always reported "no ##
+    # Footprint section found" and skipped every real V2 Task.
+    from sdlc_next import GitHub, cmd_list_parallel_ready
+    epic = _epic(110, labels=["type:epic", "epic:architected"])
+    epic["parent"] = {"number": 40}
+    task_501 = _issue(501, stage="development", parent=110, labels=["type:task"])
+    epic_doc = (
+        "## Task #501: parse payload\n"
+        "## Footprint\n"
+        "- `backend/src/whatsapp/parse.ts`\n"
+    )
+    responses = {
+        tuple(_list_argv()): _list_response([epic, task_501]),
+        ("git", "-C", "/repo", "fetch", "origin"): "",
+        ("git", "-C", "/repo", "worktree", "list", "--porcelain"):
+            "worktree /repo\nHEAD x\nbranch refs/heads/main\n",
+        ("git", "-C", "/repo", "show", "origin/issue-501:docs/sdlc/issue-501/lld.md"): "",
+        ("git", "-C", "/repo", "show", "origin/issue-501:docs/sdlc/issue-501/architecture.md"): "",
+        ("git", "-C", "/repo", "show", "origin/epic-110:docs/sdlc/epic-110/lld.md"): epic_doc,
+        ("git", "-C", "/repo", "show-ref", "--verify", "--quiet",
+         "refs/remotes/origin/issue-501"): "",
+    }
+    responses.update(_no_blockers_responses(501))
+    runner = ScriptedRunner(responses)
+    gh = GitHub(runner=runner)
+    result = cmd_list_parallel_ready(gh, "/repo", 110, runner=runner)
+    assert result["skipped"] == []
+    assert [c["issue"] for c in result["parallel_ready"]] == [501]
+
+
+# --- decide_next_action's Initiative branch (_decide_initiative_next_action) ---
+
+def test_decide_next_action_initiative_fresh_delegates_product():
+    from sdlc_next import GitHub, decide_next_action
+    initiative = _issue(40, labels=["type:initiative"])
+    runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative])})
+    gh = GitHub(runner=runner)
+    result = decide_next_action(gh, 40)
+    assert result == {"action": "delegate", "issue": 40, "unit": "initiative", "stage": "product"}
+
+
+def test_decide_next_action_initiative_gate_pending_dispatches_pass_gate():
+    from sdlc_next import GitHub, decide_next_action
+    initiative = _issue(40, labels=["type:initiative"], stage="product", status="awaiting-human-review")
+    runner = ScriptedRunner({
+        tuple(_list_argv()): _list_response([initiative]),
+        ("gh", "issue", "view", "40", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": "<!-- gate-pr: product:500 -->"}]}),
+        ("gh", "pr", "view", "500", "--repo", "owner/repo", "--json", "state,mergedAt"):
+            json.dumps({"state": "MERGED", "mergedAt": "2026-09-14T00:00:00Z"}),
+    })
+    gh = GitHub(runner=runner)
+    result = decide_next_action(gh, 40)
+    assert result["action"] == "pass-gate"
+    assert result["issue"] == 40
+    assert result["unit"] == "initiative"
+
+
+def test_decide_next_action_initiative_gate_a_passed_no_epics_cut_yet():
+    from sdlc_next import GitHub, decide_next_action
+    initiative = _issue(40, labels=["type:initiative", "initiative:gate-a-passed"])
+    runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative])})
+    gh = GitHub(runner=runner)
+    result = decide_next_action(gh, 40)
+    assert result["action"] == "none"
+    assert "cut Epics" in result["reason"]
+
+
+def test_decide_next_action_initiative_gate_a_passed_epics_still_open():
+    from sdlc_next import GitHub, decide_next_action
+    initiative = _issue(40, labels=["type:initiative", "initiative:gate-a-passed"])
+    cut_epic = _issue(41, parent=40, labels=["type:epic"], state="OPEN")
+    runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative, cut_epic])})
+    gh = GitHub(runner=runner)
+    result = decide_next_action(gh, 40)
+    assert result == {"action": "none", "epic": 40}
+
+
+def test_decide_next_action_initiative_gate_a_passed_all_epics_closed():
+    from sdlc_next import GitHub, decide_next_action
+    initiative = _issue(40, labels=["type:initiative", "initiative:gate-a-passed"])
+    cut_epic = _issue(41, parent=40, labels=["type:epic"], state="CLOSED")
+    runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative, cut_epic])})
+    gh = GitHub(runner=runner)
+    result = decide_next_action(gh, 40)
+    assert result["action"] == "none"
+    assert "initiative-close" in result["reason"]

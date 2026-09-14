@@ -256,10 +256,11 @@ orchestrator's, after you return.
 
 ### `product` done, `unit: "initiative"`
 
-**V2 shape — the mechanical plumbing below (branch names, `--unit` value) mirrors
-today's epic-level flow and needs confirming against Work-stream A's `classify_unit`
-and the real `sdlc_next.py` wiring once that lands; the document contract itself is
-settled.** In the Initiative's own worktree. Create `initiative-<n>` from `main`
+**V2 shape — built 2026-09-14**: `--unit initiative` is real on `worktree-add`,
+`open-gate`, `pass-gate`, `auto-pass-gate-a`, `verify-exit` and `sync-branch`; `main`
+is the Initiative's own integration base (never merges there itself — Gate A is the
+only thing an Initiative's branch exists for). In the Initiative's own worktree.
+Create `initiative-<n>` from `main`
 (first stage to touch it), then **author on the gate sub-branch, not on
 `initiative-<n>`**: `git checkout -b initiative-<n>-gate-product` — the Initiative
 branch only ever receives merges, same discipline as today's epic gate branches (see

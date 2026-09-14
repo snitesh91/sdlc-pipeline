@@ -167,9 +167,13 @@ signal independent of the generic bounce count (`references/rework.md`).
   re-review. Loop until clean; the escalation valve tracks the `product-review ↔
   product` pairing (`pairing-counts`), replacing the agent at `replaceAt` and marking
   `needs-human` at `needsHumanAt`. Rework rounds are scoped (see "Rework and blockers").
-- **CLEAN** → the orchestrator resolves the epic's profile and takes Gate A:
+- **CLEAN** → the orchestrator resolves the unit's profile and takes Gate A:
   - `requiresHumanGateA: true` (default profile) → open the human Gate A exactly as
-    before: `open-gate ... --doc product.md --next-stage architecture [--unit epic]`.
+    before: `open-gate ... --doc product.md --next-stage architecture [--unit epic|initiative]`.
   - `requiresHumanGateA: false` (a standing/RTB profile) → **auto-pass**:
-    `auto-pass-gate-a <n> [--unit epic] --summary "..."` — advances to `architecture`
-    and claims it, no human. See `references/gates.md`, "Gate A configurability".
+    `auto-pass-gate-a <n> [--unit epic|initiative] --summary "..."`. For an epic (or a
+    standing child), this advances to `architecture` and claims it, no human. **For an
+    Initiative, it does NOT claim `architecture`** — an Initiative has none; it
+    completes Gate A the same way `pass-gate --unit initiative` does, handing off to
+    the orchestrator cutting Epics next (SKILL.md, "Cutting Epics from an approved
+    Initiative"). See `references/gates.md`, "Gate A configurability".

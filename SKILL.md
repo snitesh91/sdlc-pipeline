@@ -43,9 +43,8 @@ which flags problems in its handoff instead.
 extension of it** — `lld` moved from task level to Epic level, `architecture` no
 longer creates or sizes children, and there is a new Initiative tier above Epic.
 Standing and legacy profiles are untouched by this; only the (former) "default
-profile" flow changed shape, described below as **Initiative-driven**. Full
-derivation and the open items still pending real `sdlc_next.py` wiring:
-`$SDLC_DIR/V2-SPEC.md`.
+profile" flow changed shape, described below as **Initiative-driven**. See
+`README.md`'s "V2: Initiative-driven lifecycle" section for a high-level summary.
 
 Which flow a unit runs is set by its **profile** — a label-matched bundle of
 behavioural toggles in the config's `pipeline.profiles` (see `references/epics.md`,
@@ -218,7 +217,7 @@ operational failure: stop and report, never retry by hand.
 | `sync-branch <n> [--unit epic]` | Reconcile the branch with its integration base; structured conflict result |
 | `merge-lld-doc <n> [--unit issue\|epic]` | `--unit issue` (default, V1): publish a normal-epic child's clean `lld.md` onto the epic branch, then **advance** it to `development`. `--unit epic` (V2): verify the epic-level `lld.md` (already pushed directly to `origin/epic-<n>`) reached origin, then advance every Task `lld` just created. Both: Stage set, Pipeline Status cleared, never claimed |
 | `verify-exit <n> --expect-stage <s> [--pr <pr>] [--unit epic]` | Post-handoff state check |
-| `open-gate` / `check-gate` / `pass-gate` / `skip-gate` | Human-review gates (`references/gates.md`) |
+| `open-gate` / `check-gate` / `pass-gate` / `skip-gate` / `auto-pass-gate-a` | Human-review gates (`references/gates.md`); `auto-pass-gate-a` advances Gate A with no human review when the resolved profile sets `requiresHumanGateA: false` |
 | `open-dev-pr <n> ...` | Draft PR + Stage=PR Review + handoff comment (posts **no** queue marker) |
 | `handoff-to-pr-review` / `record-pr-review` | The two review-queue markers |
 | `record-local-ci --pr <pr> --suite <s> --sha <HEAD> --command <cmd> --output <file>` | `development`'s evidence-carrying local-CI attestation; `<s>` is a `requiredWorkflows[].suite` from config |

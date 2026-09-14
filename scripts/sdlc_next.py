@@ -151,7 +151,8 @@ HUMAN_ASSIGNEE = CONFIG["humanAssignee"]
 # config; every key has the default shown here so an older config keeps working.
 _PIPELINE_DEFAULTS = {
     "labels": {"standing": "epic:standing", "legacy": "epic:legacy",
-               "architected": "epic:architected"},
+               "architected": "epic:architected",
+               "initiativeGateAPassed": "initiative:gate-a-passed"},
     "branches": {"issuePrefix": "issue-", "epicPrefix": "epic-",
                  "initiativePrefix": "initiative-", "gateSuffix": "-gate-"},
     # `ephemeralPrefix` names the throwaway worktree a branch-touching command
@@ -229,8 +230,8 @@ _PIPELINE_DEFAULTS = {
     # "issueType", "value": "Task"}}. See WorkItemProvider.classify_unit.
     "classification": {},
     # V2 (2026-09-14): which WorkItemProvider implementation get_work_item_provider()
-    # returns. Only "github" exists -- Jira is a documented seam (V2-SPEC.md,
-    # work-stream A), not built. Naming anything else is a refusal, not a fallback.
+    # returns. Only "github" exists -- Jira is a documented seam (README.md,
+    # "V2: Initiative-driven lifecycle"), not built. Naming anything else is a refusal, not a fallback.
     "workItemProvider": {"type": "github"},
     "docTemplates": "_templates",
     # Behavioural profiles, matched to an epic by label (ordered; first hit wins,
@@ -406,11 +407,11 @@ def _default_runner(argv: list) -> str:
 class WorkItemProvider(Protocol):
     """The work-item-tracker contract every `cmd_*` function is written against.
     `GitHub` is the only implementation today (2026-09-14) -- this Protocol exists
-    so a second one (Jira, named in V2-SPEC.md's work-stream A) can be dropped in
+    so a second one (Jira, see README.md's V2 section) can be dropped in
     without changing a single `cmd_*` function, not because a second one is built
     yet. Deliberately narrow: **issue/work-item management only.** PR/branch/CI
     methods (`pr_*`, `branch_*_by`, `path_on_ref`, `graphql`) are Code-Host concerns,
-    scoped out of this contract on purpose -- V2-SPEC.md's decision was git-protocol
+    scoped out of this contract on purpose -- this was a deliberate decision: git-protocol
     operations only, PR/merge/CI mechanics staying hardcoded to github.com, so
     there is deliberately no `CodeHostProvider` seam here to match.
 
@@ -448,8 +449,9 @@ class WorkItemProvider(Protocol):
         needs this answerable per-issue rather than only ever caller-asserted
         (V1's `--unit epic` flag). Each provider implements its own signal --
         GitHub's below reads `pipeline.classification` config; Jira would read its
-        native Initiative/Epic/Story hierarchy level instead. See V2-SPEC.md,
-        "classify_unit is part of this contract, not a Layer-1 assumption"."""
+        native Initiative/Epic/Story hierarchy level instead. Part of the
+        `WorkItemProvider` contract every provider implements, not an
+        afterthought bolted onto GitHub's alone."""
         ...
 
 
@@ -538,25 +540,20 @@ class GitHub:
         Deliberately independent of `is_epic()`/`resolve_profile()` (V1's
         Feature-type-plus-no-parent heuristic) -- V2 is a different lifecycle, not
         an extension of V1's, and entangling the two risks regressing V1's
-        still-live profile matching for a hierarchy tier V1 never had.
+        still-live profile matching for a hierarchy tier V1 never had. `is_epic_unit`/
+        `is_initiative` are the union helpers most callers actually want.
 
         Returns "other" when no configured rule matches, never a guessed default
         -- a repo that hasn't provisioned this classification yet gets an honest
         "don't know" (`references/history.md` is full of what a wrong guess
-        costs), not a silent misroute into the wrong stage's lifecycle."""
-        rules = PIPELINE.get("classification", {})
-        if not rules:
-            return "other"
-        info = self.issue_epic_info(number)
-        it = issue_type(info)
-        labels = {l["name"] for l in info.get("labels", [])}
-        for kind, rule in rules.items():
-            field, value = rule.get("field"), rule.get("value")
-            if field == "issueType" and it == value:
-                return kind
-            if field == "label" and value in labels:
-                return kind
-        return "other"
+        costs), not a silent misroute into the wrong stage's lifecycle.
+
+        This single-issue fetch is for a caller that only has one issue number in
+        hand. A bulk caller that already has every issue's `issueType`/`labels`
+        from `issue_list()` (the picker) must use `classify_unit_from_issue`
+        directly on that dict instead -- re-fetching per issue here would be an
+        N+1 GraphQL call per pass."""
+        return classify_unit_from_issue(self.issue_epic_info(number))
 
     def project_item_id(self, number: int) -> Optional[str]:
         """The Projects-v2 item id for `number` within the board (PROJECT_NUMBER)
@@ -613,8 +610,8 @@ class GitHub:
             raise GhError(
                 f"type_name={type_name!r} is not in projectFields.issueTypeIds "
                 f"(configured: {sorted(ISSUE_TYPE_IDS)}) -- V2's Epic/Initiative "
-                f"types need provisioning as real GitHub Issue Types (org-level, "
-                f"see V2-SPEC.md) and their GraphQL ids added to config before "
+                f"types need provisioning as real GitHub Issue Types (org-level) and "
+                f"their GraphQL ids added to config before "
                 f"this call can set them; a bare KeyError here would hide that.")
         issue_id = self.issue_node_id(number)
         type_id = ISSUE_TYPE_IDS[type_name]
@@ -829,14 +826,14 @@ def get_work_item_provider(runner: Runner = _default_runner) -> WorkItemProvider
     calls this instead of `GitHub()` directly, so `pipeline.workItemProvider.type`
     decides which provider runs without touching a single `cmd_*` function. Only
     `"github"` is implemented (2026-09-14) -- Jira is a documented seam
-    (V2-SPEC.md, work-stream A), not built. Naming anything else is a clear
+    (README.md, "V2: Initiative-driven lifecycle"), not built. Naming anything else is a clear
     refusal, not a silent fallback to GitHub -- that would run against the wrong
     tracker without anyone noticing."""
     provider = PIPELINE.get("workItemProvider", {}).get("type", "github")
     if provider == "github":
         return GitHub(runner=runner)
     raise GhError(f"pipeline.workItemProvider.type={provider!r} is not implemented -- "
-                  f"only 'github' exists today (see V2-SPEC.md, work-stream A)")
+                  f"only 'github' exists today (see README.md, 'V2: Initiative-driven lifecycle')")
 
 
 def label_names(issue: dict) -> set:
@@ -872,6 +869,60 @@ def is_epic(issue: dict) -> bool:
     separate "Epic" Issue Type; per operator instruction, Type: Feature *is* the
     epic taxonomy. See "Epic number is mandatory" in SKILL.md."""
     return issue_type(issue) == "Feature" and issue.get("parent") is None
+
+
+def classify_unit_from_issue(issue: dict) -> str:
+    """Pure classification core shared by `GitHub.classify_unit` (fresh
+    single-issue fetch via `issue_epic_info`) and every bulk picker
+    (`decide_next_action`, `cmd_list_parallel_ready`, `cmd_list_design_ready`),
+    which already has every issue's `issueType`/`labels` from one `issue_list()`
+    call and must not re-fetch per issue just to classify it. Both callers'
+    issue dicts share the same flattened shape (`labels` a plain list, not a
+    `{"nodes": [...]}` wrapper) -- `issue_list()` flattens it itself,
+    `issue_epic_info()` flattens it before returning. See `GitHub.classify_unit`
+    for what the config-driven rules mean."""
+    rules = PIPELINE.get("classification", {})
+    if not rules:
+        return "other"
+    it = issue_type(issue)
+    labels = label_names(issue)
+    for kind, rule in rules.items():
+        field, value = rule.get("field"), rule.get("value")
+        if field == "issueType" and it == value:
+            return kind
+        if field == "label" and value in labels:
+            return kind
+    return "other"
+
+
+def is_v2_epic(issue: dict) -> bool:
+    """A V2 Epic: classified "epic" by `pipeline.classification` -- has an
+    Initiative parent (Initiative-driven) or was cut directly as a bare
+    engineering-driven Epic, either way carrying the configured Epic
+    issueType/label rather than V1's parentless-Feature shape. See
+    `is_epic_unit` for the union both lifecycles need."""
+    return classify_unit_from_issue(issue) == "epic"
+
+
+def is_epic_unit(issue: dict) -> bool:
+    """Is `issue` an Epic under EITHER lifecycle? V1's `is_epic()` (parentless
+    Feature) and V2's `is_v2_epic()` (classified "epic", which always HAS an
+    Initiative or is a bare engineering-driven Epic) are deliberately separate,
+    non-overlapping heuristics -- a V1 epic never matches `pipeline.classification`
+    (no repo configures a "type:epic" label/native type for its top-level
+    Features), and a V2 Epic never matches `is_epic()` (it has a parent, or was
+    cut with a native Epic type `is_epic()` doesn't recognize). Every place that
+    used to gate on `is_epic()` alone to mean "is this an epic" now needs this
+    union, or a real V2 Epic is rejected as "not an epic" -- see
+    `decide_next_action`, `cmd_list_parallel_ready`, `cmd_list_design_ready`."""
+    return is_epic(issue) or is_v2_epic(issue)
+
+
+def is_initiative(issue: dict) -> bool:
+    """Is `issue` a V2 Initiative? V1 has no such tier -- this only ever matches
+    when `pipeline.classification.initiative` is configured and the issue
+    carries that native type/label."""
+    return classify_unit_from_issue(issue) == "initiative"
 
 
 def resolve_profile(epic_issue: Optional[dict]) -> dict:
@@ -1247,7 +1298,7 @@ def initiative_branch(initiative: int) -> str:
     directly: only the gate branch carrying its `product.md` merges into it.
     Unlike an Epic branch, an Initiative branch never itself merges to `main` --
     the orchestrator cuts Epics from the approved `product.md` and each Epic runs
-    its own independent lifecycle from there (see V2-SPEC.md); the Initiative
+    its own independent lifecycle from there; the Initiative
     branch's job ends once Gate A passes."""
     return f"{INITIATIVE_BRANCH_PREFIX}{initiative}"
 
@@ -1600,9 +1651,15 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
     epic_issue = by_number.get(epic)
-    if epic_issue is None or not is_epic(epic_issue):
-        raise GhError(f"#{epic} is not an epic (a top-level Type: Feature issue) -- "
-                       f"pass the epic's own issue number, not a child issue's")
+    if epic_issue is None:
+        raise GhError(f"#{epic} is not an epic or Initiative -- "
+                       f"pass the epic's/Initiative's own issue number, not a child issue's")
+    if is_initiative(epic_issue):
+        return _decide_initiative_next_action(gh, epic, epic_issue, all_issues)
+    if not is_epic_unit(epic_issue):
+        raise GhError(f"#{epic} is not an epic (a top-level Type: Feature issue, or a V2 unit "
+                       f"pipeline.classification calls \"epic\") -- pass the epic's own issue "
+                       f"number, not a child issue's")
     if is_epic_legacy(epic_issue):
         return {"action": "skip", "epic": epic,
                 "reason": "epic:legacy -- this pipeline no longer drives this epic or any of "
@@ -1628,7 +1685,7 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
         return result
 
     def unit_of(issue: dict) -> str:
-        return "epic" if is_epic(issue) else "issue"
+        return "epic" if is_epic_unit(issue) else "issue"
 
     # Crash-recovery: the epic itself (if open) plus its own open children only.
     in_progress = [i for i in ([epic_issue] if epic_issue["state"] == "OPEN" else []) + children
@@ -1651,7 +1708,14 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
                         "unresolved_threads": gate["unresolved_threads"],
                         "new_comments": gate["new_comments"]}
         elif status != "needs-human" and not is_epic_architected(epic_issue):
-            epic_stage = current_stage(epic_issue) or "product"
+            # A V2 Epic (Initiative-driven or engineering-driven) never runs its
+            # own `product` phase -- Initiative-driven already has product.md
+            # from the Initiative; engineering-driven never has one at all
+            # (SKILL.md, "Engineering-driven"). Its own phase starts straight
+            # at `architecture`. A V1 epic (parentless Feature) still starts at
+            # `product`, unchanged.
+            epic_stage = current_stage(epic_issue) or \
+                ("architecture" if is_v2_epic(epic_issue) else "product")
             if capped(epic_stage):
                 deferred_by_cap.append(epic)
             elif not gh.blocked_by(epic):
@@ -1706,6 +1770,78 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
                 "stage": stage}
 
     return none_result()
+
+
+def _decide_initiative_next_action(gh: GitHub, initiative: int, initiative_issue: dict,
+                                    all_issues: list) -> dict:
+    """`decide_next_action`'s V2 branch for an Initiative -- a much smaller
+    lifecycle than an Epic's: exactly one phase (`product`) and one gate (Gate
+    A), no per-child fan-out here at all. Epics cut from this Initiative
+    (native sub-issues once Gate A passes -- see "Cutting Epics from an
+    approved Initiative" in SKILL.md) run their OWN independent lifecycle
+    through their own top-level `/sdlc-pipeline <epic-n>` invocation; this
+    function must never try to resume or delegate one of them itself, or two
+    invocations would race the same Epic (same invariant as "Epic number is
+    mandatory", one tier up).
+
+    Once Gate A passes, `_complete_initiative_gate_a` clears the Initiative's
+    own Stage/Pipeline-Status fields -- cutting Epics from the approved
+    `product.md` is the orchestrator's own manual next step (SKILL.md), not
+    something this function drives. From there, this function's only other job
+    is noticing when every cut Epic has closed and surfacing that the
+    Initiative is ready for its own close validation -- see
+    `cmd_check_initiative_closeable` and "Closing an Initiative" in SKILL.md;
+    actually delegating that validation and closing the issue is, like
+    arch-review/lld-review after their stage, an orchestrator-prose follow-up
+    action, not something `next-action` dispatches on its own."""
+    if initiative_issue["state"] != "OPEN":
+        return {"action": "none", "epic": initiative}
+    status = pipeline_status(initiative_issue)
+    if status == "in-progress":
+        return {"action": "resume", "issue": initiative, "unit": "initiative",
+                "stage": current_stage(initiative_issue) or "product"}
+    if status in GATE_PENDING_STATUSES:
+        gate = evaluate_gate(gh, initiative)
+        if gate["status"] == "satisfied":
+            return {"action": "pass-gate", "issue": initiative, "unit": "initiative",
+                    "gate_pr": gate["gate_pr"], "stage": gate["stage"]}
+        if gate["status"] == "feedback_pending":
+            return {"action": "address-gate-feedback", "issue": initiative, "unit": "initiative",
+                    "gate_pr": gate["gate_pr"], "stage": gate["stage"],
+                    "unresolved_threads": gate["unresolved_threads"],
+                    "new_comments": gate["new_comments"]}
+        return {"action": "none", "epic": initiative}
+    if status == "needs-human":
+        return {"action": "none", "epic": initiative}
+    stage = current_stage(initiative_issue)
+    if stage is None and not has_label(initiative_issue, LABELS["initiativeGateAPassed"]):
+        # Fresh Initiative, never delegated yet -- same product-WIP cap as any
+        # other fresh product delegation (the human reviewing Gate A is one
+        # person repo-wide; see `product_wip_headroom`).
+        if product_wip_headroom(all_issues) == 0:
+            return {"action": "none", "epic": initiative,
+                    "product_cap": {"limit": PRODUCT_WIP_CAP,
+                                    "pending": product_gate_pending(all_issues),
+                                    "deferred": [initiative]}}
+        return {"action": "delegate", "issue": initiative, "unit": "initiative", "stage": "product"}
+    if stage is None:
+        cut_epics = [i for i in all_issues if i.get("parent")
+                     and i["parent"]["number"] == initiative and is_epic_unit(i)]
+        if not cut_epics:
+            # Gate A passed, but the orchestrator hasn't cut any Epics yet --
+            # that's a manual step this function doesn't perform.
+            return {"action": "none", "epic": initiative,
+                    "reason": "Gate A passed -- cut Epics from the approved product.md next "
+                              "(SKILL.md, \"Cutting Epics from an approved Initiative\")."}
+        if all(i["state"] == "CLOSED" for i in cut_epics):
+            return {"action": "none", "epic": initiative,
+                    "reason": "every cut Epic is closed -- ready for initiative-close "
+                              "validation (SKILL.md, \"Closing an Initiative\")."}
+        return {"action": "none", "epic": initiative}
+    # Not yet reached in practice (Gate A is the only gate an Initiative has,
+    # and it never claims a further stage) -- kept for completeness/symmetry
+    # with an Epic's own delegate branch, rather than silently falling through.
+    return {"action": "delegate", "issue": initiative, "unit": "initiative", "stage": stage}
 
 
 def cmd_next_action(gh: GitHub, args) -> dict:
@@ -1787,6 +1923,10 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
 _FOOTPRINT_HEADING = re.compile(r"^#+\s*(?:\d+[.)]\s*)?Footprint\b.*$",
                                 re.IGNORECASE | re.MULTILINE)
 _FOOTPRINT_BULLET_PATH = re.compile(r"^-\s+`([^`]+)`")
+# V2's epic-level lld.md convention (sdlc-lld.md, "The document"): one `##
+# Task #<n>` subsection per Task, each carrying its own `### Footprint`.
+_TASK_SUBSECTION_HEADING = re.compile(r"^##\s*Task\s*#(\d+)\b.*$",
+                                      re.IGNORECASE | re.MULTILINE)
 
 
 def parse_footprint(doc_text: str) -> list:
@@ -1813,13 +1953,42 @@ def parse_footprint(doc_text: str) -> list:
     return paths
 
 
-def read_footprint(repo_path: str, issue: int, runner: Runner = _default_runner) -> list:
+def parse_task_footprint(doc_text: str, task_number: int) -> list:
+    """Slices an Epic-level `lld.md` (V2) to one Task's own `## Task #<n>`
+    subsection, then runs `parse_footprint` within just that slice. Required
+    because the doc covers every Task in the Epic in one file (`sdlc-lld.md`,
+    "The document") -- running `parse_footprint` on the whole document would
+    silently return the FIRST Task's footprint for every Task's own query,
+    since `_FOOTPRINT_HEADING.search` only ever finds the first match. Returns
+    `[]` both when the Task's own subsection is missing and when it has one but
+    no bullets in it -- the same "cannot verify, so not eligible" contract
+    `parse_footprint`/`read_footprint`'s callers already rely on."""
+    matches = list(_TASK_SUBSECTION_HEADING.finditer(doc_text))
+    for i, m in enumerate(matches):
+        if int(m.group(1)) != task_number:
+            continue
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(doc_text)
+        return parse_footprint(doc_text[start:end])
+    return []
+
+
+def read_footprint(repo_path: str, issue: int, runner: Runner = _default_runner,
+                    epic: Optional[int] = None) -> list:
     """Reads issue #<issue>'s own declared footprint straight off its committed
     design doc on `origin/issue-<n>`, via `git show` against the shared
     checkout's remote-tracking ref -- deliberately not a worktree read, since
     computing parallel-eligibility must not itself require standing up a
     worktree first. Tries `lld.md` (a normal-epic child) then `architecture.md`
-    (a standing/legacy child) -- whichever exists on that branch."""
+    (a standing/legacy child) -- whichever exists on that branch.
+
+    A V2 Task has no `issue-<n>` doc of its own -- its footprint lives in its
+    own `## Task #<n>` subsection of its Epic's `epic-<n>/lld.md` (`sdlc-lld.md`,
+    "The document"). When `epic` is given and neither per-issue doc exists,
+    falls back to reading that subsection out of the Epic's shared doc via
+    `parse_task_footprint`, so a fresh Task without any doc of its own isn't
+    silently treated as "cannot verify non-overlap" the way blocker #2 (this
+    session's opus review) found `list-parallel-ready` doing for every V2 Task."""
     for doc in ("lld.md", "architecture.md"):
         try:
             text = runner(["git", "-C", repo_path, "show",
@@ -1829,6 +1998,13 @@ def read_footprint(repo_path: str, issue: int, runner: Runner = _default_runner)
         footprint = parse_footprint(text)
         if footprint:
             return footprint
+    if epic is not None:
+        try:
+            text = runner(["git", "-C", repo_path, "show",
+                            f"origin/{epic_branch(epic)}:{DOC_ROOT}/epic-{epic}/lld.md"])
+        except GhError:
+            return []
+        return parse_task_footprint(text, issue)
     return []
 
 
@@ -2335,9 +2511,10 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
     epic_issue = by_number.get(epic)
-    if epic_issue is None or not is_epic(epic_issue):
-        raise GhError(f"#{epic} is not an epic (a top-level Type: Feature issue) -- "
-                       f"pass the epic's own issue number, not a child issue's")
+    if epic_issue is None or not is_epic_unit(epic_issue):
+        raise GhError(f"#{epic} is not an epic (a top-level Type: Feature issue, or a V2 unit "
+                       f"pipeline.classification calls \"epic\") -- pass the epic's own issue "
+                       f"number, not a child issue's")
     base = {"parallel_ready": [], "count": 0, "eligible_total": 0, "active_count": 0,
             "active_branches": [], "limit": limit, "slots_available": 0, "epic": epic,
             "skipped": []}
@@ -2391,7 +2568,12 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
         number = issue_number_from_branch(branch)
         if number is None:
             continue
-        fp = read_footprint(repo_path, number, runner=runner)
+        # Not necessarily THIS call's own `epic` -- an active branch can belong
+        # to any epic's Task (footprint collisions are checked across the
+        # whole dev lane, not just this epic's own children).
+        active_parent = (by_number.get(number) or {}).get("parent")
+        fp = read_footprint(repo_path, number, runner=runner,
+                             epic=active_parent["number"] if active_parent else None)
         if fp:
             active_footprints.append((number, fp))
 
@@ -2424,7 +2606,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
         if gh.blocked_by(number):
             skipped.append({"issue": number, "reason": "blocked by an open dependency"})
             continue
-        footprint = read_footprint(repo_path, number, runner=runner)
+        footprint = read_footprint(repo_path, number, runner=runner, epic=epic)
         if not footprint and stage == "lld" \
                 and not origin_branch_exists(repo_path, branch, runner=runner):
             # Never-started child -- no branch, so no lld.md to carry a
@@ -2432,9 +2614,10 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
             # its own docs folder stands in as the footprint for this call.
             footprint = [f"{DOC_ROOT}/issue-{number}/"]
         if not footprint:
-            skipped.append({"issue": number, "reason": "no ## Footprint section found in its "
-                                                         "lld.md/architecture.md on origin -- cannot "
-                                                         "verify non-overlap"})
+            skipped.append({"issue": number, "reason": "no ## Footprint section found in its own "
+                                                         "lld.md/architecture.md, or in its Epic's "
+                                                         "epic-<n>/lld.md subsection, on origin -- "
+                                                         "cannot verify non-overlap"})
             continue
         collision = next((n for n, fp in selected_footprints if footprint_overlaps(footprint, fp)), None)
         if collision is not None:
@@ -2510,9 +2693,10 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
     epic_issue = by_number.get(epic)
-    if epic_issue is None or not is_epic(epic_issue):
-        raise GhError(f"#{epic} is not an epic (a top-level Type: Feature issue) -- "
-                       f"pass the epic's own issue number, not a child issue's")
+    if epic_issue is None or not is_epic_unit(epic_issue):
+        raise GhError(f"#{epic} is not an epic (a top-level Type: Feature issue, or a V2 unit "
+                       f"pipeline.classification calls \"epic\") -- pass the epic's own issue "
+                       f"number, not a child issue's")
     # Same exemption as decide_next_action: an auto-passing Gate A never queues on
     # the human, so that profile's product candidates are not capped.
     product_headroom = (product_wip_headroom(all_issues)
@@ -2847,7 +3031,7 @@ def _maybe_mark_epic_in_progress(gh: GitHub, issue: int):
     Best-effort by construction (set_project_status swallows its own
     failures), so this can never block or fail the claim itself."""
     info = gh.issue_epic_info(issue)
-    if is_epic(info) and not is_epic_standing(info):
+    if is_epic_unit(info) and not is_epic_standing(info):
         gh.set_project_status(issue, "in-progress")
 
 
@@ -3098,7 +3282,7 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], issue: int,
                        runner: Runner = _default_runner, unit: str = "issue") -> dict:
     """**`unit="epic"` (V2): `issue` is the Epic itself, not a child** -- routes to
     `_merge_epic_lld_doc` and skips everything below, which is V1's single-child
-    shape. V2's epic-level `lld` (V2-SPEC.md) commits `epic-<n>/lld.md` directly
+    shape. V2's epic-level `lld` commits `epic-<n>/lld.md` directly
     onto `origin/epic-<n>` as part of its own turn -- there is no separate child
     branch to copy the doc from the way V1's per-child `lld` has, so the epic path
     only verifies the doc reached origin, then advances every Task `lld` created
@@ -3193,12 +3377,20 @@ def _merge_epic_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
     crash between commit and push) before advancing every Task this stage
     created.
 
-    **Every Task this Epic's `lld` created, still at its just-created state
-    (no Stage field at all), is advanced** -- functional Tasks and the two
-    standing Integration-test/e2e-test Tasks alike, since `lld` creates all of
-    them the same way in the same turn. Idempotent: a Task already advanced
+    **Every open Task this Epic's `lld` created, still at its just-created
+    state (no Stage field at all), is advanced** -- functional Tasks and the
+    two standing Integration-test/e2e-test Tasks alike, since `lld` creates all
+    of them the same way in the same turn. Idempotent: a Task already advanced
     (Stage already set, from an earlier run of this same command) is skipped,
-    the same crash-safety argument as `_advance_after_lld_publish` one unit up."""
+    the same crash-safety argument as `_advance_after_lld_publish` one unit up.
+
+    Scoped to `classify_unit_from_issue(...) == "task"` and `state == "OPEN"`
+    -- not just "any parentless-of-Stage child" -- so a non-Task child
+    (something manually added under this Epic) is never silently advanced as
+    if `lld` had created it, and a child that got closed without ever being
+    staged (an abandoned Task from a `lld-review` carving bounce, closed by the
+    orchestrator per "How you carve tasks" in `sdlc-lld.md`) is not mistaken
+    for a fresh one either."""
     epic_br = epic_branch(epic)
     doc_path = f"{DOC_ROOT}/epic-{epic}/lld.md"
     with branch_lock(epic_br), BranchWorkspace(epic_br, repo_path, runner) as ws:
@@ -3209,8 +3401,8 @@ def _merge_epic_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
                 "reason": f"no lld.md on origin/{epic_br} yet — lld has not pushed it"}, ws)
     all_issues = {i["number"]: i for i in gh.issue_list()}
     tasks = [i for i in all_issues.values()
-             if i.get("parent") and i["parent"]["number"] == epic
-             and current_stage(i) is None]
+             if i["state"] == "OPEN" and i.get("parent") and i["parent"]["number"] == epic
+             and current_stage(i) is None and classify_unit_from_issue(i) == "task"]
     timestamp = _utc_now_marker()
     advanced = []
     for task in tasks:
@@ -3352,15 +3544,35 @@ def _publish_lld_doc(gh: GitHub, epic_path: str, issue: int, epic: str, doc_path
 
 
 def _complete_epic_architecture(gh: GitHub, epic_number: int, note: str) -> dict:
-    """Marks an epic's own Product/Architecture phase complete -- its children
-    become eligible for `lld` onward starting the next `next-action` run. Clears
-    the epic's own Stage/Pipeline Status fields (an architected epic has no
-    "current stage" of its own anymore, same spirit as a merged issue) and adds
-    the `epic:architected` label, which `next-action`/`default_stage` read
-    straight off the bulk issue list rather than an extra per-epic call. Safe to
-    call more than once for the same epic (idempotent field-clear/label-add) --
-    this is exactly what a second Gate B round from a deviation found mid-`lld`
-    does. See "Epic-level stages" in references/epics.md."""
+    """Marks an epic's own Product/Architecture phase complete.
+
+    **V1 (a parentless-Feature epic):** its children become eligible for `lld`
+    onward starting the next `next-action` run. Clears the epic's own Stage/
+    Pipeline Status fields (an architected epic has no "current stage" of its
+    own anymore, same spirit as a merged issue) and adds the `epic:architected`
+    label, which `next-action`/`default_stage` read straight off the bulk issue
+    list rather than an extra per-epic call. Safe to call more than once for the
+    same epic (idempotent field-clear/label-add) -- this is exactly what a
+    second Gate B round from a deviation found mid-`lld` does. See
+    "Epic-level stages" in references/epics.md.
+
+    **V2 (`gh.classify_unit(epic_number) == "epic"`):** architecture done is
+    NOT the end of this Epic's own phase -- `lld` still runs once, epic-wide,
+    before any Task starts (`sdlc-lld.md`). So instead of clearing fields and
+    marking done, this claims `lld` on the Epic itself the same way `pass-gate`
+    claims a child's next stage: Stage -> lld, Pipeline Status -> in-progress,
+    start comment posted. `epic:architected` (and the fields-clear) only happens
+    later, once `_merge_epic_lld_doc` confirms the Epic's own `lld.md` reached
+    origin -- that's the real "children may now proceed" signal for a V2 Epic,
+    matching `childrenNeedArchitectedEpic`'s existing meaning one phase later."""
+    if gh.classify_unit(epic_number) == "epic":
+        cmd_claim(gh, epic_number, "lld")
+        timestamp = _utc_now_marker()
+        gh.issue_comment(epic_number,
+            f"🏗️ Epic architecture phase complete — {note} This Epic now runs its own "
+            f"`lld` stage (one `lld.md` covering every Task) before any Task starts.\n\n"
+            f"<!-- stage-transition: epic-architecture->epic-lld @ {timestamp} -->")
+        return {"issue": epic_number, "unit": "epic", "epic_lld_claimed": True}
     gh.clear_stage_and_status_fields(epic_number)
     gh.issue_edit(epic_number, add_labels=[LABELS["architected"]])
     timestamp = _utc_now_marker()
@@ -3378,9 +3590,13 @@ def _complete_initiative_gate_a(gh: GitHub, initiative_number: int, note: str) -
     `product.md` (SKILL.md, "Cutting Epics from an approved Initiative"), a manual
     step outside this control plane, not a delegation this command should start.
     So this only clears the Initiative's own Stage/Pipeline Status fields (same
-    "no current stage of its own anymore" spirit as `_complete_epic_architecture`)
-    and leaves a comment pointing the orchestrator at that next step."""
+    "no current stage of its own anymore" spirit as `_complete_epic_architecture`),
+    adds the `initiative:gate-a-passed` label -- the only way `decide_next_action`
+    can tell "Gate A passed, fields cleared on purpose" apart from "fresh
+    Initiative, never delegated yet" once both read Stage as unset -- and leaves
+    a comment pointing the orchestrator at cutting Epics next."""
     gh.clear_stage_and_status_fields(initiative_number)
+    gh.issue_edit(initiative_number, add_labels=[LABELS["initiativeGateAPassed"]])
     timestamp = _utc_now_marker()
     gh.issue_comment(initiative_number,
         f"✅ Initiative Gate A passed — {note} Orchestrator: cut Epics from the "
@@ -4582,12 +4798,29 @@ def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: lis
     *never* be provisioned as a native type and must not be forced to fail
     here. Otherwise (no native type, no label fallback) this issue could never
     be classified by anything, so it fails loudly via `set_issue_type`'s own
-    clear error rather than creating an unclassifiable issue silently."""
-    number = gh.issue_create(title, body, labels)
+    clear error rather than creating an unclassifiable issue silently.
+
+    Checked BEFORE `issue_create` runs, not after: when the native type isn't
+    provisioned and classification for this kind is label-based, the label is
+    the ONLY signal that will ever classify this issue -- if the caller forgot
+    to actually put it in `labels`, this must refuse before creating anything,
+    not create an unclassifiable issue and only notice on read-back (the exact
+    "uncreated-in-vain" failure mode SKILL.md's "Cutting Epics from an approved
+    Initiative" warns the operator about)."""
     kind = type_name.lower()
     rule = PIPELINE.get("classification", {}).get(kind)
     classified_by_label = bool(rule) and rule.get("field") == "label"
-    if type_name in ISSUE_TYPE_IDS or not classified_by_label:
+    skip_native_type = type_name not in ISSUE_TYPE_IDS and classified_by_label
+    if skip_native_type and rule["value"] not in labels:
+        raise GhError(
+            f"type_name={type_name!r} isn't a provisioned native Issue Type, and "
+            f"pipeline.classification.{kind!r} is label-based (expects "
+            f"{rule['value']!r}) -- but {rule['value']!r} isn't in labels={labels!r}. "
+            f"Nothing would ever classify this issue as {kind!r}. Pass "
+            f"--label {rule['value']} (see \"Cutting Epics from an approved "
+            f"Initiative\" in SKILL.md).")
+    number = gh.issue_create(title, body, labels)
+    if not skip_native_type:
         gh.set_issue_type(number, type_name)
     gh.add_sub_issue(parent, number)
     return {"issue": number, "parent": parent, "type": type_name}
