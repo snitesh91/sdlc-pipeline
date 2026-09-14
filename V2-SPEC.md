@@ -207,40 +207,99 @@ this; today it has neither.
 
 ---
 
-## Work-stream C (separate design pass, not started): Initiatives
+## Work-stream C: Initiatives — a radically different lifecycle from V1, not an extension of it
 
-New hierarchy tier: `Initiative > Epic > Child`. One IRD per Initiative, written once by
-`product`; every Epic under it skips `product` entirely and reads the Initiative's
-`product.md` directly (the same way a child today reads its epic's `architecture.md`).
-Each Epic still gets its own `architecture.md` — only the requirements layer moves up,
-not the design layer.
+**V1's Epic/Child shape is explicitly not being extended here — this is a rethought
+lifecycle**, prompted directly by this morning's epic #157 finding (per-task `lld.md`
++ per-task `lld-review` is where 3-5-round bounces concentrated). The new shape
+collapses today's two design docs (epic-level `architecture.md`, task-level `lld.md`)
+into one design doc per epic, and moves integration/e2e testing off the per-task path
+entirely.
 
-Real prerequisites and cascading changes, none of them product-agent changes:
+### The new hierarchy and flow
 
-- **GitHub-side prerequisite**: "Initiative" needs to be a real Issue Type in the repo's
-  type configuration (like `Task`/`Bug`/`Feature` today) before the skill can reference
-  it — a repo-settings change, not a skill change.
-- **Doc-path resolution** in the orchestration code changes: `architecture` needs to read
-  `<docRoot>/initiative-<parent>/product.md` instead of expecting its own unit to have
-  written one.
-- **Gate cadence** — does Gate A (human review of the IRD) now happen once per Initiative
-  instead of once per Epic? Real tradeoff in how often a human touches the pipeline.
-- **Overlap with Jira's native hierarchy** — Jira (Advanced Roadmaps) already has a
-  native Initiative concept above Epic. If Jira is a near-term work-item target, this
-  tier might be *easier* to model there than to bolt onto GitHub's sub-issues — worth
-  designing work-streams A and C together rather than independently once Jira is
-  actually on the table.
+```
+Initiative (product-driven)
+  -> product writes the IRD (product.md), per work-stream B's content rules
+  -> Gate A approval
+  -> the ORCHESTRATOR (not a dispatched agent) creates the list of Epics from the
+     approved IRD -- mechanical decomposition, the same role the orchestrator
+     already plays for today's Epic/Child bookkeeping, one tier up. Each Epic's
+     issue body carries a pointer to the Initiative's IRD, plus its own explicit
+     scope carve-out: which slice of the IRD this Epic covers.
 
-Deliberately not scoped further here — pick this up as its own pass once work-stream B's
-agent content is settled and the GitHub Issue Type prerequisite is either created or
-explicitly deferred.
+Engineering-driven work bypasses the Initiative/IRD path entirely -- either an
+"engineering initiative" or a bare Epic created directly (shape of this bypass:
+still undefined, see open questions).
+
+Epic
+  -> architecture reads the FULL Initiative IRD + this Epic's own scope slice,
+     writes architecture.md. Mechanically unchanged from today -- same STOP
+     protocol, same doc-altitude rules, same Gate B human-gate-with-confidence-
+     autopass (default profile 95, standing profile 90 -- unchanged).
+  -> lld MOVES UP to epic level (was task/child level in V1). One lld.md per
+     epic, not per task.
+     - Contains a per-task `## Footprint` subsection, mirroring how epic-level
+       architecture.md today has one design subsection per child -- this is
+       what preserves list-parallel-ready's collision-safety check once there's
+       no separate per-task lld.md to read a footprint from.
+     - lld-review is ONE pass over the whole epic-level document, not one pass
+       per task.
+  -> Task -> development, implementing against its own subsection of the shared
+     epic-level lld.md. UNIT TESTS ONLY at this level -- no per-task integration
+     tests.
+  -> Once every task in the epic is merged: two standing tasks every epic
+     always has -- an Integration-test task and an e2e-test task, run once,
+     epic-wide, after the functional tasks land.
+```
+
+### This reverses a V1 change made earlier today, on purpose
+
+Earlier today, `sdlc-development.md` was given IT-scoping (run only the
+touched-domain `test/<domain>` subset per task, not the full suite) in response to a
+different ask (keep per-task IT, just make it cheaper). This new model removes
+per-task IT entirely rather than scoping it. Confirmed intentional, not an oversight
+— but worth being explicit that **if V2's lifecycle ships, that specific V1 fix
+becomes dead code in the V2 path** (still correct and live for any repo staying on
+V1's Epic/Child shape).
+
+### A real cascading consequence this creates, not yet designed
+
+`sdlc-pr-review.md` and `sdlc-development.md`'s completion gates currently treat "no
+integration test for a risk the design flagged" as a real gap — "a unit test against
+a mock does not close an integration risk." In this model, a task legitimately has no
+integration test of its own by design; that's deferred to the epic-close IT task, not
+a gap in the task's own PR. `pr-review` needs an explicit rule change here, or it will
+incorrectly bounce every V2 task for a "missing" integration test that was never
+supposed to exist at that level.
+
+### Prerequisites and open questions
+
+- **GitHub-side prerequisite** (unchanged from the earlier sketch): "Initiative" needs
+  to be a real Issue Type in the repo's type configuration before the skill can
+  reference it.
+- **Shape of the engineering-driven bypass** — is an "engineering initiative" a real
+  Initiative with a stripped-down IRD (skip market/competitor research, keep
+  scope/AC), or a wholly separate path? Still undefined.
+- **Doc-path resolution** in the orchestration code: `architecture` needs to read
+  `<docRoot>/initiative-<n>/product.md` (filtered by the Epic's own scope carve-out)
+  instead of expecting its own unit to have written a `product.md`.
+- **Overlap with Jira's native hierarchy** — Jira (Advanced Roadmaps) already models
+  Initiative above Epic natively. If Jira is a near-term work-item target (work-stream
+  A), this tier may be easier to model there than on GitHub's sub-issues — worth
+  designing A and C together once Jira is actually on the table, not independently.
 
 ---
 
 ## Sequencing recommendation (not yet agreed)
 
 Work-streams A and B are independent and could be built in either order or in parallel.
-Work-stream C depends on B being settled first (Initiatives change *where* `product`
-runs, not *what* it does) and has its own GitHub-config prerequisite regardless of
-sequencing. Nothing here commits to an order — flagging it only so the next session
-doesn't have to re-derive that B blocks C.
+Work-stream C depends on B being settled first (the orchestrator-created Epic list
+reads the IRD work-stream B's `product` agent produces) and has its own GitHub-config
+prerequisite regardless of sequencing. C also now forces one change onto work-stream
+B's own open question 1 (architecture-depth assessment relocation) and a new,
+not-yet-scoped change onto `sdlc-pr-review.md`/`sdlc-development.md`'s completion
+gates (see "cascading consequence" above) — so C is not purely additive once started,
+it edits things B and the base agent files already own. Nothing here commits to an
+order — flagging it only so the next session doesn't have to re-derive the
+dependency.
