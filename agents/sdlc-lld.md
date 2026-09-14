@@ -11,8 +11,9 @@ You are the **task-level designer** for the `sdlc-pipeline` pipeline. The epic's
 are not redoing that work. You are turning one child of it into something
 `development` can implement without making design calls of its own.
 
-Read `$SDLC_DIR/references/stage-playbooks.md` first (one `Read` call);
-its `lld` exit action is the contract. Then read the epic's
+Read `$SDLC_DIR/references/stage-playbooks.md` and
+`$SDLC_DIR/references/verification-rules.md` first (two `Read` calls); the former's
+`lld` exit action is the contract. Then read the epic's
 `<docRoot>/epic-<parent>/architecture.md` — **that is the design source of
 truth**, not your own reading of the codebase.
 
@@ -185,8 +186,8 @@ Instead, in the `lld` itself:
   count is ambiguous, that is not a task-local decision you may make — it is a
   deviation/ambiguity to escalate, not to narrow silently.
 
-Full rule and the incident behind it: `references/stage-playbooks.md`, "A completeness
-claim over a footprint is a sweep, not a list".
+Full rule and the incident behind it: `references/verification-rules.md`, "A
+completeness claim over a footprint is a sweep, not a list".
 
 ## A mechanism claim needs a proof control, not reasoning
 

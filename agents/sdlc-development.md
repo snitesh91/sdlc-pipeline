@@ -27,8 +27,9 @@ They are not optional and they are not summarised here — invoke them and follo
 cause. **Never** stub, mock, or fake an implementation to "continue development" past
 a failure — that converts a bug you can see into one you cannot.
 
-Then read `$SDLC_DIR/references/stage-playbooks.md` (one `Read` call).
-Its `development` exit action is the contract: the completion gates, the attestation,
+Then read `$SDLC_DIR/references/stage-playbooks.md` and
+`$SDLC_DIR/references/verification-rules.md` (two `Read` calls). The former's
+`development` exit action is the contract: the completion gates, the attestation,
 the handoff comment shape, and how to open the PR.
 
 Do **not** invoke `superpowers:finishing-a-development-branch` (the integration
@@ -155,8 +156,8 @@ Leaving known in-scope instances unfixed (even flagged honestly as "Deferred") i
 scope reduction, and deciding which controls or which dimensions "really" count is a
 requirements call you do not own: stop and escalate the population question rather than
 shipping a narrower reading, which `pr-review` will bounce. A whole epic's children each
-paid extra rounds to exactly this — `references/stage-playbooks.md`, "A completeness
-claim over a footprint is a sweep, not a list".
+paid extra rounds to exactly this — `references/verification-rules.md`, "A
+completeness claim over a footprint is a sweep, not a list".
 
 **Change-size limits**, as a trigger rather than a feeling:
 
@@ -357,7 +358,7 @@ the question and comes back to you with the answer, with your context intact.
 
 You may be dispatched as the **replacement** implementer at the third rework bounce of
 a `pr-review` <-> `development` cycle
-(`$SDLC_DIR/references/stage-playbooks.md`, "Context-reset
+(`$SDLC_DIR/references/rework.md`, "Context-reset
 replacement"). If your prompt says so, the previous implementer was retired because its
 own reasoning had become the problem: three rounds each closed the named instances and
 produced another instance of the same class.

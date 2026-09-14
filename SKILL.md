@@ -28,7 +28,10 @@ which flags problems in its handoff instead.
 | `references/parallelism.md` | Starting or resuming any child work or review pool; anything touching worktrees, branches, `sync-branch`, git conflicts, merge freshness, or an agent dying mid-stage |
 | `references/gates.md` | Opening, checking, passing, or skipping a human-review gate; addressing gate feedback |
 | `references/rework.md` | A review returned a finding, a stage reported ambiguity, a bounce may trip the escalation valve, or you are writing a replacement agent's resume message |
-| `references/stage-playbooks.md` | Delegating any stage (its exit actions live here); **the one file a stage subagent is told to Read** — docs, altitude, commenting, rework rules |
+| `references/stage-playbooks.md` | Delegating any stage (its exit actions live here); **every stage subagent is told to Read this one** — the rules that bind every role: docs, citation, one-turn-finish, commenting, rework |
+| `references/design-doc-rules.md` | `product.md`/`architecture.md` content rules and the pre-`product` scope-alignment step — `product`, `product-review`, `architecture`, and `design-review` are told to Read it; `lld`, `development`, `pr-review`, `exploratory` are not |
+| `references/verification-rules.md` | Proving a claim by running it, not asserting it — `architecture`, `lld`, `development`, `pr-review`, and `design-review` are told to Read it; `product`, `product-review`, `exploratory` are not |
+| `references/review-fanout.md` | Subagent-dispatch discipline for a review stage's first round — `product-review`, `design-review`, and `pr-review` are told to Read it; the other five roles are not |
 | `references/epics.md` | Epic-level phase, child sizing and footprints, deviation escalation, bug fast-track, epic closing, board status |
 | `references/operations.md` | Token and repo access, issue taxonomy (fields), auto-merge policy, local-CI attestation |
 | `references/continuous-mode.md` | Operator asked for unattended looping |
@@ -112,7 +115,8 @@ cd <repo-root>                                          # so config + git resolv
   bump for one epic cannot change another epic's instructions mid-run, and the
   shared-main-checkout copy is never handed to an agent. Set `$SDLC_DIR` per unit
   from `worktree-add`/`sync-branch`'s `skill_dir` before delegating, and hand
-  subagents the concrete `$SDLC_DIR/references/stage-playbooks.md` path — a
+  subagents the concrete `$SDLC_DIR` value in their prompt — each agent file's own
+  "first move" names the `references/*.md` paths it reads relative to that; a
   repo-relative path won't resolve for them. (The config file is committed on the
   branch too, so it is already per-branch.) Mechanics and the git requirement:
   `references/parallelism.md`, "Concurrent multi-epic isolation".
@@ -319,7 +323,7 @@ batch. Feed the answers verbatim into the `product` delegation prompt. This is a
 pre-product interaction, earlier than and distinct from Gate A, and it is one of the
 three things you *do* take to the operator (a product or scope call). Skip it only
 on a rework round or a resume where `product.md` already exists. Detail:
-`references/stage-playbooks.md`, "Scope alignment before `product`".
+`references/design-doc-rules.md`, "Scope alignment before `product`".
 
 ## Step 3 — Run this stage, then the next, then the next
 
@@ -395,20 +399,30 @@ and `superpowers:systematic-debugging` first. **Exclude**
 `superpowers:finishing-a-development-branch` (integration decision is fixed: draft PR,
 stop) and `superpowers:using-git-worktrees` (the orchestrator owns worktrees).
 
-**One rule, one home — and the home is chosen by scope** (2026-09-13). A rule that
-binds every stage (citation discipline, the no-park contract, the doc set, commenting,
-what counts as verification) lives once in `references/stage-playbooks.md`. A rule that
-binds one stage — how that stage works, and **its own exit actions** — lives once in
-that stage's `agents/sdlc-*.md`. Every agent Reads the playbook first and is guaranteed
-to read its own definition, so each rule reaches whoever needs it without being stated
-twice.
+**One rule, one home — and the home is chosen by scope** (2026-09-13, refined
+2026-09-14). A rule that binds every stage (citation discipline, the no-park contract,
+the doc set, commenting) lives once in `references/stage-playbooks.md`, which every
+agent Reads first. A rule that binds some, but not all, roles lives once in the
+narrower file that names exactly which roles read it: `references/design-doc-rules.md`
+(the `product.md`/`architecture.md` content rules, scope alignment before `product` —
+`product`, `product-review`, `architecture`, `design-review`), `references/verification-rules.md`
+(what counts as verification, run-the-thing/completeness-sweep — `architecture`, `lld`,
+`development`, `pr-review`, `design-review`), and `references/review-fanout.md`
+(subagent-dispatch discipline — `product-review`, `design-review`, `pr-review`). A rule
+that binds one stage — how that stage works, and **its own exit actions** — lives once
+in that stage's `agents/sdlc-*.md`. Each agent's own file names exactly which
+`references/*.md` files it Reads, so a rule reaches whoever needs it without being
+stated twice or read by a role it does not bind.
 
 This replaced "agent files carry persona, procedure and `tools:` only", which the skill
 stated and did not follow: the no-park rule had four homes and had drifted into three
 different strengths, the weakest being what the agent that stalled on 2026-09-13 was
 reading. Exit actions were 459 lines of the playbook that every agent read to use one
-eighth of. Two homes for one rule really is how rules drift — the fix was to give each
-rule exactly one home, not to move them all to the same file.
+eighth of; on 2026-09-14 the same shape recurred one level down — every role read the
+altitude, verification, and fan-out rules regardless of whether its own role needed
+them, so those three moved to their own files with each role's own file naming which
+ones it Reads. Two homes for one rule really is how rules drift — the fix was to give
+each rule exactly one home, not to move them all to the same file.
 
 ### The delegation prompt
 
@@ -420,9 +434,11 @@ prompt *contains*):
    that fetches it rather than pasting it** — pasted threads truncate prompts
    mid-instruction (`references/history.md`).
 2. Invoke the role's skills first (only `development` has any).
-3. One `Read` of `$SDLC_DIR/references/stage-playbooks.md` before anything else,
-   **plus** the exact doc path it owns (e.g. `<docRoot>/issue-<n>/lld.md`), spelled
-   out. Don't paste the playbook. `$SDLC_DIR` here is the **unit's own** skill copy —
+3. `$SDLC_DIR` in the prompt, so the agent's own "first move" instructions — a `Read`
+   of `references/stage-playbooks.md` plus whichever narrower `references/*.md` files
+   its own role names (design-doc, verification, or review-fanout rules) — resolve.
+   **Plus** the exact doc path it owns (e.g. `<docRoot>/issue-<n>/lld.md`), spelled
+   out. Don't paste any of these files. `$SDLC_DIR` here is the **unit's own** skill copy —
    the `skill_dir` that `worktree-add`/`sync-branch` returned for this worktree
    (Setup), never the main checkout's `.github/sdlc-pipeline`.
 4. On genuine ambiguity: **stop and report the specific question in the final

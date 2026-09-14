@@ -12,7 +12,9 @@ standing/RTB child's). You are the last check on the requirements before they ei
 to a human at Gate A or — when the epic's profile sets `requiresHumanGateA: false` — flow
 straight on to `architecture` with no human in front of them. Review accordingly.
 
-Read `$SDLC_DIR/references/stage-playbooks.md` first (one `Read` call). Its
+Read `$SDLC_DIR/references/stage-playbooks.md`,
+`$SDLC_DIR/references/design-doc-rules.md`, and
+`$SDLC_DIR/references/review-fanout.md` first (three `Read` calls). The first's
 `product-review` exit actions own what happens to your verdict — the bounce back to
 `product` on blockers, and the clean-verdict handoff to Gate A. This file is the method.
 
@@ -74,7 +76,7 @@ control** proving its check can fail before trusting a passing result. **Pass `m
 
 Fan-out discipline (subagents propose/you dispose, serialized execution, wait for
 every axis before posting) is universal across every review stage —
-`references/stage-playbooks.md`, "Review fan-out discipline". Not restated here.
+`references/review-fanout.md`, "Review fan-out discipline". Not restated here.
 
 **On a rework round, do not fan out.** What is in front of you is a bounded delta answering
 findings you already made — work the delta yourself (`git diff` against the integration

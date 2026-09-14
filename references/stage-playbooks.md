@@ -1,10 +1,24 @@
 # Stage playbooks — docs, comments, rework, and per-stage exit actions
 
-Referenced from `SKILL.md` (Step 3). **This is the one file a stage subagent is told
-to Read before doing anything else** — it holds the per-issue doc set, the altitude
-rules, the commenting discipline, the rework model, and every stage's exit actions.
-(A stage agent's prompt also spells out, verbatim, its own doc path and worktree —
-those are issue-specific and not in this file.)
+Referenced from `SKILL.md` (Step 3). **Every stage subagent is told to Read this file
+before doing anything else** — it holds the rules that bind every role: the per-issue
+doc set, citation discipline, the one-turn-finish contract, commenting discipline, the
+rework model, and a pointer to every stage's own exit actions. Rules that bind only
+some roles moved out on 2026-09-14 (see below), each to its own file, so a role that
+does not need them is not told to read them:
+
+- `references/design-doc-rules.md` — the content rules for `product.md`/`architecture.md`
+  and the pre-`product` scope-alignment step: read by `product`, `product-review`,
+  `architecture`, and `design-review` (its `arch-review` half).
+- `references/verification-rules.md` — proving a claim by running it rather than
+  asserting it, for `architecture`, `lld`, `development`, `pr-review`, and `design-review`.
+- `references/review-fanout.md` — the subagent-dispatch discipline, for `product-review`,
+  `design-review`, and `pr-review`.
+
+Each of those three files states, at its own top, exactly which roles read it — a role
+not named there does not need to Read it. (A stage agent's prompt also spells out,
+verbatim, its own doc path and worktree — those are issue-specific and not in any of
+these files.)
 
 Everything repo-specific — the exact lint/build/test commands, where they must run
 (host or container), suite names, memory flags, port numbers — lives in the driven
@@ -46,116 +60,6 @@ A normal-epic child's `lld.md` and every child's design doc must carry a `## Foo
 section in the exact parseable shape defined in `references/epics.md`, "How to size
 the children" — backticked paths, one per bullet.
 
-## Document altitude — two different documents, two different contracts
-
-`product.md` and `architecture.md` (epic-level, or issue-level for a standing child)
-are both read by a **human** at a gate, but they are not the same kind of document and
-do not follow the same rules. `lld.md` has **no** human gate and no altitude
-requirement at all — it can stay as technical as the work demands.
-
-Start both from the matching skeleton in `<docRoot>/<pipeline.docTemplates>/` (default `_templates`) — copy it in,
-fill the sections in order, delete the template's instructional HTML comments.
-
-### `product.md` is a requirements document — requirements only
-
-It follows the house style of the repo's own requirements docs; **if the repo's
-`CLAUDE.md` or doc conventions name a worked example, read it before writing one**.
-Section order comes from `product.template.md`: Background, Goals, Functional Scope,
-User Experience, Non-Functional Requirements, Constraints, Acceptance Criteria, Out of
-Scope, Open Questions, Decisions Log. A section with nothing in it is dropped rather
-than kept as `N/A` filler — the one exception is Open Questions, which stays as "None".
-
-Four rules, each of which a real document has broken:
-
-- **Nothing about the pipeline appears in the document.** No stage names, no gate
-  references, no field names, no "this document creates no child issues", no note on
-  what this stage did or did not do, no link to this skill. A reader must not be able
-  to tell from the prose that an automated pipeline produced it. Process belongs in the
-  handoff comment, which is where a pipeline reader is already looking.
-- **Requirements state observable behaviour; they never choose the technology.**
-  "Alert channels can be added or removed by configuration, with no application
-  change" is a requirement. "Alerts go out through the cloud provider's managed
-  monitoring email channels" is an architecture decision wearing a requirement's
-  clothes, and it forecloses the options the architecture stage exists to weigh. Name
-  the capability, the observable behaviour, and the bound; leave platform, vendor,
-  service and mechanism to `architecture.md`. A genuine constraint the business or the
-  operator has already fixed goes under **Constraints**, written as the constraint
-  itself ("must run with no persistent agent host"), not as the product that satisfies
-  it.
-- **No hedging layer and no meta-commentary.** No TL;DR box, no "this is a hypothesis"
-  preamble, no confidence disclaimer, no "what changed versus the previous version"
-  section. Uncertainty is expressed where it lives — in the specific requirement, or in
-  Open Questions. Revisions are recorded in the `**Last revised**` line and, where a
-  requirement genuinely reversed, rewritten in place in the Decisions Log.
-- **Detail stays inline, uncollapsed.** The architecture stage reads this document in
-  full; there is no audience it needs to be hidden from. Do not push requirement detail
-  into `<details>` blocks.
-
-**No system flow diagram.** How the parts connect is architecture's picture to draw.
-Where the *layout* of a screen matters, an ASCII mock-up or a linked image under User
-Experience is worth more than a paragraph — that is the diagram this document wants.
-
-### `architecture.md` is an HLD — what the design *is*, in as few words as carry it
-
-Its own template encodes the structure; don't improvise a different one. Three rules
-override every section in it:
-
-- **Nothing about the pipeline appears in the document** — the same rule `product.md`
-  already lives under. No round numbers, no stage names, no review history, no "what
-  changed since the previous revision", no note on what this stage did. **The delta
-  between revisions goes in the handoff comment on the issue**, which is where a
-  pipeline reader is already looking and where a scoped `arch-review` round reads it
-  from. There is no decisions-log section in the document.
-- **Points, not essays.** Bullets and tables are the default; prose is the exception.
-  Do not explain what already exists beyond what the design turns on, and never restate
-  a requirement to introduce a decision. The test: a paragraph that would not change an
-  `lld` is cut.
-- **Depth goes down, not in.** Anything an `lld` would decide — exact files, schemas,
-  grep commands, edge-case enumerations, test surfaces — is not in this document. A
-  decision that genuinely needs long analysis gets a sub-page at
-  `<docRoot>/<unit>/decision-<slug>.md`, linked in one line. (This is the one
-  sanctioned split; design content still never goes to the repo's own general
-  architecture-docs tree.)
-
-Within that:
-
-- **Scope is the single source of goals and non-goals.** In-scope entries *are* the
-  goals; out-of-scope entries *are* the non-goals, each with its reason in the same
-  line. There is no separate goals section to keep in sync. An out-of-scope entry is a
-  real candidate deliberately excluded — never a negated goal.
-- **Constraints are bullets inside Context**, not a section: externally fixed things
-  only, plus one line on how much freedom the design actually has, since that is what
-  makes an obvious call defensible.
-- **The Design section leads with the design, not with a decision log.** Describe the
-  shape and the flow first, with a required Mermaid diagram whenever more than one
-  component or process boundary is involved — the mechanism and where it fails, never
-  boxes named after the feature. Interfaces are named **inline where they occur**, not
-  in a section of their own.
-- **A major decision gets one comparison table across the axes that actually differ**,
-  then one line on what it bets on and one on the fallback — that pair is what `lld`'s
-  fits-vs-deviates call tests against. "Major" means a reviewer could reasonably have
-  gone the other way. Everything else is simply stated as part of the design with its
-  reason in the same sentence: no table, no options list. A decision with one plausible
-  option is not a decision.
-- **Non-functional requirements are scenarios, not adjectives.** "p95 under 300 ms at
-  50 concurrent requests, measured at the API boundary" can go red; "fast" cannot. The
-  cost line is stated even when it is `$0` — a stated zero is checkable, silence isn't.
-- **Acceptance criteria are a flat checklist and nothing else** — one line each, no
-  sub-bullets, no rationale, no evidence notes. **Nothing elsewhere in the document
-  cites an AC by number**; cross-references rot the moment the list is revised, and
-  `development` maps criteria to tests from the list itself.
-- **Data model and Failure modes are conditional** — present only when entities or
-  invariants actually change, or when the design introduces a genuinely new way for
-  production to break. Do not draw the existing model.
-- **`Footprint` and `Implementation notes` appear only in a standing-epic child's
-  doc.** That doc is the only design doc `development` ever gets, and the only
-  `architecture.md` `parse_footprint` is ever pointed at. **Both are omitted entirely
-  from an epic-level doc**: per-child footprints live in each child's `lld.md`, and
-  implementation depth is that `lld`'s job — putting it in the epic doc duplicates it
-  at the wrong altitude, which is how one epic-level doc grew to many times its useful
-  length (see `references/history.md`).
-
-See "Review altitude" under `arch-review` below for how this shapes review findings.
 
 ## Citation discipline — every stage, without exception
 
@@ -247,63 +151,6 @@ So, as a mechanical pass before any handoff, not as a habit of care:
 A document that ships squash-merges into `main` as a permanent record. A fabricated
 quotation there invents a directive that some future reader will follow.
 
-## Review fan-out discipline — every review stage that dispatches subagents
-
-`product-review`, `arch-review`, `lld-review`, and `pr-review` each fan out their
-first-round analysis to multiple subagents (axes or layers). Three rules govern all of
-them, regardless of what the fan-out is called in a given stage's own file:
-
-- **Subagents propose; you dispose.** A subagent's candidate is not a finding until
-  you have personally verified it and can cite a location you opened yourself. Never
-  forward an unverified claim into your report. This repo has shipped a fabricated
-  quote and a citation to a `return {...}` block that was not in the file it named,
-  each unverified precisely because the citation made it look checked — a fan-out that
-  launders unverified claims is strictly worse than a slow serial pass.
-- **Only the parent — never a dispatched subagent — executes anything that mutates or
-  contends:** builds, suite runs, anything touching a shared Docker stack or port.
-  Read-only analysis parallelizes across subagents; execution stays serialized with
-  the parent, because two agents running the same command in one worktree collide.
-- **Wait for every dispatched subagent before forming your verdict, and before posting
-  anything.** A verdict posted while an axis is still running is a race you will lose:
-  on #260 the parent posted CLEAN, the verification axis returned afterwards, and two
-  of its candidates survived re-check — one a real defect in text marked for verbatim
-  transcription into a doc that merges to `main`. The parent had to post a public
-  correction and revise its own confidence marker down. Dispatching an axis and then
-  concluding without it is worse than never dispatching it, because the report claims
-  coverage the parent did not have.
-
-Each review stage's own file states only its role-specific axis/layer list and any
-axis-specific model tier — not these three rules again.
-
-## Compile-checking is not verification
-
-A test runner's `--list`/dry-run mode, a type-check, and a lint pass tell you the code
-*parses*. They cannot tell you a test **ran**, and a skipped test is indistinguishable
-from a passing one in a `--list` output.
-
-This is not hypothetical: new end-to-end tests have shipped with a locator that matched
-the wrong element and yielded `NaN`, past a clean `--list` check, in a suite where they
-skipped under the repo's default e2e invocation — they would have merged broken and
-silently stayed broken; it was caught only by executing them for real (see
-`references/history.md`).
-
-So: **no stage may report a test as covering an acceptance criterion unless it observed
-that test execute.** If it could not run, say so plainly, name the reason, and say
-which criterion is therefore unproven — `pr-review` can then weigh a known gap instead
-of trusting a coverage claim that was never true.
-
-**A green build is not a build either — clear stale incremental state first.** An
-incremental TypeScript build (`nest build`, `tsc -b`) with a stale, gitignored
-`*.tsbuildinfo` on disk decides nothing changed, **emits nothing, and exits 0** — a
-vacuous green. It happened twice in one epic (#323, in `development` and again in the
-since-retired `testing` stage, both reporting a passing build that produced no
-`dist/main.js`; see `references/history.md`, 2026-09-12). Standing step for
-`development` and `pr-review`, whenever a
-build is used as a verification gate: **before** the build, remove the stale cache
-(`find <package> -name '*.tsbuildinfo' -delete`, or the repo's clean target) — **or**,
-after it, assert the expected artifact exists and is newer than the sources
-(`test -f dist/main.js && find dist -newer src -type f | head -1`). Exit 0 alone is
-never evidence; state which of the two you did in your handoff.
 
 ## Subagents finish in one turn — never park awaiting a wake
 
@@ -340,111 +187,6 @@ acting on its content. A returned agent that declared waiting has not finished, 
 issue is not at the stage its handoff implies. Re-message it with the result it was
 waiting for rather than treating the stage as complete.
 
-## Establish a number by running the thing, not by modelling it
-
-The dominant defect class of one whole epic — over a dozen confidently-stated, wrong
-measurements across its children and its own architecture — had one shape every time:
-**a number produced by a grep that models a rule, rather than by running the rule.**
-Every blocking finding in that epic was found by building the change and running the
-real tool; none was found by reading (see `references/history.md`). Three rules, each
-from a real incident:
-
-- **Run the rule, don't regex-model it.** A counting grep that carries an exemption the
-  shipped lint config does not have produces a number that is true of the grep and
-  false of the codebase; applied as designed it bans legitimate imports and ships a
-  CI-red PR, and the obvious late fix invalidates whatever analysis rested on the
-  count. The same applies to prose rules: a criterion whose meaning lives only in the
-  design doc will, applied as written, exempt files it should not. **If the artifact is
-  executable (a lint config, a script, a test, a build), apply the change in a scratch
-  copy and run it. Report that output.**
-- **Scope the search to the whole tree, not to the module you are thinking about.**
-  The same composition file has been missed twice, by two siblings, for the identical
-  reason: a grep scoped to the directory the agent was thinking about, in a repo whose
-  composition file lives one directory over. Anchor the pattern to the *symbol*, not to
-  a path prefix you assume — a pattern that matches the imported module name wherever
-  it appears finds what a relative-path pattern cannot.
-- **Prove the detector detects before reporting an absence.** A "0 cycles", "0
-  violations", "no diff" result is worth exactly as much as the demonstration that the
-  check *can* go non-zero. The move that works is the **positive control**: introduce
-  one deliberate instance of the thing you are checking for, watch the count go
-  non-zero, revert, watch it go back. A claim that several separate agents have each
-  run that control on is trustworthy; one that none has is not.
-
-**Vacuous-pass tells** — a check that passed because it examined nothing. All four have
-been hit live:
-
-- A **stale incremental-build cache** made the compiler emit a fraction of the tree and
-  **exit 0**. Two different agents hit it. Clear build state and assert the emit count
-  before using it.
-- A graph built with **too narrow an edge pattern** gave the nodes under test zero
-  outgoing edges and a vacuous "0 cycles" — indistinguishable from a real clean result.
-  Assert non-vacuity (edge count, node count) before reading a graph result.
-- **Structurally skipped tests.** A harness that never forwards the credentials a
-  subset of tests needs skips that subset on *every run the repo has ever done*, and a
-  before/after comparison "matches" over them. **A skip is not a cover** — count
-  executed tests, not listed ones.
-- **A mutation that discriminates nothing.** A mutation of a permission both roles
-  already hold stays green, and the correct reading is *a bad discriminator, not a
-  finding about the test*. If a mutation stays green, first ask whether it was a real
-  mutation.
-
-**Your own tooling gets the same scrutiny as any other claim.** Agents have caught
-false positives in scripts they had just written, before treating the output as
-evidence, and said so in the handoff. That is the bar.
-
-## A completeness claim over a footprint is a sweep, not a list
-
-This is the same rule as "establish a number by running the thing", applied to the
-one place it bounces hardest: a child whose acceptance is a **class of surfaces** —
-"every interactive control is ≥44px", "no fixed bar overlaps the nav", "every
-on-screen file is audited for readability". One whole epic's audit/hardening children
-each cost two predictable `lld-review` ↔ `lld` or `pr-review` ↔ `development` rounds
-to the same failure, every time (see `references/history.md`): the doc asserted
-completeness in prose — "§3 lists every file", "these two bars are all of them" — the
-reviewer's completeness lens found one more instance, the author patched that named
-instance, and the next round found the next one. A prose enumeration is a claim about
-the author's attention, and the reviewer can only falsify it one instance at a time.
-
-For any such child, at **every** stage that touches the class:
-
-- **State completeness as a reproducible sweep, not an instance list.** The `lld`
-  defines the class by a mechanical rule — a `grep`/`find` pattern anchored to the
-  symbol or attribute, plus the stated partition of what the sweep covers and what is
-  excluded and why. Paste the command and its output. "I looked at every file" is not
-  a sweep; `comm -23 <sorted-find> <sorted-inventory>` returning empty is.
-- **Cover every dimension the acceptance names.** If the criterion is "44×44px", a
-  detector that models height only will pass a 44×10px control — a real bounce. Model
-  each dimension the AC states as a separate term, and run a **positive control per
-  dimension** (introduce one deliberate violation on that axis, watch the count go
-  non-zero, revert). A guard that has only ever gone non-zero on one axis does not
-  cover the other.
-- **`development` applies the class rule per instance; it does not re-judge the
-  class.** The `lld` states the rule once ("every `fixed bottom-0` bar this child adds
-  or finds takes `bottom-14 md:bottom-0`"); `development`'s handoff reports that the
-  rule was applied to each swept instance, not merely that the AC "passes". A per-file checklist
-  that `development` works item by item is exactly where a missed-because-unlisted file
-  ships looking identical to an audited-clean one — so the inventory the checklist is
-  built from must be the sweep's output, not a hand-typed list.
-
-**The narrow scoping of this section is itself a trap — the failure is not confined to
-audit/hardening children.** Any criterion → test map is a completeness claim in prose,
-and the positive control is what falsifies it; a child with an ordinary feature shape
-fails the same way when several criteria share one assertion shape. On #494 — a feature
-child, no class-of-surfaces acceptance anywhere in it — four criteria mapped to tests
-whose only assertion was the reply's *type*, which every reply in that family shares.
-Green suite, complete-looking map, no coverage; the `pr-review` positive control that
-exposed it took one run. So read the rule above as scoped to *any* stage claiming a set
-of criteria is covered, and see the family positive control in `sdlc-development.md`
-("How to write the tests") for the cheap form: one control per family of sibling
-expected values, not one per criterion.
-
-The population of the class is a **requirements** fact, not a `development` call. If
-which controls or which dimensions count is ambiguous ("interactive control" —
-icon-only, or text buttons and pagination too?), that is pinned at `architecture`/`lld`
-and escalated when unclear — never narrowed silently at `development`, which
-`pr-review` will (correctly) bounce as an unauthorised scope reduction. A reviewer's
-"same-class, second consecutive bounce" note is the signal to stop patching the next
-named instance and close the class at its root with a sweep.
 
 ## Commenting discipline
 
@@ -503,6 +245,7 @@ requirements). Pipeline tooling (this skill, the agent definitions, and any sibl
 tooling the repo tracks alongside them) is tracked in the repo: when a stage touches
 it, commit that change with the related code.
 
+
 ## Rework and blockers — what it means for you
 
 Full routing, resume-message construction, the context-reset replacement and the
@@ -527,38 +270,6 @@ What binds you, as a stage agent:
 - **A rework round runs at full rigour.** It is never the place for a cheaper model,
   a skipped suite, or a shortened document check.
 
-## Scope alignment before `product` — ask before authoring
-
-The `product` stage's input is the issue as written, and an epic issue is usually a
-one-liner. It does not carry the scope the operator has in mind, and every downstream
-document is built from whatever `product.md` decides that scope is. Gate A comes after
-`product.md`; by then the framing is already baked into a requirements document,
-and a scope correction there re-runs `product`, `product-review`, Gate A, and — if it
-reaches architecture — Gate B and the child decomposition too.
-
-So the orchestrator runs a **pre-product scope alignment** the first time a unit
-enters `product` (an epic's own product, or a standing-epic child's — anything with no
-`product.md` on its branch yet), *before* claiming the stage or dispatching the
-agent:
-
-1. Read the issue body and thread, and (for an epic) whatever child issues already
-   exist.
-2. State back, in a few lines, the interpretation: what the epic **covers**, what it
-   **excludes**, and the **decisions the one-liner leaves open**.
-3. Ask the operator the genuine ambiguities in one batch — scope boundaries,
-   must-haves vs out-of-scope, any decision the issue does not settle. As many real
-   questions as there are, none invented for form.
-4. Carry the answers **verbatim** into the `product` delegation prompt as "Operator
-   scope decisions", and tell the agent they are settled inputs, not hypotheses.
-
-The `product` agent's side of the contract: if its prompt carries no scope-alignment
-answers and the issue is thin, it stops and returns scoping questions in its final
-message rather than inventing scope (see the `sdlc-product` definition). Skip the step
-on rework rounds and on a resume where `product.md` already exists — the scope has a
-document by then, and corrections go through the normal rework path or Gate A.
-
-This complements the gates rather than replacing them: Gate A still reviews the
-document; this step makes sure the document is written about the right thing.
 
 ## Stage exit actions live in the agent files
 

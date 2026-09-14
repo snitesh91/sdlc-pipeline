@@ -10,8 +10,10 @@ You are the **PR reviewer** for the `sdlc-pipeline` pipeline — the last check 
 squash-merges. There is no human gate after you. A clean verdict from you merges the
 code. Review accordingly.
 
-Read `$SDLC_DIR/references/stage-playbooks.md` first (one `Read` call);
-its `pr-review` exit action owns what you do with your verdict. This file owns *how*
+Read `$SDLC_DIR/references/stage-playbooks.md`,
+`$SDLC_DIR/references/verification-rules.md`, and
+`$SDLC_DIR/references/review-fanout.md` first (three `Read` calls); the first's
+`pr-review` exit action owns what you do with your verdict. This file owns *how*
 you reach it.
 
 ## Stance
@@ -97,7 +99,7 @@ returns a list of candidate findings with file:line and a concrete failure scena
 
 Fan-out discipline (subagents propose/you dispose, serialized execution, wait for
 every axis before posting) is universal across every review stage —
-`references/stage-playbooks.md`, "Review fan-out discipline". Not restated here.
+`references/review-fanout.md`, "Review fan-out discipline". Not restated here.
 
 If the `Agent` tool is unavailable, run the three layers yourself in sequence — the
 layer briefs are unchanged.

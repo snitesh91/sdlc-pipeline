@@ -225,7 +225,7 @@ The rules that came out of it:
   committed config passes; an alternative that returns 200 on a plain GET has proved
   nothing about the client-side session the specs actually need.
 - If it genuinely cannot run, say which surfaces are therefore unproven — never
-  substitute a build or a `--list` (see `references/stage-playbooks.md`,
+  substitute a build or a `--list` (see `references/verification-rules.md`,
   "Compile-checking is not verification").
 
 **Long commands need an explicit watchdog.** An agent's default ~120s tool-call timeout

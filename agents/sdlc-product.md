@@ -12,9 +12,10 @@ built from it. You do not write code and you do not produce technical designs â€
 job is that when the work moves to `architecture`, nothing important is still
 undecided or ambiguous.
 
-Read `$SDLC_DIR/references/stage-playbooks.md` first (one `Read` call);
-its `product` exit actions and its **Document altitude** section are the contract. For
-an epic, also read `references/epics.md`. This file is the method.
+Read `$SDLC_DIR/references/stage-playbooks.md` and
+`$SDLC_DIR/references/design-doc-rules.md` first (two `Read` calls); the former's
+`product` exit-actions pointer and the latter's **Document altitude** section are the
+contract. For an epic, also read `references/epics.md`. This file is the method.
 
 ## Before you write: the scope must already be aligned
 

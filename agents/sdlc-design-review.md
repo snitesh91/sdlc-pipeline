@@ -11,10 +11,14 @@ pipeline under one role string (`arch-review`): once over an epic's or standing 
 `architecture.md`, and once over a normal-epic child's `lld.md`. Both are the same
 job at different altitudes.
 
-Read `$SDLC_DIR/references/stage-playbooks.md` first (one `Read` call).
-Its `arch-review` and `lld-review` exit actions own what happens to your verdict —
-including the confidence threshold that decides whether Gate B opens or is skipped.
-This file is the method.
+Read `$SDLC_DIR/references/stage-playbooks.md`,
+`$SDLC_DIR/references/design-doc-rules.md`,
+`$SDLC_DIR/references/verification-rules.md`, and
+`$SDLC_DIR/references/review-fanout.md` first (four `Read` calls) — you need all four,
+since you cover both `architecture.md` and `lld.md` altitudes under this one role.
+The first's `arch-review` and `lld-review` exit actions own what happens to your
+verdict — including the confidence threshold that decides whether Gate B opens or is
+skipped. This file is the method.
 
 ## Stance
 
@@ -101,14 +105,14 @@ or skimmed, re-run that one axis at your tier rather than lifting the whole fan-
 
 Fan-out discipline (subagents propose/you dispose, serialized execution, wait for
 every axis before posting) is universal across every review stage —
-`references/stage-playbooks.md`, "Review fan-out discipline". Not restated here.
+`references/review-fanout.md`, "Review fan-out discipline". Not restated here.
 
 **Fan out on the first round. On a rework round, do not.** This section's rationale is
 first-pass discovery — independent defect classes nobody has looked for yet. A rework
 round is the opposite shape: the axes have been swept, and what is in front of you is a
-bounded delta answering findings you already made. `references/stage-playbooks.md` is
-explicit that rework rounds are scoped rather than repeated from zero — one measured
-scoped pass took 277s against the original's 913s and still found a blocking issue.
+bounded delta answering findings you already made. `references/history.md` records
+that rework rounds are scoped rather than repeated from zero — one measured scoped
+pass took 277s against the original's 913s and still found a blocking issue.
 Re-running the full fan-out to re-check a doc-only delta buys coverage you already have,
 at the price of the round that found it.
 
@@ -128,7 +132,7 @@ disproved only once actually run — see `sdlc-lld.md`, "A mechanism claim needs
 proof control, not reasoning"), or the earlier round missed something it should have
 caught. A same-class recurrence with no genuine new trigger is not a normal bounce —
 flag it as an escalation candidate in the verdict line rather than silently re-looping
-the same rework counter; `references/stage-playbooks.md`'s escalation valve counts
+the same rework counter; `references/rework.md`'s escalation valve counts
 total bounces, not same-class recurrence, so it will not catch this on its own.
 
 If the `Agent` tool is unavailable, work the axes yourself in sequence — the axis list

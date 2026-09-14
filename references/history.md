@@ -149,6 +149,37 @@ problem, the rule is added there as insurance against the same drift lld.md show
 checked was decision-relevant (option tables, an explicit invariant proof, honest
 bet/fallback framing).
 
+## 2026-09-14 (e) — stage-playbooks.md split by role, so a role reads less
+
+Operator: divide `stage-playbooks.md` if it helps context load. Fork audit had already
+found the one real excess: every one of the 8 roles read all 594 lines regardless of
+role, including sections relevant to only 1-2 stages.
+
+**Split into 4 files, kept `stage-playbooks.md` as the universal core** (per-issue
+docs, citation discipline, one-turn-finish, commenting, rework/blockers pointer, exit
+actions pointer — read by all 8, unchanged). Three new files, each role-scoped:
+`design-doc-rules.md` (Document altitude, Scope alignment before `product` — read by
+`product`, `product-review`, `architecture`, `design-review`), `verification-rules.md`
+(Compile-checking is not verification, Establish a number by running the thing, A
+completeness claim over a footprint is a sweep — read by `architecture`, `lld`,
+`development`, `pr-review`, `design-review`), `review-fanout.md` (Review fan-out
+discipline — read by `product-review`, `design-review`, `pr-review`).
+
+Net reduction per role: `exploratory` 594 -> 305 lines (49%); `lld`/`development`
+594 -> ~450 (24%); `product` 594 -> ~459 (23%); `product-review`/`pr-review`
+594 -> ~485 (18%); `architecture` 594 -> ~574 (3%, needs nearly all of it);
+`design-review` reads all four (serves both `arch-review` and `lld-review` altitudes
+under one role) — no reduction there, by design, not an oversight.
+
+**Found and fixed two pre-existing stale citations while auditing every pointer to a
+moved section**: `sdlc-architecture.md` and `sdlc-development.md` both cited
+"Context-reset replacement" to `stage-playbooks.md`, but that content has lived in
+`references/rework.md` since the 2026-09-13 split — never updated when it moved.
+Every other citation to a section that changed file (in `agents/*.md`,
+`references/epics.md`, `references/parallelism.md`, `SKILL.md`) was updated to the new
+filename; `references/history.md`'s own past entries were left as-is — they record
+where a rule lived *at the time*, not a live pointer.
+
 ## 2026-09-13 — one rule, one home, chosen by scope
 
 Operator: *"the skill is getting complex. Agent is not honoring the agents and skills."*
