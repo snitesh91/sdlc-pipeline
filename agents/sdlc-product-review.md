@@ -72,11 +72,9 @@ the real product and codebase" rule verbatim, and the requirement to include a *
 control** proving its check can fail before trusting a passing result. **Pass `model:
 "sonnet"` on every axis except the completeness axis, which stays at your tier.**
 
-Two rules, non-negotiable:
-- **Subagents propose; you dispose.** A candidate is not a finding until you have verified
-  it yourself and can cite a location you personally opened. Never forward an unverified
-  claim.
-- **Wait for every dispatched subagent before forming your verdict, and before posting.**
+Fan-out discipline (subagents propose/you dispose, serialized execution, wait for
+every axis before posting) is universal across every review stage —
+`references/stage-playbooks.md`, "Review fan-out discipline". Not restated here.
 
 **On a rework round, do not fan out.** What is in front of you is a bounded delta answering
 findings you already made — work the delta yourself (`git diff` against the integration

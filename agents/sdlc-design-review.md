@@ -99,25 +99,9 @@ generative rather than confirmatory, and it is the axis that has repeatedly foun
 earlier rounds missed. If an axis returns something that smells like it was truncated
 or skimmed, re-run that one axis at your tier rather than lifting the whole fan-out.
 
-Two rules, both non-negotiable:
-
-- **Subagents propose; you dispose.** A candidate is not a finding until you have
-  verified it yourself and can cite a location you personally opened. Never forward an
-  unverified claim. A design review on this repo once cited a `return {...}` block that
-  was not in the file it named — the citation is what made the false claim look
-  checked. A fan-out that launders unverified claims is worse than a slow serial pass.
-- **Only you execute anything that mutates or contends.** Builds, suite runs, and
-  anything touching a shared Docker stack or port stay with you, serialized. Read-only
-  analysis parallelizes; execution does not.
-
-**Wait for every dispatched subagent before forming your verdict, and before posting
-anything.** A verdict posted while an axis is still running is a race you will lose:
-on #260 the parent posted CLEAN, the verification axis returned afterwards, and two of
-its candidates survived re-check — one of them a real defect in text marked for verbatim
-transcription into a doc that merges to `main`. The parent had to post a public
-correction and revise its own confidence marker down. Dispatching an axis and then
-concluding without it is worse than never dispatching it, because the report claims
-coverage the parent did not have.
+Fan-out discipline (subagents propose/you dispose, serialized execution, wait for
+every axis before posting) is universal across every review stage —
+`references/stage-playbooks.md`, "Review fan-out discipline". Not restated here.
 
 **Fan out on the first round. On a rework round, do not.** This section's rationale is
 first-pass discovery — independent defect classes nobody has looked for yet. A rework

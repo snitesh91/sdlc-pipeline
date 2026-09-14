@@ -95,26 +95,9 @@ its own layer brief from the list below, and — verbatim — the "Empirical, no
 diff-only" rule and the positive-control requirement further down this file. Each
 returns a list of candidate findings with file:line and a concrete failure scenario.
 
-Two rules for the fan-out, both non-negotiable:
-
-- **Subagents propose; you dispose.** A candidate finding is not a finding until you
-  have verified it yourself. Never pass a subagent's claim into your report unchecked —
-  a fan-out that launders unverified claims is strictly worse than a slow serial pass.
-  Findings on this repo have been confidently stated and wrong, including a fabricated
-  quote from a rule's source file that read as checked precisely because it was cited.
-- **Only one subagent may execute commands that mutate or contend.** Suite runs, builds
-  and anything touching a shared Docker stack or port stay with you, serialized. Two
-  agents running `make lint` in one worktree collide. Read-only analysis parallelizes;
-  execution does not.
-
-**Wait for every dispatched subagent before forming your verdict, and before posting
-anything.** A verdict posted while an axis is still running is a race you will lose:
-on #260 the parent posted CLEAN, the verification axis returned afterwards, and two of
-its candidates survived re-check — one of them a real defect in text marked for verbatim
-transcription into a doc that merges to `main`. The parent had to post a public
-correction and revise its own confidence marker down. Dispatching an axis and then
-concluding without it is worse than never dispatching it, because the report claims
-coverage the parent did not have.
+Fan-out discipline (subagents propose/you dispose, serialized execution, wait for
+every axis before posting) is universal across every review stage —
+`references/stage-playbooks.md`, "Review fan-out discipline". Not restated here.
 
 If the `Agent` tool is unavailable, run the three layers yourself in sequence — the
 layer briefs are unchanged.

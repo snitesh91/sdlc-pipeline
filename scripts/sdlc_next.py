@@ -371,6 +371,13 @@ class GhError(RuntimeError):
     pass
 
 
+def _utc_now_marker() -> str:
+    """The one timestamp format every stage-transition marker comment uses. A single
+    call site means a format change (e.g. adding milliseconds) is a one-line edit
+    instead of a find-and-fix across every marker-writing command."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _default_runner(argv: list) -> str:
     result = subprocess.run(argv, capture_output=True, text=True)
     if result.returncode != 0:
@@ -1273,7 +1280,7 @@ def cmd_record_epic_verification(gh: GitHub, epic: int, kind: str, summary: str)
     Never hand-type the marker -- `close-epic` reads it back, and an evidence
     line that lives only in a session's memory reads to the next session as a
     run that never happened."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     label = "Full e2e suite" if kind == "e2e" else "Exploratory pass"
     gh.issue_comment(epic,
         f"🧪 {label} — closing verification for #{epic}. {summary}\n\n"
@@ -1310,7 +1317,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         # an ephemeral one under the branch lock, never in the main checkout.
         with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
             git_reconcile_branch(ws.path, branch, base="main", runner=runner)
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        timestamp = _utc_now_marker()
         gh.issue_comment(epic,
             f"🔄 Reconciled `{branch}` with `origin/main` ({behind} commit(s) picked up). "
             f"Closing verification must now run against **this** tree — the full e2e suite and "
@@ -2468,7 +2475,7 @@ def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> d
     Does not touch Stage (already `PR Review` from `open-dev-pr`) or Pipeline
     Status (still `In Progress`) -- a queued-for-review issue is not a *new* state,
     it's the same one, now with a marked handoff."""
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     gh.issue_comment(issue,
         f"✅ Development complete. {summary} "
         f"PR #{pr} is queued for `pr-review`.\n\n"
@@ -2493,7 +2500,7 @@ def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary:
     actually closes."""
     if outcome not in PR_REVIEW_OUTCOMES:
         raise GhError(f"outcome must be one of {PR_REVIEW_OUTCOMES}, got {outcome!r}")
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     headline = ("🔍 PR review complete — no findings; proceeding to merge."
                 if outcome == "clean" else
                 "🔁 PR review complete — findings sent back to `development` for rework.")
@@ -2570,7 +2577,7 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
     if not (command or "").strip():
         raise GhError("--command is required: the exact command the suite was run with")
     evidence = read_ci_evidence(output)
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     fence = "```"
     gh.pr_comment(pr, f"🧪 Local CI attested — `{suite}` suite passed locally against "
                        f"`{sha}` (main-only GHA CI; this is the merge-gate stand-in).\n\n"
@@ -2607,7 +2614,7 @@ def cmd_record_design_review(gh: GitHub, issue: int, role: str, outcome: str,
         raise GhError(f"role must be one of {DESIGN_REVIEW_ROLES}, got {role!r}")
     if outcome not in PR_REVIEW_OUTCOMES:
         raise GhError(f"outcome must be one of {PR_REVIEW_OUTCOMES}, got {outcome!r}")
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     headline = (f"🔍 `{role}` complete — no findings."
                 if outcome == "clean" else
                 f"🔁 `{role}` complete — findings sent back for rework.")
@@ -2730,7 +2737,7 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
         draft=False,
     )
     gh.set_pipeline_status_field(issue, "awaiting-human-review")
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     doc_verb = "Requirements locked" if stage == "product" else "Design locked"
     comment = (
         f"✅ {doc_verb} — see `{DOC_ROOT}/{branch}/{doc}` (`{sha}`). {summary}\n\n"
@@ -2860,7 +2867,7 @@ def cmd_sync_branch(gh: GitHub, repo_path: Optional[str], issue: int, unit: str 
             # survive a crashed session, and the sync-branch-conflict <->
             # development escalation-valve pairing must be reconstructible from the
             # thread (cmd_pairing_counts reads this marker back).
-            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            timestamp = _utc_now_marker()
             gh.issue_comment(issue,
                 f"⚠️ Merge conflict reconciling `{branch}` with `origin/{base}` — "
                 f"{len(e.files)} file(s): {', '.join(f'`{f}`' for f in e.files)}. "
@@ -2985,7 +2992,7 @@ def _advance_after_lld_publish(gh: GitHub, issue: int, entry: dict, result: dict
     if stage != "lld":
         return {**result, "advanced": False,
                 "reason_not_advanced": f"Stage is {stage!r}, not 'lld' — nothing to advance"}
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     gh.set_stage_field(issue, "development")
     gh.clear_pipeline_status_field(issue)
     gh.issue_comment(issue,
@@ -3068,7 +3075,7 @@ def _publish_lld_doc(gh: GitHub, epic_path: str, issue: int, epic: str, doc_path
                     "reason": f"push to {epic} returned success but origin/{epic} does not "
                               f"carry {doc_path} at the published blob — refusing to report "
                               f"merged; inspect origin/{epic} and re-run"}
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        timestamp = _utc_now_marker()
         gh.issue_comment(issue,
             f"📄 Published `lld.md` to `{epic}` (`{sha}`) — the low-level design is now durable "
             f"on the epic branch, independent of `{issue_branch(issue)}`, and siblings pick it "
@@ -3094,7 +3101,7 @@ def _complete_epic_architecture(gh: GitHub, epic_number: int, note: str) -> dict
     does. See "Epic-level stages" in references/epics.md."""
     gh.clear_stage_and_status_fields(epic_number)
     gh.issue_edit(epic_number, add_labels=[LABELS["architected"]])
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     gh.issue_comment(epic_number,
         f"🏗️ Epic architecture phase complete — {note} Child issues become eligible for "
         f"`lld` onward starting the next `/sdlc-pipeline` pass.\n\n"
@@ -3163,19 +3170,16 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
             gh, issue, f"human review confirmed for `architecture.md` — merged via #{gate_pr}."),
             ws)
     next_stage = STAGE_AFTER_GATE[stage]
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
+    prefix = f"✅ Human review confirmed for `{stage}.md` — merged via #{gate_pr} — "
+    marker = f"<!-- stage-transition: human-review:{stage}->{next_stage} @ {timestamp} -->"
     if live:
-        gh.issue_comment(issue,
-            f"✅ Human review confirmed for `{stage}.md` — merged via #{gate_pr} — "
-            f"proceeding to `{next_stage}` stage.\n\n"
-            f"<!-- stage-transition: human-review:{stage}->{next_stage} @ {timestamp} -->")
+        gh.issue_comment(issue, f"{prefix}proceeding to `{next_stage}` stage.\n\n{marker}")
         cmd_claim(gh, issue, next_stage)
     else:
         gh.issue_comment(issue,
-            f"✅ Human review confirmed for `{stage}.md` — merged via #{gate_pr} — "
-            f"Stage advanced to `{next_stage}`. Pick up with `/sdlc-pipeline` whenever "
-            f"you're ready to run this stage.\n\n"
-            f"<!-- stage-transition: human-review:{stage}->{next_stage} @ {timestamp} -->")
+            f"{prefix}Stage advanced to `{next_stage}`. Pick up with `/sdlc-pipeline` "
+            f"whenever you're ready to run this stage.\n\n{marker}")
         gh.set_stage_field(issue, next_stage)
         gh.clear_pipeline_status_field(issue)
     return _with_workspace({"issue": issue, "unit": unit, "next_stage": next_stage,
@@ -3221,7 +3225,7 @@ def cmd_skip_gate(gh: GitHub, issue: int, stage: str, confidence: int, summary: 
                        f"{threshold}% threshold) that `architecture.md` is "
                        f"structurally sound — skipped Gate B. {summary}")
     next_stage = STAGE_AFTER_GATE[stage]
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     gh.issue_comment(issue,
         f"⚡ Gate B skipped — arch-review reported {confidence}% confidence "
         f"(> {threshold}% threshold) that `architecture.md` is "
@@ -3253,7 +3257,7 @@ def cmd_auto_pass_gate_a(gh: GitHub, issue: int, stage: str, summary: str,
         raise GhError(f"profile '{profile['name']}' requires a human at Gate A "
                        f"(requiresHumanGateA: true) -- open a gate, do not auto-pass")
     next_stage = STAGE_AFTER_GATE[stage]  # "architecture"
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = _utc_now_marker()
     gh.issue_comment(issue,
         f"⚡ Gate A auto-passed — profile '{profile['name']}' needs no human review of "
         f"`product.md` (requiresHumanGateA: false). {summary} Proceeding directly to "

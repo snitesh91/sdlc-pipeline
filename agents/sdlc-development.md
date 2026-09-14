@@ -252,9 +252,24 @@ have bitten this repo hardest:
 
    Deviating is allowed — silently deviating is not. A `deviate` row states what you
    did instead and why, and goes in the PR description as an explicit delta.
-7. **Never cite a `file:line` you have not opened in this session.** Anchor every
-   reference to a quote you can produce — `grep -n "<literal string>" <path>`.
-   Fabricated citations have shipped from this repo before.
+7. **A build you cite as verification must be a real build.** A stale gitignored
+   `*.tsbuildinfo` makes an incremental `nest build` emit nothing and exit 0 — twice on
+   epic #159 a "passing" build produced no `dist/main.js`. Delete the stale cache
+   (`find . -name '*.tsbuildinfo' -delete` in the package) or assert the artifact
+   afterwards (`test -f dist/main.js`, newer than its sources); say which. Exit 0 alone
+   is not evidence.
+8. **Every acceptance criterion has at least one test that would fail if the criterion
+   were violated** — a behaviour test, not an existence test. Map criterion → test file
+   and test name, one line each, in the handoff comment. A criterion with no such test
+   is a gap you close before handing off, not one you declare.
+9. **Mutation-check the guards that matter.** For the tests that carry the real
+   acceptance — not every test — deliberately break the behaviour under test, confirm
+   the test goes red, revert. State the mutation and what went red. A test that stays
+   green against deliberately broken code is a decoration. Leave the tree clean
+   (`git status`) before handing off.
+
+Citation discipline is universal, not restated here — `references/stage-playbooks.md`
+covers it for every stage. Fabricated citations have shipped from this repo before.
 
 ## How you work in the repo
 
@@ -283,13 +298,6 @@ debugging session that looks exactly like a regression in your own diff.
 The corollary holds when a run *does* surface something: a cascade of failures across
 suites your diff never touched is environmental until proven otherwise, and the cheapest
 proof is the workflow's own invocation, not a baseline checkout.
-
-**A build you cite as verification must be a real build.** A stale gitignored
-`*.tsbuildinfo` makes the incremental `nest build` emit nothing and exit 0 — twice on
-epic #159 the "passing" build produced no `dist/main.js`. Before any build you use as
-a gate, delete the stale cache (`find . -name '*.tsbuildinfo' -delete` in the package)
-**or** assert the artifact afterwards (`test -f dist/main.js` and that it is newer than
-the sources). Say which; exit 0 alone is not evidence.
 
 **Integration tests run only against a `_test` database.** Any truncating suite
 (`test:it` / `cleanTables()`) must run against a DB whose name ends in `_test`
@@ -409,24 +417,10 @@ don't work around it. **On a blocker** (ambiguous requirement, missing design
 decision): stop and report the specific question in your final message — never create
 issues or change fields yourself; the orchestrator resumes the right earlier stage.
 
-**Sweep the design's numbered task-local decisions before handing off.** Walk
-`lld.md`'s decisions in order, quote the code realising each, and mark it conform or
-deviate — a bounded, mechanical pass over a list the design already enumerated. A
-deviation the implementer would have noticed is not the kind that ships; the kind that
-ships is a decision implemented correctly and then widened while fixing something
-else, which reads as ordinary intentional code. #494 shipped a `try`/`catch` widened
-past decision 4's stated `{interpret, build reply, send}` boundary to include the
-claim-table write, so a bookkeeping failure after a charged send marked the claim
-reclaimable and a redelivery drew a second charged reply. That round declared three
-deviations and missed this one, because nothing walked the list.
-
-**Run the attested suite the way its workflow runs it.** `record-local-ci` stands in
-for a main-only workflow, so the run behind it has to use that workflow's own
-invocation — the config's `requiredWorkflows[].files` names the file to read. An
-invented invocation manufactures environmental failures that are indistinguishable
-from regressions in the diff: #494's first full `test:it` ran without the workflow's
-`--runInBand` and returned 247 failures across 51 untouched suites, costing a baseline
-reproduction to prove the diff innocent.
+Before handing off: re-run "## The completion gates" above in full, in order — the
+decision-sweep (item 6) and "How you work in the repo"'s workflow-faithful suite
+invocation both bit this repo hardest on #494 and are not re-explained here a second
+time.
 
 **Write tests against behaviour, never against implementation.** A test pinned to how
 the code works rather than what it guarantees is a *change-detector*: it goes red on
@@ -482,47 +476,9 @@ the test runner's own path filter, not a package-level one. A touch to shared co
 radius by this convention — fall back to the full IT run for that package instead of
 guessing which domains it could affect.
 
-**Completion gates — all of them before the handoff, not after.** Each exists because
-it was skipped once and something shipped broken:
-
-1. **Every risk flagged by the design doc is closed against the real system, not
-   mocked away.** A unit test against a mock does not close an integration risk — it
-   tests the mock. Close it against a real database (the repo's integration suites
-   run against one), a real HTTP call, the real queue. If it genuinely cannot be
-   closed here, say so explicitly in the PR description and name what would close it;
-   do not let the mock stand in for the answer.
-2. **"Manually verified" claims cite evidence, not assertion.** A terminal
-   transcript, a log excerpt, a response body, or numbered repro steps someone else
-   can re-run. The words "manually verified" with nothing attached are treated as
-   not verified — by `pr-review`, and here.
-3. **Golden-path behaviour is explicitly re-confirmed, not assumed.** Whenever the
-   change touches shared code or error handling, re-run the pre-existing
-   non-edge-case behaviour and record the result. Fixing an edge case while breaking
-   the normal path is the specific failure this gate catches.
-4. **Every acceptance criterion is checked against the real diff, not against your
-   own commit messages.** Run `git diff origin/<base>...HEAD --name-only` and, for
-   each AC, name the file in that list which satisfies it. An AC whose satisfying
-   file is not in the diff is not done. (Validators have shipped unit-tested and
-   **wired into no entrypoint**, with commit messages reading as a finished build —
-   `references/history.md`, 2026-08-28. A unit test of a function in isolation
-   cannot prove the call site exists.)
-5. **Every acceptance criterion has at least one test that would fail if the
-   criterion were violated** — a behaviour test, not an existence test. Map criterion
-   → test file and test name, one line each, in the handoff comment. A criterion with
-   no such test is a gap you close before handing off, not one you declare.
-6. **Mutation-check the guards that matter.** For the tests that carry the real
-   acceptance — not every test — deliberately break the behaviour under test, confirm
-   the test goes red, revert. State the mutation and what went red. A test that stays
-   green against deliberately broken code is a decoration. Leave the tree clean
-   (`git status`) before handing off.
-7. **A build you cite is a real build.** A stale gitignored `*.tsbuildinfo` makes an
-   incremental `nest build` emit nothing and exit 0 — twice on epic #159 a "passing"
-   build produced no `dist/main.js`. Delete the stale cache or assert the artifact
-   afterwards, and say which. Exit 0 alone is not evidence.
-8. **Never cite a `file:line` you have not opened in this session.** Anchor every
-   reference to a quote you can produce — `grep -n "<literal string>" <path>` — so it
-   is checkable by the next reader rather than merely plausible. Fabricated citations
-   have shipped from this repo before.
+Before this stage's own exit sequence: re-run "## The completion gates" above,
+in order, one more time — it is your last self-check before handoff, not a one-time
+read at the top of the session.
 
 **Exit, in order.** First, for **each main-only required suite this round actually
 ran** (suite keys come from the config's `requiredWorkflows[].suite`):

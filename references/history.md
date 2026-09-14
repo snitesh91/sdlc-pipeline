@@ -87,6 +87,38 @@ is the operator's to write. Raises rather than vendoring a literal unresolved
 placeholder when a config value is missing. Still subject to the existing quiet-lane
 rule below: `sync-skill` doesn't check that itself, the operator does.
 
+## 2026-09-14 (c) — duplication pass: same rule, three copies, in three places
+
+Operator asked for a full duplication sweep of the skill. Three findings, all fixed:
+
+**`agents/sdlc-development.md` restated its own completion-gate checklist 2-3
+times.** The canonical `## The completion gates` list, a condensed echo mid-file
+(the decision-sweep and the #494 `--runInBand` story, both restated a second time),
+and a third, unheaded copy of the same 8-item list right before the exit actions —
+only 2 of that third copy's items were actually new. Merged the 2 new items into the
+one canonical list, deleted both restatements, left one-line pointers back to the
+canonical section instead. The citation rule was tripled the same way (once
+correctly, per `references/stage-playbooks.md`'s "Citation discipline", twice more
+inside this same file) — both in-file copies deleted, one pointer left.
+
+**The review fan-out rules (`subagents propose/you dispose`, serialize execution,
+wait for every axis before posting) were copy-pasted near-verbatim into
+`sdlc-design-review.md`, `sdlc-product-review.md`, and `sdlc-pr-review.md`,
+including the #260 incident story twice.** Hoisted into
+`references/stage-playbooks.md` as "Review fan-out discipline" (the file already
+guaranteed by `SKILL.md` to be read by every stage); each of the three agent files
+now states only its own axis/layer list plus a pointer.
+
+**`scripts/sdlc_next.py`: the UTC marker-timestamp format string was constructed
+independently at 14 call sites.** No comment justified the repetition — a format
+change (e.g. adding milliseconds) meant finding and fixing 14 places by hand. Added
+one `_utc_now_marker()` helper; all 14 sites now call it. `cmd_pass_gate`'s two
+branches also each built the same comment prefix independently — factored into a
+shared `prefix` variable, branches now differ only in their actual suffix.
+
+None of these changed behavior — every existing test stayed green, byte-identical
+output where a test pinned exact comment text.
+
 ## 2026-09-13 — one rule, one home, chosen by scope
 
 Operator: *"the skill is getting complex. Agent is not honoring the agents and skills."*
