@@ -5960,3 +5960,63 @@ def test_set_issue_type_still_works_for_a_configured_type():
         {"data": {"repository": {"issue": {"id": "ISSUE_ID_1"}}}})
     gh = GitHub(runner=runner)
     gh.set_issue_type(9, "Task")  # must not raise
+
+
+def test_merge_epic_lld_doc_not_merged_when_doc_not_yet_on_origin():
+    # V2: epic-level lld pushes epic-<n>/lld.md directly onto origin/epic-<n>
+    # itself -- if it's not there, nothing to advance, and no fields are touched.
+    from sdlc_next import GitHub, cmd_merge_lld_doc
+    path = "/epic-110"
+    doc = "docs/sdlc/epic-110/lld.md"
+    runner = ScriptedRunner({
+        **_live_wt("epic-110", path=path),
+        ("git", "-C", path, "fetch", "origin"): "",
+        ("git", "-C", path, "rev-parse", "--verify", "--quiet", f"origin/epic-110:{doc}"): "",
+    })
+    gh = GitHub(runner=ScriptedRunner({}))
+    result = cmd_merge_lld_doc(gh, path, 110, runner=runner, unit="epic")
+    assert result["merged"] is False
+    assert "not have pushed" not in result["reason"]  # sanity: real message, not a stub
+    assert "epic" in result and result["epic"] == 110
+
+
+def test_merge_epic_lld_doc_advances_every_freshly_created_task_and_skips_already_advanced():
+    # Positive control: two freshly-created Tasks (no Stage at all -- lld just
+    # created them) both get advanced. Negative control in the same run: a third
+    # Task that already has Stage=development (an earlier partial run, or a
+    # sibling that was somehow already touched) is left untouched -- idempotent,
+    # not double-advanced or re-commented.
+    from sdlc_next import GitHub, cmd_merge_lld_doc
+    path = "/epic-110"
+    doc = "docs/sdlc/epic-110/lld.md"
+    epic = _epic(110, labels=["epic:architected"])
+    fresh_task_1 = _issue(501, parent=110, issue_type="Task")
+    fresh_task_2 = _issue(502, parent=110, issue_type="Task")
+    already_advanced = _issue(503, parent=110, issue_type="Task", stage="development")
+
+    advance_501, _, _ = _advance_to_development_responses(501)
+    advance_502, _, _ = _advance_to_development_responses(502)
+
+    gh_runner = ScriptedRunner({
+        tuple(_list_argv()): _list_response([epic, fresh_task_1, fresh_task_2, already_advanced]),
+        **advance_501, **advance_502,
+    })
+    gh_runner.prefix_responses[("gh", "issue", "comment")] = ""
+    gh = GitHub(runner=gh_runner)
+
+    git_runner = ScriptedRunner({
+        **_live_wt("epic-110", path=path),
+        ("git", "-C", path, "fetch", "origin"): "",
+        ("git", "-C", path, "rev-parse", "--verify", "--quiet", f"origin/epic-110:{doc}"): "blobXYZ\n",
+    })
+
+    result = cmd_merge_lld_doc(gh, path, 110, runner=git_runner, unit="epic")
+    assert result["merged"] is True
+    assert sorted(result["advanced_tasks"]) == [501, 502]
+
+    # The already-advanced Task got no field write and no new comment at all.
+    graphql_calls = [c for c in gh_runner.calls if c[:3] == ["gh", "api", "graphql"]]
+    for c in graphql_calls:
+        assert "ISSUE_503" not in c[-1] or "updateIssueFieldValue" not in c[-1]
+    comment_calls = [c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"]]
+    assert not any(c[3] == "503" for c in comment_calls)

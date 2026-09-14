@@ -3042,15 +3042,27 @@ _PUSH_REJECTED_RE = re.compile(
 
 
 def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], issue: int,
-                       runner: Runner = _default_runner) -> dict:
-    """Publish a normal-epic child's `lld.md` onto its epic branch the instant
-    `lld-review` comes back CLEAN -- see "Publishing lld.md to the epic branch"
-    in references/parallelism.md -- rather than waiting for the whole child
-    pipeline to merge. Two payoffs: the low-level design is durable on the epic
-    branch independent of the `issue-<n>` branch, and every sibling picks it up
-    in-tree on its next `sync-branch`, so cross-child overlap checks see the real
-    committed design instead of only what's reachable on a still-open child
-    branch.
+                       runner: Runner = _default_runner, unit: str = "issue") -> dict:
+    """**`unit="epic"` (V2): `issue` is the Epic itself, not a child** -- routes to
+    `_merge_epic_lld_doc` and skips everything below, which is V1's single-child
+    shape. V2's epic-level `lld` (V2-SPEC.md) commits `epic-<n>/lld.md` directly
+    onto `origin/epic-<n>` as part of its own turn -- there is no separate child
+    branch to copy the doc from the way V1's per-child `lld` has, so the epic path
+    only verifies the doc reached origin, then advances every Task `lld` created
+    under this Epic (functional and the two standing Integration-test/e2e-test
+    ones alike) that has no Stage set yet -- the same field-write V1's advance
+    does for one child, looped over every Task this stage created rather than
+    resuming one that already existed. Idempotent the same way: a Task already
+    advanced (Stage already set) is skipped on a re-run.
+
+    **`unit="issue"` (default, V1 unchanged): publish a normal-epic child's
+    `lld.md` onto its epic branch** the instant `lld-review` comes back CLEAN --
+    see "Publishing lld.md to the epic branch" in references/parallelism.md --
+    rather than waiting for the whole child pipeline to merge. Two payoffs: the
+    low-level design is durable on the epic branch independent of the
+    `issue-<n>` branch, and every sibling picks it up in-tree on its next
+    `sync-branch`, so cross-child overlap checks see the real committed design
+    instead of only what's reachable on a still-open child branch.
 
     **Scope: normal-epic children only.** A top-level issue with no parent epic,
     or a child of a standing epic (`epic:standing`, e.g. a standing backlog epic -- its children
@@ -3093,6 +3105,8 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], issue: int,
     scheduling mechanism only, never an "all llds before any development"
     policy -- an independent child still flows lld->development without waiting
     on siblings. See `_advance_after_lld_publish` for the crash-safety argument."""
+    if unit == "epic":
+        return _merge_epic_lld_doc(gh, repo_path, issue, runner)
     issues = {i["number"]: i for i in gh.issue_list()}
     entry = issues.get(issue)
     if entry is None:
@@ -3114,6 +3128,49 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], issue: int,
         result = _publish_lld_doc(gh, ws.path, issue, epic, doc_path, src_ref, runner)
     result = _advance_after_lld_publish(gh, issue, entry, result)
     return _with_workspace(result, ws)
+
+
+def _merge_epic_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
+                        runner: Runner) -> dict:
+    """V2's `merge-lld-doc --unit epic`. Unlike V1's per-child path, there is no
+    separate source branch to reconcile from -- epic-level `lld` already pushed
+    `epic-<n>/lld.md` directly onto `origin/epic-<n>` as part of its own turn --
+    so this only verifies the doc actually reached origin (protects against
+    advancing Tasks off a commit that was made locally but never pushed, e.g. a
+    crash between commit and push) before advancing every Task this stage
+    created.
+
+    **Every Task this Epic's `lld` created, still at its just-created state
+    (no Stage field at all), is advanced** -- functional Tasks and the two
+    standing Integration-test/e2e-test Tasks alike, since `lld` creates all of
+    them the same way in the same turn. Idempotent: a Task already advanced
+    (Stage already set, from an earlier run of this same command) is skipped,
+    the same crash-safety argument as `_advance_after_lld_publish` one unit up."""
+    epic_br = epic_branch(epic)
+    doc_path = f"{DOC_ROOT}/epic-{epic}/lld.md"
+    with branch_lock(epic_br), BranchWorkspace(epic_br, repo_path, runner) as ws:
+        runner(["git", "-C", ws.path, "fetch", "origin"])
+        blob = _blob_at(ws.path, f"origin/{epic_br}", doc_path, runner)
+    if blob is None:
+        return _with_workspace({"epic": epic, "merged": False,
+                "reason": f"no lld.md on origin/{epic_br} yet — lld has not pushed it"}, ws)
+    all_issues = {i["number"]: i for i in gh.issue_list()}
+    tasks = [i for i in all_issues.values()
+             if i.get("parent") and i["parent"]["number"] == epic
+             and current_stage(i) is None]
+    timestamp = _utc_now_marker()
+    advanced = []
+    for task in tasks:
+        number = task["number"]
+        gh.set_stage_field(number, "development")
+        gh.clear_pipeline_status_field(number)
+        gh.issue_comment(number,
+            f"➡️ Epic #{epic}'s `lld-review` clean and `lld.md` published — Stage "
+            f"advanced to `development` (not claimed). `next-action` / "
+            f"`list-parallel-ready` pick it up as a fresh unit.\n\n"
+            f"<!-- stage-transition: lld-review->development @ {timestamp} -->")
+        advanced.append(number)
+    return _with_workspace({"epic": epic, "merged": True, "advanced_tasks": advanced}, ws)
 
 
 def _advance_after_lld_publish(gh: GitHub, issue: int, entry: dict, result: dict) -> dict:
@@ -4955,14 +5012,17 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
     p.set_defaults(func=lambda a: cmd_sync_branch(get_work_item_provider(), a.repo_path, a.issue, a.unit))
     p = sub.add_parser("merge-lld-doc",
-                        help="Publish a normal-epic child's lld.md onto its epic branch as soon "
-                             "as lld-review is CLEAN, then advance its Stage to development "
-                             "(NOT claimed -- next-action/list-parallel-ready pick it up as a "
-                             "fresh unit); no-op for a standing-epic child or a parentless issue")
-    p.add_argument("issue", type=int)
+                        help="V1 (--unit issue, default): publish a normal-epic child's lld.md "
+                             "onto its epic branch as soon as lld-review is CLEAN, then advance "
+                             "its Stage to development (NOT claimed); no-op for a standing-epic "
+                             "child or a parentless issue. V2 (--unit epic): verify the epic-level "
+                             "lld.md this stage already pushed reached origin, then advance "
+                             "every Task lld created under it")
+    p.add_argument("issue", type=int, help="A child issue number (--unit issue) or the Epic itself (--unit epic)")
+    p.add_argument("--unit", default="issue", choices=["issue", "epic"])
     p.add_argument("--repo-path", default=None,
                     help="Any path inside the repository; the doc is published from the epic branch's own live worktree or an ephemeral one, never the main checkout")
-    p.set_defaults(func=lambda a: cmd_merge_lld_doc(get_work_item_provider(), a.repo_path, a.issue))
+    p.set_defaults(func=lambda a: cmd_merge_lld_doc(get_work_item_provider(), a.repo_path, a.issue, unit=a.unit))
     p = sub.add_parser("open-dev-pr")
     p.add_argument("issue", type=int)
     p.add_argument("--title", required=True)

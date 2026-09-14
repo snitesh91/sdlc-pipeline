@@ -304,24 +304,28 @@ orchestrator's, after you return.
 
 ### `lld` (epic) done — V2
 
-**The git/branch mechanics below mirror the existing epic-doc pattern
-(`architecture`'s own exit action) and need confirming once the real `sdlc_next.py`
-wiring for epic-level `lld` lands; the responsibilities and document contract are
-settled.** In the epic's own worktree. Read the epic's
-`<docRoot>/epic-<n>/architecture.md` as the design source of truth; the **first
-move** is the epic-wide fits-vs-deviates call. For every piece that fits: carve the
-tasks (see "How you carve tasks"), **create each Task issue**
+In the epic's own worktree, **directly on `epic-<n>`** (no gate sub-branch — `lld`
+has no human gate, and `merge-lld-doc --unit epic` verifies the doc against
+`origin/epic-<n>` itself, the same way V1's per-child publish already lands
+doc-only commits straight on the epic branch outside the gate/PR path). Read the
+epic's `<docRoot>/epic-<n>/architecture.md` as the design source of truth; the
+**first move** is the epic-wide fits-vs-deviates call. For every piece that fits:
+carve the tasks (see "How you carve tasks"), **create each Task issue**
 (`sdlc_next.py create-issue --parent <epic-n>` — `Task` is already the default
 `--type`, but check `show-config`'s `pipeline.classification.task` and pass a
 matching `--label` too if it's label-based, e.g. `--label type:task`; `--type`
 alone only sets the native Issue Type field, not a label) with its scope and
 footprint already known, and write `<docRoot>/epic-<n>/lld.md` — no altitude
-requirement — with one
-subsection per Task, including each one's parseable `## Footprint`. Commit, push,
-short handoff comment. **Do not change the Stage field** — stays `LLD` while
-`lld-review` runs (one pass over the whole document, not one per task). For any piece
-that doesn't fit → don't carve a task around it; follow the deviation escalation for
-that piece.
+requirement — with one subsection per Task, including each one's parseable
+`## Footprint`. Commit, push to `origin/epic-<n>` directly, short handoff comment.
+**Do not change the Stage field** — stays `LLD` while `lld-review` runs (one pass
+over the whole document, not one per task). For any piece that doesn't fit → don't
+carve a task around it; follow the deviation escalation for that piece.
+
+On a **rework round**, the same worktree, same branch: edit `lld.md` in place (see
+"On a rework round, edit the design in place," above), commit, push again — no new
+mechanism, the same reconcile/`sync-branch` discipline every branch-writing stage
+already follows.
 
 On genuine ambiguity, **stop and report the specific question in your final message**.
 Never guess, never create issues beyond the Tasks this stage is responsible for

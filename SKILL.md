@@ -124,9 +124,10 @@ product -> [product-review] -> [Gate A] -> architecture -> [arch-review] -> [Gat
 
 ### Cutting Epics from an approved Initiative — new orchestrator responsibility
 
-**Mechanics below reuse the existing `create-issue` command, targeting the
-Initiative as parent instead of an Epic; needs confirming against Work-stream A's
-`classify_unit` once that lands — the responsibility itself is settled.** On a clean
+Mechanics reuse the existing `create-issue` command, targeting the Initiative as
+parent instead of an Epic, and set `classify_unit` up to actually recognize the
+result (both built 2026-09-14 — see `create-issue --type`/`--label` below and
+`GitHub.classify_unit`). On a clean
 `product-review` for an Initiative and Gate A passing, the orchestrator — not a
 subagent — reads the approved `initiative-<n>/product.md` and cuts it into Epics:
 
@@ -209,7 +210,7 @@ operational failure: stop and report, never retry by hand.
 | `claim <n> --role <role>` | Stage + In Progress + start comment |
 | `start-comment <n> --role <role>` | Start comment alone (`arch-review` / `lld-review` / `pr-review`) |
 | `sync-branch <n> [--unit epic]` | Reconcile the branch with its integration base; structured conflict result |
-| `merge-lld-doc <n>` | Publish a normal-epic child's clean `lld.md` onto the epic branch, then **advance** it to `development` (Stage set, Pipeline Status cleared — never claimed) |
+| `merge-lld-doc <n> [--unit issue\|epic]` | `--unit issue` (default, V1): publish a normal-epic child's clean `lld.md` onto the epic branch, then **advance** it to `development`. `--unit epic` (V2): verify the epic-level `lld.md` (already pushed directly to `origin/epic-<n>`) reached origin, then advance every Task `lld` just created. Both: Stage set, Pipeline Status cleared, never claimed |
 | `verify-exit <n> --expect-stage <s> [--pr <pr>] [--unit epic]` | Post-handoff state check |
 | `open-gate` / `check-gate` / `pass-gate` / `skip-gate` | Human-review gates (`references/gates.md`) |
 | `open-dev-pr <n> ...` | Draft PR + Stage=PR Review + handoff comment (posts **no** queue marker) |
@@ -560,15 +561,17 @@ still flows straight from `lld` to `development` on the next pick; nothing waits
 lld.md to the epic branch"). A child whose `lld-review` was recorded clean but whose
 Stage is still `LLD` has simply not had `merge-lld-doc` run yet: run it.
 
-**On a CLEAN `lld-review` of an Epic's lld.md (V2) — mechanics not yet built, flagging
-rather than guessing.** `lld` created the Task issues as part of this stage; there is
-no single "the child" to advance the way V1's `merge-lld-doc` does. The equivalent
-here needs to: publish `epic-<n>/lld.md` onto the epic branch, and make every
-newly-created Task (the functional ones and the two standing Integration-test/e2e-test
-ones) eligible for `list-parallel-ready` in the same pass. Whether that's a
-`merge-lld-doc` extended to handle N created issues instead of one, or a new command,
-is a real `sdlc_next.py` design question — do not invent a call shape here; confirm
-it when this part of Work-stream C is actually implemented.
+**On a CLEAN `lld-review` of an Epic's lld.md (V2)**: `record-design-review`, then
+`merge-lld-doc <epic-n> --unit epic` — built 2026-09-14. Unlike V1's per-child path,
+there is no separate child branch to publish *from*: `lld` already pushed
+`epic-<n>/lld.md` directly onto `origin/epic-<n>` as part of its own turn, so this
+call only verifies the doc actually reached origin, then advances **every** Task
+`lld` created under this Epic (functional and the two standing
+Integration-test/e2e-test ones alike) that has no Stage set yet — the same
+advance-not-claim field write V1 does for one child, looped over every Task this
+stage just created. Idempotent the same way: a Task already advanced on an earlier
+run is skipped, not re-touched. Go back to Step 1 / `list-parallel-ready` afterward —
+same scheduling discipline as V1, just handing out N fresh units instead of one.
 
 **Stage exit actions** — what each stage does last, every verdict branch — live in
 that stage's own `agents/sdlc-*.md`, with the routing table in

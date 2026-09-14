@@ -440,16 +440,29 @@ consequence of where it now starts from.
 
 ### Other prerequisites and open questions
 
-- **A `classify_unit` implementation must exist for whichever provider is in use
-  before Initiatives work at all** — for GitHub, the likely default is a real Issue
-  Type in the repo's type configuration (a repo-settings action, not a skill change),
-  but per the note above, a client could configure a label-based signal instead if
-  Issue Types aren't available on their plan.
-- **Doc-path resolution** in the orchestration code: on the Initiative path,
-  `architecture` needs to read `<docRoot>/initiative-<n>/product.md` (filtered by the
-  Epic's own scope carve-out) instead of expecting its own unit to have written a
-  `product.md`. On the engineering-driven path, there is no `product.md` to resolve at
-  all — `architecture` reads the Epic's own manually-written scope directly.
+- **`classify_unit` is built and defaults to labels** (`type:initiative`/`type:epic`/
+  `type:task` in the sample config), since custom GitHub Issue Types are
+  organization-level only and unavailable on a personal repo at any plan
+  (confirmed 2026-09-14) — see work-stream A's "Implemented" section. An org repo
+  that has Issue Types provisioned can switch each rule's `field` to `"issueType"`.
+- **Doc-path resolution — built.** `architecture`'s "What this Epic's requirements
+  source is" section reads `<docRoot>/initiative-<n>/product.md` (filtered by the
+  Epic's own scope carve-out) on the Initiative path, or the Epic's own
+  manually-written scope directly on the engineering-driven path (no `product.md`
+  to resolve at all).
+- **The `lld`-creates-Tasks → advance-to-`development` mechanic — built.**
+  `merge-lld-doc --unit epic` (2026-09-14): verifies the epic-level `lld.md` (which
+  `lld` already pushed directly to `origin/epic-<n>`, no gate sub-branch needed —
+  `lld` has no human gate) reached origin, then advances every Task `lld` created
+  under the Epic with no Stage set yet. 4 new regression tests, verified red
+  against pre-fix `sdlc_next.py`.
+- **`create-issue`'s hardcoded `Task` type — fixed.** Found while checking the
+  sample config was actually usable: `create-issue` unconditionally set every
+  created issue's type to `Task`, which would have silently mislabeled every Epic
+  the orchestrator cut. Now takes `type_name` (default `Task`, every V1 caller
+  unchanged) and a `--type` CLI flag; `set_issue_type` also now refuses clearly
+  instead of a bare `KeyError` when a type isn't provisioned in
+  `projectFields.issueTypeIds`.
 - **Overlap with Jira's native hierarchy** — Jira (Advanced Roadmaps) already models
   Initiative above Epic natively. If Jira is a near-term work-item target (work-stream
   A), this tier may be easier to model there than on GitHub's sub-issues — worth
