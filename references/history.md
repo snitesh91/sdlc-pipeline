@@ -119,6 +119,36 @@ shared `prefix` variable, branches now differ only in their actual suffix.
 None of these changed behavior — every existing test stayed green, byte-identical
 output where a test pinned exact comment text.
 
+## 2026-09-14 (d) — real-doc audit: restated facts in product.md, review-history ledgers in lld.md/architecture.md
+
+Operator asked for a read of real recent `product.md`/`architecture.md`/`lld.md`
+output, from a reviewer's-effort angle ("bigger content is difficult to review so
+write only what matters"), before touching the agent files further.
+
+**`product.md` restates the same fact across sections.** Epic #365's `product.md`
+stated its two-level-catalog shape and its 10-row limit four times each, across
+Background, Constraints, User Experience and Decisions Log, worded differently each
+time — no new information, just four places a later edit has to keep in sync. The
+template already asks for a compressed Decisions Log; execution drifted from it.
+Added a fifth rule to `sdlc-product.md`, "Say each fact once," with a before-handoff
+grep-for-restatement check.
+
+**`lld.md` (and, preventively, `architecture.md`) can grow a permanent ledger of its
+own review history.** Issue #494's `lld.md` reached 1,771 lines carrying three full
+"round N findings — disposition" sections baked in from its rework rounds — the same
+information already lives correctly, once, in each review's own handoff comment.
+No instruction was causing this (checked `sdlc-lld.md`, `references/rework.md`,
+`references/stage-playbooks.md` — none mention "disposition" or "round N"); it was
+emergent agent behavior with nothing telling it not to. Added an explicit rule to both
+`sdlc-lld.md` and `sdlc-architecture.md`: a rework round edits the design in place,
+disposition goes in the handoff comment, the document never carries its own review
+history. `architecture.md` itself was found lean in both epics sampled — not a current
+problem, the rule is added there as insurance against the same drift lld.md showed.
+
+`architecture.md` verdict: already appropriately dense, not a target — every line
+checked was decision-relevant (option tables, an explicit invariant proof, honest
+bet/fallback framing).
+
 ## 2026-09-13 — one rule, one home, chosen by scope
 
 Operator: *"the skill is getting complex. Agent is not honoring the agents and skills."*

@@ -199,6 +199,14 @@ and a `file:line` you have not opened in this session is a fabrication — ancho
 quote (`grep -n "<literal>" <path>`) rather than a bare number, because line numbers
 rot between revisions.
 
+**On a rework round, edit the design in place — do not add a permanent record of what
+each review round found.** The document is a current-state design for `development` to
+build from, not a ledger of its own review history; a "round 1 findings" section that
+ships in the file makes every future reader wade through settled review history to
+find the current design, and that information already lives once, correctly, in the
+review's own handoff comment. State what changed and why in your rework handoff; the
+document itself reads as if it were written this way the first time.
+
 ## If you are a context-reset replacement
 
 You may be dispatched as the **replacement** architect at the third bounce of an

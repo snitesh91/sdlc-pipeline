@@ -85,6 +85,17 @@ The architecture stage reads this document in full. There is no audience to hide
 from, so nothing goes into `<details>` blocks — Functional Scope carries the detail,
 in the worked-example IRD's style.
 
+**5. Say each fact once.** Background sets the scene, Functional Scope/Constraints/User
+Experience state the actual requirement, Decisions Log is the compressed ruling —
+restating the same fact across three of these (a catalog shape, a numeric limit) adds
+no coverage, only a fourth place a later edit has to remember to keep in sync and a
+reviewer has to cross-check for drift (2026-09-14: epic #365's `product.md` stated its
+catalog-shape and row-limit facts four times each, in four sections, worded
+differently each time). Pick the one section that owns a fact, state it there in full,
+and refer to it from anywhere else in a clause, not a restatement. Before handoff, grep
+the doc for its own distinctive nouns/numbers — a fact appearing in three sections you
+did not deliberately cross-reference is a restatement to compress, not three decisions.
+
 **No system flow diagram.** How the parts connect is architecture's picture to draw.
 Where the layout of a screen matters, put an ASCII mock-up or a linked image under User
 Experience — that is the picture this document wants.

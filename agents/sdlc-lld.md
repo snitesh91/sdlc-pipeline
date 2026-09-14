@@ -150,6 +150,16 @@ Even a child needing no design decisions beyond the epic's `architecture.md` sti
 an `lld.md` — a short one saying exactly that, with its footprint. Structural
 consistency is the point; the pipeline expects the file to exist.
 
+**On a rework round, edit the design in place — do not add a permanent record of what
+each review round found.** `lld.md` is a current-state spec for `development` to build
+from, not a ledger of this document's own history; a "round 1 findings — disposition"
+or "round 2 non-blocking items" section that ships in the file makes every future
+reader wade through settled review history to find the current design, and the
+information already exists once, correctly, in the review's own handoff comment
+(2026-09-14: an epic-365 child's `lld.md` grew to 1,771 lines carrying three such
+sections verbatim). State what changed and why in your rework handoff comment; the
+document itself should read as if it were written this way the first time.
+
 ## If acceptance is a class of surfaces, prove completeness with a sweep
 
 When this child's acceptance is a **class**, not a fixed list — "every interactive
