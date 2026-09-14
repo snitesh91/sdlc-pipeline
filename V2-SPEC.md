@@ -189,21 +189,20 @@ this; today it has neither.
   candidate competitors, operator curates/filters into a config-tracked list. Per-epic
   desk research starts from this list, not limited to it.
 
-### Open questions, work-stream B
+### Work-stream B — settled
 
-1. **Move the architecture-depth assessment to `architecture`?** Leaning yes (engineering
-   judgment, not product judgment) — but need to confirm first whether the orchestrator
-   today actually uses `product`'s YES/NO to *skip dispatching* `architecture` outright,
-   or whether `architecture` always runs and just reads it as a rigor hint. Changes
-   whether moving it is a pure relocation or also a routing-logic change.
-2. **Is `bookshaw-docs/requirements/IRD-001-platform-vision.md`'s shape what the V2
-   agent should assume, or a one-off?** Located (see above) but not yet reviewed for
-   content/format — needs reading before the V2 agent is written to depend on its shape
-   generically across repos, not just this one instance.
-3. **Research depth vs. cost** — operator confirmed cost control and agility are a real
-   priority, not just a nice-to-have. Depth should scale with the architecture-depth
-   assessment (or whatever replaces it) — needs an explicit stated budget/cap, not left
-   implicit.
+1. **Architecture-depth assessment moves to `architecture`.** Decided. Still need to
+   confirm, when writing the actual change, whether the orchestrator today uses
+   `product`'s YES/NO to skip dispatching `architecture` outright or just reads it as a
+   rigor hint — a mechanical detail of the move, not an open design question anymore.
+2. **`IRD-001-platform-vision.md`'s current shape doesn't need to be designed around.**
+   It was an early one-off; the skill's V2 install-time vision-gathering step defines
+   its own generic shape, and the operator will redo bookshaw's actual vision doc to
+   match when configuring V2 for this repo. Not a dependency for writing the V2 agent.
+3. **No numeric research budget — "be wise" is the actual instruction.** Scale desk
+   research effort to the size/risk of the work by judgment, not a stated cap. Written
+   into the agent as a real instruction (proportion research to the work), not left
+   implicit by omission.
 
 ---
 
@@ -228,9 +227,16 @@ Initiative (product-driven)
      issue body carries a pointer to the Initiative's IRD, plus its own explicit
      scope carve-out: which slice of the IRD this Epic covers.
 
-Engineering-driven work bypasses the Initiative/IRD path entirely -- either an
-"engineering initiative" or a bare Epic created directly (shape of this bypass:
-still undefined, see open questions).
+**Engineering-driven work bypasses the Initiative/IRD path entirely — settled.** No
+`product.md` at all. The Epic is created directly, and its scope is laid out manually
+(by the operator) in the Epic's own body — there is no IRD to derive it from. `Epic`
+still skips straight to `architecture`, which now carries a real responsibility it
+doesn't have on the Initiative path: **if the manually-laid-out scope is unclear,
+`architecture` asks the operator clarifying questions directly**, the same "ask before
+you assume" posture `product` has today, since there's no upstream IRD step to have
+caught the ambiguity first. An Initiative wrapper *may* still exist around an
+engineering-driven Epic, but if so it's a program-management/grouping artifact only —
+it does not imply a `product.md` gets written, and `architecture` does not read one.
 
 **Epic-cut rule: every Epic must be independently mergeable to main and independently
 shippable on its own.** This is the actual constraint on whoever cuts Epics from an
@@ -278,37 +284,37 @@ per-task IT entirely rather than scoping it. Confirmed intentional, not an overs
 becomes dead code in the V2 path** (still correct and live for any repo staying on
 V1's Epic/Child shape).
 
-### A real cascading consequence this creates, not yet designed
+### Completion-gate change — settled
 
-`sdlc-pr-review.md` and `sdlc-development.md`'s completion gates currently treat "no
-integration test for a risk the design flagged" as a real gap — "a unit test against
-a mock does not close an integration risk." In this model, a task legitimately has no
-integration test of its own by design; that's deferred to the epic-close IT task, not
-a gap in the task's own PR. `pr-review` needs an explicit rule change here, or it will
-incorrectly bounce every V2 task for a "missing" integration test that was never
-supposed to exist at that level.
+`sdlc-pr-review.md`'s (and `sdlc-development.md`'s) "no integration test for a
+design-flagged risk is a real gap" rule does not apply at task level in V2. **Decision:
+`pr-review` reviews what's present only** — it judges the task's own diff and its own
+unit tests on their own merits, and does not check for or bounce on the *absence* of
+integration coverage, since that's never supposed to exist at this level. The
+mock-doesn't-close-an-integration-risk discipline still holds, just relocated
+entirely to the epic-close Integration-test task, which is the one place it's now
+checked.
 
-### Prerequisites and open questions
+### Settled: task-creation ownership
 
-- **Who creates the Task issues under an Epic — `architecture` (as it creates children
-  today) or the new epic-level `lld`?** Not yet settled, and it changes the actual
-  shape of the `lld` rewrite: if `architecture` still creates Tasks (keeping
-  "depth goes down, not in" intact) and `lld` only designs against Tasks that already
-  exist, that's a small `lld` change (write one doc instead of N) plus a footprint
-  section per existing Task. If `lld` itself now creates the Tasks (since it's the
-  stage doing the per-task breakdown), `lld` absorbs a chunk of what `architecture`
-  does today, which is a bigger rewrite and arguably pulls `architecture` a layer
-  higher (pure epic-shape decisions only, no task boundaries at all). This blocks
-  writing the actual `sdlc-lld.md` V2 content until decided.
+**`lld` creates the Task issues**, not `architecture`. `architecture` stays pure
+epic-shape decisions with no task boundaries at all ("depth goes down, not in" now
+applies one layer higher than it does in V1); `lld` absorbs the per-task breakdown and
+issue creation that `architecture` used to do for children, since `lld` is the stage
+actually producing per-task design and footprints. This is a real rewrite of
+`sdlc-lld.md`'s procedure, not a small tweak — it gains a "create/size the Task issues"
+responsibility it never had at task level in V1.
+
+### Other prerequisites and open questions
+
 - **GitHub-side prerequisite** (unchanged from the earlier sketch): "Initiative" needs
   to be a real Issue Type in the repo's type configuration before the skill can
   reference it.
-- **Shape of the engineering-driven bypass** — is an "engineering initiative" a real
-  Initiative with a stripped-down IRD (skip market/competitor research, keep
-  scope/AC), or a wholly separate path? Still undefined.
-- **Doc-path resolution** in the orchestration code: `architecture` needs to read
-  `<docRoot>/initiative-<n>/product.md` (filtered by the Epic's own scope carve-out)
-  instead of expecting its own unit to have written a `product.md`.
+- **Doc-path resolution** in the orchestration code: on the Initiative path,
+  `architecture` needs to read `<docRoot>/initiative-<n>/product.md` (filtered by the
+  Epic's own scope carve-out) instead of expecting its own unit to have written a
+  `product.md`. On the engineering-driven path, there is no `product.md` to resolve at
+  all — `architecture` reads the Epic's own manually-written scope directly.
 - **Overlap with Jira's native hierarchy** — Jira (Advanced Roadmaps) already models
   Initiative above Epic natively. If Jira is a near-term work-item target (work-stream
   A), this tier may be easier to model there than on GitHub's sub-issues — worth
@@ -319,12 +325,13 @@ supposed to exist at that level.
 ## Sequencing recommendation (not yet agreed)
 
 Work-streams A and B are independent and could be built in either order or in parallel.
-Work-stream C depends on B being settled first (the orchestrator-created Epic list
-reads the IRD work-stream B's `product` agent produces) and has its own GitHub-config
-prerequisite regardless of sequencing. C also now forces one change onto work-stream
-B's own open question 1 (architecture-depth assessment relocation) and a new,
-not-yet-scoped change onto `sdlc-pr-review.md`/`sdlc-development.md`'s completion
-gates (see "cascading consequence" above) — so C is not purely additive once started,
-it edits things B and the base agent files already own. Nothing here commits to an
+Work-stream C depends on B being settled first on the Initiative path (the
+orchestrator-created Epic list reads the IRD work-stream B's `product` agent
+produces) — the engineering-driven path has no such dependency, since it never reads
+a `product.md` at all. C also edits things B and the base agent files already own: the
+architecture-depth-assessment relocation (now settled as part of B) lands inside
+`sdlc-architecture.md`, and the `pr-review`/`development` completion-gate change (now
+settled: review what's present only) lands inside those two files — so C is not purely
+additive once started. Nothing here commits to an
 order — flagging it only so the next session doesn't have to re-derive the
 dependency.
