@@ -603,6 +603,13 @@ class GitHub:
         return [n["number"] for n in nodes if n["state"] == "OPEN"]
 
     def set_issue_type(self, number: int, type_name: str):
+        if type_name not in ISSUE_TYPE_IDS:
+            raise GhError(
+                f"type_name={type_name!r} is not in projectFields.issueTypeIds "
+                f"(configured: {sorted(ISSUE_TYPE_IDS)}) -- V2's Epic/Initiative "
+                f"types need provisioning as real GitHub Issue Types (org-level, "
+                f"see V2-SPEC.md) and their GraphQL ids added to config before "
+                f"this call can set them; a bare KeyError here would hide that.")
         issue_id = self.issue_node_id(number)
         type_id = ISSUE_TYPE_IDS[type_name]
         self.graphql(_SET_ISSUE_TYPE_MUTATION.format(issue_id=issue_id, type_id=type_id))
@@ -4396,17 +4403,31 @@ def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
             "design_review": design_review}
 
 
-def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: list) -> dict:
-    """The one remaining path that creates a new issue (product splitting an
-    oversized issue -- see "Repo access" in references/operations.md). Enforces the "every issue
-    has a parent epic" invariant at its one entry point: sets Type: Task (a
-    split-off issue is never itself a fresh epic) and links it as a sub-issue of
-    `parent` immediately, rather than leaving that to a follow-up step that could
-    be skipped."""
+def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: list,
+                     type_name: str = "Task") -> dict:
+    """The one path that creates a new issue -- historically only `product`
+    splitting an oversized issue (see "Repo access" in references/operations.md),
+    always a Task. V2 (2026-09-14) reuses this same call one level up, for the
+    orchestrator cutting Epics from an approved Initiative -- `type_name` defaults
+    to `"Task"` for every existing V1 caller, unchanged, but a V2 caller creating
+    an Epic must pass `type_name="Epic"` explicitly.
+
+    **This is the write side of `classify_unit`'s read side** (`GitHub.
+    classify_unit`, config-driven via `pipeline.classification`): before this
+    fix, every issue this command created was hardcoded `Type: Task` regardless
+    of caller intent, so an Epic created here would misclassify as a Task the
+    moment anything read it back. If your `pipeline.classification` rule for a
+    kind is label-based rather than issueType-based, pass that label in `labels`
+    yourself -- this command sets the native Issue Type field, not a label, and
+    does not invent a label mapping on your behalf.
+
+    Enforces the "every issue has a parent" invariant at its one entry point:
+    sets the type and links it as a sub-issue of `parent` immediately, rather
+    than leaving that to a follow-up step that could be skipped."""
     number = gh.issue_create(title, body, labels)
-    gh.set_issue_type(number, "Task")
+    gh.set_issue_type(number, type_name)
     gh.add_sub_issue(parent, number)
-    return {"issue": number, "parent": parent, "type": "Task"}
+    return {"issue": number, "parent": parent, "type": type_name}
 
 
 def cmd_list_needs_human(gh: GitHub) -> dict:
@@ -4961,9 +4982,13 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("create-issue")
     p.add_argument("--title", required=True)
     p.add_argument("--body", required=True)
-    p.add_argument("--parent", type=int, required=True, help="Epic issue number this becomes a sub-issue of")
+    p.add_argument("--parent", type=int, required=True, help="Parent issue number this becomes a sub-issue of (an Epic for a Task, an Initiative for an Epic)")
     p.add_argument("--label", action="append", default=[], dest="labels")
-    p.set_defaults(func=lambda a: cmd_create_issue(get_work_item_provider(), a.title, a.body, a.parent, a.labels))
+    p.add_argument("--type", default="Task", dest="type_name",
+                    help="Native Issue Type to set (default Task; V2's orchestrator "
+                         "passes Epic when cutting Epics from an Initiative)")
+    p.set_defaults(func=lambda a: cmd_create_issue(get_work_item_provider(), a.title, a.body,
+                                                    a.parent, a.labels, a.type_name))
     p = sub.add_parser("mark-blocked")
     p.add_argument("issue", type=int)
     p.add_argument("--dep", type=int, required=True)

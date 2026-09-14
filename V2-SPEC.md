@@ -77,6 +77,33 @@ above; only the Work-Item Provider seam needed building now. Done, in
 stays exactly as deferred as before — the difference is there's now a real,
 tested contract for it to satisfy, not just a described one.
 
+### Found and fixed while checking: `create-issue` hardcoded every issue to `Task`
+
+Operator asked whether the sample config actually had usable field name/value
+config for classifying an Initiative on GitHub — checking that surfaced a real bug,
+not just a config gap: `cmd_create_issue` unconditionally called
+`gh.set_issue_type(number, "Task")`, correct when this command only ever split off
+Tasks (V1), but SKILL.md's new "orchestrator cuts Epics" step reuses this exact
+command one level up. Every Epic created that way would have been mislabeled
+`Task`, making it unclassifiable by `classify_unit` from the moment it was created.
+Fixed: `cmd_create_issue` takes `type_name` (default `"Task"`, unchanged for every
+V1 caller); `sdlc-lld.md`/`SKILL.md`'s Epic-cutting step now pass `--type Epic`
+explicitly. Also hardened `set_issue_type` to refuse with a clear message rather
+than a bare `KeyError` when the type isn't in `projectFields.issueTypeIds` — V2's
+Epic/Initiative types won't be provisioned as real GitHub Issue Types in most repos
+for a while yet.
+
+**Also resolved: custom GitHub Issue Types are an organization-level feature, not
+available on a personal (non-org) repo at any plan tier** (verified via web search,
+2026-09-14) — a real constraint for a personal open-source project. The sample
+config's `classification` now defaults to **labels** (`type:initiative`,
+`type:epic`, `type:task`), not Issue Types, since labels work identically on every
+repo with zero provisioning. `create-issue --type` alone only sets the native
+Issue Type field and does not invent a matching label — both `SKILL.md`'s and
+`sdlc-lld.md`'s creation steps now say to pass `--label` too when
+`pipeline.classification`'s rule for that kind is label-based, checked via
+`show-config` rather than assumed.
+
 ### The landscape has (at least) three seams, not one
 
 GitHub today does double duty as both the work-item tracker and the code host, which is

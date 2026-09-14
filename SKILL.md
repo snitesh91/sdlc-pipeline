@@ -136,9 +136,16 @@ subagent — reads the approved `initiative-<n>/product.md` and cuts it into Epi
   applied here to shippability rather than files.
 - Each Epic's issue body carries a pointer to the Initiative's IRD, plus its own
   explicit scope carve-out — the slice of the IRD this Epic covers.
-- `sdlc_next.py create-issue --parent <initiative-n>` per Epic (this call already
-  exists; using it at this altitude is new). Every Epic is a native sub-issue of its
-  Initiative, same invariant as Epic-number-mandatory below one level up.
+- `sdlc_next.py create-issue --parent <initiative-n> --type Epic` per Epic (this
+  call already exists; using it at this altitude, and the `--type` flag, is new).
+  **Also pass whatever `pipeline.classification.epic` actually checks** — read
+  `show-config` first: the sample config's default is label-based
+  (`--label type:epic`), because `--type` alone only sets the native GitHub Issue
+  Type field, and `create-issue` does not invent a label from the type name on its
+  own. Skipping this makes the Epic uncreated-in-vain from `classify_unit`'s point
+  of view — it exists, but nothing can tell it apart from a Task later. Every Epic
+  is a native sub-issue of its Initiative, same invariant as Epic-number-mandatory
+  below one level up.
 - This is the one point in the Initiative-driven flow that is **not** a subagent
   delegation — the orchestrator does it directly, the same way it already owns
   Step 1's routing decisions without delegating them.

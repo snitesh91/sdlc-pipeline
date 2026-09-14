@@ -5891,3 +5891,72 @@ def test_classify_unit_returns_other_when_rules_exist_but_none_match():
         assert gh.classify_unit(9) == "other"
     finally:
         sdlc_next.PIPELINE["classification"] = original
+
+
+def test_cmd_create_issue_defaults_to_task_type():
+    # Backward compat: every existing V1 caller passes no type_name and must
+    # keep getting Task, unchanged.
+    from sdlc_next import cmd_create_issue
+
+    calls = []
+
+    class FakeGH:
+        def issue_create(self, title, body, labels):
+            calls.append(("issue_create", title, body, labels))
+            return 42
+
+        def set_issue_type(self, number, type_name):
+            calls.append(("set_issue_type", number, type_name))
+
+        def add_sub_issue(self, parent_number, child_number):
+            calls.append(("add_sub_issue", parent_number, child_number))
+
+    result = cmd_create_issue(FakeGH(), "title", "body", 9, [])
+    assert result == {"issue": 42, "parent": 9, "type": "Task"}
+    assert ("set_issue_type", 42, "Task") in calls
+
+
+def test_cmd_create_issue_v2_passes_through_an_explicit_type():
+    # Positive control for the 2026-09-14 fix: before it, every issue created
+    # here was hardcoded Task regardless of caller intent, so an Epic created
+    # by the V2 orchestrator would misclassify as a Task. type_name must reach
+    # set_issue_type unchanged.
+    from sdlc_next import cmd_create_issue
+
+    calls = []
+
+    class FakeGH:
+        def issue_create(self, title, body, labels):
+            return 42
+
+        def set_issue_type(self, number, type_name):
+            calls.append(type_name)
+
+        def add_sub_issue(self, parent_number, child_number):
+            pass
+
+    result = cmd_create_issue(FakeGH(), "title", "body", 9, [], type_name="Epic")
+    assert result == {"issue": 42, "parent": 9, "type": "Epic"}
+    assert calls == ["Epic"]
+
+
+def test_set_issue_type_refuses_an_unconfigured_type_with_a_clear_error():
+    # Negative control: V2's Epic/Initiative types aren't provisioned as real
+    # GitHub Issue Types in most repos yet -- this must not surface as a bare
+    # KeyError with no context.
+    from sdlc_next import GitHub, GhError
+    import pytest
+    gh = GitHub(runner=ScriptedRunner({}))
+    with pytest.raises(GhError, match="not in projectFields.issueTypeIds"):
+        gh.set_issue_type(9, "Epic")
+
+
+def test_set_issue_type_still_works_for_a_configured_type():
+    # Positive control: an already-provisioned type (Task) is unaffected by the
+    # new guard.
+    from sdlc_next import GitHub
+    runner = ScriptedRunner({})
+    runner.prefix_responses[("gh", "api", "graphql")] = json.dumps(
+        {"data": {"repository": {"issue": {"id": "ISSUE_ID_1"}}}})
+    gh = GitHub(runner=runner)
+    gh.set_issue_type(9, "Task")  # must not raise

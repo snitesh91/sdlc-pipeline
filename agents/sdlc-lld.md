@@ -311,8 +311,12 @@ settled.** In the epic's own worktree. Read the epic's
 `<docRoot>/epic-<n>/architecture.md` as the design source of truth; the **first
 move** is the epic-wide fits-vs-deviates call. For every piece that fits: carve the
 tasks (see "How you carve tasks"), **create each Task issue**
-(`sdlc_next.py create-issue --parent <epic-n>`) with its scope and footprint already
-known, and write `<docRoot>/epic-<n>/lld.md` — no altitude requirement — with one
+(`sdlc_next.py create-issue --parent <epic-n>` — `Task` is already the default
+`--type`, but check `show-config`'s `pipeline.classification.task` and pass a
+matching `--label` too if it's label-based, e.g. `--label type:task`; `--type`
+alone only sets the native Issue Type field, not a label) with its scope and
+footprint already known, and write `<docRoot>/epic-<n>/lld.md` — no altitude
+requirement — with one
 subsection per Task, including each one's parseable `## Footprint`. Commit, push,
 short handoff comment. **Do not change the Stage field** — stays `LLD` while
 `lld-review` runs (one pass over the whole document, not one per task). For any piece
