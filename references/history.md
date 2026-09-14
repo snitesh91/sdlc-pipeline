@@ -4,6 +4,61 @@ Provenance for rules that would otherwise read as arbitrary. Newest first. Keep
 entries to a few lines; the rule itself lives in the spine or its reference file —
 this file records *why* and *when*.
 
+## 2026-09-14 — retrospective: model-tier revert, IT scoping, mechanism-proof gap, review recurrence
+
+**`product-review`/`arch-review` reverted from `fable` back to `opus`, repeating a
+lesson this file already recorded.** The 2026-09-12 move to `fable` (`6c691b5`) was
+reasoned as "a cheaper adversarial pass" — the same premise the 2026-08-28 entry
+above already disproved for `architecture`/`arch-review`: Fable is $10/$50 per MTok
+against Opus's $5/$25, 2x costlier in both directions, not cheaper. That 2026-08-24
+pin was reverted four days later on exactly this evidence; the 2026-09-12 retro
+re-introduced it anyway without checking this file for a prior decision on the same
+axis. Operator: noticed via unexpectedly fast weekly-quota burn after the 2026-09-12
+change. Fix: both roles back to `opus` in `SKILL.md`'s model table (the code default
+in `scripts/sdlc_next.py` was never actually changed to `fable` — only the doc was,
+so the two had silently disagreed since 2026-09-12). The 2026-09-12(d) Gate-B
+fable-confidence-skip carve-out is moot now that `arch-review` is opus again.
+
+**Backend `test:it` scoped to touched domains during `development`.** Bookshaw's
+`test:it` is one flat `jest --testPathPattern=test/` command — every child ran all 17
+`test/<domain>` suites regardless of what it touched; the `sdlc-development.md`
+"affected-graph scoping" prose assumed Turborepo's affected-package filter narrowed
+this, but nothing wires a `src/modules/<x>` package to its `test/<x>` folder. Checked
+against epic #159's approved architecture (`epic-159` branch): its CI-GATE child
+audits `backend-ci.yml`/`frontend-ci.yml` *trigger* path filters (package-level: does
+backend CI run at all) and keeps CI's own IT run as the full suite — a different
+layer from this fix, which is scoped to what the `development` stage agent runs
+*locally*, before a PR exists. No overlap. Fix: map touched `src/modules/<x>` /
+`src/common` dirs to matching `test/<x>` folders and scope the local run to those;
+a shared/`src/common` or migration touch falls back to the full suite.
+
+**Mechanism-correctness claims need a proof control, same bar as completeness
+sweeps.** Issues #530 (4 rework rounds) and #513 (redesign, 2 rounds) — every single
+blocking `lld-review` finding across both was the same class: `lld.md` asserted how a
+runtime/library mechanism behaves (Postgres connection pooling, jest's mock-registry
+scoping, pdfmake's font encoding, Docker mount-path identity, CI env-var resolution
+order) from reasoning, disproved the moment the reviewer actually ran a throwaway
+repro. `sdlc-lld.md` already mandates proof-by-execution for search-completeness
+claims ("only/every/no other") but had no equivalent for mechanism claims. Fix: added
+a parallel rule in `sdlc-lld.md` — a mechanism-behavior claim needs a throwaway
+positive+negative control run before submission, not an assertion from reasoning.
+
+**Review recurrence: state why the earlier round missed it, before bouncing again.**
+Issue #521 bounced 4x on the same defect class (2x `lld-review`, 2x `pr-review`) —
+every bounce was a real, proven defect, and the reviewer flagged "escalation
+candidate" at round 2 and 3, but the pipeline kept re-dispatching `development`
+instead of escalating or rerouting; the generic 3-strike replace counter never fired
+because it counts total bounces, not same-class recurrence. Separately: nitpick/docs
+findings were already correctly non-blocking everywhere (`product-review`,
+`arch-review`/`lld-review`, `pr-review` all already split Blocking/Non-blocking with
+"style, naming, formatting are never blocking" — nothing to fix there; the actual gap
+was real defects recurring, not nitpicks over-bouncing). Fix: `sdlc-product-review.md`,
+`sdlc-design-review.md`, `sdlc-pr-review.md` — when a blocking finding repeats an
+earlier round's defect class on the same unit, the writeup states why the earlier
+round missed it (out of scope, a new code path the fix introduced, needed execution
+to surface, reviewer miss) before bouncing again; a genuine recurring blind spot
+escalates to `needs-human`/reroute regardless of the generic strike count.
+
 ## 2026-09-13 — one rule, one home, chosen by scope
 
 Operator: *"the skill is getting complex. Agent is not honoring the agents and skills."*

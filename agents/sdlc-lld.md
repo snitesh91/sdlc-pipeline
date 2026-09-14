@@ -178,6 +178,31 @@ Instead, in the `lld` itself:
 Full rule and the incident behind it: `references/stage-playbooks.md`, "A completeness
 claim over a footprint is a sweep, not a list".
 
+## A mechanism claim needs a proof control, not reasoning
+
+The sweep rule above closes *completeness* claims ("every X"). A different, equally
+common way `lld` bounces `lld-review` is a **mechanism** claim — a stated belief about
+how a runtime or library actually behaves, reasoned from familiarity with it rather
+than checked against this codebase's real environment: connection/session pooling
+semantics, a mock or patch's interception scope, a file format's byte-level encoding,
+container/mount-path identity, environment-variable resolution order and timing.
+Issues #530 and #513 (2026-09-14 retro) bounced 4 and 2 rounds respectively, and every
+single blocking finding across both was this same class: the design asserted a
+mechanism from reasoning, and `lld-review` disproved it the moment it actually ran a
+throwaway reproduction — a DB-name hash that collides under the real Docker mount
+topology, an advisory lock taken through a pooled connection instead of a session-pinned
+one, a PDF library's glyph encoding making a literal string search never match, a boundary
+check patched onto the wrong module-scoped mock object, a fingerprint keyed on `mtime`
+that breaks on any other checkout.
+
+Before stating a mechanism claim in `lld.md`, build a throwaway positive-and-negative
+control that proves it — the same evidence bar the sweep rule already demands for
+completeness claims. A positive control confirms the mechanism behaves as claimed under
+the condition that should trigger it; a negative control confirms it does not fire when
+that condition is absent. Paste the repro and its output, not just the conclusion. A
+mechanism claim with no control behind it is a guess wearing a specification's
+confidence — reason enough for `lld-review` to bounce it on sight.
+
 ## Check yourself against the siblings
 
 Before finishing, compare your `## Footprint` against the footprints of the epic's

@@ -402,6 +402,14 @@ before merging or resuming anyone: `sdlc_next.py record-pr-review <n> --pr <pr>
   pairing; on the third bounce dispatch the context-reset replacement `development`
   agent, on the sixth check the test-only merge-and-file exception above, else
   `mark-needs-human` and park.
+  **If a finding is the same defect class as an earlier round's on this PR** (check
+  prior handoff comments), say why the earlier round missed it before bouncing again
+  — out of scope for that round's layers, a new code path the fix introduced, or a
+  genuine miss. A same-class recurrence with no new trigger is an escalation
+  candidate on its own terms, regardless of which strike it lands on — the 3rd/6th
+  counts above are on *total* bounces and will not surface this by themselves
+  (2026-09-14 retro: #521 bounced 4x on the identical defect class before anyone
+  escalated it).
 - **Deeper problem** → standing-epic child: resume `product` (or `architecture`);
   normal-epic child: resume `lld` if task-local, or the epic deviation escalation
   if it contradicts the epic's design. PR stays draft meanwhile. If the resumed

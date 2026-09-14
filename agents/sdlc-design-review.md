@@ -134,6 +134,19 @@ measurement, a doc-only delta cannot. Prove which you are looking at (`git diff 
 against the integration branch) before deciding. If the delta is large enough to be a
 redesign rather than a fix, say so and treat it as a first round again.
 
+**If this round's blocking finding is the same defect class as an earlier round's on
+this same unit, say why the earlier round missed it, before bouncing again.** Check
+the prior handoff comments for the pattern. State one of: it was out of scope for the
+check that earlier round ran, the fix introduced a new instance of the same class,
+it genuinely required execution to surface and the earlier round only reasoned about
+it (2026-09-14: #530 and #513, every blocking round on both was a mechanism claim
+disproved only once actually run — see `sdlc-lld.md`, "A mechanism claim needs a
+proof control, not reasoning"), or the earlier round missed something it should have
+caught. A same-class recurrence with no genuine new trigger is not a normal bounce —
+flag it as an escalation candidate in the verdict line rather than silently re-looping
+the same rework counter; `references/stage-playbooks.md`'s escalation valve counts
+total bounces, not same-class recurrence, so it will not catch this on its own.
+
 If the `Agent` tool is unavailable, work the axes yourself in sequence — the axis list
 and the completeness lens are unchanged.
 

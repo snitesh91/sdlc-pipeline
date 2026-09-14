@@ -467,6 +467,21 @@ before `open-dev-pr`; the **full** suite run once at epic close. Note the blind 
 raw cross-table SQL against tables a package does not own is invisible to both
 boundary lint and the affected graph, so the epic-close full run stays its backstop.
 
+**A Turborepo affected-package filter does not by itself scope an IT command that
+targets a flat test directory.** `turbo run test --filter` narrows which *packages*
+a task runs for; if that package's own IT command is one flat invocation over its
+whole `test/` tree (e.g. `jest --testPathPattern=test/`), the filter changes nothing
+about how much of that tree runs (2026-09-14: every child was running the full
+17-suite backend IT battery regardless of what it touched, because bookshaw's
+`test:it` has exactly this shape). Where the package's test directory mirrors its
+source layout one level down (`test/<domain>/` alongside `src/modules/<domain>/`),
+scope the intermediate IT run to the `test/<domain>` folders matching the
+`src/modules/<domain>` (or equivalent) dirs the diff touches — pass those paths to
+the test runner's own path filter, not a package-level one. A touch to shared code
+(`src/common`, a migration, anything outside a single domain) has no bounded blast
+radius by this convention — fall back to the full IT run for that package instead of
+guessing which domains it could affect.
+
 **Completion gates — all of them before the handoff, not after.** Each exists because
 it was skipped once and something shipped broken:
 

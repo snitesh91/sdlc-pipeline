@@ -83,6 +83,16 @@ findings you already made — work the delta yourself (`git diff` against the in
 branch to prove its shape). If the delta is a redesign rather than a fix, treat it as a
 first round again. If the `Agent` tool is unavailable, work the axes yourself in sequence.
 
+**If this round's blocking finding is the same defect class as an earlier round's on
+this same unit, say why the earlier round missed it, before bouncing again.** Check
+the prior handoff comments. State one of: out of scope for that round's check, the fix
+introduced a new instance of the same class, it required something the earlier round
+did not do (re-reading the codebase, not just the prose), or the earlier round missed
+it outright. A same-class recurrence with no genuine new trigger is an escalation
+candidate — say so in the verdict line rather than silently re-looping; the generic
+escalation valve counts total bounces, not same-class recurrence, so it will not catch
+this on its own (2026-09-14 retro).
+
 ## Discipline
 
 - **Cite `file:line` on every finding** — the doc's line, the code's line, or both. If you
