@@ -158,6 +158,12 @@
       "development": "sonnet",
       "pr-review": "opus"
     },
+    "workItemProvider": {
+      "_comment": "V2 (2026-09-14): which WorkItemProvider get_work_item_provider() returns. Only \"github\" is implemented -- Jira is a documented seam (V2-SPEC.md, work-stream A), not built. Naming anything else is a refusal, not a silent fallback.",
+      "type": "github"
+    },
+    "_classification_comment": "V2: how GitHub.classify_unit tells an Initiative from an Epic from a Task, keyed \"initiative\"/\"epic\"/\"task\". Empty by default (classify_unit returns \"other\" rather than guessing) until real Issue Types or labels are provisioned, e.g. \"classification\": {\"initiative\": {\"field\": \"issueType\", \"value\": \"Initiative\"}}.",
+    "classification": {},
     "docTemplates": "_templates",
     "profiles": [
       {

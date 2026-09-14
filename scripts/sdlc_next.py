@@ -31,7 +31,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol, runtime_checkable
 
 CONFIG_FILENAME = "sdlc-pipeline.config.json"
 
@@ -219,6 +219,17 @@ _PIPELINE_DEFAULTS = {
     "models": {"product": "opus", "product-review": "opus", "architecture": "opus",
                "arch-review": "opus", "lld": "sonnet", "lld-review": "opus",
                "development": "sonnet", "pr-review": "opus"},
+    # V2 (2026-09-14): how GitHub.classify_unit tells an Initiative from an Epic
+    # from a Task. Empty by default -- classify_unit returns "other" rather than
+    # guessing until a client provisions real Issue Types (or labels) and lists
+    # them here, e.g. {"initiative": {"field": "issueType", "value": "Initiative"},
+    # "epic": {"field": "issueType", "value": "Epic"}, "task": {"field":
+    # "issueType", "value": "Task"}}. See WorkItemProvider.classify_unit.
+    "classification": {},
+    # V2 (2026-09-14): which WorkItemProvider implementation get_work_item_provider()
+    # returns. Only "github" exists -- Jira is a documented seam (V2-SPEC.md,
+    # work-stream A), not built. Naming anything else is a refusal, not a fallback.
+    "workItemProvider": {"type": "github"},
     "docTemplates": "_templates",
     # Behavioural profiles, matched to an epic by label (ordered; first hit wins,
     # `"*"` is the terminal catch-all). Each profile is a bundle of toggles that
@@ -385,6 +396,57 @@ def _default_runner(argv: list) -> str:
     return result.stdout
 
 
+@runtime_checkable
+class WorkItemProvider(Protocol):
+    """The work-item-tracker contract every `cmd_*` function is written against.
+    `GitHub` is the only implementation today (2026-09-14) -- this Protocol exists
+    so a second one (Jira, named in V2-SPEC.md's work-stream A) can be dropped in
+    without changing a single `cmd_*` function, not because a second one is built
+    yet. Deliberately narrow: **issue/work-item management only.** PR/branch/CI
+    methods (`pr_*`, `branch_*_by`, `path_on_ref`, `graphql`) are Code-Host concerns,
+    scoped out of this contract on purpose -- V2-SPEC.md's decision was git-protocol
+    operations only, PR/merge/CI mechanics staying hardcoded to github.com, so
+    there is deliberately no `CodeHostProvider` seam here to match.
+
+    A structural (`Protocol`) contract, not an ABC: nothing has to inherit from
+    this to satisfy it, duck typing already does -- `GitHub` was never changed to
+    conform, it already did. This documents the contract explicitly instead of
+    leaving it implicit in whatever `GitHub` happens to expose."""
+
+    def issue_list(self) -> list: ...
+    def issue_view(self, number: int) -> dict: ...
+    def issue_edit(self, number: int, add_labels: list = (), remove_labels: list = (),
+                    add_assignees: list = (), remove_assignees: list = ()) -> None: ...
+    def issue_node_id(self, number: int) -> str: ...
+    def issue_fields(self, number: int) -> dict: ...
+    def issue_epic_info(self, number: int) -> dict: ...
+    def closed_issue_count(self) -> int: ...
+    def issue_create(self, title: str, body: str, labels: list) -> int: ...
+    def issue_comment(self, number: int, body: str) -> None: ...
+    def issue_close(self, number: int) -> None: ...
+    def project_item_id(self, number: int) -> Optional[str]: ...
+    def set_project_status(self, number: int, status: str) -> None: ...
+    def blocked_by(self, number: int) -> list: ...
+    def add_blocked_by(self, issue_number: int, blocking_number: int) -> None: ...
+    def blocking(self, number: int) -> list: ...
+    def set_issue_type(self, number: int, type_name: str) -> None: ...
+    def set_stage_field(self, number: int, stage: str) -> None: ...
+    def set_pipeline_status_field(self, number: int, status: str) -> None: ...
+    def clear_stage_and_status_fields(self, number: int) -> None: ...
+    def clear_stage_field(self, number: int) -> None: ...
+    def clear_pipeline_status_field(self, number: int) -> None: ...
+    def add_sub_issue(self, parent_number: int, child_number: int) -> None: ...
+
+    def classify_unit(self, number: int) -> str:
+        """Is `number` an "initiative", "epic", "task", or "other"? V2's hierarchy
+        needs this answerable per-issue rather than only ever caller-asserted
+        (V1's `--unit epic` flag). Each provider implements its own signal --
+        GitHub's below reads `pipeline.classification` config; Jira would read its
+        native Initiative/Epic/Story hierarchy level instead. See V2-SPEC.md,
+        "classify_unit is part of this contract, not a Layer-1 assumption"."""
+        ...
+
+
 class GitHub:
     """The only place gh/GraphQL subprocess calls happen. Inject a fake `runner` in tests."""
 
@@ -458,6 +520,37 @@ class GitHub:
         node = data["repository"]["issue"]
         node["labels"] = node["labels"]["nodes"]
         return node
+
+    def classify_unit(self, number: int) -> str:
+        """GitHub's implementation of the `WorkItemProvider.classify_unit` contract
+        (see there for why this exists). Reads `pipeline.classification` from
+        config -- a dict keyed `"initiative"|"epic"|"task"`, each value
+        `{"field": "issueType"|"label", "value": "<name>"}`. A client without
+        native GitHub Issue Types provisioned for these can classify by label
+        instead, with no code change here.
+
+        Deliberately independent of `is_epic()`/`resolve_profile()` (V1's
+        Feature-type-plus-no-parent heuristic) -- V2 is a different lifecycle, not
+        an extension of V1's, and entangling the two risks regressing V1's
+        still-live profile matching for a hierarchy tier V1 never had.
+
+        Returns "other" when no configured rule matches, never a guessed default
+        -- a repo that hasn't provisioned this classification yet gets an honest
+        "don't know" (`references/history.md` is full of what a wrong guess
+        costs), not a silent misroute into the wrong stage's lifecycle."""
+        rules = PIPELINE.get("classification", {})
+        if not rules:
+            return "other"
+        info = self.issue_epic_info(number)
+        it = issue_type(info)
+        labels = {l["name"] for l in info.get("labels", [])}
+        for kind, rule in rules.items():
+            field, value = rule.get("field"), rule.get("value")
+            if field == "issueType" and it == value:
+                return kind
+            if field == "label" and value in labels:
+                return kind
+        return "other"
 
     def project_item_id(self, number: int) -> Optional[str]:
         """The Projects-v2 item id for `number` within the board (PROJECT_NUMBER)
@@ -716,6 +809,21 @@ class GitHub:
     def graphql(self, query: str) -> dict:
         out = self._run(["gh", "api", "graphql", "-f", f"query={query}"])
         return json.loads(out)["data"]
+
+
+def get_work_item_provider(runner: Runner = _default_runner) -> WorkItemProvider:
+    """The one place a `WorkItemProvider` gets instantiated -- every CLI command
+    calls this instead of `GitHub()` directly, so `pipeline.workItemProvider.type`
+    decides which provider runs without touching a single `cmd_*` function. Only
+    `"github"` is implemented (2026-09-14) -- Jira is a documented seam
+    (V2-SPEC.md, work-stream A), not built. Naming anything else is a clear
+    refusal, not a silent fallback to GitHub -- that would run against the wrong
+    tracker without anyone noticing."""
+    provider = PIPELINE.get("workItemProvider", {}).get("type", "github")
+    if provider == "github":
+        return GitHub(runner=runner)
+    raise GhError(f"pipeline.workItemProvider.type={provider!r} is not implemented -- "
+                  f"only 'github' exists today (see V2-SPEC.md, work-stream A)")
 
 
 def label_names(issue: dict) -> set:
@@ -4606,7 +4714,7 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("next-action")
     p.add_argument("epic", type=int, help="The epic issue number to drive end-to-end -- required, "
                                            "see \"Epic number is mandatory\" in SKILL.md")
-    p.set_defaults(func=lambda a: cmd_next_action(GitHub(), a))
+    p.set_defaults(func=lambda a: cmd_next_action(get_work_item_provider(), a))
     p = sub.add_parser("list-ready-for-review",
                         help="Up to PR_REVIEW_PARALLELISM of this epic's children whose draft PR "
                              "is finished, handed off by development, and not yet reviewed this "
@@ -4615,7 +4723,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--limit", type=int, default=None,
                     help=f"How many PRs to return (default: PR_REVIEW_PARALLELISM = "
                          f"{PR_REVIEW_PARALLELISM})")
-    p.set_defaults(func=lambda a: cmd_list_ready_for_review(GitHub(), a.epic, a.limit))
+    p.set_defaults(func=lambda a: cmd_list_ready_for_review(get_work_item_provider(), a.epic, a.limit))
     p = sub.add_parser("list-parallel-ready",
                         help="Up to DEV_LANE_PARALLELISM of this epic's lld/development/testing "
                              "children safe to start/resume concurrently, each in its own worktree "
@@ -4627,7 +4735,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--limit", type=int, default=None,
                     help=f"Total concurrent children allowed (default: DEV_LANE_PARALLELISM = "
                          f"{DEV_LANE_PARALLELISM})")
-    p.set_defaults(func=lambda a: cmd_list_parallel_ready(GitHub(), a.repo_path, a.epic, a.limit))
+    p.set_defaults(func=lambda a: cmd_list_parallel_ready(get_work_item_provider(), a.repo_path, a.epic, a.limit))
     p = sub.add_parser("list-design-ready",
                         help="Up to DESIGN_LANE_PARALLELISM of this STANDING epic's product/"
                              "architecture children safe to start/resume concurrently, each in its "
@@ -4640,7 +4748,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--limit", type=int, default=None,
                     help=f"Total concurrent design-stage children allowed (default: "
                          f"DESIGN_LANE_PARALLELISM = {DESIGN_LANE_PARALLELISM})")
-    p.set_defaults(func=lambda a: cmd_list_design_ready(GitHub(), a.repo_path, a.epic, a.limit))
+    p.set_defaults(func=lambda a: cmd_list_design_ready(get_work_item_provider(), a.repo_path, a.epic, a.limit))
     p = sub.add_parser("handoff-to-pr-review",
                         help="development's exit action once its suites are green: posts the "
                              "canonical development->pr-review marker that queues this PR for "
@@ -4649,7 +4757,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--summary", required=True,
                     help="One sentence: what was built and tested, and the result")
-    p.set_defaults(func=lambda a: cmd_handoff_to_pr_review(GitHub(), a.issue, a.pr, a.summary))
+    p.set_defaults(func=lambda a: cmd_handoff_to_pr_review(get_work_item_provider(), a.issue, a.pr, a.summary))
     p = sub.add_parser("record-pr-review",
                         help="Record a pr-review pass's outcome on the issue (last action of "
                              "every review, before merge-pr or a rework resume)")
@@ -4663,7 +4771,7 @@ def main(argv: Optional[list] = None) -> int:
                          "round's on this PR -- the mechanical escalation signal, not a "
                          "sentence in the verdict prose")
     p.set_defaults(func=lambda a: cmd_record_pr_review(
-        GitHub(), a.issue, a.pr, a.outcome, a.summary, a.same_class_recurrence))
+        get_work_item_provider(), a.issue, a.pr, a.outcome, a.summary, a.same_class_recurrence))
     p = sub.add_parser("record-local-ci",
                         help="development's evidence-carrying attestation that a main-only "
                              "suite (backend/frontend) passed locally against a given commit -- "
@@ -4681,7 +4789,7 @@ def main(argv: Optional[list] = None) -> int:
                     help="Path to a file holding that run's own captured stdout/stderr; its "
                          "tail is embedded in the attestation comment. A summary is not "
                          "accepted in its place")
-    p.set_defaults(func=lambda a: cmd_record_local_ci(GitHub(), a.pr, a.suite, a.sha,
+    p.set_defaults(func=lambda a: cmd_record_local_ci(get_work_item_provider(), a.pr, a.suite, a.sha,
                                                        a.command, a.output))
     p = sub.add_parser("record-design-review",
                         help="Record an arch-review/lld-review outcome on the unit (last action "
@@ -4697,19 +4805,19 @@ def main(argv: Optional[list] = None) -> int:
                          "round's on this unit -- the mechanical escalation signal, "
                          "not a sentence in the verdict prose")
     p.set_defaults(func=lambda a: cmd_record_design_review(
-        GitHub(), a.issue, a.role, a.outcome, a.summary, a.unit, a.same_class_recurrence))
+        get_work_item_provider(), a.issue, a.role, a.outcome, a.summary, a.unit, a.same_class_recurrence))
     p = sub.add_parser("check-gate")
     p.add_argument("issue", type=int)
-    p.set_defaults(func=lambda a: cmd_check_gate(GitHub(), a))
+    p.set_defaults(func=lambda a: cmd_check_gate(get_work_item_provider(), a))
     p = sub.add_parser("claim")
     p.add_argument("issue", type=int)
     p.add_argument("--role", required=True)
-    p.set_defaults(func=lambda a: cmd_claim(GitHub(), a.issue, a.role))
+    p.set_defaults(func=lambda a: cmd_claim(get_work_item_provider(), a.issue, a.role))
     p = sub.add_parser("start-comment")
     p.add_argument("issue", type=int)
     p.add_argument("--role", required=True,
                    choices=["product-review", "arch-review", "lld-review", "pr-review", "testing"])
-    p.set_defaults(func=lambda a: cmd_start_comment(GitHub(), a.issue, a.role))
+    p.set_defaults(func=lambda a: cmd_start_comment(get_work_item_provider(), a.issue, a.role))
     p = sub.add_parser("open-gate")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
@@ -4720,7 +4828,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--summary", required=True)
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
     p.set_defaults(func=lambda a: cmd_open_gate(
-        GitHub(), a.repo_path, a.issue, a.title, a.doc, a.next_stage, a.summary, a.unit))
+        get_work_item_provider(), a.repo_path, a.issue, a.title, a.doc, a.next_stage, a.summary, a.unit))
     p = sub.add_parser("pass-gate")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
@@ -4728,14 +4836,14 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--gate-pr", type=int, required=True)
     p.add_argument("--stage", required=True, choices=["product", "architecture"])
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
-    p.set_defaults(func=lambda a: cmd_pass_gate(GitHub(), a.repo_path, a.issue, a.gate_pr, a.stage, a.unit))
+    p.set_defaults(func=lambda a: cmd_pass_gate(get_work_item_provider(), a.repo_path, a.issue, a.gate_pr, a.stage, a.unit))
     p = sub.add_parser("skip-gate")
     p.add_argument("issue", type=int)
     p.add_argument("--stage", required=True, choices=["architecture"])
     p.add_argument("--confidence", type=int, required=True)
     p.add_argument("--summary", required=True)
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
-    p.set_defaults(func=lambda a: cmd_skip_gate(GitHub(), a.issue, a.stage, a.confidence, a.summary, a.unit))
+    p.set_defaults(func=lambda a: cmd_skip_gate(get_work_item_provider(), a.issue, a.stage, a.confidence, a.summary, a.unit))
     p = sub.add_parser("auto-pass-gate-a",
                         help="Advance past Gate A with no human review when the epic's "
                              "profile sets requiresHumanGateA:false (after a clean product-review)")
@@ -4743,30 +4851,30 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--stage", default="product", choices=["product"])
     p.add_argument("--summary", required=True)
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
-    p.set_defaults(func=lambda a: cmd_auto_pass_gate_a(GitHub(), a.issue, a.stage, a.summary, a.unit))
+    p.set_defaults(func=lambda a: cmd_auto_pass_gate_a(get_work_item_provider(), a.issue, a.stage, a.summary, a.unit))
     p = sub.add_parser("auto-pass-gate")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--repo-path", default=".")
-    p.set_defaults(func=lambda a: cmd_auto_pass_gate(GitHub(), a.repo_path, a.pr))
+    p.set_defaults(func=lambda a: cmd_auto_pass_gate(get_work_item_provider(), a.repo_path, a.pr))
     p = sub.add_parser("mark-feedback-received")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--author", required=True, help="login of the comment/review author")
     p.add_argument("--body", default="", help="comment/review body text (empty = no-op skip)")
-    p.set_defaults(func=lambda a: cmd_mark_feedback_received(GitHub(), a.pr, a.author, a.body))
+    p.set_defaults(func=lambda a: cmd_mark_feedback_received(get_work_item_provider(), a.pr, a.author, a.body))
     p = sub.add_parser("mark-feedback-addressed")
     p.add_argument("issue", type=int)
-    p.set_defaults(func=lambda a: cmd_mark_feedback_addressed(GitHub(), a.issue))
+    p.set_defaults(func=lambda a: cmd_mark_feedback_addressed(get_work_item_provider(), a.issue))
     p = sub.add_parser("mark-todo")
     p.add_argument("issue", type=int)
-    p.set_defaults(func=lambda a: cmd_mark_todo(GitHub(), a.issue))
+    p.set_defaults(func=lambda a: cmd_mark_todo(get_work_item_provider(), a.issue))
     p = sub.add_parser("mark-issue-closed")
     p.add_argument("issue", type=int)
-    p.set_defaults(func=lambda a: cmd_mark_issue_closed(GitHub(), a.issue))
+    p.set_defaults(func=lambda a: cmd_mark_issue_closed(get_work_item_provider(), a.issue))
     p = sub.add_parser("pause-for-epic-regate")
     p.add_argument("issue", type=int)
     p.add_argument("--epic", type=int, required=True)
     p.add_argument("--gate-pr", type=int, required=True)
-    p.set_defaults(func=lambda a: cmd_pause_for_epic_regate(GitHub(), a.issue, a.epic, a.gate_pr))
+    p.set_defaults(func=lambda a: cmd_pause_for_epic_regate(get_work_item_provider(), a.issue, a.epic, a.gate_pr))
     p = sub.add_parser("verify-exit")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
@@ -4775,7 +4883,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--pr", type=int, default=None)
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
     p.set_defaults(func=lambda a: cmd_verify_exit(
-        GitHub(), a.repo_path, a.issue, a.expect_stage, a.pr, a.unit))
+        get_work_item_provider(), a.repo_path, a.issue, a.expect_stage, a.pr, a.unit))
     p = sub.add_parser("cite",
                         help="Generate a citation block by reading the real file (or "
                              "git show <rev>:<path>) -- selects the target fragment by "
@@ -4808,7 +4916,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("number", type=int)
     p.add_argument("--unit", choices=["issue", "epic"], default="issue")
     p.add_argument("--repo-path", default=".", help="The shared main checkout")
-    p.set_defaults(func=lambda a: cmd_worktree_add(GitHub(), a.number, a.unit, a.repo_path))
+    p.set_defaults(func=lambda a: cmd_worktree_add(get_work_item_provider(), a.number, a.unit, a.repo_path))
 
     p = sub.add_parser("sync-skill",
                         help="Bump the skill submodule to --ref (default origin/main) "
@@ -4824,7 +4932,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--repo-path", default=None,
                     help="Any path inside the repository (base for the worktree map); the command operates in the branch's own live worktree or an ephemeral one, never the main checkout")
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
-    p.set_defaults(func=lambda a: cmd_sync_branch(GitHub(), a.repo_path, a.issue, a.unit))
+    p.set_defaults(func=lambda a: cmd_sync_branch(get_work_item_provider(), a.repo_path, a.issue, a.unit))
     p = sub.add_parser("merge-lld-doc",
                         help="Publish a normal-epic child's lld.md onto its epic branch as soon "
                              "as lld-review is CLEAN, then advance its Stage to development "
@@ -4833,43 +4941,43 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
                     help="Any path inside the repository; the doc is published from the epic branch's own live worktree or an ephemeral one, never the main checkout")
-    p.set_defaults(func=lambda a: cmd_merge_lld_doc(GitHub(), a.repo_path, a.issue))
+    p.set_defaults(func=lambda a: cmd_merge_lld_doc(get_work_item_provider(), a.repo_path, a.issue))
     p = sub.add_parser("open-dev-pr")
     p.add_argument("issue", type=int)
     p.add_argument("--title", required=True)
     p.add_argument("--body", required=True)
     p.add_argument("--summary", required=True)
-    p.set_defaults(func=lambda a: cmd_open_dev_pr(GitHub(), a.issue, a.title, a.body, a.summary))
+    p.set_defaults(func=lambda a: cmd_open_dev_pr(get_work_item_provider(), a.issue, a.title, a.body, a.summary))
     p = sub.add_parser("pr-checks")
     p.add_argument("pr", type=int)
-    p.set_defaults(func=lambda a: cmd_pr_checks(GitHub(), a.pr))
+    p.set_defaults(func=lambda a: cmd_pr_checks(get_work_item_provider(), a.pr))
     p = sub.add_parser("merge-pr")
     p.add_argument("pr", type=int)
     p.add_argument("--issue", type=int, required=True)
     p.add_argument("--repo-path", default=".",
                     help="Repo root whose worktree list is searched to release the "
                          "merged branch's worktree")
-    p.set_defaults(func=lambda a: cmd_merge_pr(GitHub(), a.pr, a.issue, a.repo_path))
+    p.set_defaults(func=lambda a: cmd_merge_pr(get_work_item_provider(), a.pr, a.issue, a.repo_path))
     p = sub.add_parser("create-issue")
     p.add_argument("--title", required=True)
     p.add_argument("--body", required=True)
     p.add_argument("--parent", type=int, required=True, help="Epic issue number this becomes a sub-issue of")
     p.add_argument("--label", action="append", default=[], dest="labels")
-    p.set_defaults(func=lambda a: cmd_create_issue(GitHub(), a.title, a.body, a.parent, a.labels))
+    p.set_defaults(func=lambda a: cmd_create_issue(get_work_item_provider(), a.title, a.body, a.parent, a.labels))
     p = sub.add_parser("mark-blocked")
     p.add_argument("issue", type=int)
     p.add_argument("--dep", type=int, required=True)
     p.add_argument("--repo-path", default=".",
                     help="Repo root whose worktree list is searched to release this "
                          "unit's worktree")
-    p.set_defaults(func=lambda a: cmd_mark_blocked(GitHub(), a.issue, a.dep, a.repo_path))
+    p.set_defaults(func=lambda a: cmd_mark_blocked(get_work_item_provider(), a.issue, a.dep, a.repo_path))
     p = sub.add_parser("mark-needs-human")
     p.add_argument("issue", type=int)
     p.add_argument("--reason", required=True)
     p.add_argument("--repo-path", default=".",
                     help="Repo root whose worktree list is searched to release this "
                          "unit's worktree")
-    p.set_defaults(func=lambda a: cmd_mark_needs_human(GitHub(), a.issue, a.reason, a.repo_path))
+    p.set_defaults(func=lambda a: cmd_mark_needs_human(get_work_item_provider(), a.issue, a.reason, a.repo_path))
     p = sub.add_parser("retro-check")
     p.add_argument("--repo-path", default=".",
                     help="Repo root holding the tracked retro-watermark file")
@@ -4881,7 +4989,7 @@ def main(argv: Optional[list] = None) -> int:
                          "true -- pass this back verbatim so issues closed after the "
                          "retro was triggered, during the fix work, aren't silently "
                          "counted as reviewed")
-    p.set_defaults(func=lambda a: cmd_retro_check(GitHub(), a.repo_path, a.mark_done, a.count))
+    p.set_defaults(func=lambda a: cmd_retro_check(get_work_item_provider(), a.repo_path, a.mark_done, a.count))
     p = sub.add_parser("show-config",
                         help="Print the effective pipeline tunables (config `pipeline` "
                              "block merged over defaults) plus repo/docRoot/parallelism")
@@ -4899,23 +5007,23 @@ def main(argv: Optional[list] = None) -> int:
                         help="Marker-derived escalation-valve bounce counts for one issue "
                              "(pr-review rework since last clean, sync-conflict count)")
     p.add_argument("issue", type=int)
-    p.set_defaults(func=lambda a: cmd_pairing_counts(GitHub(), a.issue))
+    p.set_defaults(func=lambda a: cmd_pairing_counts(get_work_item_provider(), a.issue))
     p = sub.add_parser("list-needs-human")
-    p.set_defaults(func=lambda a: cmd_list_needs_human(GitHub()))
+    p.set_defaults(func=lambda a: cmd_list_needs_human(get_work_item_provider()))
     p = sub.add_parser("close-epic",
                         help="Reconcile the epic's integration branch with main, then merge it "
                              "once closing verification evidence is on the thread")
     p.add_argument("epic", type=int)
     p.add_argument("--repo-path", default=".")
-    p.set_defaults(func=lambda a: cmd_close_epic(GitHub(), a.epic, a.repo_path))
+    p.set_defaults(func=lambda a: cmd_close_epic(get_work_item_provider(), a.epic, a.repo_path))
     p = sub.add_parser("record-epic-verification",
                         help="Record one half of an epic's closing verification (e2e | exploratory)")
     p.add_argument("epic", type=int)
     p.add_argument("--kind", required=True, choices=["e2e", "exploratory"])
     p.add_argument("--summary", required=True)
-    p.set_defaults(func=lambda a: cmd_record_epic_verification(GitHub(), a.epic, a.kind, a.summary))
+    p.set_defaults(func=lambda a: cmd_record_epic_verification(get_work_item_provider(), a.epic, a.kind, a.summary))
     p = sub.add_parser("check-epics-closeable")
-    p.set_defaults(func=lambda a: cmd_check_epics_closeable(GitHub()))
+    p.set_defaults(func=lambda a: cmd_check_epics_closeable(get_work_item_provider()))
     p = sub.add_parser("provision-epic-stack",
                         help="Stand up the epic's isolated runtime stack (own compose project, "
                              "ports, env/secrets profile, DB data dir) -- see pipeline.stack; "

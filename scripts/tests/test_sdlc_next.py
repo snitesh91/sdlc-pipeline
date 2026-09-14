@@ -5771,3 +5771,123 @@ def test_verify_exit_still_refuses_review_roles_with_no_stage_value(tmp_path):
                                  expect_stage=role, runner=git_runner)
         assert result["ok"] is False, role
         assert "misuse" in result, role
+
+
+def test_get_work_item_provider_defaults_to_github():
+    from sdlc_next import GitHub, get_work_item_provider
+    provider = get_work_item_provider(runner=ScriptedRunner({}))
+    assert isinstance(provider, GitHub)
+
+
+def test_get_work_item_provider_honours_a_configured_github_type():
+    import sdlc_next
+    from sdlc_next import GitHub, get_work_item_provider
+    original = dict(sdlc_next.PIPELINE.get("workItemProvider", {}))
+    sdlc_next.PIPELINE["workItemProvider"] = {"type": "github"}
+    try:
+        provider = get_work_item_provider(runner=ScriptedRunner({}))
+        assert isinstance(provider, GitHub)
+    finally:
+        sdlc_next.PIPELINE["workItemProvider"] = original
+
+
+def test_get_work_item_provider_refuses_an_unimplemented_type():
+    # Negative control: an unknown/unbuilt provider must not silently fall back
+    # to GitHub -- that would run against the wrong tracker with no warning.
+    import sdlc_next
+    from sdlc_next import GhError, get_work_item_provider
+    import pytest
+    original = dict(sdlc_next.PIPELINE.get("workItemProvider", {}))
+    sdlc_next.PIPELINE["workItemProvider"] = {"type": "jira"}
+    try:
+        with pytest.raises(GhError, match="not implemented"):
+            get_work_item_provider(runner=ScriptedRunner({}))
+    finally:
+        sdlc_next.PIPELINE["workItemProvider"] = original
+
+
+def test_github_satisfies_the_work_item_provider_protocol():
+    # Structural check: GitHub actually matches the documented contract, not
+    # just by convention -- WorkItemProvider is runtime_checkable specifically
+    # so this is enforceable.
+    from sdlc_next import GitHub, WorkItemProvider
+    assert isinstance(GitHub(runner=ScriptedRunner({})), WorkItemProvider)
+
+
+def test_classify_unit_returns_other_when_no_rules_configured():
+    import sdlc_next
+    from sdlc_next import GitHub, REPO
+    original = dict(sdlc_next.PIPELINE.get("classification", {}))
+    sdlc_next.PIPELINE["classification"] = {}
+    try:
+        runner = ScriptedRunner({})
+        runner.prefix_responses[("gh", "api", "graphql")] = json.dumps(
+            {"data": {"repository": {"issue": {
+                "issueType": {"name": "Feature"}, "parent": None,
+                "labels": {"nodes": []}}}}})
+        gh = GitHub(runner=runner)
+        assert gh.classify_unit(9) == "other"
+    finally:
+        sdlc_next.PIPELINE["classification"] = original
+
+
+def test_classify_unit_matches_a_configured_issue_type_rule():
+    # Positive control: a configured issueType rule actually classifies.
+    import sdlc_next
+    from sdlc_next import GitHub, REPO
+    original = dict(sdlc_next.PIPELINE.get("classification", {}))
+    sdlc_next.PIPELINE["classification"] = {
+        "initiative": {"field": "issueType", "value": "Initiative"},
+        "epic": {"field": "issueType", "value": "Epic"},
+    }
+    try:
+        runner = ScriptedRunner({})
+        runner.prefix_responses[("gh", "api", "graphql")] = json.dumps(
+            {"data": {"repository": {"issue": {
+                "issueType": {"name": "Initiative"}, "parent": None,
+                "labels": {"nodes": []}}}}})
+        gh = GitHub(runner=runner)
+        assert gh.classify_unit(9) == "initiative"
+    finally:
+        sdlc_next.PIPELINE["classification"] = original
+
+
+def test_classify_unit_matches_a_configured_label_rule():
+    # A client without native Issue Types provisioned classifies by label instead.
+    import sdlc_next
+    from sdlc_next import GitHub, REPO
+    original = dict(sdlc_next.PIPELINE.get("classification", {}))
+    sdlc_next.PIPELINE["classification"] = {
+        "task": {"field": "label", "value": "type:task"},
+    }
+    try:
+        runner = ScriptedRunner({})
+        runner.prefix_responses[("gh", "api", "graphql")] = json.dumps(
+            {"data": {"repository": {"issue": {
+                "issueType": None, "parent": {"number": 5},
+                "labels": {"nodes": [{"name": "type:task"}]}}}}})
+        gh = GitHub(runner=runner)
+        assert gh.classify_unit(9) == "task"
+    finally:
+        sdlc_next.PIPELINE["classification"] = original
+
+
+def test_classify_unit_returns_other_when_rules_exist_but_none_match():
+    # Negative control: configured rules that don't match this issue must not
+    # produce a false-positive classification.
+    import sdlc_next
+    from sdlc_next import GitHub, REPO
+    original = dict(sdlc_next.PIPELINE.get("classification", {}))
+    sdlc_next.PIPELINE["classification"] = {
+        "initiative": {"field": "issueType", "value": "Initiative"},
+    }
+    try:
+        runner = ScriptedRunner({})
+        runner.prefix_responses[("gh", "api", "graphql")] = json.dumps(
+            {"data": {"repository": {"issue": {
+                "issueType": {"name": "Bug"}, "parent": {"number": 5},
+                "labels": {"nodes": []}}}}})
+        gh = GitHub(runner=runner)
+        assert gh.classify_unit(9) == "other"
+    finally:
+        sdlc_next.PIPELINE["classification"] = original

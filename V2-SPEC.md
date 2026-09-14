@@ -32,14 +32,50 @@ them as two work-streams that can land independently.
 - A working Confluence doc-store implementation. Docs stay git-committed under
   `<docRoot>`. Only the seam needs to exist.
 - A working Jira work-item implementation. GitHub Issues stays the only wired
-  implementation. Only the seam needs to exist, and it needs to be *easy* to plug a
-  second one in later, not necessarily done now.
+  implementation. **The seam itself is now built** (see "Implemented," below) — what's
+  deferred is a second class satisfying it, not the interface.
 - The "Initiative" hierarchy tier (see below) — real, wanted, but has its own
   prerequisites and cascading changes independent of everything else here.
 
 ---
 
 ## Work-stream A: provider abstraction
+
+### Implemented (2026-09-14) — the interface, GitHub as the only implementation
+
+Per operator: build the pluggable design for **issue management, not code
+management** — code hosting stays git-protocol/github.com-only per the non-goals
+above; only the Work-Item Provider seam needed building now. Done, in
+`scripts/sdlc_next.py`:
+
+- **`WorkItemProvider`** — a `typing.Protocol` (structural, not an ABC — `GitHub`
+  satisfies it by already having the right methods, no inheritance change needed)
+  listing the full issue-management contract every `cmd_*` function is written
+  against: list/view/edit/comment/close/create an issue, native-field get/set,
+  hierarchy links (`blocked_by`, `add_sub_issue`), and `classify_unit`.
+  Deliberately excludes `pr_*`/`branch_*_by`/`path_on_ref`/`graphql` — those are
+  Code-Host/transport concerns, out of scope by the same decision as above.
+- **`GitHub.classify_unit(number) -> "initiative"|"epic"|"task"|"other"`** — new
+  method, config-driven via `pipeline.classification` (per-kind `{"field":
+  "issueType"|"label", "value": "..."}` rules). Empty by default; returns `"other"`
+  rather than guessing when nothing is configured or nothing matches — a repo that
+  hasn't provisioned Initiative/Epic/Task classification yet gets an honest
+  "don't know," not a silent misroute. Deliberately independent of the existing
+  `is_epic()`/`resolve_profile()` V1 heuristic (Feature-type-plus-no-parent) — V2 is
+  a different lifecycle, not an extension, and entangling the two risked regressing
+  V1's still-live profile matching.
+- **`get_work_item_provider()`** — the one place a provider gets instantiated; every
+  CLI command now calls this instead of bare `GitHub()` (37 call sites replaced,
+  zero behavior change — verified by the full existing suite staying green
+  unmodified). Reads `pipeline.workItemProvider.type`, default `"github"`. Naming
+  anything else is a clear refusal (`GhError`), never a silent fallback to GitHub.
+- 8 new regression tests (factory default/override/refusal, Protocol conformance,
+  `classify_unit` positive/negative controls for both `issueType` and `label` rules),
+  verified red against pre-fix `sdlc_next.py`.
+
+**What this does not do yet**: no second class implements `WorkItemProvider`. Jira
+stays exactly as deferred as before — the difference is there's now a real,
+tested contract for it to satisfy, not just a described one.
 
 ### The landscape has (at least) three seams, not one
 
