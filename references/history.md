@@ -180,6 +180,46 @@ Every other citation to a section that changed file (in `agents/*.md`,
 filename; `references/history.md`'s own past entries were left as-is — they record
 where a rule lived *at the time*, not a live pointer.
 
+## 2026-09-14 (f) — epic #157's 5-round bounces: same-class recurrence becomes a marker
+
+Operator noticed epic #157's children (#499-#506) bouncing `lld-review` 3-5 times
+each and asked whether task division/dependency-DAG shape was the cause. It wasn't:
+`architecture.md` had already partitioned correctly (module boundaries, #504 as sole
+migrations writer, explicit cross-references) and no round bounced on an actual
+sibling-footprint collision. The real causes, found by reading every bounce:
+
+**#504 (4 rounds, stuck at 0 clean): an inventory built by reading code, not by a
+sweep.** The AC4 "every priority query" population missed a real query in each of 4
+straight rounds — a different one each time. The reviewer wrote "escalate on the
+pattern" at rounds 2 *and* 3; nothing escalated, because that sentence is prose in a
+verdict and nothing re-reads verdict prose on every resume decision. This is the same
+completeness-claim-needs-a-sweep rule already in `verification-rules.md`, just never
+recognized as covering an *inventory of items to act on* (one level earlier than a
+criterion or a test) — extended the rule to name this shape explicitly.
+
+**The escalation valve's own design already called for "say so in the verdict"
+(`references/rework.md`) — that was the actual bug.** A same-class recurrence had no
+mechanical signal, only a sentence the orchestrator had to remember to re-read on
+every single resume decision. Fixed at the source: `record-design-review` and
+`record-pr-review` both take `--same-class-recurrence` now, embedding
+`same-class:true` in their existing outcome marker; `pairing-counts` reports it as
+`same_class_recurrence_count` (per role for design reviews, top-level for pr-review).
+Any nonzero count is its own escalation signal, independent of the generic
+`replaceAt`/`needsHumanAt` thresholds — `rework.md`'s "the thing that actually repeats
+is a class" bullet now points at the marker instead of asking for a sentence.
+`sdlc-design-review.md`, `sdlc-product-review.md`, and `sdlc-pr-review.md` all
+instruct passing the flag instead of writing the sentence.
+
+**Minor: #499's round-4 finding "flagged to #504" never reached #504's thread** —
+a coordination note lived only in #499's own doc, which #504 had no reason to
+re-read. `sdlc-lld.md`'s sibling-footprint check now says a finding naming a specific
+sibling posts as a comment on that sibling's own issue, not only in your own doc.
+
+**#499's 5 rounds and most of #503's 4 were not a process failure** — each surfaced a
+genuinely distinct real defect in dense SQL/index work, which is the review doing its
+job, just expensively. Nothing changed for that case; a same-class marker would not
+have fired on it, correctly.
+
 ## 2026-09-13 — one rule, one home, chosen by scope
 
 Operator: *"the skill is getting complex. Agent is not honoring the agents and skills."*

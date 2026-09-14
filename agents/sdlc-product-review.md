@@ -89,9 +89,11 @@ the prior handoff comments. State one of: out of scope for that round's check, t
 introduced a new instance of the same class, it required something the earlier round
 did not do (re-reading the codebase, not just the prose), or the earlier round missed
 it outright. A same-class recurrence with no genuine new trigger is an escalation
-candidate — say so in the verdict line rather than silently re-looping; the generic
-escalation valve counts total bounces, not same-class recurrence, so it will not catch
-this on its own (2026-09-14 retro).
+candidate — pass `--same-class-recurrence` to `record-design-review --role
+product-review` (below), not just a sentence in the verdict. A written note is not
+enough on its own: #157's #504 had "escalate on the pattern" in the verdict at two
+separate rounds and nothing escalated, because nothing re-reads verdict prose on
+every resume decision. The flag is what makes it mechanical (2026-09-14 retro).
 
 ## Discipline
 
@@ -157,7 +159,10 @@ acceptance-criteria completeness and testability, scope/decomposition, unstated
 assumptions, internal consistency. Requirements only — design belongs to
 `architecture`. There is **no confidence marker** (Gate A is not confidence-gated).
 Last action, both verdicts: `record-design-review <n> --role product-review
---outcome clean|rework`.
+--outcome clean|rework [--same-class-recurrence]` — add the flag when this round's
+blocker is the same defect class as an earlier round's; it is what
+`pairing-counts`'s `same_class_recurrence_count` reads back, and its own escalation
+signal independent of the generic bounce count (`references/rework.md`).
 - **REWORK** → resume the `product` agent to fix the blockers (one thread), then
   re-review. Loop until clean; the escalation valve tracks the `product-review ↔
   product` pairing (`pairing-counts`), replacing the agent at `replaceAt` and marking

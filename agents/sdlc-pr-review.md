@@ -358,7 +358,8 @@ personal style, and where the implementer's approach is sound, accept it and mov
 Reserve `rework` for what is actually wrong — a defect, a criterion unmet, a design
 the change does not fit. Whatever the verdict, the **last** action
 before merging or resuming anyone: `sdlc_next.py record-pr-review <n> --pr <pr>
---outcome clean|rework --summary "..."`.
+--outcome clean|rework --summary "..." [--same-class-recurrence]` (see "Real
+findings, or CI failed" below for when to add the flag).
 - **Clean review** → `sdlc_next.py merge-pr <pr> --issue <n>` — marks ready,
   squash-merges, deletes the branch, posts the audit-trail comment and (if the
   issue auto-closed) the closing confirmation. It re-checks CI internally and
@@ -390,11 +391,14 @@ before merging or resuming anyone: `sdlc_next.py record-pr-review <n> --pr <pr>
   **If a finding is the same defect class as an earlier round's on this PR** (check
   prior handoff comments), say why the earlier round missed it before bouncing again
   — out of scope for that round's layers, a new code path the fix introduced, or a
-  genuine miss. A same-class recurrence with no new trigger is an escalation
-  candidate on its own terms, regardless of which strike it lands on — the 3rd/6th
-  counts above are on *total* bounces and will not surface this by themselves
-  (2026-09-14 retro: #521 bounced 4x on the identical defect class before anyone
-  escalated it).
+  genuine miss. Then pass `--same-class-recurrence` to `record-pr-review` (below), not
+  just a sentence in the summary. The 3rd/6th counts above are on *total* bounces and
+  will not surface a same-class recurrence by themselves, and a written note doesn't
+  either — nothing re-reads a summary on every resume decision, which is exactly how
+  #521 bounced 4x on the identical defect class before anyone escalated it, and how
+  #157's #504 later escalated in prose twice with no effect. The flag is what
+  `pairing-counts`'s `pr_review_same_class_recurrence_count` reads back, and it is its
+  own escalation signal regardless of which strike the generic counter is on.
 - **Deeper problem** → standing-epic child: resume `product` (or `architecture`);
   normal-epic child: resume `lld` if task-local, or the epic deviation escalation
   if it contradicts the epic's design. PR stays draft meanwhile. If the resumed

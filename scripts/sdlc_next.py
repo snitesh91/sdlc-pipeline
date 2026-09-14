@@ -892,7 +892,9 @@ _STAGE_TRANSITION_MARKER = re.compile(r"<!--\s*stage-transition:\s*(\S+?)->(\S+?
 # agent: an issue sits at Stage = Testing / Pipeline Status = In Progress both
 # before *and* during rework, so neither field can distinguish "awaiting review"
 # from "already reviewed, dev is fixing it". See "Parallel PR review" in references/parallelism.md.
-_PR_REVIEW_OUTCOME_MARKER = re.compile(r"<!--\s*pr-review-outcome:\s*(\w+):(\d+)\s*(?:@[^>]*?)?-->")
+_PR_REVIEW_OUTCOME_MARKER = re.compile(
+    r"<!--\s*pr-review-outcome:\s*(\w+):(\d+)(?:\s+same-class:(true|false))?"
+    r"\s*(?:@[^>]*?)?-->")
 # Posted by `cmd_sync_branch` when reconciling with origin/main hit real unmerged
 # paths -- persists the sync-branch-conflict <-> development escalation-valve
 # pairing on the issue thread so `cmd_pairing_counts` (and a fresh session) can
@@ -920,7 +922,8 @@ _SYNC_CONFLICT_MARKER = re.compile(r"<!--\s*sync-conflict:\s*(\S+)\s*(?:@[^>]*?)
 # have resumed with it silently reset to zero, leaving the valve unenforceable
 # exactly where it fires most.
 _DESIGN_REVIEW_OUTCOME_MARKER = re.compile(
-    r"<!--\s*design-review-outcome:\s*(\w+):(\S+?)\s*(?:@[^>]*?)?-->")
+    r"<!--\s*design-review-outcome:\s*(\w+):(\S+?)(?:\s+same-class:(true|false))?"
+    r"\s*(?:@[^>]*?)?-->")
 
 # Local-CI attestation, added 2026-09-04 with the main-only-CI cost cut. The
 # backend/frontend suites no longer run on child PRs in GitHub Actions (they run
@@ -2486,27 +2489,41 @@ def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> d
 PR_REVIEW_OUTCOMES = ("clean", "rework")
 
 
-def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary: str) -> dict:
+def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary: str,
+                         same_class_recurrence: bool = False) -> dict:
     """Records that a `pr-review` pass ran on this issue's PR and what it found --
     the last action of every review, clean or not, **before** `merge-pr` or a
     rework resume. Posts one comment carrying the
-    `<!-- pr-review-outcome: <outcome>:<pr> @ <ts> -->` marker
+    `<!-- pr-review-outcome: <outcome>:<pr> [same-class:true] @ <ts> -->` marker
     `list-ready-for-review` reads back, so a PR under rework is never handed to a
     second, concurrent review agent (see `cmd_list_ready_for_review`).
 
     `outcome` is `clean` (nothing found; merging next) or `rework` (findings sent
     back to `development`). Recording it on the clean path too is not redundant:
     the merge can fail or be delayed by CI, and the issue stays listable until it
-    actually closes."""
+    actually closes.
+
+    `same_class_recurrence=True` -- pass it when this round's finding is the same
+    defect class as an earlier round's on this PR. See `cmd_record_design_review`
+    for why this needs to be a marker `cmd_pairing_counts` reads, not a sentence
+    in the verdict prose that nothing acts on."""
     if outcome not in PR_REVIEW_OUTCOMES:
         raise GhError(f"outcome must be one of {PR_REVIEW_OUTCOMES}, got {outcome!r}")
+    if same_class_recurrence and outcome != "rework":
+        raise GhError("same_class_recurrence only makes sense on outcome='rework' "
+                       "-- a clean verdict has no defect class to recur")
     timestamp = _utc_now_marker()
     headline = ("🔍 PR review complete — no findings; proceeding to merge."
                 if outcome == "clean" else
                 "🔁 PR review complete — findings sent back to `development` for rework.")
+    if same_class_recurrence:
+        headline += " **Same defect class as an earlier round — escalation candidate.**"
+    same_class_field = " same-class:true" if same_class_recurrence else ""
     gh.issue_comment(issue, f"{headline} {summary}\n\n"
-                             f"<!-- pr-review-outcome: {outcome}:{pr} @ {timestamp} -->")
-    return {"issue": issue, "pr": pr, "outcome": outcome, "recorded": True}
+                             f"<!-- pr-review-outcome: {outcome}:{pr}"
+                             f"{same_class_field} @ {timestamp} -->")
+    return {"issue": issue, "pr": pr, "outcome": outcome,
+            "same_class_recurrence": same_class_recurrence, "recorded": True}
 
 
 # How much of a suite run's captured output an attestation embeds. Enough to show
@@ -2594,17 +2611,29 @@ DESIGN_REVIEW_ROLES = ("product-review", "arch-review", "lld-review")
 
 
 def cmd_record_design_review(gh: GitHub, issue: int, role: str, outcome: str,
-                             summary: str, unit: str = "issue") -> dict:
+                             summary: str, unit: str = "issue",
+                             same_class_recurrence: bool = False) -> dict:
     """Records that `arch-review` or `lld-review` ran and what it concluded --
     the design-side twin of `record-pr-review`, and the last action of every
     design review, clean or not, before the orchestrator resumes the design agent
     or moves the unit on.
 
     Posts one comment carrying
-    `<!-- design-review-outcome: <outcome>:<role> @ <ts> -->`, which
-    `cmd_pairing_counts` reads back per role. Added 2026-08-28 out of epic #98's
-    retrospective -- see `_DESIGN_REVIEW_OUTCOME_MARKER` for why the pairing that
-    fires the valve most often had no counter until then.
+    `<!-- design-review-outcome: <outcome>:<role> [same-class:true] @ <ts> -->`,
+    which `cmd_pairing_counts` reads back per role. Added 2026-08-28 out of epic
+    #98's retrospective -- see `_DESIGN_REVIEW_OUTCOME_MARKER` for why the pairing
+    that fires the valve most often had no counter until then.
+
+    `same_class_recurrence=True` -- pass it when this round's blocking finding is
+    the same defect class as an earlier round's on this unit (the review agent's
+    own instructions call for this, see "Fan-out"/"rework" sections). This is the
+    mechanical form of "escalate on the pattern": on #157's #504 (2026-09-14) a
+    reviewer wrote that sentence in the verdict prose at two separate rounds and
+    nothing acted on it, because nothing parses a verdict's prose. A same-class
+    marker is what `references/rework.md`'s escalation valve reads instead of the
+    generic bounce count, so a same-class recurrence escalates on its own terms
+    the first time `cmd_pairing_counts` reports it, not on whichever bounce number
+    the generic counter happens to be at.
 
     This does **not** replace the `arch-review-confidence` marker, which
     `skip-gate` reads and which answers a different question (how much to trust a
@@ -2614,14 +2643,22 @@ def cmd_record_design_review(gh: GitHub, issue: int, role: str, outcome: str,
         raise GhError(f"role must be one of {DESIGN_REVIEW_ROLES}, got {role!r}")
     if outcome not in PR_REVIEW_OUTCOMES:
         raise GhError(f"outcome must be one of {PR_REVIEW_OUTCOMES}, got {outcome!r}")
+    if same_class_recurrence and outcome != "rework":
+        raise GhError("same_class_recurrence only makes sense on outcome='rework' "
+                       "-- a clean verdict has no defect class to recur")
     timestamp = _utc_now_marker()
     headline = (f"🔍 `{role}` complete — no findings."
                 if outcome == "clean" else
                 f"🔁 `{role}` complete — findings sent back for rework.")
+    if same_class_recurrence:
+        headline += " **Same defect class as an earlier round — escalation candidate.**"
+    same_class_field = " same-class:true" if same_class_recurrence else ""
     gh.issue_comment(issue, f"{headline} {summary}\n\n"
-                             f"<!-- design-review-outcome: {outcome}:{role} @ {timestamp} -->")
+                             f"<!-- design-review-outcome: {outcome}:{role}"
+                             f"{same_class_field} @ {timestamp} -->")
     return {"issue": issue, "unit": unit, "role": role,
-            "outcome": outcome, "recorded": True}
+            "outcome": outcome, "same_class_recurrence": same_class_recurrence,
+            "recorded": True}
 
 
 def _post_start_comment(gh: GitHub, issue: int, role: str):
@@ -4195,9 +4232,19 @@ def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
     `lld-review <-> lld` (`design-review-outcome` markers, reported per role under
     `design_review`).
     `testing <-> development` still leaves no marker and remains the
-    orchestrator's own session-scoped count."""
+    orchestrator's own session-scoped count.
+
+    `same_class_recurrence_count` (top-level, for `pr-review`, and per role under
+    `design_review`) counts `same-class:true` markers -- added 2026-09-14 because
+    the generic bounce count does not distinguish three different defects from the
+    same defect three times, and a reviewer's own "escalate on the pattern" note in
+    verdict prose changes nothing unless something reads it back. **Any count >= 1
+    here is its own escalation signal, independent of `replace_at`/`needs_human_at`**
+    -- see `references/rework.md`, "Same-class recurrence must be a marker, not a
+    sentence"."""
     comments = gh.issue_view(issue).get("comments", [])
     rework_since_clean = total_rework = total_clean = sync_conflicts = 0
+    pr_review_same_class = 0
     design_review: dict = {}
     for c in comments:
         body = c.get("body", "")
@@ -4206,6 +4253,8 @@ def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
             if m.group(1) == "rework":
                 total_rework += 1
                 rework_since_clean += 1
+                if m.group(3) == "true":
+                    pr_review_same_class += 1
             else:
                 total_clean += 1
                 rework_since_clean = 0
@@ -4215,10 +4264,13 @@ def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
         if d:
             outcome, role = d.group(1), d.group(2)
             counts = design_review.setdefault(
-                role, {"rework_since_last_clean": 0, "total_rework": 0, "total_clean": 0})
+                role, {"rework_since_last_clean": 0, "total_rework": 0, "total_clean": 0,
+                       "same_class_recurrence_count": 0})
             if outcome == "rework":
                 counts["total_rework"] += 1
                 counts["rework_since_last_clean"] += 1
+                if d.group(3) == "true":
+                    counts["same_class_recurrence_count"] += 1
             else:
                 counts["total_clean"] += 1
                 counts["rework_since_last_clean"] = 0
@@ -4228,6 +4280,7 @@ def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
             "pr_review_rework_since_last_clean": rework_since_clean,
             "pr_review_total_rework": total_rework,
             "pr_review_total_clean": total_clean,
+            "pr_review_same_class_recurrence_count": pr_review_same_class,
             "sync_conflict_count": sync_conflicts,
             # Keyed by role (`arch-review` / `lld-review`) rather than flattened:
             # a unit can bounce on both, and the valve counts them as separate
@@ -4605,7 +4658,12 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--outcome", required=True, choices=list(PR_REVIEW_OUTCOMES))
     p.add_argument("--summary", required=True,
                     help="One sentence: what the review checked and concluded")
-    p.set_defaults(func=lambda a: cmd_record_pr_review(GitHub(), a.issue, a.pr, a.outcome, a.summary))
+    p.add_argument("--same-class-recurrence", action="store_true",
+                    help="This round's finding is the same defect class as an earlier "
+                         "round's on this PR -- the mechanical escalation signal, not a "
+                         "sentence in the verdict prose")
+    p.set_defaults(func=lambda a: cmd_record_pr_review(
+        GitHub(), a.issue, a.pr, a.outcome, a.summary, a.same_class_recurrence))
     p = sub.add_parser("record-local-ci",
                         help="development's evidence-carrying attestation that a main-only "
                              "suite (backend/frontend) passed locally against a given commit -- "
@@ -4634,8 +4692,12 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--summary", required=True,
                     help="One sentence: what the review checked and concluded")
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
+    p.add_argument("--same-class-recurrence", action="store_true",
+                    help="This round's finding is the same defect class as an earlier "
+                         "round's on this unit -- the mechanical escalation signal, "
+                         "not a sentence in the verdict prose")
     p.set_defaults(func=lambda a: cmd_record_design_review(
-        GitHub(), a.issue, a.role, a.outcome, a.summary, a.unit))
+        GitHub(), a.issue, a.role, a.outcome, a.summary, a.unit, a.same_class_recurrence))
     p = sub.add_parser("check-gate")
     p.add_argument("issue", type=int)
     p.set_defaults(func=lambda a: cmd_check_gate(GitHub(), a))

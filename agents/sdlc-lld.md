@@ -221,6 +221,15 @@ other open children. Overlap is not automatically wrong — but unnoticed overla
 two parallel children stomp each other. If you find it, say so in the doc so
 `lld-review` can judge it deliberately.
 
+**A finding that names a specific sibling issue goes on that sibling's own issue as a
+comment, not only in your own doc.** Your doc is what `lld-review` reads for *your*
+child; a sibling's `lld`/`development` has no reason to re-read it, so a note buried
+there addressed "to #504" never reaches #504 (2026-09-14: exactly this happened on
+epic #157 — a coordination note in #499's `lld.md` flagged for #504 and never posted
+to #504's thread). `gh issue comment <sibling-n> --repo <owner>/<repo> --body "..."`
+once you've named the sibling; keep the note in your own doc too if it explains your
+own design, but the sibling's copy is what actually reaches them.
+
 ## Exit actions — yours, performed as your last step
 
 These were moved here from `references/stage-playbooks.md` on 2026-09-13: they are

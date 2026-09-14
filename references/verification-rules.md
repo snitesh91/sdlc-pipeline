@@ -135,6 +135,22 @@ of criteria is covered, and see the family positive control in `sdlc-development
 ("How to write the tests") for the cheap form: one control per family of sibling
 expected values, not one per criterion.
 
+**A third shape, one level earlier than a criterion or a test: an inventory of items
+you are about to act on.** "Every priority query", "every endpoint that needs
+migrating", "every file this touches" is the same completeness claim as the two
+above, before any criterion or test exists to check it against — and it fails the
+same way when the inventory is assembled by *reading the code* instead of by a
+mechanical sweep. On #157's #504 (2026-09-14), a priority-query inventory built by
+reading the codebase missed a real query in each of four straight `lld-review`
+rounds — a different missing query each time, never the one already found. The
+reviewer wrote "escalate on the pattern" at rounds 2 *and* 3; nothing escalated,
+because that sentence was prose in a verdict, not a marker anything reads (see
+`references/rework.md`, "Same-class recurrence must be a marker, not a sentence").
+Build the inventory the same way as the class-population sweep above — a
+`grep`/`find` command anchored to the real signal (a call site, a decorator, a query
+builder pattern), pasted with its output — before treating it as the scope of what
+you are about to fix.
+
 The population of the class is a **requirements** fact, not a `development` call. If
 which controls or which dimensions count is ambiguous ("interactive control" —
 icon-only, or text buttons and pagination too?), that is pinned at `architecture`/`lld`

@@ -1496,6 +1496,7 @@ def test_pairing_counts_derives_bounces_from_markers():
         "pr_review_rework_since_last_clean": 2,
         "pr_review_total_rework": 3,
         "pr_review_total_clean": 1,
+        "pr_review_same_class_recurrence_count": 0,
         "sync_conflict_count": 1,
         "design_review": {},
     }
@@ -1525,11 +1526,13 @@ def test_pairing_counts_tracks_design_reviews_per_role():
     # Three lld-review bounces with no clean between them -- this is the shape the
     # valve escalates on, and the count a fresh session must be able to recover.
     assert result["design_review"]["lld-review"] == {
-        "rework_since_last_clean": 3, "total_rework": 3, "total_clean": 0}
+        "rework_since_last_clean": 3, "total_rework": 3, "total_clean": 0,
+        "same_class_recurrence_count": 0}
     # arch-review's clean verdict resets its own counter and does not touch
     # lld-review's -- the whole reason roles are keyed separately.
     assert result["design_review"]["arch-review"] == {
-        "rework_since_last_clean": 0, "total_rework": 1, "total_clean": 1}
+        "rework_since_last_clean": 0, "total_rework": 1, "total_clean": 1,
+        "same_class_recurrence_count": 0}
     # A review that never ran on this unit has no key at all, rather than a
     # zeroed entry that reads like "ran and found nothing".
     assert "pr-review" not in result["design_review"]
@@ -1544,6 +1547,90 @@ def test_record_design_review_refuses_an_unknown_role():
     with pytest.raises(GhError, match="role must be one of"):
         cmd_record_design_review(GitHub(runner=ScriptedRunner({})), 9,
                                  "pr-review", "clean", "s")
+
+
+def test_record_design_review_refuses_same_class_recurrence_on_a_clean_verdict():
+    # Negative control: a clean verdict has no defect class to recur -- the flag
+    # only makes sense paired with outcome="rework".
+    import pytest
+    from sdlc_next import GitHub, GhError, cmd_record_design_review
+    with pytest.raises(GhError, match="only makes sense on outcome='rework'"):
+        cmd_record_design_review(GitHub(runner=ScriptedRunner({})), 9,
+                                 "lld-review", "clean", "s", same_class_recurrence=True)
+
+
+def test_record_design_review_embeds_the_same_class_marker_and_pairing_counts_reads_it_back():
+    # Positive control for the 2026-09-14 fix: #157's #504 had a reviewer write
+    # "escalate on the pattern" in verdict prose at two separate rounds and
+    # nothing acted on it. same_class_recurrence=True must produce a marker
+    # cmd_pairing_counts actually counts, not just a headline sentence.
+    from sdlc_next import GitHub, cmd_record_design_review, cmd_pairing_counts, REPO
+    posted = {}
+
+    class RecordingGitHub(GitHub):
+        def issue_comment(self, issue, body):
+            posted["body"] = body
+
+    gh = RecordingGitHub(runner=ScriptedRunner({}))
+    result = cmd_record_design_review(gh, 9, "lld-review", "rework", "same miss again",
+                                      same_class_recurrence=True)
+    assert result["same_class_recurrence"] is True
+    assert "same-class:true" in posted["body"]
+    assert "escalation candidate" in posted["body"]
+
+    runner = ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", REPO,
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": posted["body"]}]}),
+    })
+    counts = cmd_pairing_counts(GitHub(runner=runner), 9)
+    assert counts["design_review"]["lld-review"]["same_class_recurrence_count"] == 1
+
+
+def test_record_design_review_without_the_flag_leaves_same_class_count_at_zero():
+    # Negative control: an ordinary rework (no same-class flag) must not be
+    # miscounted as a same-class recurrence.
+    from sdlc_next import GitHub, cmd_record_design_review, cmd_pairing_counts, REPO
+    posted = {}
+
+    class RecordingGitHub(GitHub):
+        def issue_comment(self, issue, body):
+            posted["body"] = body
+
+    gh = RecordingGitHub(runner=ScriptedRunner({}))
+    cmd_record_design_review(gh, 9, "lld-review", "rework", "a fresh defect")
+    assert "same-class" not in posted["body"]
+
+    runner = ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", REPO,
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": posted["body"]}]}),
+    })
+    counts = cmd_pairing_counts(GitHub(runner=runner), 9)
+    assert counts["design_review"]["lld-review"]["same_class_recurrence_count"] == 0
+
+
+def test_record_pr_review_embeds_the_same_class_marker_and_pairing_counts_reads_it_back():
+    from sdlc_next import GitHub, cmd_record_pr_review, cmd_pairing_counts, REPO
+    posted = {}
+
+    class RecordingGitHub(GitHub):
+        def issue_comment(self, issue, body):
+            posted["body"] = body
+
+    gh = RecordingGitHub(runner=ScriptedRunner({}))
+    result = cmd_record_pr_review(gh, 9, 42, "rework", "same miss again",
+                                  same_class_recurrence=True)
+    assert result["same_class_recurrence"] is True
+    assert "same-class:true" in posted["body"]
+
+    runner = ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", REPO,
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": posted["body"]}]}),
+    })
+    counts = cmd_pairing_counts(GitHub(runner=runner), 9)
+    assert counts["pr_review_same_class_recurrence_count"] == 1
 
 
 def test_checks_status_pending_if_any_check_still_pending():

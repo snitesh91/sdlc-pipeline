@@ -131,9 +131,12 @@ it (2026-09-14: #530 and #513, every blocking round on both was a mechanism clai
 disproved only once actually run — see `sdlc-lld.md`, "A mechanism claim needs a
 proof control, not reasoning"), or the earlier round missed something it should have
 caught. A same-class recurrence with no genuine new trigger is not a normal bounce —
-flag it as an escalation candidate in the verdict line rather than silently re-looping
-the same rework counter; `references/rework.md`'s escalation valve counts
-total bounces, not same-class recurrence, so it will not catch this on its own.
+pass `--same-class-recurrence` to `record-design-review` (below), not just a sentence
+in the verdict. The generic bounce counter cannot distinguish three different defects
+from the same defect three times; a written note in the verdict does not fix that
+either, because nothing re-parses it on every resume decision (2026-09-14: #157's
+#504 had "escalate on the pattern" written in the verdict at two separate rounds and
+nothing escalated). The flag is what makes it mechanical.
 
 If the `Agent` tool is unavailable, work the axes yourself in sequence — the axis list
 and the completeness lens are unchanged.
@@ -288,14 +291,22 @@ the unit on:
 
 ```bash
 sdlc_next.py record-design-review <n> --role lld-review --outcome clean|rework \
-    --summary "..." [--unit epic]
+    --summary "..." [--same-class-recurrence] [--unit epic]
 ```
+
+Add `--same-class-recurrence` on a `rework` outcome whose blocking finding is the same
+defect class as an earlier round's (see "Fan out on the first round" above) — this is
+what makes the escalation mechanical instead of a sentence in the summary nothing
+re-reads.
 
 The design-side twin of `record-pr-review`: it is what lets `pairing-counts` see the
 `lld-review` <-> `lld` pairing — the one that fires the valve most and had no
 mechanical counter (see `references/history.md`, 2026-08-28). Read `pairing-counts`
-(`design_review`) before deciding whether a bounce is routine. **The confidence
-marker does not substitute for this** — it is meaningless on a rework verdict, which
+(`design_review`) before deciding whether a bounce is routine — its
+`same_class_recurrence_count` is its own escalation signal, independent of the generic
+bounce number (`references/rework.md`, "The counter counts bounces; the thing that
+actually repeats is a class"). **The confidence marker does not substitute for this**
+— it is meaningless on a rework verdict, which
 is exactly the verdict a valve counts. Post both.
 
 **State your axis coverage in the handoff.** A design review that fans out to
