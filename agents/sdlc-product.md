@@ -258,24 +258,25 @@ orchestrator's, after you return.
 
 **V2 shape — built 2026-09-14**: `--unit initiative` is real on `worktree-add`,
 `open-gate`, `pass-gate`, `auto-pass-gate-a`, `verify-exit` and `sync-branch`; `main`
-is the Initiative's own integration base (never merges there itself — Gate A is the
-only thing an Initiative's branch exists for). In the Initiative's own worktree.
-Create `initiative-<n>` from `main`
-(first stage to touch it), then **author on the gate sub-branch, not on
-`initiative-<n>`**: `git checkout -b initiative-<n>-gate-product` — the Initiative
-branch only ever receives merges, same discipline as today's epic gate branches (see
-"Opening a gate" in `references/gates.md`). Write
-`<docRoot>/initiative-<n>/product.md` as a requirements document covering the whole
-Initiative, per Document altitude — organised by **functional area, never by Epic**.
-Epics are created by the *orchestrator* after Gate A clears (not by `architecture`,
-and not by you) — a product document that names them either pre-empts that cut or
-reports on it, and the requirement is the same whoever ends up implementing it.
-Commit; push both `initiative-<n>` (empty, at `main`'s tip) and
-`initiative-<n>-gate-product`. Update the Initiative's body with a pointer + brief
-summary. Set its Effort. Then the orchestrator runs **`product-review`** (below);
-only on its clean verdict does Gate A follow, and only after Gate A does the
-orchestrator cut the Epic list. **Do not change the Stage field** — it stays
-`Product` while `product-review` runs.
+is the Initiative's own integration base. In the Initiative's own worktree, create
+`initiative-<n>` from `main` (first stage to touch it) and **commit `product.md`
+straight onto `initiative-<n>` itself — no gate sub-branch.** Unlike an epic branch
+(which keeps receiving `lld`/Task work after its own gate merges), nothing is ever
+committed to `initiative-<n>` again once Gate A merges, so there is nothing to protect
+by routing the doc through a disposable sub-branch first — same shape as a standing
+child's `issue-<n>`. Write `<docRoot>/initiative-<n>/product.md` as a requirements
+document covering the whole Initiative, per Document altitude — organised by
+**functional area, never by Epic**. Epics are created by the *orchestrator* after
+Gate A clears (not by `architecture`, and not by you) — a product document that names
+them either pre-empts that cut or reports on it, and the requirement is the same
+whoever ends up implementing it. Commit; push `initiative-<n>`. Update the
+Initiative's body with a pointer + brief summary. Set its Effort. Then the
+orchestrator runs **`product-review`** (below); only on its clean verdict does Gate A
+follow — `open-gate --unit initiative` opens `initiative-<n>` itself as the PR
+against `main` (**squash-merge it** — `main` should carry exactly one commit for this
+document), and `pass-gate --unit initiative` deletes the branch from origin once
+that's confirmed. Only after Gate A does the orchestrator cut the Epic list. **Do not
+change the Stage field** — it stays `Product` while `product-review` runs.
 
 **Engineering-driven work never reaches this stage at all** — no Initiative, no
 `product.md`. A bare Epic is created directly with its scope laid out manually, and

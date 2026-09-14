@@ -1293,24 +1293,16 @@ def epic_gate_branch(epic: int, stage: str) -> str:
 
 
 def initiative_branch(initiative: int) -> str:
-    """V2's Initiative-tier twin of `epic_branch` -- same lifecycle, one tier up.
-    Cut from `origin/main` when the Initiative starts, never committed to
-    directly: only the gate branch carrying its `product.md` merges into it.
-    Unlike an Epic branch, an Initiative branch never itself merges to `main` --
-    the orchestrator cuts Epics from the approved `product.md` and each Epic runs
-    its own independent lifecycle from there; the Initiative
-    branch's job ends once Gate A passes."""
+    """V2's Initiative-tier branch -- a short-lived, single-purpose branch, NOT
+    an `epic_branch` twin despite the naming symmetry. Cut from `origin/main`
+    when the Initiative starts; `product.md` is committed straight onto it
+    (same shape as a standing child's `issue-<n>`, not an epic's gate-sub-branch
+    dance -- nothing else is ever committed to `initiative-<n>` after Gate A, so
+    there is no reason to route the doc through a disposable sub-branch first).
+    This branch itself is opened as the Gate A PR against `main` (`open-gate`'s
+    generic issue-shaped path); once that merges, `pass-gate --unit initiative`
+    deletes it from origin -- its only job is done."""
     return f"{INITIATIVE_BRANCH_PREFIX}{initiative}"
-
-
-def initiative_gate_branch(initiative: int, stage: str) -> str:
-    """The short-lived sub-branch an Initiative-level gate doc is authored on
-    (default `initiative-<n>-gate-<stage>`), cut from `origin/initiative-<n>` --
-    same shape as `epic_gate_branch`, one tier up. V2's Initiative only ever runs
-    `product` (product-review, Gate A), never `architecture`, so `stage` is
-    `"product"` in practice, but the parameter stays general for consistency with
-    `epic_gate_branch`'s own shape."""
-    return f"{initiative_branch(initiative)}{GATE_BRANCH_SUFFIX}{stage}"
 
 
 def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
@@ -3175,20 +3167,14 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
                 f"committed on {base}, this needs operator approval: move those "
                 f"commits onto {head} (cut from the epic's clean base), force-rewind "
                 f"{base} to it, push both, then re-run open-gate.")
-    elif unit == "initiative":
-        # Same shape as the epic branch above, one tier up: `product.md` is
-        # authored on `initiative-<n>-gate-product`, opened against
-        # `initiative-<n>` -- Gate A is the only gate an Initiative ever has.
-        head, base = initiative_gate_branch(issue, stage), initiative_branch(issue)
-        ahead = gh.branch_ahead_by(head, base=base)
-        if not ahead:
-            detail = ("does not exist on origin" if ahead is None
-                      else f"carries no commits over {base}")
-            raise GhError(
-                f"gate branch {head} {detail} -- an Initiative's {doc} is authored "
-                f"on that disposable sub-branch, never committed to {base} directly "
-                f"(see \"Opening a gate\" in references/gates.md).")
     else:
+        # A V2 Initiative's gate is the same shape as a standing child's:
+        # `product.md` is committed straight onto `initiative-<n>` (its only
+        # branch), which is itself the Gate A PR against `main` -- there is no
+        # sub-branch, because nothing is ever committed to `initiative-<n>`
+        # again after Gate A merges (unlike an epic branch, which keeps
+        # receiving `lld`/Task work). `pass-gate --unit initiative` deletes the
+        # branch from origin once the merge is confirmed. See `initiative_branch`.
         head, base = branch, "main"
     # The SHA the gate comment cites is the PUSHED head -- `origin/<head>` after a
     # fetch -- never a local worktree's HEAD. The PR is opened against origin, so
@@ -3730,31 +3716,42 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
                        f"field verbatim; it is the gate's owning doc-stage, not a target you pick")
     if unit == "epic":
         branch = epic_branch(issue)
-    elif unit == "initiative":
-        branch = initiative_branch(issue)
     else:
         branch = f"{unit}-{issue}"
+    if unit == "initiative":
+        # The Initiative branch's only job was carrying Gate A's `product.md`
+        # to `main` -- nothing is ever committed to it again once that merges
+        # (unlike an epic branch, which keeps receiving `lld`/Task work, or a
+        # standing child's `issue-<n>`, which keeps running further stages).
+        # Reconciling it would be pointless work on a branch about to be
+        # deleted, so skip straight to deleting it from origin instead.
+        # Idempotent: a human who already ticked GitHub's "delete branch on
+        # merge" box (or a prior run of this same command) leaves nothing to
+        # delete -- that is success, not a failure to surface.
+        runner(["git", "-C", repo_path or ".", "fetch", "origin"])
+        try:
+            runner(["git", "-C", repo_path or ".", "push", "origin", "--delete", branch])
+        except GhError:
+            pass
+        return _complete_initiative_gate_a(
+            gh, issue, f"human review confirmed for `product.md` — merged via #{gate_pr}.")
     # A merged per-issue gate landed on `main`, so the issue branch reconciles
-    # with `origin/main`. A merged epic (or Initiative) gate landed on the unit's
-    # own branch itself (its head was the `<unit>-<n>-gate-<stage>` sub-branch), so
-    # that worktree reconciles with `origin/<unit>-<n>` -- `main` is not involved
-    # until `close-epic` (an Initiative never itself merges to `main` at all). The
-    # epic's integration base is still `main`; `sync-branch --unit epic` keeps
-    # using it. See "The epic integration branch" in references/epics.md.
+    # with `origin/main`. A merged epic gate landed on the epic's own branch
+    # itself (its head was the `epic-<n>-gate-<stage>` sub-branch), so that
+    # worktree reconciles with `origin/epic-<n>` -- `main` is not involved
+    # until `close-epic`. The epic's integration base is still `main`;
+    # `sync-branch --unit epic` keeps using it. See "The epic integration
+    # branch" in references/epics.md.
     # Under the branch lock, in the branch's own (or an ephemeral) worktree --
     # an epic branch usually has no live worktree at gate-pass time, and this is
     # the command that most often borrowed the main checkout for it (epic #365).
     with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
         git_reconcile_branch(ws.path, branch,
-                              base=branch if unit in ("epic", "initiative") else "main",
+                              base=branch if unit == "epic" else "main",
                               runner=runner)
     if unit == "epic" and stage == "architecture":
         return _with_workspace(_complete_epic_architecture(
             gh, issue, f"human review confirmed for `architecture.md` — merged via #{gate_pr}."),
-            ws)
-    if unit == "initiative":
-        return _with_workspace(_complete_initiative_gate_a(
-            gh, issue, f"human review confirmed for `product.md` — merged via #{gate_pr}."),
             ws)
     next_stage = STAGE_AFTER_GATE[stage]
     timestamp = _utc_now_marker()

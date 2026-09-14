@@ -2636,22 +2636,21 @@ def test_open_gate_unit_epic_gate_b_uses_architecture_gate_sub_branch():
     assert pr_create_call[pr_create_call.index("--head") + 1] == "epic-5-gate-architecture"
 
 
-def test_open_gate_unit_initiative_opens_gate_sub_branch_against_initiative_branch():
-    # Same shape as `unit=epic`, one tier up: `product.md` (Gate A, the only
-    # gate an Initiative ever has) is authored on `initiative-<n>-gate-product`,
-    # opened against `initiative-<n>`, never `main`.
+def test_open_gate_unit_initiative_opens_the_initiative_branch_itself_against_main():
+    # Same shape as `unit=issue` (a standing child): `product.md` is committed
+    # straight onto `initiative-<n>` -- no gate sub-branch, since nothing is
+    # ever committed to it again after Gate A merges. `initiative-<n>` itself
+    # is the Gate A PR, opened against `main` directly.
     from sdlc_next import GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, \
         PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
     git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): "",
-                                 ("git", "-C", "/repo", "rev-parse", "origin/initiative-40-gate-product"): "cafe1234\n"})
+                                 ("git", "-C", "/repo", "rev-parse", "origin/initiative-40"): "cafe1234\n"})
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=40)}")
     status_mutation_argv = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_40', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['awaiting-human-review'])}")
     gh_runner = ScriptedRunner({
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_40"}}}}),
         status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 40}}}}),
-        ("gh", "api", "repos/owner/repo/compare/initiative-40...initiative-40-gate-product",
-         "--jq", ".ahead_by"): "1\n",
     })
     gh_runner.prefix_responses = {
         ("gh", "pr", "create"): "https://github.com/owner/repo/pull/500\n",
@@ -2662,29 +2661,27 @@ def test_open_gate_unit_initiative_opens_gate_sub_branch_against_initiative_bran
                             "architecture", "Locked Initiative-level requirements.",
                             unit="initiative", runner=git_runner)
     assert result == {"issue": 40, "unit": "initiative", "gate_pr": 500, "stage": "product",
-                      "sha": "cafe1234", "head": "initiative-40-gate-product", "base": "initiative-40"}
+                      "sha": "cafe1234", "head": "initiative-40", "base": "main"}
     pr_create_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "pr", "create"])
-    assert pr_create_call[pr_create_call.index("--base") + 1] == "initiative-40"
-    assert pr_create_call[pr_create_call.index("--head") + 1] == "initiative-40-gate-product"
-    assert "main" not in pr_create_call
+    assert pr_create_call[pr_create_call.index("--base") + 1] == "main"
+    assert pr_create_call[pr_create_call.index("--head") + 1] == "initiative-40"
     comment_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"])
     body = comment_call[comment_call.index("--body") + 1]
     assert "docs/sdlc/initiative-40/product.md" in body
 
 
-def test_open_gate_unit_initiative_refuses_when_the_gate_sub_branch_was_never_pushed():
+def test_open_gate_unit_initiative_fails_when_branch_never_pushed():
     from sdlc_next import GitHub, GhError, cmd_open_gate
     git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): ""})
+    git_runner.fail_on = {("git", "-C", "/repo", "rev-parse", "origin/initiative-40")}
     gh_runner = ScriptedRunner()
-    gh_runner.fail_on = {("gh", "api", "repos/owner/repo/compare/initiative-40...initiative-40-gate-product",
-                           "--jq", ".ahead_by")}
     gh = GitHub(runner=gh_runner)
     try:
         cmd_open_gate(gh, "/repo", 40, "WhatsApp initiative", "product.md", "architecture",
                        "x", unit="initiative", runner=git_runner)
         assert False, "expected GhError"
     except GhError as e:
-        assert "never committed to initiative-40 directly" in str(e)
+        assert "rev-parse origin/initiative-40" in str(e)
 
 
 def test_open_gate_unit_issue_still_targets_main_from_issue_branch():
@@ -2764,19 +2761,17 @@ def test_pass_gate_unit_epic_at_architecture_completes_epic_instead_of_claiming_
     assert stage_writes == []
 
 
-def test_pass_gate_unit_initiative_completes_gate_a_instead_of_claiming_architecture():
-    # The merged Initiative gate landed on `initiative-40` (its head was the gate
-    # sub-branch), so the Initiative worktree reconciles with
-    # `origin/initiative-40` -- and an Initiative never claims "architecture",
-    # since it has none; it hands off to the orchestrator cutting Epics instead.
+def test_pass_gate_unit_initiative_deletes_the_branch_and_completes_gate_a():
+    # The merged Initiative gate landed on `main` directly (initiative-40 WAS
+    # the PR) -- nothing is ever committed to initiative-40 again, so pass-gate
+    # deletes it from origin instead of reconciling a worktree for it. An
+    # Initiative never claims "architecture", since it has none; it hands off
+    # to the orchestrator cutting Epics instead.
     from sdlc_next import GitHub, cmd_pass_gate, _ISSUE_NODE_ID_QUERY, _DELETE_ISSUE_FIELD_VALUE_MUTATION, \
         STAGE_FIELD_ID, PIPELINE_STATUS_FIELD_ID
     git_runner = ScriptedRunner({
-        **_live_wt("initiative-40"),
         ("git", "-C", "/repo", "fetch", "origin"): "",
-        ("git", "-C", "/repo", "checkout", "initiative-40"): "",
-        ("git", "-C", "/repo", "merge", "origin/initiative-40"): "",
-        ("git", "-C", "/repo", "push", "origin", "initiative-40"): "",
+        ("git", "-C", "/repo", "push", "origin", "--delete", "initiative-40"): "",
     })
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=40)}")
     del_stage_argv = ("gh", "api", "graphql", "-f",
@@ -2797,8 +2792,7 @@ def test_pass_gate_unit_initiative_completes_gate_a_instead_of_claiming_architec
     result = cmd_pass_gate(gh, "/repo", issue=40, gate_pr=500, stage="product",
                             unit="initiative", runner=git_runner)
     assert result == {"issue": 40, "unit": "initiative", "initiative_gate_a_complete": True}
-    assert ["git", "-C", "/repo", "merge", "origin/initiative-40"] in git_runner.calls
-    assert ["git", "-C", "/repo", "merge", "origin/main"] not in git_runner.calls
+    assert ["git", "-C", "/repo", "push", "origin", "--delete", "initiative-40"] in git_runner.calls
     # Never writes a Stage-field value (e.g. "Architecture") for an Initiative.
     stage_writes = [c for c in gh_runner.calls if "updateIssueFieldValue" in " ".join(c)]
     assert stage_writes == []
@@ -2807,6 +2801,35 @@ def test_pass_gate_unit_initiative_completes_gate_a_instead_of_claiming_architec
     assert "cut Epics" in body
     edit_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "edit"])
     assert "initiative:gate-a-passed" in edit_call
+
+
+def test_pass_gate_unit_initiative_branch_deletion_is_idempotent():
+    # A human who already ticked GitHub's "delete branch on merge" checkbox
+    # (or a prior run of this same command) leaves nothing to delete on
+    # origin -- that is success, not a failure this command should surface.
+    from sdlc_next import GitHub, cmd_pass_gate, _ISSUE_NODE_ID_QUERY, _DELETE_ISSUE_FIELD_VALUE_MUTATION, \
+        STAGE_FIELD_ID, PIPELINE_STATUS_FIELD_ID
+    git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): ""})
+    git_runner.fail_on = {("git", "-C", "/repo", "push", "origin", "--delete", "initiative-40")}
+    node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=40)}")
+    del_stage_argv = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_40', field_id=STAGE_FIELD_ID)}")
+    del_status_argv = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_40', field_id=PIPELINE_STATUS_FIELD_ID)}")
+    gh_runner = ScriptedRunner({
+        ("gh", "issue", "view", "40", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": "<!-- gate-pr: product:500 -->"}]}),
+        node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_40"}}}}),
+        del_stage_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 40}}}}),
+        del_status_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 40}}}}),
+    })
+    gh_runner.prefix_responses = {("gh", "issue", "comment", "40"): "",
+                                   ("gh", "issue", "edit", "40"): ""}
+    gh = GitHub(runner=gh_runner)
+    result = cmd_pass_gate(gh, "/repo", issue=40, gate_pr=500, stage="product",
+                            unit="initiative", runner=git_runner)
+    assert result == {"issue": 40, "unit": "initiative", "initiative_gate_a_complete": True}
 
 
 def test_skip_gate_unit_epic_completes_epic_without_opening_a_gate():
@@ -6306,8 +6329,6 @@ def test_v2_full_lifecycle_initiative_to_epic_to_task_smoke():
     status_await_40 = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_40', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['awaiting-human-review'])}")
     gh_responses[status_await_40] = json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 40}}}})
-    gh_responses[("gh", "api", "repos/owner/repo/compare/initiative-40...initiative-40-gate-product",
-                  "--jq", ".ahead_by")] = "1\n"
     gh_responses[("gh", "issue", "view", "40", "--repo", "owner/repo",
                   "--json", "number,title,labels,body,state,comments")] = \
         json.dumps({"comments": [{"body": "<!-- gate-pr: product:500 -->"}]})
@@ -6366,9 +6387,11 @@ def test_v2_full_lifecycle_initiative_to_epic_to_task_smoke():
     assert wt_result["branch"] == "initiative-40"
 
     # 2. Gate A: open, then pass -- must complete Gate A, not claim "architecture".
+    # product.md is committed straight onto initiative-40 (no gate sub-branch);
+    # that branch itself is the PR against main.
     gate_git_runner = ScriptedRunner({
         ("git", "-C", "/repo", "fetch", "origin"): "",
-        ("git", "-C", "/repo", "rev-parse", "origin/initiative-40-gate-product"): "cafe1234\n",
+        ("git", "-C", "/repo", "rev-parse", "origin/initiative-40"): "cafe1234\n",
     })
     open_result = cmd_open_gate(gh, "/repo", 40, "WhatsApp Initiative", "product.md",
                                  "architecture", "Locked Initiative-level requirements.",
@@ -6376,11 +6399,8 @@ def test_v2_full_lifecycle_initiative_to_epic_to_task_smoke():
     assert open_result["gate_pr"] == 500
 
     pass_git_runner = ScriptedRunner({
-        **_live_wt("initiative-40"),
         ("git", "-C", "/repo", "fetch", "origin"): "",
-        ("git", "-C", "/repo", "checkout", "initiative-40"): "",
-        ("git", "-C", "/repo", "merge", "origin/initiative-40"): "",
-        ("git", "-C", "/repo", "push", "origin", "initiative-40"): "",
+        ("git", "-C", "/repo", "push", "origin", "--delete", "initiative-40"): "",
     })
     pass_result = cmd_pass_gate(gh, "/repo", issue=40, gate_pr=500, stage="product",
                                  unit="initiative", runner=pass_git_runner)
