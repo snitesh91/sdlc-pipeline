@@ -313,15 +313,67 @@ mock-doesn't-close-an-integration-risk discipline still holds, just relocated
 entirely to the epic-close Integration-test task, which is the one place it's now
 checked.
 
-### Settled: task-creation ownership
+**Scope confirmed: `sdlc-development.md` and `sdlc-pr-review.md` change *only* on
+testing guidelines — the IT-scope removal above and this completion-gate change.**
+Everything else in both files (TDD discipline, the completion-gate checklist beyond
+the IT item, the review stance, the fan-out layers, the empirical-not-diff-only bar,
+the mutation-check rule) stays as-is. Not a rewrite the way `lld` is.
 
-**`lld` creates the Task issues**, not `architecture`. `architecture` stays pure
-epic-shape decisions with no task boundaries at all ("depth goes down, not in" now
-applies one layer higher than it does in V1); `lld` absorbs the per-task breakdown and
-issue creation that `architecture` used to do for children, since `lld` is the stage
-actually producing per-task design and footprints. This is a real rewrite of
-`sdlc-lld.md`'s procedure, not a small tweak — it gains a "create/size the Task issues"
-responsibility it never had at task level in V1.
+### Settled: LLD's core principle, and how the epic-level shape falls out of it
+
+**`lld` creates the Task issues**, not `architecture` — confirmed, and re-derived from
+first principles rather than assumed, because that derivation is what actually shapes
+the rewrite. LLD has exactly three invariant jobs, unchanged by V1 vs. V2:
+
+1. **Resolution, not re-design.** `architecture.md` is fixed and trusted; LLD closes
+   every task-local decision architecture deliberately left open ("depth goes down,
+   not in" is architecture's own discipline — it pushes detail downward on purpose).
+   LLD never re-litigates what architecture already decided — a design that doesn't
+   actually fit is an escalation, never a quiet workaround (the existing
+   "fits vs. deviates" call, now made once at epic granularity instead of per-task).
+2. **Proof over assertion.** Architecture is allowed to hypothesize ("this bets on Y,
+   falls back to Z"); LLD is not allowed to hypothesize about anything checkable.
+   Every negative claim, threshold, boundary's real behavior, completeness claim, and
+   runtime/library mechanism claim must be backed by something actually executed — a
+   grep with output, a quoted source sentence, an opened implementation, a sweep, a
+   positive/negative control. Unchanged by the epic-level move.
+3. **Collision-safety declaration.** Whatever unit LLD's output maps to is what gets
+   dispatched concurrently, so LLD also owns declaring blast radius (the Footprint)
+   completely enough that the orchestrator can parallelize safely — a distinct job
+   from design resolution, not a byproduct of it.
+
+**Scaling these three up to epic level is what produces the new shape — it isn't a
+mechanical port of the V1 file to a bigger scope:**
+
+- Principle 1 ("resolution") now has to include *deciding what the tasks are*, since
+  nothing upstream of `lld` has carved them at epic level. That is the honest reason
+  task-creation belongs in `lld` and not `architecture`: carving concrete task
+  boundaries *is* the depth architecture is explicitly told to leave out. Not a new
+  responsibility bolted on — principle 1 applied at a coarser starting grain.
+- Principle 2 ("proof over assertion") is unchanged — every task's subsection inside
+  the one epic-level `lld.md` carries the same evidence bar as a V1 task-level
+  `lld.md` did, just written N times in one document instead of N separate ones.
+- Principle 3 ("collision-safety") gets structurally *stronger*, not just relocated:
+  with every task's Footprint inside one document, overlap between tasks is a direct
+  comparison inside one file instead of an inference across N separate documents.
+  **This makes the "post a finding to the sibling's own issue" fix built into
+  `sdlc-lld.md` earlier today unnecessary by construction in V2** — there is no
+  cross-document boundary left for a coordination note to get lost across, because
+  there is only one document. (Flagging this the same way as the IT-scoping and
+  completion-gate reversals above: a real V1 fix that goes dead once V2 ships.)
+- `lld-review`'s one pass gains a third thing to adjudicate that V1's per-task review
+  never had to consider: not just "is each task's resolution sound" and "do
+  footprints overlap," but **was the task-carving itself good** — right-sized,
+  correctly sequenced, non-overlapping by construction. This is the actual structural
+  answer to this morning's epic #157 finding (3-5 round bounces concentrated in
+  per-task `lld-review` cycles): a bad carving decision now has one reviewable place
+  to be caught, before any task's `development` even starts, instead of surfacing
+  piecemeal across N separate per-task review cycles.
+
+So the epic-level `lld` is the same three invariants as V1's task-level `lld`, with
+task-carving now explicitly inside principle 1's territory because there is nothing
+upstream of `lld` to have done it already — not a redesign of what LLD *is*, a
+consequence of where it now starts from.
 
 ### Other prerequisites and open questions
 
