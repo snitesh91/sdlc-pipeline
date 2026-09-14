@@ -114,6 +114,16 @@ Layer 2 — Provider interfaces (contracts, defined once, GitHub is the referenc
   WorkItemProvider: create/read/comment/transition/link-hierarchy/search
   (CodeHostProvider and DocStore interfaces: seam only, no second implementation yet)
 
+  **`classify_unit` is part of this contract, not a Layer-1 assumption.** Whether a
+  given issue *is* an Initiative, an Epic, or a Task is answered differently per
+  provider — GitHub might use a real Issue Type, or a label, depending on what the
+  client's plan/org supports; Jira has its own native Initiative/Epic/Story hierarchy
+  levels that may map directly. **The classification rule itself is client-configured,
+  not hardcoded per provider** — two GitHub-backed clients could use two different
+  signals (Issue Type vs. label) for the same concept. Core orchestration (Layer 1)
+  only ever calls `classify_unit(issue) -> initiative | epic | task | other` and never
+  inspects a provider-specific field directly to make that call.
+
 Layer 3 — Concrete sub-skills (pluggable, GitHub wired, others deferred)
   github-work-items (today's `GitHub` class / gh CLI, ~as-is)
   jira-work-items (deferred — candidate: one of the two MCP servers above)
@@ -215,10 +225,18 @@ collapses today's two design docs (epic-level `architecture.md`, task-level `lld
 into one design doc per epic, and moves integration/e2e testing off the per-task path
 entirely.
 
+**Initiative creation itself is manual** — an operator decides to start one; nothing in
+the pipeline generates one on its own. What *is* pluggable is how the pipeline
+recognizes an issue as an Initiative once created — see work-stream A's
+`classify_unit`: GitHub might signal it via Issue Type or a label depending on the
+client's setup, Jira via its native hierarchy level. The GitHub Issue Type
+prerequisite noted below is one possible `classify_unit` implementation for GitHub,
+not the only one a client could configure.
+
 ### The new hierarchy and flow
 
 ```
-Initiative (product-driven)
+Initiative (product-driven, created manually by the operator)
   -> product writes the IRD (product.md), per work-stream B's content rules
   -> Gate A approval
   -> the ORCHESTRATOR (not a dispatched agent) creates the list of Epics from the
@@ -307,9 +325,11 @@ responsibility it never had at task level in V1.
 
 ### Other prerequisites and open questions
 
-- **GitHub-side prerequisite** (unchanged from the earlier sketch): "Initiative" needs
-  to be a real Issue Type in the repo's type configuration before the skill can
-  reference it.
+- **A `classify_unit` implementation must exist for whichever provider is in use
+  before Initiatives work at all** — for GitHub, the likely default is a real Issue
+  Type in the repo's type configuration (a repo-settings action, not a skill change),
+  but per the note above, a client could configure a label-based signal instead if
+  Issue Types aren't available on their plan.
 - **Doc-path resolution** in the orchestration code: on the Initiative path,
   `architecture` needs to read `<docRoot>/initiative-<n>/product.md` (filtered by the
   Epic's own scope carve-out) instead of expecting its own unit to have written a
