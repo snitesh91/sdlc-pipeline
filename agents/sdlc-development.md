@@ -36,6 +36,17 @@ Do **not** invoke `superpowers:finishing-a-development-branch` (the integration
 decision is fixed: draft PR, stop) or `superpowers:using-git-worktrees` (the
 orchestrator owns worktrees and has told you which directory to use).
 
+**V2 testing split — know which task you are before you decide what to test.** Under
+epic-level `lld`, an epic always carries two kinds of task: normal functional tasks,
+and two standing tasks (Integration-test, e2e-test) created alongside them. A normal
+task writes **unit tests only** — no integration tests of its own, that's not a gap,
+it's deferred by design to the standing Integration-test task, which runs the full
+suite once every functional task has merged and both writes whatever coverage is
+missing and fixes any failure it finds. The e2e-test task works the same way for
+end-to-end coverage. Everything below that mentions integration/e2e testing applies
+in full to those two standing tasks and does not apply to a normal task — each such
+rule says so at the point it matters, but this is the frame to hold going in.
+
 ## Trust the design; do not redo it
 
 The design doc — `lld.md` for a normal-epic child, `architecture.md` or `product.md`
@@ -214,13 +225,19 @@ have bitten this repo hardest:
    - Re-check every number — diff stats, suite counts, file counts — against the
      artifact, not against an earlier draft of the same document.
 
-2. **Every plan-flagged risk is closed against the real system, not mocked away.**
-   If the design (or your own discovery) named an unresolved integration risk, it needs
-   a stated resolution with real evidence — a real service response, a real log line,
-   a real query against the real Postgres the `test:it` suites run on. A unit test
-   against a mock does not close an integration risk; it tests the mock. If it
-   genuinely cannot be closed here, say so explicitly in the PR description and name
-   what would close it. Do not let the mock stand in for the answer.
+2. **Every plan-flagged risk is closed against the real system, not mocked away —
+   except a normal V2 task, where this gate does not apply at all.** In V2's
+   epic-level-`lld` model, a normal task writes **unit tests only**; closing
+   integration risk against the real system is deferred entirely to the epic's two
+   standing tasks (Integration-test, e2e-test) created alongside the functional
+   tasks. A normal task's PR is not missing anything by having no integration
+   evidence — that was never its job. **This gate applies in full, unchanged, when
+   you are `development` for one of those two standing tasks**: a real service
+   response, a real log line, a real query against the real Postgres the `test:it`
+   suites run on. A unit test against a mock does not close an integration risk; it
+   tests the mock. If it genuinely cannot be closed there, say so explicitly in the
+   PR description and name what would close it. Do not let the mock stand in for the
+   answer. (V1, no epic-level `lld`: this gate applies to every task as before.)
 3. **"Manually verified" claims cite evidence, not assertion.** Anywhere you write
    that a path was verified manually, attach the concrete observation that proves it:
    terminal output, a log excerpt, a response body, or numbered repro steps someone
@@ -308,11 +325,13 @@ override once pointed `test:it` at the shared dev DB `bookshaw` and `cleanTables
 wiped real dev catalog/user/order rows. If the effective DB is not a `_test` one, stop
 and report — do not run the suite.
 
-**Do not run `make e2e`.** A full end-to-end run costs over an hour of wall clock,
-exceeds a tool call's timeout, and contends for shared ports and Docker stacks.
-End-to-end behaviour is proven once, at epic close, against the finished tree. If you
-believe the change genuinely cannot be validated without it, say so in your handoff and
-stop; do not start a run.
+**Do not run `make e2e` on a normal task.** A full end-to-end run costs over an hour of
+wall clock, exceeds a tool call's timeout, and contends for shared ports and Docker
+stacks. End-to-end behaviour is proven once, at epic close, against the finished tree
+— by the epic's standing e2e-test task, which this rule does not apply to: running
+`make e2e` is that task's actual job. On a normal task, if you believe the change
+genuinely cannot be validated without it, say so in your handoff and stop; do not
+start a run.
 
 **Port/adapter implementations project field-by-field — never return the entity.** An
 export/data-portability adapter (or any port that shapes data for an external consumer)
@@ -447,11 +466,20 @@ so — never the host-side equivalent). Redirect each run to a file; you need th
 for the attestation. Any command that can outlast the default tool-call timeout needs
 `run_in_background` plus an in-turn `Monitor` wait, or an explicit ≥600s timeout.
 
-**Do not run `make e2e`.** A full end-to-end run costs over an hour of wall clock and
-contends for shared ports and Docker stacks. End-to-end behaviour is proven once, at
-epic close, against the finished tree (`references/epics.md`, "Epic closing"). If you
-believe the change genuinely cannot be validated without it, say so in your handoff
-and stop; do not start a run.
+**Do not run `make e2e` on a normal task.** A full end-to-end run costs over an hour of
+wall clock and contends for shared ports and Docker stacks. End-to-end behaviour is
+proven once, at epic close, against the finished tree (`references/epics.md`, "Epic
+closing") — by the epic's standing e2e-test task, which this rule does not apply to.
+On a normal task, if you believe the change genuinely cannot be validated without it,
+say so in your handoff and stop; do not start a run.
+
+**V2: a normal task runs no intermediate IT at all — the two paragraphs below are V1
+behavior, dead for a normal task once epic-level `lld` is in effect.** Integration
+coverage moves entirely to the epic's standing Integration-test task, which runs the
+full suite (not scoped) once every functional task has merged. Kept here for repos
+still on V1's per-task-`lld` shape, and because the standing IT task itself still
+benefits from the same scoping discipline if its own diff is large enough to want an
+intermediate run before its final full pass:
 
 **Affected-graph scoping (once workspace packages + Turborepo exist).** When the repo
 has explicit package boundaries and a Turborepo DAG, an intermediate run may be scoped
