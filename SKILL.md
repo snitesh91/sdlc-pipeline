@@ -747,6 +747,28 @@ review, and `merge-lld-doc` stay yours**, after the agent returns.
 
 Repeat Steps 2–3 until the unit is merged or architected, blocked, or needs a human.
 
+### Stop at the run cap — reset your context between batches
+
+Your own context grows for the whole run and is re-read on every turn, so a run that
+drives dozens of Tasks end-to-end without stopping is the largest single source of
+token cost in the pipeline. `show-config`'s `parallelism.maxTasksPerRun` bounds it:
+it is the number of units this run may drive to a **terminal state** (a merge, or an
+Epic's Tasks reaching `epic:architected`) before you stop instead of picking the next.
+
+- Read it once at the start of the run. **`0` means unlimited** — no cap, the
+  historical behaviour; skip this whole mechanism.
+- When it is non-zero, count units *you brought to a terminal state this run* (not
+  units merely touched). When the count reaches the cap, **finish the unit in flight,
+  then stop** — do not start another from `list-parallel-ready`.
+- Stopping this way is a clean checkpoint, not a blocker: the pipeline's persisted
+  state already maps each unit to one next step (every transition is crash-safe), so
+  the next `/sdlc-pipeline` run resumes exactly here — with a fresh, small orchestrator
+  context. Report what you completed and that you stopped at the cap with work
+  remaining, so the operator knows to run again.
+- This is a throughput/batching limit only. It never changes how `lld` carves Tasks,
+  never merges or splits them, and never overrides `blockedBy` ordering — it just caps
+  how many reach done before the context resets.
+
 ## Step 4 — Report back to the user
 
 When Step 1 finds nothing actionable: summarize every unit touched, stages run, rework

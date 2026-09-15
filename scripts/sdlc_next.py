@@ -141,6 +141,22 @@ DEV_LANE_PARALLELISM = CONFIG["parallelism"]["devLane"]
 # See "Design lane" in references/parallelism.md.
 DESIGN_LANE_PARALLELISM = CONFIG["parallelism"].get("designLane", 2)
 
+# How many units (Tasks/children) one orchestrator run may drive to a terminal
+# state (merged, or an Epic's Tasks architected) before it stops with a
+# resumable checkpoint instead of picking the next. This is NOT a concurrency
+# cap like the lanes above and NOT a task-carving target -- carving stays
+# footprint-driven (`sdlc-lld.md`, "How you carve tasks"). It exists only to
+# bound the *orchestrator's own* context growth: the orchestrator session
+# accumulates context for the whole run and is re-read every turn, so a run that
+# never stops grows without limit. Stopping at the cap lets the next run resume
+# from the pipeline's already-crash-safe persisted state with a fresh, small
+# context. `0` (the default, and the value for a config predating this key)
+# means unlimited -- the historical behaviour, no cap. Read via `.get` so older
+# configs still load. Enforced by the orchestrator in SKILL.md, not by a script
+# loop; surfaced in `show-config` so the orchestrator reads it rather than
+# assuming a number.
+MAX_TASKS_PER_RUN = CONFIG["parallelism"].get("maxTasksPerRun", 0)
+
 # Only used by check_epics_closeable's one-time "ready to close" notification --
 # mark_needs_human/open_gate no longer touch the assignee (operator instruction:
 # the Pipeline Status field is the tracking mechanism on its own). See "Assignee
@@ -5731,7 +5747,8 @@ def main(argv: Optional[list] = None) -> int:
                                    # config), so surface the effective value alongside the
                                    # raw devLane/prReview rather than the raw block alone.
                                    "parallelism": {**CONFIG["parallelism"],
-                                                   "designLane": DESIGN_LANE_PARALLELISM},
+                                                   "designLane": DESIGN_LANE_PARALLELISM,
+                                                   "maxTasksPerRun": MAX_TASKS_PER_RUN},
                                    "requiredWorkflows": CONFIG["requiredWorkflows"],
                                    "localCiSuites": list(LOCAL_CI_SUITES),
                                    **PIPELINE})

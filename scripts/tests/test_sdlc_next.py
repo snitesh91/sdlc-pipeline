@@ -4653,6 +4653,30 @@ def test_show_config_honours_a_design_lane_override(tmp_path):
     assert json.loads(out)["parallelism"]["designLane"] == 5
 
 
+def test_show_config_max_tasks_per_run_defaults_to_zero_unlimited(tmp_path):
+    cfg = json.loads((Path(__file__).resolve().parents[2] / "sdlc.config.sample.json").read_text())
+    cfg["parallelism"].pop("maxTasksPerRun", None)  # a config predating the key
+    cfg_path = tmp_path / "sdlc-pipeline.config.json"
+    cfg_path.write_text(json.dumps(cfg))
+    script = str(Path(__file__).resolve().parents[1] / "sdlc_next.py")
+    out = subprocess.check_output(
+        [sys.executable, script, "show-config"],
+        env={**os.environ, "SDLC_CONFIG": str(cfg_path), "GITHUB_TOKEN": "x"}, text=True)
+    assert json.loads(out)["parallelism"]["maxTasksPerRun"] == 0
+
+
+def test_show_config_honours_a_max_tasks_per_run_override(tmp_path):
+    cfg = json.loads((Path(__file__).resolve().parents[2] / "sdlc.config.sample.json").read_text())
+    cfg["parallelism"]["maxTasksPerRun"] = 10
+    cfg_path = tmp_path / "sdlc-pipeline.config.json"
+    cfg_path.write_text(json.dumps(cfg))
+    script = str(Path(__file__).resolve().parents[1] / "sdlc_next.py")
+    out = subprocess.check_output(
+        [sys.executable, script, "show-config"],
+        env={**os.environ, "SDLC_CONFIG": str(cfg_path), "GITHUB_TOKEN": "x"}, text=True)
+    assert json.loads(out)["parallelism"]["maxTasksPerRun"] == 10
+
+
 # --- worktree release: a parked or merged unit stops holding a dev-lane slot ---
 # Regression cover for the 2026-08-20 incident: #186 was parked `needs-human` but
 # its worktree was left on disk, so `list-parallel-ready` read the lane as full

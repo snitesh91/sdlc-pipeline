@@ -8,7 +8,8 @@
   "parallelism": {
     "devLane": 3,
     "prReview": 3,
-    "designLane": 2
+    "designLane": 2,
+    "maxTasksPerRun": 0
   },
   "requiredWorkflows": [
     {
