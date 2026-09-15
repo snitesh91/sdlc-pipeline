@@ -6659,3 +6659,61 @@ def test_close_initiative_closes_when_clean():
     assert result == {"initiative": 40, "closed": True, "epics": [41]}
     close_call = next(c for c in runner.calls if c[:3] == ["gh", "issue", "close"])
     assert close_call[:6] == ["gh", "issue", "close", "40", "--repo", "owner/repo"]
+
+
+# --- V2 B1: dev/pr-review read only their own Task subsection, not the whole Epic lld ---
+
+def test_slice_task_subsection_returns_only_that_task():
+    from sdlc_next import slice_task_subsection
+    doc = (
+        "# lld.md\n\n"
+        "## Task #501: parse payload\n"
+        "Design for 501.\n\n"
+        "## Footprint\n- `a.ts`\n\n"
+        "## Task #502: persist\n"
+        "Design for 502.\n\n"
+        "## Footprint\n- `b.ts`\n"
+    )
+    s501 = slice_task_subsection(doc, 501)
+    assert s501.startswith("## Task #501: parse payload")
+    assert "Design for 501." in s501
+    # the neighbouring Task's content must not leak into the slice
+    assert "Task #502" not in s501
+    assert "Design for 502." not in s501
+    assert slice_task_subsection(doc, 999) is None
+
+
+def test_cmd_lld_section_prints_only_the_requested_task_subsection(capsys):
+    from sdlc_next import cmd_lld_section
+    argv = ("git", "-C", "/repo", "show", "origin/epic-430:docs/sdlc/epic-430/lld.md")
+    doc = (
+        "# lld.md\n\n"
+        "## Task #501: parse\nDesign 501.\n\n## Footprint\n- `a.ts`\n\n"
+        "## Task #502: persist\nDesign 502.\n\n## Footprint\n- `b.ts`\n"
+    )
+    runner = ScriptedRunner({argv: doc})
+    result = cmd_lld_section("/repo", 430, 501, runner=runner)
+    out = capsys.readouterr().out
+    assert out.startswith("## Task #501: parse")
+    assert "Design 501." in out
+    assert "Task #502" not in out
+    assert result == {"ok": True, "epic": 430, "task": 501, "chars": len(out)}
+
+
+def test_cmd_lld_section_raises_when_task_subsection_absent():
+    import pytest
+    from sdlc_next import cmd_lld_section, GhError
+    argv = ("git", "-C", "/repo", "show", "origin/epic-430:docs/sdlc/epic-430/lld.md")
+    runner = ScriptedRunner({argv: "# lld.md\n\n## Task #501: only\nx\n"})
+    with pytest.raises(GhError, match="Task #999"):
+        cmd_lld_section("/repo", 430, 999, runner=runner)
+
+
+def test_cmd_lld_section_raises_when_epic_lld_missing():
+    import pytest
+    from sdlc_next import cmd_lld_section, GhError
+    argv = ("git", "-C", "/repo", "show", "origin/epic-430:docs/sdlc/epic-430/lld.md")
+    runner = ScriptedRunner({})
+    runner.fail_on = {argv}
+    with pytest.raises(GhError, match="is the epic's lld published"):
+        cmd_lld_section("/repo", 430, 501, runner=runner)

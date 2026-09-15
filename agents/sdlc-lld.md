@@ -353,8 +353,11 @@ Stage-less Tasks until the Epic is `epic:architected`, which is what keeps them
 from starting before your design is published.
 
 After `lld-review` clears, the orchestrator publishes your `lld.md` onto the
-epic branch at `epic-<n>/lld.md` (`publish-doc`), the path every functional
-Task's `development` stage reads as background; runs `merge-lld-doc --unit epic`,
+epic branch at `epic-<n>/lld.md` (`publish-doc`); each functional Task's
+`development` and `pr-review` then reads back **only its own** `## Task #<n>`
+subsection from it, via `sdlc_next.py lld-section --epic <n> --task <m>`, never the
+whole document — which is exactly why each subsection must be self-contained. Runs
+`merge-lld-doc --unit epic`,
 which advances the Tasks you created to `development` and marks the Epic
 `epic:architected`; and only then closes you (`close-issue`). Don't close
 yourself. See "Cutting an Epic's phase-Tasks" in SKILL.md.

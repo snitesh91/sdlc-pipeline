@@ -302,6 +302,7 @@ operational failure: stop and report, never retry by hand.
 |---|---|
 | `next-action <epic>` | Pick the one unit to work (Step 1) |
 | `list-parallel-ready <epic> --repo-path <p>` | Dev-lane pool: `lld`/`development` children safe to start/resume concurrently |
+| `lld-section --epic <n> --task <m> --repo-path <p>` | Print only Task #`<m>`'s `## Task #<m>` subsection of `epic-<n>/lld.md` — the design a V2 functional Task's `development`/`pr-review` reads, instead of the whole Epic doc |
 | `list-design-ready <epic> --repo-path <p>` | Design-lane pool: a **standing** epic's `product`/`architecture` children safe to start/resume concurrently (empty for a default-profile epic) |
 | `list-ready-for-review <epic>` | Review pool: finished PRs awaiting `pr-review` |
 | `worktree-add <n> [--unit epic]` | The unit's worktree, the one correct way: resumes from `origin/<branch>` when it exists, else branches off the integration base; initialises the skill submodule and returns `skill_dir` (the per-unit `$SDLC_DIR`) |
@@ -637,7 +638,13 @@ prompt *contains*):
    of `references/stage-playbooks.md` plus whichever narrower `references/*.md` files
    its own role names (design-doc, verification, or review-fanout rules) — resolve.
    **Plus** the exact doc path it owns (e.g. `<docRoot>/issue-<n>/lld.md`), spelled
-   out. Don't paste any of these files. `$SDLC_DIR` here is the **unit's own** skill copy —
+   out. **For a V2 functional Task's `development` and `pr-review`, the design is its
+   own `## Task #<n>` subsection of `epic-<parent>/lld.md`, not a doc of its own — tell
+   it to read that subsection with `python3 "$SDLC_DIR/scripts/sdlc_next.py"
+   lld-section --epic <parent> --task <n> --repo-path <worktree>`, and not to read the
+   whole `epic-<parent>/lld.md`** (that Epic doc carries every Task; reading all of it
+   per Task re-reads the whole document N times for nothing). Don't paste any of these
+   files. `$SDLC_DIR` here is the **unit's own** skill copy —
    the `skill_dir` that `worktree-add`/`sync-branch` returned for this worktree
    (Setup), never the main checkout's `.github/sdlc-pipeline`.
 4. On genuine ambiguity: **stop and report the specific question in the final

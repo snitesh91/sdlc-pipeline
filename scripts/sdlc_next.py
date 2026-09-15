@@ -1977,6 +1977,48 @@ def parse_task_footprint(doc_text: str, task_number: int) -> list:
     return []
 
 
+def slice_task_subsection(doc_text: str, task_number: int) -> Optional[str]:
+    """Returns just one Task's `## Task #<n>` subsection of an Epic-level
+    `lld.md` (V2) -- its heading through to the line before the next Task
+    heading. Every Task's design lives in one shared Epic document
+    (`sdlc-lld.md`, "The document"), so a V2 functional Task's `development` and
+    `pr-review` must read only their own subsection; reading the whole document
+    turns it into a shared floor re-read by every one of the Epic's Tasks. Same
+    heading grammar as `parse_task_footprint` (`## Task #<n>`, `###`, and a
+    missing `#` all parse). Returns None when no subsection carries that number."""
+    matches = list(_TASK_SUBSECTION_HEADING.finditer(doc_text))
+    for i, m in enumerate(matches):
+        if int(m.group(1)) != task_number:
+            continue
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(doc_text)
+        return doc_text[start:end].rstrip() + "\n"
+    return None
+
+
+def cmd_lld_section(repo_path: str, epic: int, task: int,
+                     runner: Runner = _default_runner) -> dict:
+    """Prints one Task's `## Task #<n>` subsection out of its Epic's
+    `epic-<n>/lld.md` (read from `origin/epic-<n>` via `git show`) to stdout,
+    and returns a small status dict as this command's JSON footer. This is what a
+    V2 functional Task's `development` and `pr-review` read as their design doc --
+    only their own subsection, not the whole Epic document. It deliberately
+    prints raw markdown before the JSON line every other subcommand returns,
+    because the caller reads the section as a document, not as a JSON value."""
+    try:
+        text = runner(["git", "-C", repo_path, "show",
+                        f"origin/{epic_branch(epic)}:{DOC_ROOT}/epic-{epic}/lld.md"])
+    except GhError:
+        raise GhError(f"cannot read {DOC_ROOT}/epic-{epic}/lld.md on "
+                       f"origin/{epic_branch(epic)} -- is the epic's lld published?")
+    section = slice_task_subsection(text, task)
+    if section is None:
+        raise GhError(f"no `## Task #{task}` subsection in {DOC_ROOT}/epic-{epic}/lld.md "
+                       f"(headings must read `## Task #{task}: ...`, per sdlc-lld.md)")
+    print(section, end="")
+    return {"ok": True, "epic": epic, "task": task, "chars": len(section)}
+
+
 def read_footprint(repo_path: str, issue: int, runner: Runner = _default_runner,
                     epic: Optional[int] = None) -> list:
     """Reads issue #<issue>'s own declared footprint straight off its committed
@@ -5366,6 +5408,15 @@ def main(argv: Optional[list] = None) -> int:
                     help=f"Total concurrent children allowed (default: DEV_LANE_PARALLELISM = "
                          f"{DEV_LANE_PARALLELISM})")
     p.set_defaults(func=lambda a: cmd_list_parallel_ready(get_work_item_provider(), a.repo_path, a.epic, a.limit))
+    p = sub.add_parser("lld-section",
+                        help="Print one Task's `## Task #<n>` subsection of its Epic's "
+                             "epic-<n>/lld.md -- what a V2 functional Task's development/pr-review "
+                             "read as their design doc, instead of the whole Epic document")
+    p.add_argument("--epic", type=int, required=True, help="The Epic whose lld.md holds the subsection")
+    p.add_argument("--task", type=int, required=True, help="The Task whose `## Task #<n>` subsection to print")
+    p.add_argument("--repo-path", default=".",
+                    help="Repo/worktree with an `origin/epic-<n>` remote-tracking ref to git-show from")
+    p.set_defaults(func=lambda a: cmd_lld_section(a.repo_path, a.epic, a.task))
     p = sub.add_parser("list-design-ready",
                         help="Up to DESIGN_LANE_PARALLELISM of this STANDING epic's product/"
                              "architecture children safe to start/resume concurrently, each in its "

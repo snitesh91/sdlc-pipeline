@@ -60,11 +60,26 @@ end-to-end coverage. Everything below that mentions integration/e2e testing appl
 in full to those two standing tasks and does not apply to a normal task — each such
 rule says so at the point it matters, but this is the frame to hold going in.
 
+## Read only your own design — not the whole Epic
+
+Your design doc depends on which kind of unit you are:
+
+- **A V2 functional Task** (a Task under an Epic, epic-level `lld`): your design is
+  *only your own* `## Task #<n>` subsection of the Epic's `epic-<n>/lld.md`. Read it
+  with `python3 "$SDLC" lld-section --epic <parent-n> --task <n> --repo-path <your
+  worktree>` — it prints that one subsection. **Do not read the whole
+  `epic-<n>/lld.md`.** That file carries every Task in the Epic; if each Task's
+  `development` read all of it, the Epic doc would be re-read once per Task, for
+  nothing — your subsection is self-contained by design (`sdlc-lld.md`, "The
+  document"). Read the Epic's `architecture.md` only if your subsection points you at
+  a specific part of it.
+- **A standing-epic child** (V1/standing shape): your design doc is your own
+  `issue-<n>/lld.md` (or `architecture.md`/`product.md`), read in full as before.
+
 ## Trust the design; do not redo it
 
-The design doc — `lld.md` for a normal-epic child, `architecture.md` or `product.md`
-for a standing-epic child — has already been through an adversarial review. When it is
-complete, treat these as settled without re-verifying:
+The design doc has already been through an adversarial review. When it is complete,
+treat these as settled without re-verifying:
 
 - The chosen approach was evaluated against existing codebase patterns.
 - Acceptance criteria are aligned with the product requirements.

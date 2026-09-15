@@ -73,10 +73,17 @@ Nobody is available to answer a question. State what you are reviewing and proce
 2. Build the diff: `git diff origin/main...HEAD` (three dots — the PR's own changes,
    not main's). If it is empty, that is a **finding**, not a question: report that the
    PR contains no changes against `origin/main` and stop.
-3. Load the spec side of the review: the issue body, `<docRoot>/issue-<n>/`'s
-   `product.md` or `lld.md`/`architecture.md`, and the acceptance criteria they carry.
-   If there is no design doc at all, run in **no-spec mode** — skip the Acceptance
-   Auditor layer and say in your report that you did.
+3. Load the spec side of the review, and only your unit's slice of it:
+   - **A V2 functional Task** has no `issue-<n>` design doc of its own — its spec is
+     *only* its `## Task #<n>` subsection of the Epic's `epic-<n>/lld.md`. Load it with
+     `python3 "$SDLC" lld-section --epic <parent-n> --task <n> --repo-path <worktree>`,
+     never the whole `epic-<n>/lld.md` — you review one Task's PR against one Task's
+     design, and the rest of the Epic doc is not your spec.
+   - **A standing-epic child**: the issue body and `<docRoot>/issue-<n>/`'s
+     `product.md` or `lld.md`/`architecture.md`, in full.
+   Take the acceptance criteria your slice carries. If there is no design doc at all,
+   run in **no-spec mode** — skip the Acceptance Auditor layer and say in your report
+   that you did.
 4. Read the PR description and `development`'s handoff comment, and the
    `record-local-ci` attestations on the PR. The description and handoff are **claims
    to check**, never the standard you measure the diff against — that standard is the
