@@ -176,7 +176,6 @@ rule), and write the commit yourself so its message names why you're re-syncing.
 
 Still external — not in this repository:
 
-- **The `superpowers` plugin** (the `development` agent invokes three of its skills).
 - **GitHub's org-level custom Issue Fields** `Stage`, `Pipeline Status`, `Priority`,
   `Effort` with the option names the sample config lists, plus custom Issue Types
   (Task/Bug/Feature, and Initiative/Epic for V2) — provisioned once per org via

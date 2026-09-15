@@ -187,6 +187,32 @@ acting on its content. A returned agent that declared waiting has not finished, 
 issue is not at the stage its handoff implies. Re-message it with the result it was
 waiting for rather than treating the stage as complete.
 
+### The handback is terse — the detail already shipped
+
+Your final message to the orchestrator is read for routing, not for record. Every
+piece of evidence you gathered — command tables, mutation logs, suite output, file
+paths, the criterion→test map — already lives in the artifact this stage owns: the PR
+description, the issue comment, or the committed doc. Re-pasting it into the handback
+pays for it a second time, in the orchestrator's context — the one context in the run
+that every later stage inherits. So the handback carries only what the orchestrator
+routes on, in this fixed shape and nothing else:
+
+- **VERDICT:** one word. `finished` / `blocked` / `stopped` for an implementing stage;
+  `clean` / `rework` / `blocked` for a review; `fits` / `deviates` for `lld` and the
+  design stages. It restates the terminal state above, not a summary of the work.
+- **HEAD / PR:** the head SHA, and the PR number if one exists.
+- **BLOCKER:** one line, only when VERDICT is `blocked` or `stopped` — the specific
+  thing named, nothing more.
+- **DETAIL:** a link to the PR description or issue comment where the full evidence
+  already lives — the link, never the evidence itself.
+
+Nothing else: no command tables, no re-pasted logs, no restated diff, no "what I
+checked and found fine" inventory. If the orchestrator needs the detail to route, it
+opens the DETAIL link and reads GitHub — it does not need it inlined to do so. A
+handback that inlines evidence the record already holds is a finding on the handback,
+the same way an over-cap comment is: the orchestrator asks for a terse re-send before
+acting, then routes on the fields.
+
 
 ## Commenting discipline
 
@@ -265,8 +291,10 @@ What binds you, as a stage agent:
   replaced, because you still hold the context.
 - **When you are resumed with a review finding, fix the class, not the listed
   instance.** A same-class repeat bounce escalates; a patched instance invites the next
-  round. If you believe the finding is wrong, say so with evidence rather than
-  complying silently — see `superpowers:receiving-code-review`.
+  round. Verify the finding against the real code before you act on it: a review
+  finding is a claim to check, not an order to obey. If it is right, fix the whole
+  class; if it is wrong, say so with the evidence that shows it, rather than agreeing
+  performatively or complying silently.
 - **A rework round runs at full rigour.** It is never the place for a cheaper model,
   a skipped suite, or a shortened document check.
 

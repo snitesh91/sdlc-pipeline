@@ -138,9 +138,11 @@ Both rules cost one grep each. `lld-review` will spend a whole round on either.
 
 ## How you carve tasks
 
-This is the part of principle 1 that didn't exist at this altitude in V1. Two rules,
-both existing for the same reason the Footprint mechanism exists at all — safe
-parallel execution and reviewable size:
+This is the part of principle 1 that didn't exist at this altitude in V1. The rules
+below exist for the same reason the Footprint mechanism exists at all — safe parallel
+execution and reviewable size — plus one the V1 shape never forced: a task is the unit
+`development` loads into a fresh context and `pr-review` judges as one PR, so an
+oversized task drags an oversized context through every downstream stage.
 
 - **Carve along genuine footprint and dependency boundaries, not by even slicing.**
   Two tasks whose footprints don't overlap and whose work is genuinely independent are
@@ -150,10 +152,25 @@ parallel execution and reviewable size:
   independent work. A task carved purely to make pieces smaller, when its footprint
   still overlaps a sibling's, produces exactly the collision this document exists to
   prevent.
+- **One task = one bounded concern, one shippable PR.** This is the size band, and it
+  is tighter than "a reviewer could read it in one pass" — a reviewer can read a large
+  design in one pass, which is exactly how tasks came out too big. A task carrying more
+  than one independently-shippable capability, or whose footprint spans more than one
+  bounded concern, is carved too big: split it on the concern boundary. Prefer a **thin
+  vertical slice** — one capability end-to-end — over a horizontal layer, because
+  slices keep footprints disjoint and layers force every task to touch the same files.
+- **But never below a shippable slice — smaller is not free.** A task must stand on its
+  own: implementable, unit-testable, and openable as a meaningful PR by itself. Do not
+  carve below that line to chase small — a fragment that only compiles once a sibling
+  lands is not a task, it is a dependency you have mis-split, and each extra task adds
+  its own dispatch, review, and cross-task coordination cost. When two candidate pieces
+  share a footprint or one is inert without the other, they are one task.
 - **Size for a reviewable, provable design, not for a target count.** A task whose
   design can't be resolved with real proof (principle 2) in one focused subsection is
-  carved too big; a task with no task-local decisions left to make at all still gets
-  one, per "even a task needing no decisions still gets a subsection," below.
+  carved too big on the proof axis as well; a task with no task-local decisions left to
+  make at all still gets one, per "even a task needing no decisions still gets a
+  subsection," below. Carve to these boundaries, never to a number of tasks — the count
+  is whatever the concern boundaries produce.
 
 You are also the reviewable place the *carving itself* gets checked: `lld-review`'s
 one pass judges whether the split was sound, not just whether each task's content is

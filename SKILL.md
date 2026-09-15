@@ -592,11 +592,10 @@ verbatim). Judge the *work*, not the stage label. Four rules are not negotiable:
 An upgrade above the table is the same deal in reverse: allowed, stated in the
 comment.
 
-`development` is the only role that stacks skills: its agent file invokes
-`superpowers:test-driven-development`, `superpowers:verification-before-completion`
-and `superpowers:systematic-debugging` first. **Exclude**
-`superpowers:finishing-a-development-branch` (integration decision is fixed: draft PR,
-stop) and `superpowers:using-git-worktrees` (the orchestrator owns worktrees).
+No role loads an external skill plugin. `development`'s working discipline —
+test-first, root-cause-every-failure, verify-by-running — is inlined at the top of
+`agents/sdlc-development.md`, so the pipeline has no dependency on any plugin being
+installed in the driven repo.
 
 **One rule, one home — and the home is chosen by scope** (2026-09-13, refined
 2026-09-14). A rule that binds every stage (citation discipline, the no-park contract,
@@ -632,7 +631,8 @@ prompt *contains*):
    title, body of **every open child**. **For anything large, give the `gh` command
    that fetches it rather than pasting it** — pasted threads truncate prompts
    mid-instruction (`references/history.md`).
-2. Invoke the role's skills first (only `development` has any).
+2. The role's own working discipline is inlined in its `agents/sdlc-<role>.md` and
+   loaded when the agent Reads its definition — no external skill to invoke.
 3. `$SDLC_DIR` in the prompt, so the agent's own "first move" instructions — a `Read`
    of `references/stage-playbooks.md` plus whichever narrower `references/*.md` files
    its own role names (design-doc, verification, or review-fanout rules) — resolve.
@@ -657,10 +657,41 @@ prompt *contains*):
 8. Any command that can outlast the default tool timeout needs `run_in_background`
    or an explicit ≥600s outer timeout — the agent cannot discover this without dying.
 
+**Keep the prompt minimal — the agent re-derives the rest.** The list above is what
+the agent must *have*, not what you must *type*. Every standing rule — citation
+discipline, the no-park/one-turn-finish contract, the repo's Docker and testing
+commands, the completeness-sweep rule, the exit action — is already in front of the
+agent the moment it Reads its own `agents/sdlc-<role>.md` and
+`references/stage-playbooks.md`, which its first move does. Restating any of it in the
+prompt pays for those tokens twice, in the context that can least afford it, and worse
+invites the agent to cite your prompt as a source — a fabricated-quotation class
+`lld-review` and `pr-review` bounce (`references/stage-playbooks.md`, "The delegation
+prompt is not a citable source"). So pass only what is unit-specific and cannot be
+read from a file:
+
+> Role: `<role>`. Unit: #`<n>` — `<title>`. Worktree: `<path>` (`cd` there first).
+> `$SDLC_DIR`: `<skill_dir>`. Doc you own: `<doc-path>`. Then the 2–3 task-specific
+> facts and nothing else: the finding to fix, the deviation to judge, the sibling PR
+> that just landed. For the body, the comment thread, or every open child, give the
+> `gh` command that fetches it (item 1) rather than pasting it.
+
+A prompt that restates rules the agent reads for itself is the dispatch-side twin of an
+over-cap handback: trim it to the unit-specific facts.
+
 **Track stage agents** (for resume-based rework): note each `Agent` call's returned
 ID against its role for this unit's run — session-scoped, never written to GitHub. To
 send a finding back, `SendMessage` **directly, yourself**, never via a relay fork.
 Discard the mapping once the unit reaches a stopping point.
+
+**Keep your own context lean — you are the one that is re-read every turn.** A stage
+agent's context dies when its turn ends; yours accumulates for the whole run and is
+re-read on every request, so a file dump you pull into your own context is paid for
+again and again. When you need to search or read across the codebase yourself — not to
+drive a stage, but to resolve an ambiguity, reconcile a conflict, or locate something
+— dispatch a **read-only `Explore` subagent** and act on its conclusion, rather than
+running the greps and reading the files inline. Routing to `sdlc_next.py` (already
+terse) and to `Explore` is how the orchestrator's context stays small across a long
+epic; inline exploration is the main avoidable source of its growth.
 
 ### After the subagent returns
 
