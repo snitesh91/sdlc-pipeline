@@ -262,6 +262,22 @@ export GITHUB_TOKEN=$(cat <your GitHub token file>)     # classic PAT (ghp_)
 cd <repo-root>                                          # so config + git resolve
 ```
 
+**Optional token-proxy preflight — once per repo.** If this repo uses the `rtk`
+command-output proxy to cut bash-tool tokens, confirm it is wired before the run so
+the whole invocation benefits — an unhooked run is where the pipeline's bash output is
+most expensive. Skip this section entirely if the repo does not use `rtk`. Otherwise,
+the first time you drive this repo:
+
+- Check `which rtk` resolves **and** that `.claude/settings.local.json` has a
+  `PreToolUse` Bash hook running `rtk hook claude`.
+- If `rtk` is missing or the hook is absent, tell the operator **once** — "`rtk` not
+  installed/hooked for this repo; run `rtk init` to enable its bash-output token
+  savings" — and **do not block the run**: `rtk` is an optimization, never a
+  dependency, and the pipeline runs correctly without it.
+- Once you have confirmed it is wired (or the operator says this repo won't use it),
+  record a harness-memory flag `rtk-ready-<repo>` so later runs skip this check and the
+  operator is not asked again.
+
 **Two paths, resolved from two places — do not conflate them:**
 
 - **`$SDLC` (control plane) is a stable bootstrap path** — the main checkout's
