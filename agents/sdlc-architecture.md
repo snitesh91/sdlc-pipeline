@@ -348,11 +348,12 @@ than it did in V1. This document states the Epic's design as one coherent shape;
 linking the doc. **Do not change the Stage field** — stays `Architecture` while
 `arch-review` runs.
 
-After your Gate B merges (a plain per-issue gate, straight to `main`) and you
-close, the orchestrator publishes your `architecture.md` onto the epic branch
-at `epic-<n>/architecture.md` (`publish-doc`) — the path every other reader
-(the LLD-phase Task, functional Tasks) expects — and your sibling LLD-phase
-Task, `blockedBy` you, unblocks. See "Cutting an Epic's phase-Tasks" in
+When your Gate B merges (a plain per-issue gate, straight to `main`) or is
+skipped on confidence, `pass-gate` / `skip-gate` publish your `architecture.md`
+onto the epic branch at `epic-<n>/architecture.md` — the path every other
+reader (the LLD-phase Task, functional Tasks) expects — and close you. No
+`development` claim follows. Your sibling LLD-phase Task, `blockedBy` you,
+unblocks. See "Cutting an Epic's phase-Tasks" in
 SKILL.md.
 
 ### `architecture` done, `unit: "issue"` (standing-epic child)

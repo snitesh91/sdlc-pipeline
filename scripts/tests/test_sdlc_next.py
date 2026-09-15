@@ -2158,6 +2158,8 @@ def test_pass_gate_reconciles_comments_and_reclaims_next_stage():
         epic_check_argv: json.dumps({"data": {"repository": {"issue": {
             "issueType": {"name": "Task"}, "parent": {"number": 92}, "labels": {"nodes": []},
         }}}}),
+        # The parent is a V1 epic, so #9 is not a V2 phase-Task and claims onward.
+        **dict([_epic_check(92)]),
     })
     gh_runner.prefix_responses = {
         ("gh", "issue", "comment", "9"): "",
@@ -3010,6 +3012,8 @@ def test_auto_pass_gate_dispatches_to_pass_gate_for_matching_open_gate():
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
         stage_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
         status_delete_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 9}}}}),
+        # No parent, so #9 is not a V2 phase-Task and advances to its next stage.
+        **dict([_epic_check(9)]),
     })
     gh_runner.prefix_responses = {("gh", "issue", "comment", "9"): ""}
     gh = GitHub(runner=gh_runner)
@@ -4841,6 +4845,7 @@ def test_worktree_add_epic_unit_branches_off_main_into_epic_path():
         ("git", "-C", ".", "branch", "-r", "--list", "origin/epic-110"): "",
         ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-epic-110", "-b", "epic-110",
          "origin/main"): "",
+        ("git", "-C", ".", "push", "origin", "refs/heads/epic-110:refs/heads/epic-110"): "",
     })
     runner.fail_on = {("git", "-C", "/tmp/sdlc-epic-110", "ls-files", "--error-unmatch", ".github/sdlc-pipeline")}
     assert cmd_worktree_add(gh, 110, unit="epic", runner=runner)["path"] == "/tmp/sdlc-epic-110"
@@ -6257,8 +6262,11 @@ def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
         ("git", "-C", "/epic-41", "checkout", "-B", "epic-41", "origin/epic-41"): "",
         ("git", "-C", "/epic-41", "update-index", "--add", "--cacheinfo",
          "100644,aaa1111,docs/sdlc/epic-41/architecture.md"): "",
+        ("git", "-C", "/epic-41", "show-ref", "--verify", "--quiet",
+         "refs/remotes/origin/epic-41"): "",
         ("git", "-C", "/epic-41", "commit", "-m",
-         "docs(sdlc): publish issue-43 architecture.md to epic-41", "--",
+         "docs(sdlc): publish issue-43 architecture.md to epic-41"): "",
+        ("git", "-C", "/epic-41", "checkout", "HEAD", "--",
          "docs/sdlc/epic-41/architecture.md"): "",
         ("git", "-C", "/epic-41", "rev-parse", "HEAD"): "deadbeef\n",
         ("git", "-C", "/epic-41", "push", "origin", "epic-41"): "",

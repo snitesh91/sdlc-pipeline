@@ -58,8 +58,8 @@ pure container: `decide_next_action` never delegates a stage to it directly:
 
 ```
 initiative: [Product-Roadmap Task: product -> product-review -> Gate A] -> [orchestrator cuts Epics]
-epic:       [Architecture-phase Task: architecture -> arch-review -> Gate B] -> [orchestrator: publish-doc, then LLD-phase Task unblocks]
-            [LLD-phase Task: lld (creates functional + the 2 standing Tasks) -> lld-review] -> [orchestrator: publish-doc + merge-lld-doc advances them]
+epic:       [Architecture-phase Task: architecture -> arch-review -> Gate B] -> [pass-gate publishes architecture.md, closes the Task; LLD-phase Task unblocks]
+            [LLD-phase Task: lld (creates functional + the 2 standing Tasks) -> lld-review] -> [orchestrator: publish-doc, merge-lld-doc advances them, close-issue]
 task:       development -> [pr-review] -> auto-merge -> CLOSED
 ```
 
@@ -67,8 +67,12 @@ Every Epic always carries two standing Tasks alongside its functional ones — a
 Integration-test Task and an e2e-test Task, created by the LLD-phase Task the
 same way as any other Task. They run after every functional Task has merged,
 each writing whatever coverage is missing and fixing failures they find (the
-same full pipeline any Task runs). **Epic close reuses their attestations as
-the merge evidence — it does not re-run the suites.**
+same full pipeline any Task runs). **Epic close does not re-run what they already
+proved on the same tree:** `close-epic` still requires both closing-verification
+records (`record-epic-verification --kind e2e` and `--kind exploratory`), and when
+its reconcile with `main` picked up nothing, the `e2e` record cites the e2e-test
+Task's local-CI attestation instead of a fresh run. A reconcile that did pick up
+commits means a different tree — run the suite. The exploratory pass always runs.
 
 **Engineering-driven** — no product motivation, no Initiative, no `product.md` at
 all. A bare Epic is created directly with its scope written manually in the issue
@@ -136,7 +140,9 @@ the control plane**: `default_stage()` already gives an Initiative's child
 `"product"` (not the default profile's `"lld"` — see its own docstring), so
 `decide_next_action` picks it up exactly the way it picks up any fresh child.
 Once its Gate A merges (its own `issue-<n>` branch, straight to `main`, same
-shape a standing child's gate always had) and the Task closes,
+shape a standing child's gate always had), `pass-gate` closes the Task — its
+parent is an Initiative, so no next stage is claimed (see "Cutting an Epic's
+phase-Tasks") — and
 `decide_next_action` on the Initiative itself reports it via `reason:
 "Product-Roadmap Task closed -- cut Epics..."` — see "Closing an Initiative"
 for the mechanical check.
@@ -186,15 +192,19 @@ python3 "$SDLC" worktree-add <architecture-task-n> --unit issue --base origin/ma
 
 python3 "$SDLC" create-issue --parent <epic-n> --title "LLD phase" \
   --body "..." --type Task
+python3 "$SDLC" set-stage <lld-task-n> --stage lld
 python3 "$SDLC" add-blocked-by <lld-task-n> --on <architecture-task-n>
 ```
 
-- **`set-stage` is required for the Architecture-phase Task** — `architecture`
-  differs from the default profile's own `childEntryStage` (`"lld"`), so
-  `default_stage()` cannot guess it; `set-stage` writes only the Stage field,
-  no claim, no start comment, leaving the Task genuinely fresh until an actual
-  `/sdlc-pipeline` invocation claims and delegates it. The LLD-phase Task needs
-  no such call: `"lld"` already *is* the default profile's `childEntryStage`.
+- **`set-stage` is required for both phase-Tasks.** `set-stage` writes only the
+  Stage field — no claim, no start comment — so the Task stays fresh until an
+  actual `/sdlc-pipeline` invocation claims and delegates it. The
+  Architecture-phase Task's `architecture` is not the default profile's
+  `childEntryStage`, so `default_stage()` cannot guess it. The LLD-phase Task's
+  `lld` is, but `next-action` holds back every **Stage-less** child of a V2 Epic
+  until the Epic is `epic:architected`: those are the Tasks the LLD-phase Task
+  creates, and they must wait for `merge-lld-doc` to advance them. An unstaged
+  LLD-phase Task would be held back with them, forever.
 - **`worktree-add --base origin/main` is required for the Architecture-phase
   Task** (and would be for the LLD-phase Task too, if it were stood up before
   its own turn) — `integration_base`'s auto-detection has no way to tell a
@@ -206,23 +216,36 @@ python3 "$SDLC" add-blocked-by <lld-task-n> --on <architecture-task-n>
 - **`add-blocked-by`** orders the LLD-phase Task after the Architecture-phase
   Task via the native `blockedBy` edge — the *only* thing enforcing this
   ordering; there is no epic-level gate for it anymore.
-- **On the Architecture-phase Task's Gate B passing** (a plain per-issue gate,
-  same mechanics as any other issue's architecture gate): the orchestrator
-  publishes its doc onto the epic branch, then closes the Task —
-  ```bash
-  python3 "$SDLC" publish-doc <architecture-task-n> --doc architecture.md
-  python3 "$SDLC" mark-issue-closed <architecture-task-n>
-  ```
-  `publish-doc` reads `docs/sdlc/issue-<n>/architecture.md` from the Task's own
-  branch and commits it at `docs/sdlc/epic-<n>/architecture.md` on the epic
-  branch — the one path every reader (the LLD-phase Task, functional Tasks)
-  already expects — and posts a comment on the Epic naming the doc and the
-  Task, the direct answer to "where's the architecture.md link on the Epic".
+- **The Epic branch needs no setup step.** `publish-doc` creates `epic-<n>` on
+  origin from `main` the first time it publishes (or pushes a branch that exists
+  only locally), and `worktree-add --unit epic` pushes a fresh epic branch when
+  it cuts one.
+- **On the Architecture-phase Task's Gate B passing or being skipped**, the gate
+  command finishes the Task itself. A gate-bearing child of a V2 Epic can only be
+  its Architecture-phase Task, so `pass-gate` / `skip-gate` (`--repo-path` on
+  `skip-gate`) claim no next stage. Instead they publish
+  `docs/sdlc/issue-<n>/architecture.md` from the Task's own branch to
+  `docs/sdlc/epic-<n>/architecture.md` on the epic branch — the one path every
+  reader (the LLD-phase Task, functional Tasks) expects — post the doc link on
+  the Epic, then close the Task (`close-issue`). The result carries
+  `phase_task_complete: true`. When the publish is not verified on origin, the
+  Task stays open with `phase_task_complete: false` and a `reason`: fix it, then
+  `publish-doc <n> --doc architecture.md` and `close-issue <n>`.
 - **On the LLD-phase Task's `lld-review` coming back clean** (no gate — `lld`
-  has no human review): same shape, `publish-doc <lld-task-n> --doc lld.md`,
-  then `merge-lld-doc <epic-n> --unit epic` (unchanged from before) advances
-  every functional/standing Task the LLD-phase Task just created, then
-  `mark-issue-closed <lld-task-n>`.
+  has no human review), publish, advance, then close — in this order, never
+  closing first:
+  ```bash
+  python3 "$SDLC" publish-doc <lld-task-n> --doc lld.md
+  python3 "$SDLC" merge-lld-doc <epic-n> --unit epic
+  python3 "$SDLC" close-issue <lld-task-n>
+  ```
+  `merge-lld-doc --unit epic` advances every Stage-less Task under the Epic to
+  `development` and marks the Epic `epic:architected`; only then does
+  `next-action` hand those Tasks out.
+- **Close with `close-issue`, never `mark-issue-closed`.** `mark-issue-closed`
+  only sets the terminal fields in reaction to a close that already happened
+  (the `issues: closed` Action job); as a close step it leaves the issue open
+  with no Stage, and `next-action` hands it back out as fresh work.
 - This is the one point in the Epic-driven flow that is **not** a subagent
   delegation — the orchestrator does it directly, same as cutting Epics from
   an Initiative one tier up.
@@ -286,9 +309,11 @@ operational failure: stop and report, never retry by hand.
 | `claim <n> --role <role>` | Stage + In Progress + start comment |
 | `start-comment <n> --role <role>` | Start comment alone (`arch-review` / `lld-review` / `pr-review`) |
 | `sync-branch <n> [--unit epic]` | Reconcile the branch with its integration base; structured conflict result |
-| `merge-lld-doc <n> [--unit issue\|epic]` | `--unit issue` (default, V1): publish a normal-epic child's clean `lld.md` onto the epic branch, then **advance** it to `development`. `--unit epic` (V2): verify the epic-level `lld.md` (already pushed directly to `origin/epic-<n>`) reached origin, then advance every Task `lld` just created. Both: Stage set, Pipeline Status cleared, never claimed |
+| `merge-lld-doc <n> [--unit issue\|epic]` | `--unit issue` (default, V1): publish a normal-epic child's clean `lld.md` onto the epic branch, then **advance** it to `development`. `--unit epic` (V2): verify `epic-<n>/lld.md` is on `origin/epic-<n>` (put there by `publish-doc` from the LLD-phase Task), then advance every Stage-less Task under the Epic and mark it `epic:architected`. Both: Stage set, Pipeline Status cleared, never claimed |
+| `set-stage <n> --stage <s>` / `add-blocked-by <n> --on <dep>` / `publish-doc <n> --doc <d>` | V2 phase-Task cutting and doc publishing ("Cutting an Epic's phase-Tasks"); `publish-doc` creates the epic branch on origin if it does not exist yet |
+| `close-issue <n>` | Close an issue and set its terminal fields — the orchestrator's close for a V2 phase-Task (`mark-issue-closed` only reacts to a close) |
 | `verify-exit <n> --expect-stage <s> [--pr <pr>] [--unit epic]` | Post-handoff state check |
-| `open-gate` / `check-gate` / `pass-gate` / `skip-gate` / `auto-pass-gate-a` | Human-review gates (`references/gates.md`); `auto-pass-gate-a` advances Gate A with no human review when the resolved profile sets `requiresHumanGateA: false` |
+| `open-gate` / `check-gate` / `pass-gate` / `skip-gate` / `auto-pass-gate-a` | Human-review gates (`references/gates.md`); `auto-pass-gate-a` advances Gate A with no human review when the resolved profile sets `requiresHumanGateA: false`. On a V2 phase-Task (child of an Initiative or V2 Epic), `pass-gate`/`skip-gate` finish and close the Task instead of claiming a next stage |
 | `open-dev-pr <n> ...` | Draft PR + Stage=PR Review + handoff comment (posts **no** queue marker) |
 | `handoff-to-pr-review` / `record-pr-review` | The two review-queue markers |
 | `record-local-ci --pr <pr> --suite <s> --sha <HEAD> --command <cmd> --output <file>` | `development`'s evidence-carrying local-CI attestation; `<s>` is a `requiredWorkflows[].suite` from config |

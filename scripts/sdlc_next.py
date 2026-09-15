@@ -1789,9 +1789,20 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
         # ordered by their own native `blockedBy` edge, not this gate.
         return none_result()
 
+    # A V2 Epic's Tasks exist before its design is done -- the LLD-phase Task
+    # creates them mid-`lld` -- and `merge-lld-doc --unit epic` advances only
+    # Tasks with no Stage. Until the Epic is architected, a Stage-less child is
+    # one of those Tasks (phase-Tasks are staged when cut), so it is neither
+    # delegated nor staged here. Found live, 2026-09-15: once the LLD-phase
+    # Task closed, a functional Task was delegated at `lld` and its written
+    # Stage then hid it from `merge-lld-doc`.
+    v2_design_pending = is_v2_epic(epic_issue) and not is_epic_architected(epic_issue)
+
     for issue in sorted(children, key=sort_key):
         status = pipeline_status(issue)
         if status == "needs-human":
+            continue
+        if v2_design_pending and current_stage(issue) is None:
             continue
         if status in GATE_PENDING_STATUSES:
             gate = evaluate_gate(gh, issue["number"])
@@ -2171,6 +2182,11 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
     else:
         base = base or f"origin/{integration_base(gh, number, unit)}"
         runner(["git", "-C", repo_path, "worktree", "add", path, "-b", branch, base])
+        if unit == "epic":
+            # An epic branch is shared: every branch-writing command resolves it
+            # from origin, so a local-only one is invisible to them.
+            runner(["git", "-C", repo_path, "push", "origin",
+                    f"refs/heads/{branch}:refs/heads/{branch}"])
         resumed = False
     # A linked worktree's submodule directory is empty until initialised; do it
     # here so `skill_dir` is the per-unit `$SDLC_DIR` from the first command on.
@@ -2433,6 +2449,32 @@ def origin_branch_exists(repo_path: str, branch: str, runner: Runner = _default_
         return True
     except GhError:
         return False
+
+
+def ensure_branch_on_origin(repo_path: str, branch: str, base: str = "main",
+                            runner: Runner = _default_runner) -> str:
+    """Make `origin/<branch>` exist before a command that writes to it.
+
+    Returns `"exists"` when origin already has it, `"pushed-local"` when only a
+    local ref did (pushed as-is), or `"created"` when neither did (cut from
+    `origin/<base>`). An Epic's branch has no natural first writer in V2 --
+    the Epic runs no stage of its own, and its first commit is `publish-doc`
+    landing the Architecture-phase Task's doc -- so without this, the first
+    publish failed on a branch nobody had created, and a branch created
+    locally by `worktree-add --unit epic` failed deeper, inside `_publish_doc`'s
+    `origin/<epic>...<epic>` diff. Both found live, 2026-09-15."""
+    runner(["git", "-C", repo_path, "fetch", "origin"])
+    if origin_branch_exists(repo_path, branch, runner=runner):
+        return "exists"
+    try:
+        runner(["git", "-C", repo_path, "rev-parse", "--verify", "--quiet",
+                f"refs/heads/{branch}"])
+        source, outcome = f"refs/heads/{branch}", "pushed-local"
+    except GhError:
+        source, outcome = f"refs/remotes/origin/{base}", "created"
+    runner(["git", "-C", repo_path, "push", "origin", f"{source}:refs/heads/{branch}"])
+    runner(["git", "-C", repo_path, "fetch", "origin"])
+    return outcome
 
 
 def active_worktree_branches(repo_path: str, runner: Runner = _default_runner) -> set:
@@ -3411,9 +3453,11 @@ def _merge_epic_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
         # own lld.md at all.
         tasks_line = (f"Tasks advanced to `development`: {', '.join(f'#{n}' for n in advanced)}."
                       if advanced else "No fresh Tasks to advance this run.")
+        # `publish-doc` already announced the doc on this thread; this names the
+        # phase transition only, so the Epic reads one lld.md announcement.
         gh.issue_comment(epic,
-            f"📐 `lld.md` published — see `{doc_path}` (`{blob}`). Epic design phase "
-            f"(architecture + lld) complete. {tasks_line}\n\n"
+            f"📐 Epic design phase (architecture + lld) complete — `{doc_path}` "
+            f"(`{blob}`). {tasks_line}\n\n"
             f"<!-- stage-transition: epic-lld->children @ {timestamp} -->")
     return _with_workspace({"epic": epic, "merged": True, "advanced_tasks": advanced}, ws)
 
@@ -3539,8 +3583,19 @@ def _publish_doc(gh: GitHub, epic_path: str, issue: int, epic: str, src_doc_path
             # process may actually write to).
             runner(["git", "-C", epic_path, "update-index", "--add", "--cacheinfo",
                     f"100644,{src_blob},{dest_doc_path}"])
-        runner(["git", "-C", epic_path, "commit", "-m",
-                f"docs(sdlc): publish issue-{issue} {doc_label} to {epic}", "--", dest_doc_path])
+        commit = ["git", "-C", epic_path, "commit", "-m",
+                  f"docs(sdlc): publish issue-{issue} {doc_label} to {epic}"]
+        if dest_doc_path == src_doc_path:
+            runner([*commit, "--", dest_doc_path])
+        else:
+            # No pathspec: `commit -- <path>` takes <path> from the working tree,
+            # where the plumbing above never wrote it, so git reports "nothing
+            # to commit". The index holds only this one change -- the branch
+            # was just reset to origin and checked clean above.
+            runner(commit)
+            # Materialize the committed file, or the worktree reads as a
+            # deletion and the next publish refuses it as uncommitted changes.
+            runner(["git", "-C", epic_path, "checkout", "HEAD", "--", dest_doc_path])
         sha = git_rev_parse_head(epic_path, runner=runner)
         try:
             runner(["git", "-C", epic_path, "push", "origin", epic])
@@ -3615,9 +3670,11 @@ def cmd_publish_doc(gh: GitHub, repo_path: Optional[str], issue: int, doc: str,
     src_doc_path = f"{DOC_ROOT}/issue-{issue}/{doc}"
     dest_doc_path = f"{DOC_ROOT}/epic-{parent_number}/{doc}"
     src_ref = f"origin/{issue_branch(issue)}"
-    with branch_lock(epic), BranchWorkspace(epic, repo_path, runner) as ws:
-        result = _publish_doc(gh, ws.path, issue, epic, src_doc_path, src_ref, runner,
-                              dest_doc_path=dest_doc_path, doc_label=doc, comment=False)
+    with branch_lock(epic):
+        ensure_branch_on_origin(repo_path or ".", epic, runner=runner)
+        with BranchWorkspace(epic, repo_path, runner) as ws:
+            result = _publish_doc(gh, ws.path, issue, epic, src_doc_path, src_ref, runner,
+                                  dest_doc_path=dest_doc_path, doc_label=doc, comment=False)
     if result.get("merged"):
         gh.issue_comment(parent_number,
             f"📄 `{doc}` published — see `{dest_doc_path}` (`{result['commit']}`), from "
@@ -3660,6 +3717,58 @@ def _complete_epic_architecture(gh: GitHub, epic_number: int, note: str) -> dict
         f"`lld` onward starting the next `/sdlc-pipeline` pass.\n\n"
         f"<!-- stage-transition: epic-architecture->children @ {timestamp} -->")
     return {"issue": epic_number, "unit": "epic", "epic_architecture_complete": True}
+
+
+def phase_task_parent(gh: GitHub, issue: int) -> Optional[dict]:
+    """The V2 parent that makes `issue` a phase-Task, as `{"number", "kind"}`
+    (`kind` is `"initiative"` or `"epic"`), or None for any other issue.
+
+    Read from the tree, not from a new classification: a gate is only ever
+    opened on a *phase* child. An Initiative's one plain child is its
+    Product-Roadmap Task; a V2 Epic's functional Tasks enter at `development`
+    and never reach a gate, so the gate-bearing children under it are exactly
+    its Architecture-phase Task. Callers ask this only on a gate path. A V1
+    normal epic's children and a standing epic's children match neither
+    parent kind and keep the per-issue flow."""
+    parent = gh.issue_epic_info(issue).get("parent")
+    if not parent:
+        return None
+    info = gh.issue_epic_info(parent["number"])
+    if is_initiative(info):
+        return {"number": parent["number"], "kind": "initiative"}
+    if is_v2_epic(info):
+        return {"number": parent["number"], "kind": "epic"}
+    return None
+
+
+def _complete_phase_task(gh: GitHub, repo_path: Optional[str], issue: int, stage: str,
+                         parent: dict, note: str, runner: Runner, markers: str = "") -> dict:
+    """Finish a V2 phase-Task whose gate just passed (or was skipped): publish
+    what has to reach the Epic branch, then close the Task. It has no next
+    stage. `pass-gate` used to claim `STAGE_AFTER_GATE[stage]` here like any
+    per-issue gate, leaving a Product-Roadmap Task `in-progress` at
+    `architecture` and an Architecture-phase Task at `development` -- found
+    live, 2026-09-15.
+
+    An Architecture-phase Task publishes `architecture.md` to its Epic's branch
+    first and stays open unless that doc is verified on origin, so a failed
+    publish never closes the Task that owns the doc. A Product-Roadmap Task
+    has nothing to publish: its gate already landed `product.md` on `main`."""
+    result = {"issue": issue, "unit": "issue", "phase_task_complete": False,
+              "parent": parent["number"]}
+    if stage == "architecture" and parent["kind"] == "epic":
+        published = cmd_publish_doc(gh, repo_path, issue, "architecture.md", runner=runner)
+        result["publish"] = published
+        if not published.get("verified_on_origin"):
+            result["reason"] = ("architecture.md is not on the Epic branch -- the Task stays "
+                                "open; fix the publish and re-run publish-doc, then close-issue")
+            return result
+    gh.issue_comment(issue,
+        f"✅ {note}\n\nPhase-Task complete — closing it; its parent #{parent['number']} "
+        f"carries the flow from here.\n\n"
+        f"{markers}<!-- phase-task-complete: {stage} @ {_utc_now_marker()} -->")
+    cmd_close_issue(gh, issue)
+    return {**result, "phase_task_complete": True, "closed": True}
 
 
 def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: str,
@@ -3722,6 +3831,13 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
         git_reconcile_branch(ws.path, branch,
                               base=branch if unit == "epic" else "main",
                               runner=runner)
+    if unit == "issue":
+        parent = phase_task_parent(gh, issue)
+        if parent is not None:
+            return _with_workspace(_complete_phase_task(
+                gh, repo_path, issue, stage, parent,
+                f"Human review confirmed for `{stage}.md` — merged via #{gate_pr}.", runner),
+                ws)
     if unit == "epic" and stage == "architecture":
         return _with_workspace(_complete_epic_architecture(
             gh, issue, f"human review confirmed for `architecture.md` — merged via #{gate_pr}."),
@@ -3760,7 +3876,8 @@ def _profile_for_unit(gh: GitHub, issue: int, unit: str) -> dict:
 
 
 def cmd_skip_gate(gh: GitHub, issue: int, stage: str, confidence: int, summary: str,
-                   unit: str = "issue") -> dict:
+                   unit: str = "issue", repo_path: Optional[str] = None,
+                   runner: Runner = _default_runner) -> dict:
     """Skip the Gate B human-review PR entirely when arch-review returned a clean
     verdict with high enough self-reported confidence -- see "Human-review gates" in
     SKILL.md. Gate A (product) has no confidence skip; whether it needs a human at all
@@ -3782,6 +3899,13 @@ def cmd_skip_gate(gh: GitHub, issue: int, stage: str, confidence: int, summary: 
             gh, issue, f"arch-review reported {confidence}% confidence (> "
                        f"{threshold}% threshold) that `architecture.md` is "
                        f"structurally sound — skipped Gate B. {summary}")
+    parent = phase_task_parent(gh, issue)
+    if parent is not None:
+        return _complete_phase_task(
+            gh, repo_path, issue, stage, parent,
+            f"⚡ Gate B skipped — arch-review reported {confidence}% confidence (> "
+            f"{threshold}% threshold) that `architecture.md` is structurally sound. {summary}",
+            runner, markers=f"<!-- arch-review-confidence: {confidence} -->\n")
     next_stage = STAGE_AFTER_GATE[stage]
     timestamp = _utc_now_marker()
     gh.issue_comment(issue,
@@ -4681,6 +4805,23 @@ def cmd_mark_issue_closed(gh: GitHub, issue: int) -> dict:
     return {"issue": issue, "is_epic": is_epic(info), "marked_done": True}
 
 
+def cmd_close_issue(gh: GitHub, issue: int) -> dict:
+    """Close `issue` on the tracker and apply the terminal fields in the same
+    call -- the orchestrator's close, for a V2 phase-Task whose work never
+    merges through `merge-pr`'s `Closes #<n>` (an LLD-phase Task once its doc is
+    published and its Tasks advanced).
+
+    `mark-issue-closed` only *reacts* to a close (the `issues: closed` Action
+    job) and never closes anything itself. Used as the close step, it left the
+    issue open with Pipeline Status `Done` and no Stage, which `next-action`
+    read as a fresh child and handed straight back out -- found live,
+    2026-09-15. The field writes stay here too, so a repo without that
+    Action still ends in the right state; with it, the job's rerun is a no-op."""
+    gh.issue_close(issue)
+    cmd_mark_issue_closed(gh, issue)
+    return {"issue": issue, "closed": True}
+
+
 # Tracked file holding the closed-issue count at the last completed retrospective
 # -- committed alongside the retro's own skill edits (Step 5 commits anyway), so
 # the trigger is a watermark ("5 or more closed since the last retro") instead of
@@ -4893,7 +5034,7 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
     epics (permanent backlog umbrellas) are never proposed for closing, even when
     momentarily empty of open children. See "Epic closing" in references/epics.md."""
     all_issues = gh.issue_list()
-    open_epics = [i for i in all_issues if i["state"] == "OPEN" and is_epic(i) and not is_epic_standing(i)]
+    open_epics = [i for i in all_issues if i["state"] == "OPEN" and is_epic_unit(i) and not is_epic_standing(i)]
     results = []
     for epic in open_epics:
         children = [i for i in all_issues if i.get("parent") and i["parent"]["number"] == epic["number"]]
@@ -4910,8 +5051,13 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
         # merge is what carries them to `main`. So for a still-open epic the branch
         # to check is the epic branch, GitHub-side.
         branch = epic_branch(epic["number"])
+        # A V2 Epic owns no product.md (its Initiative's Product-Roadmap Task
+        # landed that on `main`); what `publish-doc` puts on its branch is
+        # architecture.md and lld.md.
+        doc_names = (("architecture.md", "lld.md") if is_v2_epic(epic)
+                     else ("product.md", "architecture.md"))
         missing_docs = [f"{DOC_ROOT}/epic-{epic['number']}/{name}"
-                        for name in ("product.md", "architecture.md")
+                        for name in doc_names
                         if not gh.path_on_ref(f"{DOC_ROOT}/epic-{epic['number']}/{name}", branch)]
         docs_line = (
             f"- [ ] {len(missing_docs)} epic doc(s) never reached `{branch}` "
@@ -4919,7 +5065,7 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
             "closing, or they stay reachable only by an unmerged gate branch ref and never "
             "reach `main`\n"
             if missing_docs else
-            f"- [x] This epic's `product.md` and `architecture.md` are both on `{branch}` "
+            f"- [x] This epic's `{doc_names[0]}` and `{doc_names[1]}` are both on `{branch}` "
             "(auto-verified) — `close-epic`'s merge carries them to `main`\n"
         )
         dependents_line = (
@@ -5301,7 +5447,10 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--confidence", type=int, required=True)
     p.add_argument("--summary", required=True)
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
-    p.set_defaults(func=lambda a: cmd_skip_gate(get_work_item_provider(), a.issue, a.stage, a.confidence, a.summary, a.unit))
+    p.add_argument("--repo-path", default=None,
+                    help="Any path inside the repository; used only when the issue is a V2 "
+                         "Architecture-phase Task, whose architecture.md is published to its Epic branch")
+    p.set_defaults(func=lambda a: cmd_skip_gate(get_work_item_provider(), a.issue, a.stage, a.confidence, a.summary, a.unit, repo_path=a.repo_path))
     p = sub.add_parser("auto-pass-gate-a",
                         help="Advance past Gate A with no human review when the epic's "
                              "profile sets requiresHumanGateA:false (after a clean product-review)")
@@ -5328,6 +5477,12 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("mark-issue-closed")
     p.add_argument("issue", type=int)
     p.set_defaults(func=lambda a: cmd_mark_issue_closed(get_work_item_provider(), a.issue))
+    p = sub.add_parser("close-issue",
+                        help="Close the issue and set its terminal fields (Stage cleared, "
+                             "Pipeline Status Done) -- the orchestrator's close for a V2 "
+                             "phase-Task. mark-issue-closed only reacts to a close")
+    p.add_argument("issue", type=int)
+    p.set_defaults(func=lambda a: cmd_close_issue(get_work_item_provider(), a.issue))
     p = sub.add_parser("pause-for-epic-regate")
     p.add_argument("issue", type=int)
     p.add_argument("--epic", type=int, required=True)

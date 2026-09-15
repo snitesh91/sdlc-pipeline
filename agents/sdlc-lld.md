@@ -308,10 +308,9 @@ orchestrator's, after you return.
 child's exit action below** — you are a plain `unit: "issue"` Task (the Epic's
 own **LLD-phase Task**, cut by the orchestrator alongside its sibling
 Architecture-phase Task immediately after the Epic itself, `blockedBy` that
-sibling). Continue on your own `issue-<n>` — no gate sub-branch, since `lld` has
-no human gate either way, and `merge-lld-doc --unit epic` verifies the doc against
-`origin/epic-<n>` (the published copy) once your own Gate-less merge to `main`
-lands. Read the epic's `<docRoot>/epic-<n>/architecture.md` (published there by
+sibling). Continue on your own `issue-<n>` — no gate sub-branch and no gate:
+`lld` has no human review, so your branch never merges anywhere; the
+orchestrator publishes your doc from it. Read the epic's `<docRoot>/epic-<n>/architecture.md` (published there by
 the orchestrator after the Architecture-phase Task closed) as the design source
 of truth; the **first move** is the epic-wide fits-vs-deviates call. For every
 piece that fits: carve the tasks (see "How you carve tasks"), **create each Task
@@ -327,12 +326,16 @@ stays `LLD` while `lld-review` runs (one pass over the whole document, not one
 per task). For any piece that doesn't fit → don't carve a task around it; follow
 the deviation escalation for that piece.
 
-After `lld-review` clears and you close, the orchestrator publishes your
-`lld.md` onto the epic branch at `epic-<n>/lld.md` (`publish-doc`), the path
-every functional Task's own `lld`/`development` stage expects as background, and
-then runs `merge-lld-doc --unit epic` to advance the functional Task issues you
-just created past their `product`/`architecture-review` gates. See "Cutting an
-Epic's phase-Tasks" in SKILL.md.
+**Leave the Tasks you create unstaged.** `next-action` holds back a V2 Epic's
+Stage-less Tasks until the Epic is `epic:architected`, which is what keeps them
+from starting before your design is published.
+
+After `lld-review` clears, the orchestrator publishes your `lld.md` onto the
+epic branch at `epic-<n>/lld.md` (`publish-doc`), the path every functional
+Task's `development` stage reads as background; runs `merge-lld-doc --unit epic`,
+which advances the Tasks you created to `development` and marks the Epic
+`epic:architected`; and only then closes you (`close-issue`). Don't close
+yourself. See "Cutting an Epic's phase-Tasks" in SKILL.md.
 
 On a **rework round**, the same worktree, same branch: edit `lld.md` in place (see
 "On a rework round, edit the design in place," above), commit, push again — no new

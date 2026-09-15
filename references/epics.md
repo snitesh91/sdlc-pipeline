@@ -312,7 +312,9 @@ comment and assigns the operator (idempotent — detects its own prior marker):
 2. No child closed as won't-fix in a way that silently shrinks delivered scope
 3. No open issue elsewhere depends on a closed child *(auto-verified via the native
    `blocking` relationship)*
-4. The epic's own `product.md` and `architecture.md` are both on `epic-<n>`
+4. The epic's own `product.md` and `architecture.md` are both on `epic-<n>` — for a
+   V2 Epic, `architecture.md` and `lld.md`, the two docs `publish-doc` lands there
+   (its `product.md` belongs to the Initiative and is already on `main`)
    *(auto-verified — `docs_missing_from_epic_branch` in the result)* — a doc left
    on an unmerged `epic-<n>-gate-<stage>` sub-branch is reachable only by SHA, and a
    SHA quoted from an old comment resolves to whatever draft it pointed at (see

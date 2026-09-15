@@ -271,9 +271,9 @@ a standing child are **what you write and what happens after**:
   is the same whoever ends up implementing it.
 - After your Gate A merges (a plain per-issue gate, straight to `main` —
   **the orchestrator should squash-merge it**, so `main` carries exactly one
-  commit for this document) and you close, the orchestrator cuts the Epic
-  list from your approved doc — see "Cutting Epics from an approved
-  Initiative" in SKILL.md.
+  commit for this document), `pass-gate` closes you — no `architecture`
+  claim follows — and the orchestrator cuts the Epic list from your approved
+  doc — see "Cutting Epics from an approved Initiative" in SKILL.md.
 
 Everything else — committing, pushing, updating the issue body, setting
 Effort, **not** touching the Stage field while `product-review` runs — is
