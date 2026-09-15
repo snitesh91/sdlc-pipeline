@@ -1490,6 +1490,9 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                 "reason": f"PR #{pr_number} checks not passed (status={status}){detail_msg}"}
     gh.pr_ready(pr_number)
     gh.pr_merge(pr_number)
+    # The PR's `Closes #<n>` closes the epic; set its terminal fields here too,
+    # so a repo without the `issues: closed` Action job is not left unset.
+    cmd_mark_issue_closed(gh, epic)
     return {"epic": epic, "merged": True, "pr": pr_number, "branch": branch}
 
 
@@ -1570,6 +1573,9 @@ def cmd_close_initiative(gh: GitHub, initiative: int) -> dict:
         return {"initiative": initiative, "closed": False, "missing_verification": missing,
                 "reason": f"closing verification incomplete: {'; '.join(missing)}"}
     gh.issue_close(initiative)
+    # Terminal fields here, not only in the `issues: closed` Action job, so a
+    # repo without that workflow still ends in the right state.
+    cmd_mark_issue_closed(gh, initiative)
     return {"initiative": initiative, "closed": True, "epics": check["epics"]}
 
 
@@ -1715,6 +1721,8 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
             result["product_cap"] = {"limit": PRODUCT_WIP_CAP,
                                      "pending": product_gate_pending(all_issues),
                                      "deferred": deferred_by_cap}
+        elif is_initiative(epic_issue) and epic_issue["state"] == "CLOSED":
+            result["reason"] = f"Initiative #{epic} is closed -- nothing left to do."
         elif is_initiative(epic_issue):
             # No label anywhere disambiguates "fresh, roadmap Task not created
             # yet" from "roadmap Task closed, ready to cut Epics" -- both look
@@ -1735,9 +1743,11 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
                 result["reason"] = ("Product-Roadmap Task closed -- cut Epics from the "
                                     "approved product.md next (SKILL.md, \"Cutting Epics "
                                     "from an approved Initiative\").")
-            # else: genuinely fresh (no roadmap Task created yet) or the
-            # roadmap Task is still open but blocked/needs-human -- plain
-            # "none", nothing more useful to say.
+            elif not initiative_children:
+                result["reason"] = ("no Product-Roadmap Task yet -- cut it next (SKILL.md, "
+                                    "\"Cutting an Initiative's Product-Roadmap Task\").")
+            # else: the roadmap Task is still open but blocked/needs-human --
+            # plain "none", nothing more useful to say.
         return result
 
     def unit_of(issue: dict) -> str:
@@ -1916,7 +1926,10 @@ _FOOTPRINT_HEADING = re.compile(r"^#+\s*(?:\d+[.)]\s*)?Footprint\b.*$",
 _FOOTPRINT_BULLET_PATH = re.compile(r"^-\s+`([^`]+)`")
 # V2's epic-level lld.md convention (sdlc-lld.md, "The document"): one `##
 # Task #<n>` subsection per Task, each carrying its own `### Footprint`.
-_TASK_SUBSECTION_HEADING = re.compile(r"^##\s*Task\s*#(\d+)\b.*$",
+# `## Task #<n>` is the documented form (`sdlc-lld.md`, "The document"); `###`
+# and a missing `#` are accepted because a Task silently dropped from the
+# parallel lane over heading punctuation cost a live run on 2026-09-15.
+_TASK_SUBSECTION_HEADING = re.compile(r"^#{2,3}\s*Task\s*#?(\d+)\b.*$",
                                       re.IGNORECASE | re.MULTILINE)
 
 
@@ -2637,8 +2650,9 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
             footprint = [f"{DOC_ROOT}/issue-{number}/"]
         if not footprint:
             skipped.append({"issue": number, "reason": "no ## Footprint section found in its own "
-                                                         "lld.md/architecture.md, or in its Epic's "
-                                                         "epic-<n>/lld.md subsection, on origin -- "
+                                                         "lld.md/architecture.md, or under a "
+                                                         f"`## Task #{number}` heading in its Epic's "
+                                                         "epic-<n>/lld.md, on origin -- "
                                                          "cannot verify non-overlap"})
             continue
         collision = next((n for n, fp in selected_footprints if footprint_overlaps(footprint, fp)), None)
@@ -3413,6 +3427,10 @@ def _merge_epic_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
     with branch_lock(epic_br), BranchWorkspace(epic_br, repo_path, runner) as ws:
         runner(["git", "-C", ws.path, "fetch", "origin"])
         blob = _blob_at(ws.path, f"origin/{epic_br}", doc_path, runner)
+        # The comment names a commit, like every other doc-published comment;
+        # the blob is only the "is it on origin" check.
+        tip = (runner(["git", "-C", ws.path, "rev-parse", f"origin/{epic_br}"]).strip()
+               if blob is not None else None)
     if blob is None:
         return _with_workspace({"epic": epic, "merged": False,
                 "reason": f"no lld.md on origin/{epic_br} yet — lld has not pushed it"}, ws)
@@ -3441,7 +3459,8 @@ def _merge_epic_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
     # Idempotent: a re-run of this command after a crash mid-way finds the label
     # already there and the fields already clear -- both writes are no-ops in
     # substance, just repeated.
-    if not has_label(gh.issue_view(epic), LABELS["architected"]):
+    completed_now = not has_label(gh.issue_view(epic), LABELS["architected"])
+    if completed_now:
         gh.clear_stage_and_status_fields(epic)
         gh.issue_edit(epic, add_labels=[LABELS["architected"]])
         # `open-gate --unit epic` posts the architecture.md link on this same
@@ -3457,9 +3476,16 @@ def _merge_epic_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
         # phase transition only, so the Epic reads one lld.md announcement.
         gh.issue_comment(epic,
             f"📐 Epic design phase (architecture + lld) complete — `{doc_path}` "
-            f"(`{blob}`). {tasks_line}\n\n"
+            f"(`{tip}`). {tasks_line}\n\n"
             f"<!-- stage-transition: epic-lld->children @ {timestamp} -->")
-    return _with_workspace({"epic": epic, "merged": True, "advanced_tasks": advanced}, ws)
+    if not advanced and not completed_now:
+        return _with_workspace({"epic": epic, "merged": False, "verified_on_origin": True,
+                                "advanced_tasks": [],
+                                "reason": "up-to-date — lld.md is on origin, the Epic is already "
+                                          "architected, and no Stage-less Task is left to advance"},
+                               ws)
+    return _with_workspace({"epic": epic, "merged": True, "verified_on_origin": True,
+                            "advanced_tasks": advanced}, ws)
 
 
 def _advance_after_lld_publish(gh: GitHub, issue: int, entry: dict, result: dict) -> dict:
@@ -3767,8 +3793,8 @@ def _complete_phase_task(gh: GitHub, repo_path: Optional[str], issue: int, stage
         f"✅ {note}\n\nPhase-Task complete — closing it; its parent #{parent['number']} "
         f"carries the flow from here.\n\n"
         f"{markers}<!-- phase-task-complete: {stage} @ {_utc_now_marker()} -->")
-    cmd_close_issue(gh, issue)
-    return {**result, "phase_task_complete": True, "closed": True}
+    closed = cmd_close_issue(gh, issue, repo_path=repo_path, runner=runner)
+    return {**result, "phase_task_complete": True, "closed": True, "worktree": closed["worktree"]}
 
 
 def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: str,
@@ -4802,10 +4828,12 @@ def cmd_mark_issue_closed(gh: GitHub, issue: int) -> dict:
     info = gh.issue_epic_info(issue)
     gh.clear_stage_field(issue)
     gh.set_pipeline_status_field(issue, "done")
-    return {"issue": issue, "is_epic": is_epic(info), "marked_done": True}
+    return {"issue": issue, "is_epic": is_epic_unit(info), "is_initiative": is_initiative(info),
+            "marked_done": True}
 
 
-def cmd_close_issue(gh: GitHub, issue: int) -> dict:
+def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
+                    runner: Runner = _default_runner) -> dict:
     """Close `issue` on the tracker and apply the terminal fields in the same
     call -- the orchestrator's close, for a V2 phase-Task whose work never
     merges through `merge-pr`'s `Closes #<n>` (an LLD-phase Task once its doc is
@@ -4816,10 +4844,16 @@ def cmd_close_issue(gh: GitHub, issue: int) -> dict:
     issue open with Pipeline Status `Done` and no Stage, which `next-action`
     read as a fresh child and handed straight back out -- found live,
     2026-09-15. The field writes stay here too, so a repo without that
-    Action still ends in the right state; with it, the job's rerun is a no-op."""
+    Action still ends in the right state; with it, the job's rerun is a no-op.
+
+    Also releases the issue's worktree: a closed Task never takes another
+    stage, and a tree left behind reads as a stale lane slot in
+    `list-parallel-ready`. `release_worktree` refuses (structured, never
+    raising) when the tree holds uncommitted or unpushed work."""
     gh.issue_close(issue)
     cmd_mark_issue_closed(gh, issue)
-    return {"issue": issue, "closed": True}
+    released = release_worktree(issue_branch(issue), runner=runner, base_repo=repo_path or ".")
+    return {"issue": issue, "closed": True, "worktree": released}
 
 
 # Tracked file holding the closed-issue count at the last completed retrospective
@@ -5075,7 +5109,7 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
             "- [x] No open issue elsewhere depends on a closed child of this epic (auto-verified)\n"
         )
         checklist = (
-            f"## 🏁 Epic ready to close — all {len(children)} child issue(s) merged\n\n"
+            f"## 🏁 Epic ready to close — all {len(children)} child issue(s) closed\n\n"
             f"- [x] All child issues closed (auto-verified: {len(children)}/{len(children)})\n"
             f"{dependents_line}"
             f"{docs_line}"
@@ -5480,9 +5514,12 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("close-issue",
                         help="Close the issue and set its terminal fields (Stage cleared, "
                              "Pipeline Status Done) -- the orchestrator's close for a V2 "
-                             "phase-Task. mark-issue-closed only reacts to a close")
+                             "phase-Task. mark-issue-closed only reacts to a close. Also "
+                             "releases the issue's worktree")
     p.add_argument("issue", type=int)
-    p.set_defaults(func=lambda a: cmd_close_issue(get_work_item_provider(), a.issue))
+    p.add_argument("--repo-path", default=None,
+                    help="Any path inside the repository (base for the worktree map)")
+    p.set_defaults(func=lambda a: cmd_close_issue(get_work_item_provider(), a.issue, repo_path=a.repo_path))
     p = sub.add_parser("pause-for-epic-regate")
     p.add_argument("issue", type=int)
     p.add_argument("--epic", type=int, required=True)

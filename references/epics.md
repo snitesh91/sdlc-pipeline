@@ -309,10 +309,9 @@ For every open epic whose children are **all** closed, posts a one-time checklis
 comment and assigns the operator (idempotent — detects its own prior marker):
 
 1. All child issues closed *(auto-verified)*
-2. No child closed as won't-fix in a way that silently shrinks delivered scope
-3. No open issue elsewhere depends on a closed child *(auto-verified via the native
+2. No open issue elsewhere depends on a closed child *(auto-verified via the native
    `blocking` relationship)*
-4. The epic's own `product.md` and `architecture.md` are both on `epic-<n>` — for a
+3. The epic's own `product.md` and `architecture.md` are both on `epic-<n>` — for a
    V2 Epic, `architecture.md` and `lld.md`, the two docs `publish-doc` lands there
    (its `product.md` belongs to the Initiative and is already on `main`)
    *(auto-verified — `docs_missing_from_epic_branch` in the result)* — a doc left
@@ -320,9 +319,9 @@ comment and assigns the operator (idempotent — detects its own prior marker):
    SHA quoted from an old comment resolves to whatever draft it pointed at (see
    `references/history.md`, 2026-08-20); it would also never reach `main`, since
    `close-epic`'s merge of `epic-<n>` is what lands the docs there
-5. Architecture docs the epic touched reflect final state
-6. Delivered scope matches the epic's stated purpose
-7. Manual testing done — a human end-to-end pass outside the pipeline's coverage
+4. Closing verification run on `epic-<n>` after merging `origin/main` into it — the full
+   e2e suite and an exploratory pass, in parallel
+5. `epic-<n>` merged to `main`
 
 Every item is mechanical or executed by the pipeline. The judgment items that used to
 sit here — "no silent scope drift", "architecture docs reflect final state", "delivered

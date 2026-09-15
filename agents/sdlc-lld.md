@@ -167,7 +167,12 @@ for `development` and for `lld-review`, so it can be as technical as the work
 demands. Optimise for a single property: **`development` should be able to implement
 any one task from it without making a design decision.**
 
-**One document, one subsection per task.** Each task's subsection covers:
+**One document, one subsection per task.** Head each subsection
+`## Task #<n>: <title>`, where `<n>` is the Task's issue number. `list-parallel-ready`
+finds a Task's `## Footprint` by that heading (`### Task #<n>` and `Task <n>` without
+the `#` also parse). A heading that carries the number any other way, such as
+`## Implement X (#<n>)`, does not, and the Task is skipped as unverifiable. Each
+task's subsection covers:
 
 - **Exact files and functions to touch** — paths, symbol names, what changes in each.
 - **How it maps to the epic's design** — which subsection of `architecture.md` this
@@ -319,8 +324,8 @@ default `--type`, but check `show-config`'s `pipeline.classification.task` and
 pass a matching `--label` too if it's label-based, e.g. `--label type:task`;
 `--type` alone only sets the native Issue Type field, not a label) with its scope
 and footprint already known, as siblings of yourself under the Epic, and write
-`issue-<n>/lld.md` — no altitude requirement — with one subsection per Task,
-including each one's parseable `## Footprint`. Commit, push to your own
+`issue-<n>/lld.md` — no altitude requirement — with one `## Task #<n>` subsection
+per Task (see "The document"), including each one's parseable `## Footprint`. Commit, push to your own
 `origin/issue-<n>`, short handoff comment. **Do not change the Stage field** —
 stays `LLD` while `lld-review` runs (one pass over the whole document, not one
 per task). For any piece that doesn't fit → don't carve a task around it; follow

@@ -9,6 +9,7 @@ of an index-only path) or leaves dirty (a committed path never written to the
 working tree) passed there unchanged. Git is real here; only GitHub is faked.
 """
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -218,13 +219,13 @@ def test_epic_announces_lld_md_once_across_publish_doc_and_merge_lld_doc(repo):
 
 # --- bugs 1 + 2: a phase-Task's gate finishes the Task ------------------------
 
-def test_close_issue_closes_the_issue_and_marks_it_done():
+def test_close_issue_closes_the_issue_and_marks_it_done(repo):
     gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9,
                    "stage": "lld", "status": "in-progress"})
 
-    result = s.cmd_close_issue(gh, 11)
+    result = s.cmd_close_issue(gh, 11, repo_path=str(repo))
 
-    assert result == {"issue": 11, "closed": True}
+    assert result["issue"] == 11 and result["closed"] is True
     assert gh.issues[11]["state"] == "CLOSED"
     assert gh.issues[11]["stage"] is None
     assert gh.issues[11]["status"] == "done"
@@ -336,3 +337,192 @@ def test_next_action_hands_out_advanced_tasks_once_the_v2_epic_is_architected():
 
     assert s.decide_next_action(gh, 9) == {
         "action": "delegate", "issue": 13, "unit": "issue", "stage": "development"}
+
+
+# --- Round 2: defects from an independent live run (Initiative #28), 2026-09-15 ---
+
+def _worktree_with_doc(gh, repo, number: int, path: str, text: str) -> str:
+    """Stand up a phase-Task's worktree the CLI's way, commit a doc there and
+    push it -- the state a real stage agent leaves behind."""
+    wt = s.cmd_worktree_add(gh, number, repo_path=str(repo), base="origin/main")["path"]
+    target = Path(wt) / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    _git("add", path, cwd=wt)
+    _git("commit", "-qm", f"add {path}", cwd=wt)
+    _git("push", "-q", "origin", f"issue-{number}", cwd=wt)
+    return wt
+
+
+# D1: a Task heading the docs never pinned down silently dropped the Task.
+
+@pytest.mark.parametrize("heading", [
+    "## Task #35: greet endpoint", "## Task 35 — greet endpoint",
+    "### Task #35", "### Task 35: greet endpoint"])
+def test_parse_task_footprint_accepts_the_task_heading_variants(heading):
+    doc = (f"# lld\n\n{heading}\n\n## Footprint\n- `src/a.js`\n\n"
+           f"## Task #36: other\n\n## Footprint\n- `src/b.js`\n")
+
+    assert s.parse_task_footprint(doc, 35) == ["src/a.js"]
+
+
+def test_list_parallel_ready_names_the_task_heading_it_could_not_find(repo):
+    gh = FakeGh([
+        {"number": 6, "labels": ["type:initiative"]},
+        {"number": 9, "labels": ["type:epic", s.LABELS["architected"]], "parent": 6},
+        {"number": 13, "labels": ["type:task"], "parent": 9, "stage": "development"},
+    ])
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md",
+                     "# lld\n\n## Implement greet (#13)\n\n## Footprint\n- `src/a.js`\n")
+
+    result = s.cmd_list_parallel_ready(gh, str(repo), 9)
+
+    [skip] = [x for x in result["skipped"] if x["issue"] == 13]
+    assert "## Task #13" in skip["reason"]
+
+
+# D2: the Epic comment cited a blob SHA as a commit; a no-op re-run said merged.
+
+def test_merge_lld_doc_cites_the_epic_branch_commit_and_a_rerun_is_not_merged(repo):
+    gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"},
+                  {"number": 13, "labels": ["type:task"], "parent": 9})
+    _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", "# lld\n")
+    s.cmd_publish_doc(gh, str(repo), 11, "lld.md")
+
+    first = s.cmd_merge_lld_doc(gh, str(repo), 9, unit="epic")
+    rerun = s.cmd_merge_lld_doc(gh, str(repo), 9, unit="epic")
+
+    tip = _git("rev-parse", "origin/epic-9", cwd=repo).strip()
+    [phase_comment] = [c for c in gh.comments_on(9) if "design phase" in c]
+    assert tip in phase_comment
+    assert first["merged"] is True
+    assert rerun["merged"] is False
+    assert rerun["verified_on_origin"] is True
+    assert rerun["advanced_tasks"] == []
+
+
+# D3: gates.md now allows squash-merging a phase-Task's gate; prove pass-gate copes.
+
+def test_pass_gate_on_an_architecture_phase_task_after_a_squash_merged_gate(repo):
+    gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "architecture",
+                   "status": "awaiting-human-review",
+                   "comments": ["<!-- gate-pr: architecture:12 -->"]})
+    doc_path = f"{DOC}/issue-10/architecture.md"
+    _push_doc_branch(repo, "issue-10", doc_path, "# arch\n")
+    (repo / doc_path).parent.mkdir(parents=True, exist_ok=True)
+    (repo / doc_path).write_text("# arch\n")
+    _git("add", doc_path, cwd=repo)
+    _git("commit", "-qm", "Architecture phase (#12) squashed", cwd=repo)
+    _git("push", "-q", "origin", "main", cwd=repo)
+
+    result = s.cmd_pass_gate(gh, str(repo), 10, 12, "architecture")
+
+    assert result["phase_task_complete"] is True
+    assert _origin_file(repo, "epic-9", f"{DOC}/epic-9/architecture.md") == "# arch\n"
+
+
+# D4: the closing checklist said "merged" for children that were only closed.
+
+def test_check_epics_closeable_checklist_counts_closed_children_not_merged():
+    gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
+    gh.path_on_ref = lambda path, ref="main": True
+
+    s.cmd_check_epics_closeable(gh)
+
+    [checklist] = gh.comments_on(9)
+    assert "1 child issue(s) closed" in checklist
+    assert "merged\n" not in checklist.splitlines()[0] + "\n"
+
+
+# D5: mark-issue-closed called a V2 Epic and an Initiative "not an epic".
+
+def test_mark_issue_closed_classifies_v2_epics_and_initiatives():
+    gh = _v2_tree()
+
+    assert s.cmd_mark_issue_closed(gh, 9)["is_epic"] is True
+    assert s.cmd_mark_issue_closed(gh, 6)["is_initiative"] is True
+
+
+# D6: next-action on an Initiative gave no reason when fresh, a stale one when closed.
+
+def test_next_action_on_a_fresh_initiative_says_to_cut_its_roadmap_task():
+    gh = FakeGh([{"number": 6, "labels": ["type:initiative"]}])
+
+    result = s.decide_next_action(gh, 6)
+
+    assert result["action"] == "none"
+    assert "Product-Roadmap Task" in result["reason"]
+
+
+def test_next_action_on_a_closed_initiative_says_it_is_closed():
+    gh = FakeGh([
+        {"number": 6, "labels": ["type:initiative"], "state": "CLOSED"},
+        {"number": 9, "labels": ["type:epic"], "parent": 6, "state": "CLOSED"},
+    ])
+
+    result = s.decide_next_action(gh, 6)
+
+    assert "is closed" in result["reason"]
+    assert "ready for initiative-close" not in result["reason"]
+
+
+# D7: close-initiative left Pipeline Status unset until a CI job ran.
+
+def test_close_initiative_sets_the_terminal_fields_itself():
+    gh = FakeGh([
+        {"number": 6, "labels": ["type:initiative"], "status": "in-progress",
+         "comments": ["<!-- initiative-verification: requirements:6 @ 2026-09-15T00:00:00Z -->"]},
+        {"number": 9, "labels": ["type:epic"], "parent": 6, "state": "CLOSED"},
+    ])
+
+    assert s.cmd_close_initiative(gh, 6)["closed"] is True
+    assert gh.issues[6]["state"] == "CLOSED"
+    assert gh.issues[6]["status"] == "done"
+
+
+# D8: a finished phase-Task's worktree was left behind as a stale lane slot.
+
+def test_pass_gate_on_a_phase_task_releases_its_worktree(repo):
+    gh = FakeGh([
+        {"number": 6, "labels": ["type:initiative"]},
+        {"number": 7, "labels": ["type:task"], "parent": 6, "stage": "product",
+         "status": "awaiting-human-review", "comments": ["<!-- gate-pr: product:8 -->"]},
+    ])
+    wt = _worktree_with_doc(gh, repo, 7, f"{DOC}/issue-7/product.md", "# prd\n")
+    _git("push", "-q", "origin", "origin/issue-7:refs/heads/main", cwd=repo)
+
+    result = s.cmd_pass_gate(gh, str(repo), 7, 8, "product")
+
+    assert result["phase_task_complete"] is True
+    assert not Path(wt).exists()
+
+
+def test_close_issue_releases_the_issue_worktree(repo):
+    gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"})
+    wt = _worktree_with_doc(gh, repo, 11, f"{DOC}/issue-11/lld.md", "# lld\n")
+
+    result = s.cmd_close_issue(gh, 11, repo_path=str(repo))
+
+    assert result["worktree"]["released"] is True
+    assert not Path(wt).exists()
+
+
+def test_close_epic_sets_the_terminal_fields_when_it_merges():
+    gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
+    gh.issues[9]["comments"] = [
+        "<!-- epic-verification: e2e:9 @ 2026-09-15T00:00:00Z -->",
+        "<!-- epic-verification: exploratory:9 @ 2026-09-15T00:01:00Z -->"]
+    merged = []
+    gh.branch_behind_by = lambda branch, base="main": 0
+    gh.pr_list_for_branch = lambda branch: []
+    gh.pr_create = lambda **kw: 38
+    gh.pr_checks = lambda n: []
+    gh.pr_view = lambda n, fields="": {"comments": [], "headRefOid": "abc"}
+    gh.pr_files = lambda n: []
+    gh.pr_ready = lambda n: None
+    gh.pr_merge = lambda n: merged.append(n)
+
+    result = s.cmd_close_epic(gh, 9)
+
+    assert result["merged"] is True and merged == [38]
+    assert gh.issues[9]["status"] == "done"

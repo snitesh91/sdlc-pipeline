@@ -227,7 +227,7 @@ python3 "$SDLC" add-blocked-by <lld-task-n> --on <architecture-task-n>
   `docs/sdlc/issue-<n>/architecture.md` from the Task's own branch to
   `docs/sdlc/epic-<n>/architecture.md` on the epic branch — the one path every
   reader (the LLD-phase Task, functional Tasks) expects — post the doc link on
-  the Epic, then close the Task (`close-issue`). The result carries
+  the Epic, then close the Task (`close-issue`, which also removes its worktree). The result carries
   `phase_task_complete: true`. When the publish is not verified on origin, the
   Task stays open with `phase_task_complete: false` and a `reason`: fix it, then
   `publish-doc <n> --doc architecture.md` and `close-issue <n>`.
@@ -311,7 +311,7 @@ operational failure: stop and report, never retry by hand.
 | `sync-branch <n> [--unit epic]` | Reconcile the branch with its integration base; structured conflict result |
 | `merge-lld-doc <n> [--unit issue\|epic]` | `--unit issue` (default, V1): publish a normal-epic child's clean `lld.md` onto the epic branch, then **advance** it to `development`. `--unit epic` (V2): verify `epic-<n>/lld.md` is on `origin/epic-<n>` (put there by `publish-doc` from the LLD-phase Task), then advance every Stage-less Task under the Epic and mark it `epic:architected`. Both: Stage set, Pipeline Status cleared, never claimed |
 | `set-stage <n> --stage <s>` / `add-blocked-by <n> --on <dep>` / `publish-doc <n> --doc <d>` | V2 phase-Task cutting and doc publishing ("Cutting an Epic's phase-Tasks"); `publish-doc` creates the epic branch on origin if it does not exist yet |
-| `close-issue <n>` | Close an issue and set its terminal fields — the orchestrator's close for a V2 phase-Task (`mark-issue-closed` only reacts to a close) |
+| `close-issue <n> [--repo-path <p>]` | Close an issue, set its terminal fields and release its worktree — the orchestrator's close for a V2 phase-Task (`mark-issue-closed` only reacts to a close). `close-epic`'s merge and `close-initiative` set the terminal fields themselves too |
 | `verify-exit <n> --expect-stage <s> [--pr <pr>] [--unit epic]` | Post-handoff state check |
 | `open-gate` / `check-gate` / `pass-gate` / `skip-gate` / `auto-pass-gate-a` | Human-review gates (`references/gates.md`); `auto-pass-gate-a` advances Gate A with no human review when the resolved profile sets `requiresHumanGateA: false`. On a V2 phase-Task (child of an Initiative or V2 Epic), `pass-gate`/`skip-gate` finish and close the Task instead of claiming a next stage |
 | `open-dev-pr <n> ...` | Draft PR + Stage=PR Review + handoff comment (posts **no** queue marker) |

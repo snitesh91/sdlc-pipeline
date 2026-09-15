@@ -127,6 +127,11 @@ development PR closes an issue. How it may be merged depends on the unit:
 - A per-issue gate (`issue-<n>` → `main`) is **never squash-merged and never deletes
   the branch** — `issue-<n>` keeps living through every later stage, and a squash
   would make the next `sync-branch` merge of `main` a phantom diff.
+- A **V2 phase-Task's** gate (a Product-Roadmap or Architecture-phase Task,
+  `issue-<n>` → `main`) **may be squash-merged**: `pass-gate` closes the Task and
+  releases its worktree, so the branch never takes another stage. Still **do not
+  delete the branch before `pass-gate` runs** — an Architecture-phase Task's
+  `architecture.md` is published to the epic branch from `origin/issue-<n>`.
 - An epic gate (`epic-<n>-gate-<stage>` → `epic-<n>`) **may be squash-merged and the
   sub-branch may be deleted after the merge** — it is disposable; the doc now lives
   on `epic-<n>`. What must never be squashed or deleted is `epic-<n>` itself, which

@@ -876,7 +876,8 @@ def test_mark_issue_closed_clears_stage_and_sets_done_for_epic():
         set_done_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 110}}}}),
     })
     gh = GitHub(runner=runner)
-    assert cmd_mark_issue_closed(gh, 110) == {"issue": 110, "is_epic": True, "marked_done": True}
+    assert cmd_mark_issue_closed(gh, 110) == {"issue": 110, "is_epic": True, "is_initiative": False,
+                                              "marked_done": True}
     assert list(clear_stage_argv) in runner.calls
     assert list(set_done_argv) in runner.calls
 
@@ -904,7 +905,8 @@ def test_mark_issue_closed_clears_stage_and_sets_done_for_non_epic():
     gh = GitHub(runner=runner)
     # No project-item/board-status call is scripted -- proves the non-epic path
     # never reaches a board write.
-    assert cmd_mark_issue_closed(gh, 183) == {"issue": 183, "is_epic": False, "marked_done": True}
+    assert cmd_mark_issue_closed(gh, 183) == {"issue": 183, "is_epic": False, "is_initiative": False,
+                                              "marked_done": True}
 
 
 def test_cli_mark_issue_closed_dispatches(monkeypatch):
@@ -6034,6 +6036,7 @@ def test_merge_epic_lld_doc_advances_every_freshly_created_task_and_skips_alread
         **_live_wt("epic-110", path=path),
         ("git", "-C", path, "fetch", "origin"): "",
         ("git", "-C", path, "rev-parse", "--verify", "--quiet", f"origin/epic-110:{doc}"): "blobXYZ\n",
+        ("git", "-C", path, "rev-parse", "origin/epic-110"): "tip110\n",
     })
 
     result = cmd_merge_lld_doc(gh, path, 110, runner=git_runner, unit="epic")
@@ -6088,6 +6091,7 @@ def test_merge_epic_lld_doc_completes_the_epics_own_design_phase():
         **_live_wt("epic-120", path=path),
         ("git", "-C", path, "fetch", "origin"): "",
         ("git", "-C", path, "rev-parse", "--verify", "--quiet", f"origin/epic-120:{doc}"): "blobXYZ\n",
+        ("git", "-C", path, "rev-parse", "origin/epic-120"): "tip120\n",
     })
     result = cmd_merge_lld_doc(gh, path, 120, runner=git_runner, unit="epic")
     assert result["merged"] is True
@@ -6099,7 +6103,8 @@ def test_merge_epic_lld_doc_completes_the_epics_own_design_phase():
     epic_comment = next(c for c in gh_runner.calls
                          if c[:3] == ["gh", "issue", "comment"] and c[3] == "120")
     body = epic_comment[epic_comment.index("--body") + 1]
-    assert doc in body and "blobXYZ" in body and "#701" in body
+    # Cites the epic branch commit, not the doc's blob.
+    assert doc in body and "tip120" in body and "blobXYZ" not in body and "#701" in body
 
 
 def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
@@ -6298,6 +6303,7 @@ def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
         ("git", "-C", "/epic-41", "fetch", "origin"): "",
         ("git", "-C", "/epic-41", "rev-parse", "--verify", "--quiet",
          f"origin/epic-41:{doc_path}"): "blobABC\n",
+        ("git", "-C", "/epic-41", "rev-parse", "origin/epic-41"): "tip41\n",
     })
     merge_result = cmd_merge_lld_doc(gh, "/epic-41", 41, runner=merge_git_runner, unit="epic")
     assert merge_result["merged"] is True
@@ -6452,7 +6458,8 @@ def test_decide_next_action_initiative_with_no_children_is_none():
     runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative])})
     gh = GitHub(runner=runner)
     result = decide_next_action(gh, 40)
-    assert result == {"action": "none", "epic": 40}
+    assert result["action"] == "none" and result["epic"] == 40
+    assert "Product-Roadmap Task" in result["reason"]
 
 
 def test_decide_next_action_initiative_delegates_its_roadmap_task():
@@ -6623,10 +6630,22 @@ def test_close_initiative_refuses_when_verification_missing():
 
 
 def test_close_initiative_closes_when_clean():
-    from sdlc_next import GitHub, cmd_close_initiative
+    from sdlc_next import (GitHub, cmd_close_initiative, _ISSUE_NODE_ID_QUERY,
+                            _DELETE_ISSUE_FIELD_VALUE_MUTATION, _SET_ISSUE_FIELD_MUTATION,
+                            STAGE_FIELD_ID, PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS)
     initiative = _issue(40, labels=["type:initiative"])
     e1 = _issue(41, parent=40, labels=["type:epic"], state="CLOSED")
     runner = ScriptedRunner({
+        # Terminal fields, set by close-initiative itself.
+        **dict([_epic_check(40, labels=["type:initiative"])]),
+        ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=40)}"):
+            json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_40"}}}}),
+        ("gh", "api", "graphql", "-f",
+         f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_40', field_id=STAGE_FIELD_ID)}"):
+            json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 40}}}}),
+        ("gh", "api", "graphql", "-f",
+         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_40', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['done'])}"):
+            json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 40}}}}),
         tuple(_list_argv()): _list_response([initiative, e1]),
         ("gh", "issue", "view", "40", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
