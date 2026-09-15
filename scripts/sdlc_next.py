@@ -778,6 +778,21 @@ class GitHub:
             return None
         return int(out.strip())
 
+    def base_delta_files(self, head: str, base: str = "main") -> list:
+        """The files `base` changed that `head` does not have -- the diff from
+        merge-base(head, base) to base -- via the same REST compare endpoint as
+        `branch_behind_by`, reading `.files[].filename`. `cmd_merge_pr` uses it to
+        decide whether a behind-base PR's stale-base risk is real: a base delta
+        that touches no required-workflow path cannot have changed suite-covered
+        behaviour, so the PR's existing CI/attestation still describes the merged
+        result and no re-sync/re-CI/re-attest is needed. GitHub's compare API
+        returns at most 300 files; `base_delta_needs_reattest` treats a delta at
+        that cap conservatively, so a truncated read never yields the docs-only
+        fast path."""
+        out = self._run(["gh", "api", f"repos/{self.repo}/compare/{head}...{base}",
+                          "--jq", ".files[]?.filename"])
+        return [line for line in out.splitlines() if line.strip()]
+
     def pr_ready(self, number: int):
         self._run(["gh", "pr", "ready", str(number), "--repo", self.repo])
 
@@ -4677,6 +4692,33 @@ def missing_required_workflows(changed_files: list, checks: list,
     return missing
 
 
+def base_delta_needs_reattest(base_delta_files: list) -> bool:
+    """Whether a behind-base PR must be re-synced and re-attested before merge,
+    given the files `base` changed that the PR lacks (`GitHub.base_delta_files`).
+
+    `cmd_merge_pr` refuses a behind-base PR because CI ran on a stale base and two
+    green siblings can still break `main` together -- a semantic conflict in
+    suite-covered code. That risk exists only when the base delta touches code a
+    required suite runs over. When the base moved only in files no required
+    workflow watches -- docs, a sibling's unrelated tree, the doc set itself --
+    there is nothing for the suite to re-prove, and forcing a sync + fresh CI +
+    re-attest buys nothing but another dev-agent spawn and its handback. So in
+    that case the PR's existing attestation is carried forward.
+
+    Conservative by construction: a 300-file delta (GitHub's compare-API file
+    cap, so possibly truncated) forces re-attest, as does any change to the
+    pipeline's own config, so the docs-only fast path is taken only on a delta
+    read in full that demonstrably triggers no required workflow. An empty delta
+    (base moved by commits with no net file change) needs no re-attest. Reuses
+    the same prefix/workflow-file match as `missing_required_workflows`."""
+    if len(base_delta_files) >= 300:
+        return True
+    for spec in REQUIRED_WORKFLOWS:
+        if any(p.startswith(spec["prefixes"]) or p in spec["files"] for p in base_delta_files):
+            return True
+    return touches_pipeline_config(base_delta_files)
+
+
 def touches_pipeline_config(changed_files: list) -> bool:
     """True when a PR changed the pipeline's own config file in the driven repo.
 
@@ -4736,20 +4778,40 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
     every closure path uniformly.
 
     Also refuses -- as a structured exit-0 result, not an error -- when the
-    branch is *behind* `origin/main`. Green CI on a stale base proves nothing
-    about the combined state: with the parallel dev lane, two sibling PRs can
-    each be green independently yet break `main` together (a semantic conflict
-    no textual merge check catches). The orchestrator's fix is mechanical:
-    `sync-branch` (merges origin/main in, pushing re-triggers CI), wait for
-    green, re-run `merge-pr`."""
+    branch is *behind* `origin/main` **and** the base delta it lacks touches a
+    required suite's tree. Green CI on a stale base proves nothing about the
+    combined state: with the parallel dev lane, two sibling PRs can each be green
+    independently yet break `main` together (a semantic conflict no textual merge
+    check catches). The orchestrator's fix is mechanical: `sync-branch` (merges
+    origin/main in, pushing re-triggers CI), wait for green, re-run `merge-pr`.
+
+    But a behind-base branch whose base delta touches **no** required-workflow
+    path (a docs-only bump, a sibling's unrelated tree) has no such stale-base
+    risk -- nothing the suites cover changed on the base -- so its existing
+    attestation is carried forward and it merges without a forced re-sync +
+    re-CI + re-attest (`base_delta_needs_reattest`). The result then carries
+    `carried_attestation_forward: True`. The head-SHA attestation match below is
+    unchanged either way."""
     base = integration_base(gh, issue)
     behind = gh.branch_behind_by(issue_branch(issue), base=base)
+    carried_forward = {}
     if behind:
-        return {"pr": pr_number, "issue": issue, "merged": False, "behind_base": behind,
-                "base": base,
-                "reason": f"branch {issue_branch(issue)} is {behind} commit(s) behind {base} -- CI ran "
-                          f"on a stale base; run sync-branch, wait for fresh CI green, then "
-                          f"re-run merge-pr"}
+        base_delta = gh.base_delta_files(issue_branch(issue), base=base)
+        if base_delta_needs_reattest(base_delta):
+            return {"pr": pr_number, "issue": issue, "merged": False, "behind_base": behind,
+                    "base": base,
+                    "reason": f"branch {issue_branch(issue)} is {behind} commit(s) behind {base} -- CI ran "
+                              f"on a stale base that changed suite-covered files; run sync-branch, "
+                              f"wait for fresh CI green, then re-run merge-pr"}
+        # The base moved only in files no required workflow watches (docs, an
+        # unrelated tree). Nothing the suites cover changed on the base, so this
+        # PR's existing green CI / local-ci attestation still describes the
+        # merged result -- carry it forward instead of forcing a sync + fresh CI
+        # + re-attest (and the dev-agent spawn that costs). The merge below still
+        # requires that attestation to match the current head, unchanged.
+        carried_forward = {"behind_base": behind, "base": base,
+                            "base_delta_files": len(base_delta),
+                            "carried_attestation_forward": True}
     missing = missing_pipeline_evidence(gh.issue_view(issue).get("comments", []))
     if missing:
         return {"pr": pr_number, "issue": issue, "merged": False,
@@ -4798,6 +4860,7 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
     # unpushed/dirty guards in release_worktree should be no-ops.
     return {"pr": pr_number, "issue": issue, "merged": True, "issue_closed": issue_closed,
             "config_changed": touches_pipeline_config(files),
+            **carried_forward,
             "worktree": release_worktree(issue_branch(issue), base_repo=repo_path, runner=gh._run)}
 
 

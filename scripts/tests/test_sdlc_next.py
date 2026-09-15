@@ -1990,6 +1990,10 @@ def test_merge_pr_refuses_as_structured_result_when_branch_behind_main():
     from tests.test_sdlc_next import ScriptedRunner
     runner = ScriptedRunner({
         ("gh", "api", "repos/owner/repo/compare/main...issue-9", "--jq", ".behind_by"): "2\n",
+        # the base delta touches a suite-covered tree, so the stale-base risk is
+        # real and the refusal stands (C1 only carries forward a docs-only delta)
+        ("gh", "api", "repos/owner/repo/compare/issue-9...main", "--jq", ".files[]?.filename"):
+            "backend/src/x.ts\n",
         tuple(_list_argv()): _list_response([_issue(9)]),
     })
     gh = GitHub(runner=runner)
@@ -6741,3 +6745,67 @@ def test_cmd_lld_section_raises_when_epic_lld_missing():
     runner.fail_on = {argv}
     with pytest.raises(GhError, match="is the epic's lld published"):
         cmd_lld_section("/repo", 430, 501, runner=runner)
+
+
+# --- C1: docs-only base delta carries the attestation forward instead of re-attesting ---
+
+def test_base_delta_needs_reattest_classifies_deltas():
+    from sdlc_next import base_delta_needs_reattest, CONFIG_FILENAME
+    assert base_delta_needs_reattest([]) is False                       # base moved, no net files
+    assert base_delta_needs_reattest(["docs/sdlc/epic-1/lld.md"]) is False
+    assert base_delta_needs_reattest(["backend/src/x.ts"]) is True      # a required suite's tree
+    assert base_delta_needs_reattest([".github/workflows/backend-ci.yml"]) is True
+    assert base_delta_needs_reattest([CONFIG_FILENAME]) is True         # pipeline config
+    assert base_delta_needs_reattest([f"docs/x{i}.md" for i in range(300)]) is True  # cap: possibly truncated
+
+
+def test_merge_pr_refuses_behind_base_when_delta_touches_suite_covered_files():
+    from sdlc_next import GitHub, cmd_merge_pr
+    from tests.test_sdlc_next import ScriptedRunner
+    runner = ScriptedRunner({
+        ("gh", "api", "repos/owner/repo/compare/main...issue-9", "--jq", ".behind_by"): "2\n",
+        ("gh", "api", "repos/owner/repo/compare/issue-9...main", "--jq", ".files[]?.filename"):
+            "backend/src/service.ts\n",
+        tuple(_list_argv()): _list_response([_issue(9)]),
+    })
+    gh = GitHub(runner=runner)
+    result = cmd_merge_pr(gh, 42, issue=9)
+    assert result["merged"] is False
+    assert result["behind_base"] == 2
+    assert "suite-covered" in result["reason"]
+    assert not any(call[:3] == ["gh", "pr", "merge"] for call in runner.calls)
+
+
+def test_merge_pr_carries_attestation_forward_when_behind_base_is_docs_only():
+    from sdlc_next import GitHub, cmd_merge_pr
+    from tests.test_sdlc_next import ScriptedRunner
+    import json
+    runner = ScriptedRunner({
+        ("gh", "pr", "checks", "42", "--repo", "owner/repo",
+         "--json", "name,state,bucket,link,workflow"): json.dumps([]),
+        ("gh", "api", "--paginate", "repos/owner/repo/pulls/42/files", "--jq", ".[].filename"):
+            "docs/sdlc/issue-9/product.md\n",
+        ("gh", "api", "repos/owner/repo/compare/main...issue-9", "--jq", ".behind_by"): "2\n",
+        ("gh", "api", "repos/owner/repo/compare/issue-9...main", "--jq", ".files[]?.filename"):
+            "docs/sdlc/epic-1/lld.md\n",
+        tuple(_list_argv()): _list_response([_issue(9)]),
+        ("gh", "pr", "view", "42", "--repo", "owner/repo",
+         "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
+        ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch"): "",
+        ("gh", "issue", "view", "9", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"state": "CLOSED", "comments": _clean_pipeline_comments()}),
+        **_NO_UNIT_WORKTREE,
+    })
+    runner.prefix_responses = {
+        ("gh", "pr", "comment", "42"): "",
+        ("gh", "issue", "comment", "9"): "",
+    }
+    gh = GitHub(runner=runner)
+    result = cmd_merge_pr(gh, 42, issue=9)
+    assert result["merged"] is True
+    assert result["carried_attestation_forward"] is True
+    assert result["behind_base"] == 2
+    assert result["base_delta_files"] == 1
+    assert any(call[:3] == ["gh", "pr", "merge"] for call in runner.calls)  # merged, no re-sync demanded
