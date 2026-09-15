@@ -26,11 +26,11 @@ actually does what `product.md` said it would.
 
 ## Before you start
 
-1. Read the Initiative's own `product.md`: it lives on `origin/initiative-<n>` (the
-   Initiative branch never merges to `main` — see `initiative_branch` in
-   `scripts/sdlc_next.py` — so it is not on `main`'s own tree). Read it via
-   `git show origin/initiative-<n>:<docRoot>/initiative-<n>/product.md`, no worktree
-   needed for a read.
+1. Read the Initiative's own `product.md`: it was written by the Initiative's
+   Product-Roadmap Task and merged to `main` via that Task's own Gate A, at
+   `<docRoot>/issue-<roadmap-task-n>/product.md` — an ordinary path on `main`,
+   same as any standing child's gated doc. Find the Task number via the
+   Initiative's native sub-issues if it isn't already in your prompt.
 2. List every Epic cut from this Initiative (`check-initiative-closeable`'s `epics`
    field) and skim each one's own scope carve-out, so you know which requirement maps
    to which delivered slice.

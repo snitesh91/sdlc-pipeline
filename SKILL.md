@@ -39,37 +39,36 @@ which flags problems in its handoff instead.
 
 ## The lifecycle model
 
-**V2 (2026-09-14): the normal-epic flow is a different lifecycle from V1, not an
-extension of it** — `lld` moved from task level to Epic level, `architecture` no
-longer creates or sizes children, and there is a new Initiative tier above Epic.
-Standing and legacy profiles are untouched by this; only the (former) "default
-profile" flow changed shape, described below as **Initiative-driven**. See
-`README.md`'s "V2: Initiative-driven lifecycle" section for a high-level summary.
+**V2 (2026-09-14, redesigned 2026-09-15): the normal-epic flow is a different
+lifecycle from V1, not an extension of it** — every V2 phase (an Initiative's
+`product`, an Epic's `architecture` and `lld`) is now **its own plain child
+issue** ("phase-Task"), not something the Initiative/Epic issue itself ever
+runs. Standing and legacy profiles are untouched by this; only the (former)
+"default profile" flow changed shape, described below as **Initiative-driven**.
+See `README.md`'s "V2: Initiative-driven lifecycle" section for a high-level
+summary.
 
-Which flow a unit runs is set by its **profile** — a label-matched bundle of
-behavioural toggles in the config's `pipeline.profiles` (see `references/epics.md`,
-"Epic profiles", and `references/operations.md`). The skill no longer hardcodes the
-`epic:standing`/`epic:legacy` labels; a client maps labels to profiles and can use
-`epic:standing`, `RTB`, or any label it likes.
-
-**Initiative-driven** — product-motivated work. `product` writes one IRD for the
-whole Initiative; once it's approved, **the orchestrator itself cuts the Epics**, not
-a subagent — see "Cutting Epics from an approved Initiative," below. Each Epic then
-runs `architecture` once and `lld` once (also epic-level in V2, covering every Task),
-and Tasks run the per-task pipeline:
+**Why phase-Tasks, not an epic-self phase (settled 2026-09-15, replacing the
+first V2 cut's epic/initiative-branch machinery):** every phase-Task reuses
+V1's existing, already-battle-tested per-issue mechanics verbatim — its own
+`issue-<n>` branch, `worktree-add`, `open-gate`/`pass-gate`, `record-design-
+review` — with zero special-casing in the control plane for "is this an
+Initiative" or "is this a V2 Epic". The Initiative/Epic issue itself becomes a
+pure container: `decide_next_action` never delegates a stage to it directly:
 
 ```
-initiative: product -> [product-review] -> [Gate A, human] -> [orchestrator cuts Epics]
-epic:       architecture -> [arch-review] -> [Gate B, human or confidence-skip] -> lld (creates Tasks) -> [lld-review, one pass over the whole doc]
+initiative: [Product-Roadmap Task: product -> product-review -> Gate A] -> [orchestrator cuts Epics]
+epic:       [Architecture-phase Task: architecture -> arch-review -> Gate B] -> [orchestrator: publish-doc, then LLD-phase Task unblocks]
+            [LLD-phase Task: lld (creates functional + the 2 standing Tasks) -> lld-review] -> [orchestrator: publish-doc + merge-lld-doc advances them]
 task:       development -> [pr-review] -> auto-merge -> CLOSED
 ```
 
 Every Epic always carries two standing Tasks alongside its functional ones — an
-Integration-test Task and an e2e-test Task, created by `lld` the same way as any
-other Task. They run after every functional Task has merged, each writing whatever
-coverage is missing and fixing failures they find (the same full pipeline any Task
-runs). **Epic close reuses their attestations as the merge evidence — it does not
-re-run the suites.**
+Integration-test Task and an e2e-test Task, created by the LLD-phase Task the
+same way as any other Task. They run after every functional Task has merged,
+each writing whatever coverage is missing and fixing failures they find (the
+same full pipeline any Task runs). **Epic close reuses their attestations as
+the merge evidence — it does not re-run the suites.**
 
 **Engineering-driven** — no product motivation, no Initiative, no `product.md` at
 all. A bare Epic is created directly with its scope written manually in the issue
@@ -121,14 +120,32 @@ product -> [product-review] -> [Gate A] -> architecture -> [arch-review] -> [Gat
   unit: a cross-issue `blockedBy`, a `needs-human` verdict, or an open gate. None of
   them pause the invocation — see "Looping".
 
+### Cutting an Initiative's Product-Roadmap Task — new orchestrator responsibility
+
+An Initiative never runs `product` itself. Immediately after creating the
+Initiative issue, the orchestrator cuts its **one** Product-Roadmap Task:
+
+```bash
+python3 "$SDLC" create-issue --parent <initiative-n> --title "Product Roadmap" \
+  --body "..." --type Task  # --label per pipeline.classification.task if label-based
+```
+
+This Task then runs the plain `unit="issue"` flow like any other issue —
+`product` → `product-review` → Gate A — with **no special-casing anywhere in
+the control plane**: `default_stage()` already gives an Initiative's child
+`"product"` (not the default profile's `"lld"` — see its own docstring), so
+`decide_next_action` picks it up exactly the way it picks up any fresh child.
+Once its Gate A merges (its own `issue-<n>` branch, straight to `main`, same
+shape a standing child's gate always had) and the Task closes,
+`decide_next_action` on the Initiative itself reports it via `reason:
+"Product-Roadmap Task closed -- cut Epics..."` — see "Closing an Initiative"
+for the mechanical check.
+
 ### Cutting Epics from an approved Initiative — new orchestrator responsibility
 
-Mechanics reuse the existing `create-issue` command, targeting the Initiative as
-parent instead of an Epic, and set `classify_unit` up to actually recognize the
-result (both built 2026-09-14 — see `create-issue --type`/`--label` below and
-`GitHub.classify_unit`). On a clean
-`product-review` for an Initiative and Gate A passing, the orchestrator — not a
-subagent — reads the approved `initiative-<n>/product.md` and cuts it into Epics:
+On the Product-Roadmap Task's Gate A passing, the orchestrator — not a
+subagent — reads the approved `docs/sdlc/issue-<n>/product.md` and cuts it into
+Epics:
 
 - **Each Epic must be independently mergeable to `main` and independently
   shippable on its own** — an Epic that only makes sense once a sibling Epic has
@@ -136,8 +153,7 @@ subagent — reads the approved `initiative-<n>/product.md` and cuts it into Epi
   applied here to shippability rather than files.
 - Each Epic's issue body carries a pointer to the Initiative's IRD, plus its own
   explicit scope carve-out — the slice of the IRD this Epic covers.
-- `sdlc_next.py create-issue --parent <initiative-n> --type Epic` per Epic (this
-  call already exists; using it at this altitude, and the `--type` flag, is new).
+- `sdlc_next.py create-issue --parent <initiative-n> --type Epic` per Epic.
   **Also pass whatever `pipeline.classification.epic` actually checks** — read
   `show-config` first: the sample config's default is label-based
   (`--label type:epic`), because `--type` alone only sets the native GitHub Issue
@@ -155,6 +171,61 @@ subagent — reads the approved `initiative-<n>/product.md` and cuts it into Epi
 - This is the one point in the Initiative-driven flow that is **not** a subagent
   delegation — the orchestrator does it directly, the same way it already owns
   Step 1's routing decisions without delegating them.
+
+### Cutting an Epic's phase-Tasks — new orchestrator responsibility
+
+Immediately after cutting (or manually creating, engineering-driven) an Epic,
+the orchestrator cuts its two phase-Tasks — this is what actually runs
+`architecture` and `lld`, since a V2 Epic has no phase of its own:
+
+```bash
+python3 "$SDLC" create-issue --parent <epic-n> --title "Architecture phase" \
+  --body "..." --type Task  # --label per pipeline.classification.task
+python3 "$SDLC" set-stage <architecture-task-n> --stage architecture
+python3 "$SDLC" worktree-add <architecture-task-n> --unit issue --base origin/main
+
+python3 "$SDLC" create-issue --parent <epic-n> --title "LLD phase" \
+  --body "..." --type Task
+python3 "$SDLC" add-blocked-by <lld-task-n> --on <architecture-task-n>
+```
+
+- **`set-stage` is required for the Architecture-phase Task** — `architecture`
+  differs from the default profile's own `childEntryStage` (`"lld"`), so
+  `default_stage()` cannot guess it; `set-stage` writes only the Stage field,
+  no claim, no start comment, leaving the Task genuinely fresh until an actual
+  `/sdlc-pipeline` invocation claims and delegates it. The LLD-phase Task needs
+  no such call: `"lld"` already *is* the default profile's `childEntryStage`.
+- **`worktree-add --base origin/main` is required for the Architecture-phase
+  Task** (and would be for the LLD-phase Task too, if it were stood up before
+  its own turn) — `integration_base`'s auto-detection has no way to tell a
+  phase-Task apart from an ordinary functional Task under the same
+  (non-standing) Epic without inventing a new classification this project
+  deliberately avoided; see `integration_base`'s own docstring. Getting this
+  wrong cuts the Task's branch from the epic branch instead of `main`, which
+  its Gate (targeting `main`) cannot then merge cleanly.
+- **`add-blocked-by`** orders the LLD-phase Task after the Architecture-phase
+  Task via the native `blockedBy` edge — the *only* thing enforcing this
+  ordering; there is no epic-level gate for it anymore.
+- **On the Architecture-phase Task's Gate B passing** (a plain per-issue gate,
+  same mechanics as any other issue's architecture gate): the orchestrator
+  publishes its doc onto the epic branch, then closes the Task —
+  ```bash
+  python3 "$SDLC" publish-doc <architecture-task-n> --doc architecture.md
+  python3 "$SDLC" mark-issue-closed <architecture-task-n>
+  ```
+  `publish-doc` reads `docs/sdlc/issue-<n>/architecture.md` from the Task's own
+  branch and commits it at `docs/sdlc/epic-<n>/architecture.md` on the epic
+  branch — the one path every reader (the LLD-phase Task, functional Tasks)
+  already expects — and posts a comment on the Epic naming the doc and the
+  Task, the direct answer to "where's the architecture.md link on the Epic".
+- **On the LLD-phase Task's `lld-review` coming back clean** (no gate — `lld`
+  has no human review): same shape, `publish-doc <lld-task-n> --doc lld.md`,
+  then `merge-lld-doc <epic-n> --unit epic` (unchanged from before) advances
+  every functional/standing Task the LLD-phase Task just created, then
+  `mark-issue-closed <lld-task-n>`.
+- This is the one point in the Epic-driven flow that is **not** a subagent
+  delegation — the orchestrator does it directly, same as cutting Epics from
+  an Initiative one tier up.
 
 ## Setup — one shell, three values
 
@@ -364,10 +435,10 @@ just feeds Step 4 for the operator to act on.
 
 ### Closing an Initiative — V2, fully automated
 
-`decide_next_action`'s Initiative branch (`_decide_initiative_next_action`) notices
-once every Epic cut from an Initiative is closed, and says so in a `none` result's
-`reason` rather than dispatching anything itself — same "next-action surfaces it, the
-orchestrator acts" shape as `check-epics-closeable` above, one tier up. On seeing that:
+`decide_next_action` on the Initiative notices once every Epic cut from it is
+closed, and says so in a `none` result's `reason` rather than dispatching
+anything itself — same "next-action surfaces it, the orchestrator acts" shape
+as `check-epics-closeable` above, one tier up. On seeing that:
 
 1. `python3 "$SDLC" check-initiative-closeable <initiative>` — confirms every cut Epic
    is actually closed (mechanical re-check, not a re-derivation).
@@ -376,9 +447,10 @@ orchestrator acts" shape as `check-epics-closeable` above, one tier up. On seein
    against every requirement in the Initiative's own `product.md`. It always records
    its verification, met or not (`record-initiative-verification`).
 3. **Every requirement met** → `python3 "$SDLC" close-initiative <initiative>` — one
-   call, not two: an Initiative branch never itself merges to `main` (only its Gate A
-   doc did, onto `initiative-<n>`; see `initiative_branch`), so there is nothing to
-   reconcile or merge here, just the issue to close.
+   call, not two: an Initiative has no branch of its own at all (its Gate A doc merged
+   straight to `main` via its Product-Roadmap Task, see "Cutting an Initiative's
+   Product-Roadmap Task" above), so there is nothing to reconcile or merge here, just
+   the issue to close.
 4. **Anything not met** → file the gap (a Task against the relevant cut Epic, or judge
    it out of scope and say why) and stop — do not close. Re-run from step 2 once fixed.
 
@@ -436,11 +508,11 @@ orchestrator-direct review path.
 
 | Role | Trigger | `subagent_type` | Model | Doc it owns |
 |---|---|---|---|---|
-| `product` | `stage:product` (Initiative or standing child) | `sdlc-product` | opus | `initiative-<n>/product.md` (or `issue-<n>/product.md` for a standing child) |
+| `product` | `stage:product` (an Initiative's Product-Roadmap Task, or a standing child) | `sdlc-product` | opus | `issue-<n>/product.md` — same path for both; the Initiative itself owns nothing |
 | `product-review` | right after `product` | `sdlc-product-review` | opus | none (comment only) — universal; blocker bounces `product`, clean goes to Gate A |
-| `architecture` | `stage:architecture` (Epic, either Initiative-driven or engineering-driven, or standing child) | `sdlc-architecture` | opus | `epic-<n>/architecture.md` (V2: no longer creates/sizes anything below it — no children, no Tasks; also owns the architecture-depth assessment, moved here from `product`) |
+| `architecture` | `stage:architecture` (an Epic's Architecture-phase Task, either Initiative-driven or engineering-driven, or a standing child) | `sdlc-architecture` | opus | `issue-<n>/architecture.md` on the Task's own branch; `publish-doc` copies it to `epic-<n>/architecture.md` once Gate B passes (V2: no longer creates/sizes anything below it — no children, no Tasks; also owns the architecture-depth assessment, moved here from `product`) |
 | `arch-review` | right after `architecture` | `sdlc-design-review` | opus | none (comment only) |
-| `lld` | `stage:lld` (V2: Epic — creates the Task issues; V1/standing child: task-level, unchanged) | `sdlc-lld` | sonnet | `epic-<n>/lld.md` (V2, one subsection per Task) or `issue-<n>/lld.md` (V1/standing) |
+| `lld` | `stage:lld` (V2: an Epic's LLD-phase Task — creates the functional Task issues; V1/standing child: task-level, unchanged) | `sdlc-lld` | sonnet | `issue-<n>/lld.md` on the Task's own branch (V2, one subsection per functional Task); `publish-doc` copies it to `epic-<n>/lld.md` once `lld-review` is clean. V1/standing: `issue-<n>/lld.md` unchanged |
 | `lld-review` | right after `lld` | `sdlc-design-review` | opus | none — **mandatory, never confidence-skipped**; V2: one pass over the whole epic-level document, also judges whether the Task-carving itself was sound |
 | `development` | `stage:development` (a Task, V2, or a child, V1) | `sdlc-development` | sonnet | none — the PR description is the record; suite evidence is the `record-local-ci` attestations. V2: a normal Task writes unit tests only; the epic's two standing Integration-test/e2e-test Tasks carry full coverage for the whole epic |
 | `pr-review` | right after `development` hands off | `sdlc-pr-review` | opus | none (comment only). V2: reviews what's present only — does not bounce a normal Task for integration/e2e coverage that's deferred to the two standing Tasks |
