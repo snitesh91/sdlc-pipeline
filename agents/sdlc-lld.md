@@ -302,25 +302,37 @@ These were moved here from `references/stage-playbooks.md` on 2026-09-13: they a
 guaranteed to read. Opening a human-review gate is the exception and remains the
 orchestrator's, after you return.
 
-### `lld` (epic) done — V2
+### `lld` done, `unit: "issue"` — an Epic's LLD-phase Task
 
-In the epic's own worktree, **directly on `epic-<n>`** (no gate sub-branch — `lld`
-has no human gate, and `merge-lld-doc --unit epic` verifies the doc against
-`origin/epic-<n>` itself, the same way V1's per-child publish already lands
-doc-only commits straight on the epic branch outside the gate/PR path). Read the
-epic's `<docRoot>/epic-<n>/architecture.md` as the design source of truth; the
-**first move** is the epic-wide fits-vs-deviates call. For every piece that fits:
-carve the tasks (see "How you carve tasks"), **create each Task issue**
-(`sdlc_next.py create-issue --parent <epic-n>` — `Task` is already the default
-`--type`, but check `show-config`'s `pipeline.classification.task` and pass a
-matching `--label` too if it's label-based, e.g. `--label type:task`; `--type`
-alone only sets the native Issue Type field, not a label) with its scope and
-footprint already known, and write `<docRoot>/epic-<n>/lld.md` — no altitude
-requirement — with one subsection per Task, including each one's parseable
-`## Footprint`. Commit, push to `origin/epic-<n>` directly, short handoff comment.
-**Do not change the Stage field** — stays `LLD` while `lld-review` runs (one pass
-over the whole document, not one per task). For any piece that doesn't fit → don't
-carve a task around it; follow the deviation escalation for that piece.
+**V2 shape — redesigned 2026-09-15: mechanically identical to a standing-epic
+child's exit action below** — you are a plain `unit: "issue"` Task (the Epic's
+own **LLD-phase Task**, cut by the orchestrator alongside its sibling
+Architecture-phase Task immediately after the Epic itself, `blockedBy` that
+sibling). Continue on your own `issue-<n>` — no gate sub-branch, since `lld` has
+no human gate either way, and `merge-lld-doc --unit epic` verifies the doc against
+`origin/epic-<n>` (the published copy) once your own Gate-less merge to `main`
+lands. Read the epic's `<docRoot>/epic-<n>/architecture.md` (published there by
+the orchestrator after the Architecture-phase Task closed) as the design source
+of truth; the **first move** is the epic-wide fits-vs-deviates call. For every
+piece that fits: carve the tasks (see "How you carve tasks"), **create each Task
+issue** (`sdlc_next.py create-issue --parent <epic-n>` — `Task` is already the
+default `--type`, but check `show-config`'s `pipeline.classification.task` and
+pass a matching `--label` too if it's label-based, e.g. `--label type:task`;
+`--type` alone only sets the native Issue Type field, not a label) with its scope
+and footprint already known, as siblings of yourself under the Epic, and write
+`issue-<n>/lld.md` — no altitude requirement — with one subsection per Task,
+including each one's parseable `## Footprint`. Commit, push to your own
+`origin/issue-<n>`, short handoff comment. **Do not change the Stage field** —
+stays `LLD` while `lld-review` runs (one pass over the whole document, not one
+per task). For any piece that doesn't fit → don't carve a task around it; follow
+the deviation escalation for that piece.
+
+After `lld-review` clears and you close, the orchestrator publishes your
+`lld.md` onto the epic branch at `epic-<n>/lld.md` (`publish-doc`), the path
+every functional Task's own `lld`/`development` stage expects as background, and
+then runs `merge-lld-doc --unit epic` to advance the functional Task issues you
+just created past their `product`/`architecture-review` gates. See "Cutting an
+Epic's phase-Tasks" in SKILL.md.
 
 On a **rework round**, the same worktree, same branch: edit `lld.md` in place (see
 "On a rework round, edit the design in place," above), commit, push again — no new
@@ -331,7 +343,7 @@ On genuine ambiguity, **stop and report the specific question in your final mess
 Never guess, never create issues beyond the Tasks this stage is responsible for
 creating, never change fields yourself.
 
-### `lld` (standing-epic child) — unchanged from V1
+### `lld` done, `unit: "issue"` (standing-epic child)
 
 Standing-epic children are untouched by the V2 redesign. In the child's worktree on
 `issue-<n>` (create if first stage). Read the epic's

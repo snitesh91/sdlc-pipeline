@@ -254,29 +254,30 @@ These were moved here from `references/stage-playbooks.md` on 2026-09-13: they a
 guaranteed to read. Opening a human-review gate is the exception and remains the
 orchestrator's, after you return.
 
-### `product` done, `unit: "initiative"`
+### `product` done, `unit: "issue"` — an Initiative's Product-Roadmap Task
 
-**V2 shape — built 2026-09-14**: `--unit initiative` is real on `worktree-add`,
-`open-gate`, `pass-gate`, `auto-pass-gate-a`, `verify-exit` and `sync-branch`; `main`
-is the Initiative's own integration base. In the Initiative's own worktree, create
-`initiative-<n>` from `main` (first stage to touch it) and **commit `product.md`
-straight onto `initiative-<n>` itself — no gate sub-branch.** Unlike an epic branch
-(which keeps receiving `lld`/Task work after its own gate merges), nothing is ever
-committed to `initiative-<n>` again once Gate A merges, so there is nothing to protect
-by routing the doc through a disposable sub-branch first — same shape as a standing
-child's `issue-<n>`. Write `<docRoot>/initiative-<n>/product.md` as a requirements
-document covering the whole Initiative, per Document altitude — organised by
-**functional area, never by Epic**. Epics are created by the *orchestrator* after
-Gate A clears (not by `architecture`, and not by you) — a product document that names
-them either pre-empts that cut or reports on it, and the requirement is the same
-whoever ends up implementing it. Commit; push `initiative-<n>`. Update the
-Initiative's body with a pointer + brief summary. Set its Effort. Then the
-orchestrator runs **`product-review`** (below); only on its clean verdict does Gate A
-follow — `open-gate --unit initiative` opens `initiative-<n>` itself as the PR
-against `main` (**squash-merge it** — `main` should carry exactly one commit for this
-document), and `pass-gate --unit initiative` deletes the branch from origin once
-that's confirmed. Only after Gate A does the orchestrator cut the Epic list. **Do not
-change the Stage field** — it stays `Product` while `product-review` runs.
+**V2 shape — redesigned 2026-09-15: mechanically identical to a standing-epic
+child's exit action below** — you are a plain `unit: "issue"` Task (the
+Initiative's own **Product-Roadmap Task**, cut by the orchestrator immediately
+after the Initiative issue itself), not the Initiative issue. Create
+`issue-<n>` from `main`, same as any standing child. The only differences from
+a standing child are **what you write and what happens after**:
+
+- Write `<docRoot>/issue-<n>/product.md` as a requirements document covering
+  the **whole Initiative**, per Document altitude — organised by **functional
+  area, never by Epic**. Epics are created by the *orchestrator* after Gate A
+  clears (not by `architecture`, and not by you) — a product document that
+  names them either pre-empts that cut or reports on it, and the requirement
+  is the same whoever ends up implementing it.
+- After your Gate A merges (a plain per-issue gate, straight to `main` —
+  **the orchestrator should squash-merge it**, so `main` carries exactly one
+  commit for this document) and you close, the orchestrator cuts the Epic
+  list from your approved doc — see "Cutting Epics from an approved
+  Initiative" in SKILL.md.
+
+Everything else — committing, pushing, updating the issue body, setting
+Effort, **not** touching the Stage field while `product-review` runs — is
+identical to the standing-child shape immediately below.
 
 **Engineering-driven work never reaches this stage at all** — no Initiative, no
 `product.md`. A bare Epic is created directly with its scope laid out manually, and

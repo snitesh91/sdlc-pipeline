@@ -24,8 +24,9 @@ This file is the method.
 
 Two paths reach you, and you determine which one you're on before anything else:
 
-- **Initiative-driven**: read the full Initiative's `product.md`
-  (`<docRoot>/initiative-<n>/product.md`) for context, then this Epic's own scope
+- **Initiative-driven**: read the full Initiative's `product.md`, written by the
+  Initiative's Product-Roadmap Task and merged to `main` via that Task's own Gate A
+  (`<docRoot>/issue-<roadmap-task-n>/product.md`), for context, then this Epic's own scope
   carve-out (in the Epic's issue body — the slice of the Initiative's IRD this Epic
   covers). Design against the carve-out; the full IRD is background, not scope you're
   free to expand into.
@@ -331,20 +332,28 @@ These were moved here from `references/stage-playbooks.md` on 2026-09-13: they a
 guaranteed to read. Opening a human-review gate is the exception and remains the
 orchestrator's, after you return.
 
-### `architecture` done, `unit: "epic"`
+### `architecture` done, `unit: "issue"` — an Epic's Architecture-phase Task
 
-**V2 shape.** In the epic's worktree, on a fresh
-`epic-<n>-gate-architecture` cut from `origin/epic-<n>` (`git fetch origin && git
-checkout -b epic-<n>-gate-architecture origin/epic-<n>`) — **never commit to
-`epic-<n>` directly**, it only receives merges, and `open-gate --unit epic` refuses
-a gate whose sub-branch carries nothing over it. A second Gate B round reuses the
-same branch name, re-cut. Write `epic-<n>/architecture.md` per Document altitude —
+**V2 shape — redesigned 2026-09-15: mechanically identical to a standing-epic
+child's exit action below** — you are a plain `unit: "issue"` Task (the
+Epic's own **Architecture-phase Task**, cut by the orchestrator alongside its
+sibling LLD-phase Task immediately after the Epic itself), not the Epic issue.
+Continue on your own `issue-<n>` — no gate sub-branch, since (unlike the old
+`unit: "epic"` shape) nothing else is ever committed to this branch again once
+your Gate B merges. Write `issue-<n>/architecture.md` per Document altitude —
 **no per-child/per-task subsections, and no task creation here.** Both moved to
 `lld` in V2: task-carving is depth, and depth goes down, not in, one layer lower
 than it did in V1. This document states the Epic's design as one coherent shape;
 `lld` is where it gets decomposed into tasks. Commit, push, short handoff comment
 linking the doc. **Do not change the Stage field** — stays `Architecture` while
 `arch-review` runs.
+
+After your Gate B merges (a plain per-issue gate, straight to `main`) and you
+close, the orchestrator publishes your `architecture.md` onto the epic branch
+at `epic-<n>/architecture.md` (`publish-doc`) — the path every other reader
+(the LLD-phase Task, functional Tasks) expects — and your sibling LLD-phase
+Task, `blockedBy` you, unblocks. See "Cutting an Epic's phase-Tasks" in
+SKILL.md.
 
 ### `architecture` done, `unit: "issue"` (standing-epic child)
 
