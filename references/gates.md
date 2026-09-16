@@ -267,8 +267,9 @@ When `arch-review` returns a clean verdict it also reports numeric `confidence`
 (0-100) in a `<!-- arch-review-confidence: N -->` marker. The cutoff is
 **per-profile**: `skip-gate` reads the governing epic's profile and uses that profile's
 `gates.skipConfidenceThreshold` (a child resolves via its parent epic), falling back to
-the global `pipeline.gates.skipConfidenceThreshold` (default 95). A standing/RTB profile
-may lower it (e.g. 90). Never hardcode a different number — `skip-gate` reports the
+the global `pipeline.gates.skipConfidenceThreshold` (default 80, operator instruction
+2026-09-16 — was 95). A standing/RTB profile may lower it further (e.g. 70). Never
+hardcode a different number — `skip-gate` reports the
 threshold it applied in its refusal.
 
 - **Confidence > threshold** → skip Gate B entirely:

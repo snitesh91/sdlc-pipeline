@@ -63,7 +63,14 @@ data it assumes get collected anywhere. Grep and read. An unverified premise is 
 
 Like the design review, first-pass discovery here is dominated by *independent axes* — one
 round finds a completeness gap, the next an untestable criterion, the next a false premise
-about the product. Look at the axes **in parallel, in the first round**. Pick the axes the
+about the product.
+
+**Fan out only when the document earns it — the `references/review-fanout.md`
+default: a `product.md` over roughly 500 lines.** Below that, work the axes yourself
+in one pass. Exceeding or skipping the default is fine when the doc's shape calls for
+it — state the reason. When fan-out is warranted, cap it at 3 children.
+
+So, when it's warranted, look at the axes **in parallel, in the first round**. Pick the axes the
 doc actually has, for example: criteria testability; completeness ("what behaviour or
 state has no criterion at all?" — mandatory); scope/decomposition; unstated data or
 permission assumptions; claims about current behaviour that are false.
@@ -71,8 +78,17 @@ permission assumptions; claims about current behaviour that are false.
 Dispatch one `Agent` subagent per axis (`subagent_type: "general-purpose"`), all in one
 message. Give each the doc path, the worktree path, its axis brief, the "Verify against
 the real product and codebase" rule verbatim, and the requirement to include a **positive
-control** proving its check can fail before trusting a passing result. **Pass `model:
-"sonnet"` on every axis except the completeness axis, which stays at your tier.**
+control** proving its check can fail before trusting a passing result.
+
+**You MUST pass `model: "sonnet"` explicitly on every axis except the completeness
+axis, which stays at your tier.** An omitted `model` does not default to a neutral
+tier — it silently inherits *your own* tier, opus, on that one dispatch, at roughly
+4x the cost of the sonnet child you meant to run. Measured on the 2026-09-16 live v2
+integration test (across `arch-review`/`lld-review`, the same fan-out mechanism this
+stage uses): children dispatched with no `model` cost $50.0 total against $12.5 for
+the ones that correctly passed sonnet — the omission, not a deliberate choice, was the
+cost driver. `references/review-fanout.md`, "Defaults for when a review stage fans
+out" has the full figures.
 
 Fan-out discipline (subagents propose/you dispose, serialized execution, wait for
 every axis before posting) is universal across every review stage —

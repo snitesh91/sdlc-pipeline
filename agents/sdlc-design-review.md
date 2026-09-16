@@ -76,7 +76,13 @@ Across epic #156 that pattern cost three and four rounds on several children, an
 first-pass rate for `lld-review` was 2 in 11. Almost none of those rounds found a repeat
 of the previous one — they found something nobody had looked for yet.
 
-So look at the axes **in parallel, in the first round**. Pick the axes the design
+**Fan out only when the document earns it — the `references/review-fanout.md`
+default: a design doc over roughly 500 lines.** Below that, work the axes yourself in
+one pass; a short `lld.md` for one bounded task does not need five independent-context
+subagents to review it. Exceeding or skipping the default is fine when the doc's shape
+calls for it — state the reason. When fan-out is warranted, cap it at 3 children.
+
+So, when it's warranted, look at the axes **in parallel, in the first round**. Pick the axes the design
 actually has (they differ per design; do not use a fixed list mechanically), for example:
 
 - does the mechanism match the strings/inputs it claims to
@@ -93,9 +99,15 @@ its axis brief, and — verbatim — the "Verify against the real codebase" rule
 the requirement to include a **positive control** proving its check can fail before
 trusting a passing result.
 
-**Pass `model: "sonnet"` on every axis dispatch except the completeness lens.** An
-omitted `model` inherits *your* tier, so a five-axis fan-out silently runs five Opus
-agents and the review costs six. The axes do not need it: they are forbidden from
+**You MUST pass `model: "sonnet"` explicitly on every axis dispatch except the
+completeness lens.** This is not a default to rely on: an omitted `model` does not
+fall back to some neutral tier, it inherits *your own* tier — opus — on that one
+dispatch call. On the 2026-09-16 live v2 integration test, `arch-review`/`lld-review`
+passed `model=sonnet` on 4 of 5 children and omitted it on the 5th, which silently ran
+opus at roughly 4x that child's cost; across the run, `model`-omitted children cost
+$50.0 against $12.5 for the ones that correctly passed sonnet. So a five-axis fan-out
+with one omitted call still silently runs one Opus agent, and the review costs more
+than intended for no stated reason. The axes do not need it: they are forbidden from
 producing findings — you re-verify every candidate yourself before it becomes one — so
 a weaker axis costs you a missed lead, never a false claim in the doc. The completeness
 lens is the exception and stays at your tier: "what has nobody examined at all?" is
@@ -193,13 +205,25 @@ CLEAN | REWORK — <one line>
 enforced in code: above the threshold on a clean verdict, Gate B is skipped and the
 work goes straight on. So:
 
+- **What the number means: your confidence that the design is implementable as
+  written, without a human catching something first.** Not "how polished the design
+  reads" and not a general hedge against everything you cannot personally guarantee.
 - It is only meaningful on a **clean** verdict.
-- **Report low confidence if you found anything**, or if anything material was
-  unverifiable — a claim you could not check, a subsystem you could not read, an epic
-  whose children you could not fully compare.
-- Confidence is about *your coverage*, not about how good the design looked. High
-  confidence means "I checked the things that would have made this unsound and they
-  hold", not "nothing jumped out".
+- **A clean verdict with zero blockers normally sits at or above the threshold.** You
+  already did the coverage that let you call it clean — confidence restates that
+  coverage, it is not a second, more cautious pass over the same result.
+- **Scoring below the threshold on a clean verdict requires naming, in the handoff
+  comment, the specific thing that could not be verified** — a claim you could not
+  check, a subsystem you could not read, an epic whose children you could not fully
+  compare. A number with no named gap next to it is not a low-confidence score, it is
+  an unexplained one. On the 2026-09-16 live v2 integration test, `arch-review`
+  returned a clean verdict, zero blockers, and self-scored 60 with nothing named — that
+  made Gate B's skip unreachable for no stated reason (`references/history.md`, that
+  date).
+- **Uncertainty about something the design deliberately excludes is not a reason to
+  score low.** An out-of-scope entry is a declared non-goal, not an unverified claim —
+  see "Review altitude" above. Confidence is about what the design *does* claim, not
+  about every question a human could still ask.
 
 Then follow `stage-playbooks.md`'s routing: clean above threshold skips Gate B (issue
 continues into `development`; epic becomes `epic:architected`); clean at or below

@@ -557,7 +557,11 @@ and its tree isn't touched, so the gate won't ask for it).
 Then `sdlc_next.py handoff-to-pr-review <n> --pr <pr> --summary "..."` — **always**,
 including after rework (the marker is the review queue; never hand-type it). The
 summary is the handoff comment below; post it as its own comment immediately before
-the call when it runs long.
+the call when it runs long. Skipping this call is no longer a silent gap: the
+orchestrator's `verify-exit --expect-stage pr-review` reports `handoff_marker_present`
+and catches a missing marker immediately after this turn ends, rather than the issue
+sitting invisible to `list-ready-for-review` until `merge-pr` eventually refuses with
+`missing_pipeline_evidence`.
 
 **The handoff comment shape** (evidence-carrying, ≤ 6,000 characters):
 
