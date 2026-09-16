@@ -8,6 +8,7 @@ the test scripted -- so a command sequence git itself rejects (a pathspec commit
 of an index-only path) or leaves dirty (a committed path never written to the
 working tree) passed there unchanged. Git is real here; only GitHub is faked.
 """
+import json
 import subprocess
 from pathlib import Path
 
@@ -31,11 +32,12 @@ class FakeGh:
 
     def __init__(self, issues: list):
         self.issues = {}
+        self.blocked: dict = {}
         for i in issues:
             self.issues[i["number"]] = {
                 "title": f"issue {i['number']}", "state": "OPEN", "labels": [],
                 "parent": None, "stage": None, "status": None, "comments": [],
-                "issue_type": None, "created": "2026-08-01T00:00:00Z", **i}
+                "issue_type": None, "created": "2026-08-01T00:00:00Z", "body": "", **i}
 
     def _node(self, n: int) -> dict:
         i = self.issues[n]
@@ -44,7 +46,7 @@ class FakeGh:
             fields["Stage"] = _STAGE_TITLE_CASE[i["stage"]]
         if i["status"]:
             fields["Pipeline Status"] = _STATUS_TITLE_CASE[i["status"]]
-        return {"number": n, "title": i["title"], "state": i["state"], "body": "",
+        return {"number": n, "title": i["title"], "state": i["state"], "body": i.get("body", ""),
                 "createdAt": i["created"],
                 "issueType": {"name": i["issue_type"]} if i["issue_type"] else None,
                 "labels": [{"name": l} for l in i["labels"]],
@@ -91,10 +93,29 @@ class FakeGh:
         self.issues[n]["stage"] = self.issues[n]["status"] = None
 
     def blocked_by(self, n):
-        return []
+        return [d for d in self.blocked.get(n, []) if self.issues[d]["state"] == "OPEN"]
 
     def blocking(self, n):
         return []
+
+    # --- write side, for the flows that create work items (create-lld-tasks) ---
+
+    def issue_create(self, title, body, labels):
+        number = (max(self.issues) if self.issues else 0) + 1
+        self.issues[number] = {
+            "title": title, "state": "OPEN", "labels": list(labels), "parent": None,
+            "stage": None, "status": None, "comments": [], "issue_type": None,
+            "created": "2026-09-16T00:00:00Z", "body": body}
+        return number
+
+    def set_issue_type(self, n, type_name):
+        self.issues[n]["issue_type"] = type_name
+
+    def add_sub_issue(self, parent_number, child_number):
+        self.issues[child_number]["parent"] = parent_number
+
+    def add_blocked_by(self, issue_number, blocking_number):
+        self.blocked.setdefault(issue_number, []).append(blocking_number)
 
     def comments_on(self, n):
         return self.issues[n]["comments"]
@@ -526,3 +547,322 @@ def test_close_epic_sets_the_terminal_fields_when_it_merges():
 
     assert result["merged"] is True and merged == [38]
     assert gh.issues[9]["status"] == "done"
+
+
+# =============================================================================
+# 2026-09-16 retro. Real git, faked tracker -- the same split as the rest of
+# this file, for the same reason: the defects below are about ref state and
+# on-disk trees, which a scripted runner answers however the test asked.
+#
+# Each fix pairs a REGRESSION test with a POSITIVE CONTROL that is green both
+# before and after the fix.
+# =============================================================================
+
+
+# --- Fix 3: a resumed worktree is brought up to origin -----------------------
+
+def _live_epic_worktree(repo, tmp_path, epic=9):
+    """Push `epic-<n>` and check it out in its own live worktree at the path the
+    pipeline uses -- the state a run already in flight leaves behind."""
+    _git("push", "-q", "origin", f"main:refs/heads/epic-{epic}", cwd=repo)
+    _git("fetch", "-q", "origin", cwd=repo)
+    wt = tmp_path / "wt" / f"sdlc-epic-{epic}"
+    _git("worktree", "add", "-q", str(wt), "-B", f"epic-{epic}", f"origin/epic-{epic}", cwd=repo)
+    return wt
+
+
+def _advance_origin(repo, branch, path, text):
+    """Land a commit on `origin/<branch>` from outside the worktree -- what a
+    sibling PR merging into the epic branch looks like to a tree already open."""
+    _git("fetch", "-q", "origin", cwd=repo)
+    _git("checkout", "-q", "-B", f"advance-{branch}", f"origin/{branch}", cwd=repo)
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    _git("add", path, cwd=repo)
+    _git("commit", "-qm", f"advance {branch}", cwd=repo)
+    _git("push", "-q", "origin", f"advance-{branch}:{branch}", cwd=repo)
+    _git("checkout", "-q", "main", cwd=repo)
+
+
+def test_worktree_add_fast_forwards_a_resumed_worktree_to_origin(repo, tmp_path):
+    # epic-53, live: the worktree existed, four PRs had merged into
+    # origin/epic-53 since it was opened, and worktree-add handed the stale tree
+    # straight back with nothing in the result saying how old it was.
+    gh = _v2_tree()
+    wt = _live_epic_worktree(repo, tmp_path)
+    _advance_origin(repo, "epic-9", "merged.txt", "from a merged PR\n")
+
+    result = s.cmd_worktree_add(gh, 9, unit="epic", repo_path=str(repo))
+
+    assert result["created"] is False and result["resumed"] is True
+    assert result["behind_before"] == 1
+    assert result["synced_to_origin"] is True
+    assert (wt / "merged.txt").read_text() == "from a merged PR\n"
+
+
+def test_worktree_add_refuses_to_force_a_diverged_resumed_worktree(repo, tmp_path):
+    # Fast-forward only. A branch with commits on both sides carries unpushed
+    # work, and discarding a commit to make a resume look clean is the one
+    # outcome this must never have.
+    gh = _v2_tree()
+    wt = _live_epic_worktree(repo, tmp_path)
+    (wt / "local.txt").write_text("unpushed work\n")
+    _git("add", "local.txt", cwd=wt)
+    _git("commit", "-qm", "local only", cwd=wt)
+    _advance_origin(repo, "epic-9", "merged.txt", "from a merged PR\n")
+
+    result = s.cmd_worktree_add(gh, 9, unit="epic", repo_path=str(repo))
+
+    assert result["diverged"] is True
+    assert result["synced_to_origin"] is False
+    assert result["behind_before"] == 1 and result["ahead_of_origin"] == 1
+    assert (wt / "local.txt").exists()          # never force-reset
+    assert not (wt / "merged.txt").exists()     # and never silently merged
+
+
+def test_worktree_add_leaves_a_current_worktree_and_its_wip_alone(repo, tmp_path):
+    """POSITIVE CONTROL: resuming a tree already at origin's tip must not touch
+    it -- in particular it must not reset away uncommitted work. Green before
+    the sync fix and after it, so a "fix" that force-resets every resume fails
+    here."""
+    gh = _v2_tree()
+    wt = _live_epic_worktree(repo, tmp_path)
+    (wt / "wip.txt").write_text("uncommitted\n")
+
+    result = s.cmd_worktree_add(gh, 9, unit="epic", repo_path=str(repo))
+
+    assert result["created"] is False
+    assert Path(result["path"]).resolve() == wt.resolve()
+    assert (wt / "wip.txt").read_text() == "uncommitted\n"
+
+
+# --- Fix 5: maxTasksPerRun is enforced, not merely reported ------------------
+
+@pytest.fixture
+def run_state(tmp_path, monkeypatch):
+    """Point the run-state files at this test's own directory and give the cap a
+    real value -- the sample config ships 0, which means unlimited."""
+    d = tmp_path / "runs"
+    d.mkdir()
+    monkeypatch.setenv("SDLC_RUNS_DIR", str(d))
+    monkeypatch.setattr(s, "MAX_TASKS_PER_RUN", 2)
+    return d
+
+
+def _write_run(run_state, terminal, run_id="run-1", epic=9):
+    (run_state / f"epic-{epic}.json").write_text(
+        json.dumps({"run_id": run_id, "terminal": terminal}))
+
+
+def _architected_epic(**task):
+    return FakeGh([
+        {"number": 6, "labels": ["type:initiative"]},
+        {"number": 9, "labels": ["type:epic", s.LABELS["architected"]], "parent": 6},
+        {"number": 13, "labels": ["type:task"], "parent": 9, "stage": "development", **task},
+    ])
+
+
+def test_next_action_stops_at_the_run_cap_instead_of_handing_out_new_work(run_state):
+    gh = _architected_epic()
+    _write_run(run_state, [11, 12])
+
+    result = s.decide_next_action(gh, 9, run_id="run-1")
+
+    assert result["action"] == "stop-at-cap"
+    assert result["cap"] == 2
+    assert result["completed"] == [11, 12]
+    # A deferred unit must come away with no side effects at all.
+    assert gh.issues[13]["stage"] == "development"
+    assert gh.issues[13]["status"] is None
+
+
+def test_next_action_never_caps_a_resume(run_state):
+    # Resumes finish work already in flight. Capping one would strand a unit
+    # mid-pipeline rather than bound anything.
+    gh = _architected_epic(status="in-progress")
+    _write_run(run_state, [11, 12])
+
+    result = s.decide_next_action(gh, 9, run_id="run-1")
+
+    assert result["action"] == "resume" and result["issue"] == 13
+
+
+def test_next_action_never_caps_a_gate_action(run_state):
+    gh = FakeGh([
+        {"number": 6, "labels": ["type:initiative"]},
+        {"number": 9, "labels": ["type:epic", s.LABELS["architected"]], "parent": 6},
+        {"number": 13, "labels": ["type:task"], "parent": 9, "stage": "lld",
+         "status": "awaiting-human-review", "comments": ["<!-- gate-pr: lld:14 -->"]},
+    ])
+    gh.pr_view = lambda n, fields="": {"state": "MERGED"}
+    _write_run(run_state, [11, 12])
+
+    result = s.decide_next_action(gh, 9, run_id="run-1")
+
+    assert result["action"] == "pass-gate" and result["issue"] == 13
+
+
+def test_list_parallel_ready_hands_out_nothing_at_the_run_cap(run_state, repo):
+    # Capping next-action alone would just push the overflow into the other
+    # lane that hands out fresh work.
+    gh = _architected_epic()
+    _write_run(run_state, [11, 12])
+
+    result = s.cmd_list_parallel_ready(gh, str(repo), 9, run_id="run-1")
+
+    assert result["parallel_ready"] == []
+    assert result["stop_at_cap"] is True
+    assert result["cap_enforced"] is True
+
+
+def test_a_new_run_id_resets_the_cap(run_state):
+    gh = _architected_epic()
+    _write_run(run_state, [11, 12], run_id="run-1")
+
+    result = s.decide_next_action(gh, 9, run_id="run-2")
+
+    assert result["action"] == "delegate" and result["issue"] == 13
+    assert json.loads((run_state / "epic-9.json").read_text()) == {
+        "run_id": "run-2", "terminal": []}
+
+
+def test_next_action_below_the_cap_still_delegates(run_state):
+    gh = _architected_epic()
+    _write_run(run_state, [11])
+
+    assert s.decide_next_action(gh, 9, run_id="run-1")["action"] == "delegate"
+
+
+def test_close_issue_counts_the_closed_unit_against_the_run(run_state, repo):
+    gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"})
+    _write_run(run_state, [])
+
+    s.cmd_close_issue(gh, 11, repo_path=str(repo))
+
+    assert json.loads((run_state / "epic-9.json").read_text())["terminal"] == [11]
+
+
+def test_merge_pr_counts_the_merged_unit_against_the_run(run_state, repo):
+    gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "development",
+                   "comments": [
+                       "<!-- stage-transition: development->pr-review @ 2026-09-16T00:00:00Z -->",
+                       "<!-- pr-review-outcome: clean:42 @ 2026-09-16T01:00:00Z -->"]})
+    gh._run = s._default_runner
+    gh.branch_behind_by = lambda head, base="main": 0
+    gh.pr_checks = lambda n: []
+    gh.pr_files = lambda n: []
+    gh.pr_view = lambda n, fields="": {"comments": [], "headRefOid": "abc"}
+    gh.pr_ready = lambda n: None
+    gh.pr_merge = lambda n: None
+    gh.pr_comment = lambda n, body: None
+    _write_run(run_state, [])
+
+    result = s.cmd_merge_pr(gh, 42, issue=11, repo_path=str(repo))
+
+    assert result["merged"] is True
+    assert json.loads((run_state / "epic-9.json").read_text())["terminal"] == [11]
+
+
+def test_run_cap_is_opt_in_and_ignored_without_a_run_id(run_state):
+    """POSITIVE CONTROL: with no --run-id the cap is off, so a run-state file
+    already AT the cap changes nothing and work is still handed out. Green
+    before enforcement existed and after it -- a cap that fired unconditionally
+    would fail here."""
+    gh = _architected_epic()
+    _write_run(run_state, [11, 12])
+
+    assert s.decide_next_action(gh, 9)["action"] == "delegate"
+
+
+# --- Fix 7: Task issues are created after the carving is approved ------------
+
+_CARVED_LLD = (
+    "# lld for epic 9\n\n"
+    "## Task skeleton-health: Add /health endpoint\n"
+    "Design for the health endpoint.\n\n"
+    "## Footprint\n- `src/health.js`\n\n"
+    "## Task greet-endpoint: Add /greet endpoint\n"
+    "Depends on: skeleton-health\n\n"
+    "## Footprint\n- `src/greet.js`\n")
+
+
+def test_create_lld_tasks_creates_numbers_and_wires_the_carving(repo):
+    gh = _v2_tree()
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", _CARVED_LLD)
+
+    result = s.cmd_create_lld_tasks(gh, 9, repo_path=str(repo))
+
+    assert [c["key"] for c in result["created"]] == ["skeleton-health", "greet-endpoint"]
+    health = result["tasks"]["skeleton-health"]
+    greet = result["tasks"]["greet-endpoint"]
+    # Parented to the Epic, typed, and classifiable as Tasks.
+    assert gh.issues[health]["parent"] == 9 and gh.issues[greet]["parent"] == 9
+    assert s.classify_unit_from_issue(gh.issue_epic_info(health)) == "task"
+    # `Depends on:` became the native edge, in the right direction.
+    assert result["blocked_by"] == [{"issue": greet, "on": health}]
+    assert gh.blocked_by(greet) == [health]
+    # The doc on origin is renumbered in place, slug preserved.
+    published = _origin_file(repo, "epic-9", f"{DOC}/epic-9/lld.md")
+    assert f"## Task #{health}: Add /health endpoint <!-- task-key: skeleton-health -->" \
+        in published
+    assert "## Task skeleton-health" not in published
+    assert result["pushed"] is True
+    # Each Task's own subsection still resolves -- by number, and by slug.
+    assert s.parse_task_footprint(published, health) == ["src/health.js"]
+    assert s.parse_task_footprint(published, "greet-endpoint") == ["src/greet.js"]
+
+
+def test_create_lld_tasks_is_idempotent_on_a_rerun(repo):
+    gh = _v2_tree()
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", _CARVED_LLD)
+    first = s.cmd_create_lld_tasks(gh, 9, repo_path=str(repo))
+    issues_after_first = set(gh.issues)
+
+    second = s.cmd_create_lld_tasks(gh, 9, repo_path=str(repo))
+
+    assert len(first["created"]) == 2
+    assert second["created"] == []
+    assert second["committed"] is None
+    assert "already carries an issue number" in second["reason"]
+    assert set(gh.issues) == issues_after_first  # nothing duplicated
+
+
+def test_create_lld_tasks_repairs_a_crash_between_create_and_push(repo):
+    # The crash window: the issue was created but the rewritten doc never
+    # reached origin, so the heading is still keyed. The task-key marker in the
+    # issue body is what lets a re-run adopt it instead of creating a second
+    # issue for the same section.
+    gh = _v2_tree()
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", _CARVED_LLD)
+    orphan = gh.issue_create("Add /health endpoint",
+                             "x\n\n<!-- task-key: skeleton-health -->", ["type:task"])
+    gh.add_sub_issue(9, orphan)
+
+    result = s.cmd_create_lld_tasks(gh, 9, repo_path=str(repo))
+
+    assert [r["issue"] for r in result["reused"]] == [orphan]
+    assert [c["key"] for c in result["created"]] == ["greet-endpoint"]
+    published = _origin_file(repo, "epic-9", f"{DOC}/epic-9/lld.md")
+    assert f"## Task #{orphan}: Add /health endpoint" in published
+
+
+def test_create_lld_tasks_refuses_when_the_epic_lld_is_not_published(repo):
+    gh = _v2_tree()
+    with pytest.raises(s.GhError, match="publish the Epic's lld.md first"):
+        s.cmd_create_lld_tasks(gh, 9, repo_path=str(repo))
+
+
+def test_merge_lld_doc_epic_still_advances_the_tasks_it_finds(repo):
+    """POSITIVE CONTROL for moving Task creation out of `lld`: `merge-lld-doc
+    --unit epic` keeps its current behaviour, advancing every Stage-less Task
+    under the Epic. Green before the change and after it."""
+    gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"},
+                  {"number": 13, "labels": ["type:task"], "parent": 9})
+    _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", "# lld\n")
+    s.cmd_publish_doc(gh, str(repo), 11, "lld.md")
+
+    merged = s.cmd_merge_lld_doc(gh, str(repo), 9, unit="epic")
+
+    assert merged["advanced_tasks"] == [13]
+    assert gh.issues[13]["stage"] == "development"

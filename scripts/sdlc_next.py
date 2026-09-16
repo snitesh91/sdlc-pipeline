@@ -210,7 +210,13 @@ _PIPELINE_DEFAULTS = {
         "downCommand": "COMPOSE_PROJECT_NAME={project} docker compose "
                        "--env-file {envFile} down -v --remove-orphans",
     },
-    "gates": {"skipConfidenceThreshold": 95, "requiresHumanGateA": True},
+    # `skipConfidenceThreshold` lowered 95 -> 80 on 2026-09-16, per operator
+    # instruction: at 95 the Gate B confidence skip almost never fired, so a
+    # clean arch-review still queued a human gate that was passed unread, which
+    # is a worse signal than no gate at all. A repo that wants the old bar sets
+    # `pipeline.gates.skipConfidenceThreshold` (or a profile's own `gates`)
+    # explicitly -- config overrides are unchanged and still win outright.
+    "gates": {"skipConfidenceThreshold": 80, "requiresHumanGateA": True},
     # Product-stage WIP cap (operator, 2026-08-16; epic #92 produced five parallel
     # Gate A PRs a human could not keep up with). At most `maxGateAPending` open
     # units repo-wide may sit at Stage=Product with an open Gate A (Pipeline Status
@@ -1652,7 +1658,123 @@ def cmd_check_gate(gh: GitHub, args) -> dict:
     return evaluate_gate(gh, args.issue)
 
 
-def decide_next_action(gh: GitHub, epic: int) -> dict:
+# --- Run-scoped task cap (`parallelism.maxTasksPerRun`) -----------------------
+# The cap was surfaced by `show-config` and enforced by nobody: it named a
+# number the orchestrator was trusted to count against in prose, over exactly
+# the kind of long run whose defining problem is that its own context (and so
+# its reliability at counting anything) grows without bound. Enforcing it needs
+# state that outlives a single command, so it lives in one small file per epic
+# per run, beside the branch locks.
+#
+# `MAX_TASKS_PER_RUN` is read at call time off the module global -- never
+# captured into a default argument -- the same way `PRODUCT_WIP_CAP` is, so a
+# test or a one-off run can override it on the module.
+
+def _run_state_dir() -> str:
+    """Directory of the per-epic run-state files. `SDLC_RUNS_DIR` wins (the test
+    suite, and any operator who wants this state off the worktree root); else
+    `<worktrees.root>/.sdlc-runs`, beside `.sdlc-locks`."""
+    env = os.environ.get("SDLC_RUNS_DIR")
+    if env:
+        return env
+    return os.path.join(PIPELINE["worktrees"]["root"], ".sdlc-runs")
+
+
+def _run_state_path(epic: int) -> str:
+    return os.path.join(_run_state_dir(), f"epic-{epic}.json")
+
+
+def read_run_state(epic: int) -> Optional[dict]:
+    """`{"run_id": str, "terminal": [issue numbers]}` for `epic`, or None when no
+    run has ever been scoped against it.
+
+    A corrupt or unreadable file reads as None rather than raising: this is a
+    context-budget guard, and failing a whole run over damaged bookkeeping
+    would be a worse outcome than starting the count again."""
+    try:
+        with open(_run_state_path(epic)) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    state.setdefault("terminal", [])
+    return state
+
+
+def _write_run_state(epic: int, state: dict) -> None:
+    os.makedirs(_run_state_dir(), exist_ok=True)
+    with open(_run_state_path(epic), "w") as f:
+        json.dump(state, f)
+
+
+def run_cap_state(epic: int, run_id: Optional[str]) -> Optional[dict]:
+    """The run-state `epic` is judged against for the run `run_id`, resetting it
+    first when the stored id belongs to a different run.
+
+    `run_id` is the orchestrator's own identifier for one invocation. A
+    *different* stored id means the file is a previous run's, whose count says
+    nothing about this one, so it is reset rather than inherited -- that is
+    exactly what makes the cap "per run" instead of "per epic, forever", and
+    what lets the next run resume with a full budget from the pipeline's
+    already crash-safe persisted state.
+
+    Returns None when no `run_id` was passed: the cap is opt-in, and without one
+    behaviour is precisely what it was before any of this existed."""
+    if not run_id:
+        return None
+    state = read_run_state(epic)
+    if state is None or state.get("run_id") != run_id:
+        state = {"run_id": run_id, "terminal": []}
+        _write_run_state(epic, state)
+    return state
+
+
+def run_cap_reached(state: Optional[dict]) -> bool:
+    """Whether this run has already driven `maxTasksPerRun` units to a terminal
+    state. A cap of `0` -- the default, and the value for any config predating
+    the key -- is unlimited and never reaches."""
+    return bool(state) and MAX_TASKS_PER_RUN > 0 \
+        and len(state.get("terminal", [])) >= MAX_TASKS_PER_RUN
+
+
+def record_terminal_unit(gh: WorkItemProvider, issue: int) -> Optional[dict]:
+    """Count `issue` against its Epic's current run, when one is being tracked --
+    called by the two commands that genuinely take a unit to a terminal state,
+    `merge-pr` and `close-issue`.
+
+    Counting at the terminal action rather than when work is handed out is what
+    makes the cap count *finished* units: a unit that bounces through several
+    rework rounds still costs its run exactly one slot.
+
+    Silent and cheap when nobody uses run ids -- an absent or empty run-state
+    directory short-circuits before any tracker call, so the default path costs
+    one `os.listdir` and no API request. Idempotent: an issue already counted is
+    not counted twice, so re-running `merge-pr`/`close-issue` after a crash
+    cannot inflate the number."""
+    try:
+        if not os.listdir(_run_state_dir()):
+            return None
+    except OSError:
+        return None
+    parent = None
+    for entry in gh.issue_list():
+        if entry["number"] == issue:
+            parent = (entry.get("parent") or {}).get("number")
+            break
+    if parent is None:
+        return None
+    state = read_run_state(parent)
+    if state is None:
+        return None
+    if issue not in state["terminal"]:
+        state["terminal"].append(issue)
+        _write_run_state(parent, state)
+    return {"epic": parent, "run_id": state.get("run_id"),
+            "terminal_count": len(state["terminal"]), "cap": MAX_TASKS_PER_RUN}
+
+
+def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> dict:
     """Picks the one unit -- the named epic's/Initiative's own Product/
     Architecture phase, or one of its children -- to work next. `epic` is now
     a **required** argument (see "Epic number is mandatory" in SKILL.md, added
@@ -1742,11 +1864,33 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
     product_headroom = (product_wip_headroom(all_issues)
                         if effective_gates(epic_issue)["requiresHumanGateA"] else None)
     deferred_by_cap: list = []
+    # Run-scoped task cap (`parallelism.maxTasksPerRun`). It gates only *fresh*
+    # work: `resume`, `pass-gate` and `address-gate-feedback` are never checked
+    # against it, because they finish work already in flight -- refusing those
+    # would strand a unit mid-pipeline rather than bound anything, and the
+    # thing being bounded is how much NEW work one run takes on.
+    cap_state = run_cap_state(epic, run_id)
+    at_cap = run_cap_reached(cap_state)
+    deferred_by_run_cap: list = []
 
     def capped(stage: str) -> bool:
         return stage == "product" and product_headroom is not None and product_headroom <= 0
 
     def none_result() -> dict:
+        if deferred_by_run_cap:
+            # Reported as its own action, never as `none`: "nothing to do" and
+            # "this run is full" are opposite instructions to the orchestrator,
+            # and reading the second as the first would close out an epic that
+            # still has work left.
+            completed = list(cap_state.get("terminal", []))
+            return {"action": "stop-at-cap", "epic": epic, "cap": MAX_TASKS_PER_RUN,
+                    "completed": completed,
+                    "reason": f"this run has driven {len(completed)} unit(s) to a terminal "
+                              f"state, reaching the maxTasksPerRun cap of "
+                              f"{MAX_TASKS_PER_RUN}. Deferred this pass: "
+                              f"{', '.join(f'#{n}' for n in deferred_by_run_cap)}. Every "
+                              f"unit's state is already persisted -- start a new run (a "
+                              f"fresh --run-id) to carry on with a small context."}
         result = {"action": "none", "epic": epic}
         if deferred_by_cap:
             result["product_cap"] = {"limit": PRODUCT_WIP_CAP,
@@ -1808,6 +1952,8 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
             epic_stage = current_stage(epic_issue) or "product"
             if capped(epic_stage):
                 deferred_by_cap.append(epic)
+            elif at_cap:
+                deferred_by_run_cap.append(epic)
             elif not gh.blocked_by(epic):
                 return {"action": "delegate", "issue": epic, "unit": "epic",
                         "stage": epic_stage}
@@ -1862,6 +2008,12 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
             # the cap defers this pass gets no side effects at all.
             deferred_by_cap.append(issue["number"])
             continue
+        if at_cap:
+            # Checked before the blockedBy call and before the Stage-assign
+            # write below, same as the product cap: a unit this pass defers
+            # must come away with no side effects at all.
+            deferred_by_run_cap.append(issue["number"])
+            continue
         if gh.blocked_by(issue["number"]):
             continue
         if current_stage(issue) is None:
@@ -1877,7 +2029,14 @@ def decide_next_action(gh: GitHub, epic: int) -> dict:
 
 
 def cmd_next_action(gh: GitHub, args) -> dict:
-    return decide_next_action(gh, args.epic)
+    """`next-action`'s CLI wrapper. `cap_enforced` is added here rather than
+    inside `decide_next_action` deliberately: it describes how the *command* was
+    invoked, not what the decision was, and the decision function's result shape
+    is read by every other caller. Without a `--run-id` the cap is off and this
+    reports `false`, which is also the honest answer for a configured cap of 0."""
+    run_id = getattr(args, "run_id", None)
+    result = decide_next_action(gh, args.epic, run_id=run_id)
+    return {**result, "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0}
 
 
 def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None) -> dict:
@@ -1962,6 +2121,68 @@ _FOOTPRINT_BULLET_PATH = re.compile(r"^-\s+`([^`]+)`")
 # parallel lane over heading punctuation cost a live run on 2026-09-15.
 _TASK_SUBSECTION_HEADING = re.compile(r"^#{2,3}\s*Task\s*#?(\d+)\b.*$",
                                       re.IGNORECASE | re.MULTILINE)
+# A Task heading names its Task one of two ways: by issue number (`## Task
+# #<n>`, what every published doc carries) or -- before the issues exist at all
+# -- by the short slug key its `lld` author chose (`## Task <key>: <title>`,
+# e.g. `## Task skeleton-health: Add /health`). `create-lld-tasks` rewrites the
+# second form into the first once the carving has been approved.
+#
+# A key must be a slug (lowercase alphanumerics and hyphens) deliberately, so an
+# ordinary prose heading like `## Task Breakdown` or `## Task Overview` is not
+# read as a Task and never has an issue created for it.
+_TASK_HEADING_LINE = re.compile(r"^(#{2,3})\s*Task\b\s*(\S+)(.*)$",
+                                re.IGNORECASE | re.MULTILINE)
+_TASK_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+_TASK_KEY_MARKER = re.compile(r"<!--\s*task-key:\s*([a-z0-9][a-z0-9-]*)\s*-->", re.IGNORECASE)
+
+
+def parse_task_headings(doc_text: str) -> list:
+    """Every `## Task ...` heading in an Epic-level `lld.md`, in document order.
+
+    One scanner covers both spellings because **section boundaries have to see
+    every heading, not only the ones a caller is asking about**. Slicing Task
+    #51 out of a half-rewritten document using the numbered headings alone
+    would run straight past the still-keyed sections after it and hand back
+    their design as part of #51's -- which is precisely the window
+    `create-lld-tasks` opens while it renumbers.
+
+    Each entry carries `start`/`end` (the section's span), `line_start`/
+    `line_end` (the heading line itself), `hashes`, `number` (int or None),
+    `key` (the slug, or None once renumbered), `task_key` (the slug preserved
+    in a `<!-- task-key: ... -->` marker on an already-rewritten heading), and
+    `title`."""
+    entries = []
+    for m in _TASK_HEADING_LINE.finditer(doc_text):
+        ident, rest = m.group(2).rstrip(":"), m.group(3)
+        number = key = None
+        if ident.lstrip("#").isdigit():
+            number = int(ident.lstrip("#"))
+        elif _TASK_KEY_RE.match(ident):
+            key = ident
+        else:
+            continue  # `## Task Breakdown` and friends: prose, not a Task
+        marker = _TASK_KEY_MARKER.search(rest)
+        entries.append({"number": number, "key": key,
+                        "task_key": marker.group(1) if marker else None,
+                        "title": _TASK_KEY_MARKER.sub("", rest).strip().lstrip(":").strip(),
+                        "hashes": m.group(1),
+                        "line_start": m.start(), "line_end": m.end()})
+    for i, entry in enumerate(entries):
+        entry["start"] = entry["line_start"]
+        entry["end"] = entries[i + 1]["line_start"] if i + 1 < len(entries) else len(doc_text)
+    return entries
+
+
+def _task_heading_matches(entry: dict, task) -> bool:
+    """Whether one parsed heading is the Task asked for. A number matches `##
+    Task #<n>`; a slug matches either a not-yet-renumbered `## Task <key>`
+    heading or the `<!-- task-key: ... -->` marker `create-lld-tasks` leaves
+    behind -- so a caller holding only the design-time key can still find the
+    section after it has been renumbered."""
+    ident = str(task)
+    if ident.isdigit():
+        return entry["number"] == int(ident)
+    return ident in (entry["key"], entry["task_key"])
 
 
 def parse_footprint(doc_text: str) -> list:
@@ -1997,14 +2218,13 @@ def parse_task_footprint(doc_text: str, task_number: int) -> list:
     since `_FOOTPRINT_HEADING.search` only ever finds the first match. Returns
     `[]` both when the Task's own subsection is missing and when it has one but
     no bullets in it -- the same "cannot verify, so not eligible" contract
-    `parse_footprint`/`read_footprint`'s callers already rely on."""
-    matches = list(_TASK_SUBSECTION_HEADING.finditer(doc_text))
-    for i, m in enumerate(matches):
-        if int(m.group(1)) != task_number:
-            continue
-        start = m.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(doc_text)
-        return parse_footprint(doc_text[start:end])
+    `parse_footprint`/`read_footprint`'s callers already rely on.
+
+    `task_number` may be an issue number or a design-time task key; boundaries
+    are computed over every Task heading either way (see `parse_task_headings`)."""
+    for entry in parse_task_headings(doc_text):
+        if _task_heading_matches(entry, task_number):
+            return parse_footprint(doc_text[entry["line_end"]:entry["end"]])
     return []
 
 
@@ -2016,18 +2236,15 @@ def slice_task_subsection(doc_text: str, task_number: int) -> Optional[str]:
     `pr-review` must read only their own subsection; reading the whole document
     turns it into a shared floor re-read by every one of the Epic's Tasks. Same
     heading grammar as `parse_task_footprint` (`## Task #<n>`, `###`, and a
-    missing `#` all parse). Returns None when no subsection carries that number."""
-    matches = list(_TASK_SUBSECTION_HEADING.finditer(doc_text))
-    for i, m in enumerate(matches):
-        if int(m.group(1)) != task_number:
-            continue
-        start = m.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(doc_text)
-        return doc_text[start:end].rstrip() + "\n"
+    missing `#` all parse, as does a pre-renumbering `## Task <key>`). Returns
+    None when no subsection carries that number or key."""
+    for entry in parse_task_headings(doc_text):
+        if _task_heading_matches(entry, task_number):
+            return doc_text[entry["start"]:entry["end"]].rstrip() + "\n"
     return None
 
 
-def cmd_lld_section(repo_path: str, epic: int, task: int,
+def cmd_lld_section(repo_path: str, epic: int, task,
                      runner: Runner = _default_runner) -> dict:
     """Prints one Task's `## Task #<n>` subsection out of its Epic's
     `epic-<n>/lld.md` (read from `origin/epic-<n>` via `git show`) to stdout,
@@ -2035,7 +2252,13 @@ def cmd_lld_section(repo_path: str, epic: int, task: int,
     V2 functional Task's `development` and `pr-review` read as their design doc --
     only their own subsection, not the whole Epic document. It deliberately
     prints raw markdown before the JSON line every other subcommand returns,
-    because the caller reads the section as a document, not as a JSON value."""
+    because the caller reads the section as a document, not as a JSON value.
+
+    `task` may be an issue number (`--task 51`) or a design-time task key
+    (`--task skeleton-health`). **Both heading forms resolve**, so an epic
+    already in flight with numbered headings keeps working unchanged while an
+    epic whose `lld` has been written but whose Tasks are not carved yet can
+    still be read section by section."""
     try:
         text = runner(["git", "-C", repo_path, "show",
                         f"origin/{epic_branch(epic)}:{DOC_ROOT}/epic-{epic}/lld.md"])
@@ -2044,8 +2267,9 @@ def cmd_lld_section(repo_path: str, epic: int, task: int,
                        f"origin/{epic_branch(epic)} -- is the epic's lld published?")
     section = slice_task_subsection(text, task)
     if section is None:
-        raise GhError(f"no `## Task #{task}` subsection in {DOC_ROOT}/epic-{epic}/lld.md "
-                       f"(headings must read `## Task #{task}: ...`, per sdlc-lld.md)")
+        label = f"#{task}" if str(task).isdigit() else f"{task}"
+        raise GhError(f"no `## Task {label}` subsection in {DOC_ROOT}/epic-{epic}/lld.md "
+                       f"(headings must read `## Task {label}: ...`, per sdlc-lld.md)")
     print(section, end="")
     return {"ok": True, "epic": epic, "task": task, "chars": len(section)}
 
@@ -2256,8 +2480,7 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
     path = worktree_path(unit, number)
     existing = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
     if existing:
-        return {"created": False, "path": existing, "branch": branch,
-                "reason": "branch already checked out in a live worktree"}
+        return _resume_live_worktree(existing, branch, repo_path, runner)
     runner(["git", "-C", repo_path, "fetch", "origin"])
     on_origin = runner(["git", "-C", repo_path, "branch", "-r", "--list",
                         f"origin/{branch}"]).strip()
@@ -2265,6 +2488,11 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
         base = f"origin/{branch}"
         runner(["git", "-C", repo_path, "worktree", "add", path, "-B", branch, base])
         resumed = True
+        # `-B <branch> origin/<branch>` points the local branch at origin's tip
+        # outright, so this resume is current by construction. `behind_before`
+        # is None rather than 0: whatever the local ref pointed at is discarded
+        # here, so "how far behind it was" was never measured.
+        synced = {"synced_to_origin": True, "behind_before": None}
     else:
         base = base or f"origin/{integration_base(gh, number, unit)}"
         runner(["git", "-C", repo_path, "worktree", "add", path, "-b", branch, base])
@@ -2274,11 +2502,65 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
             runner(["git", "-C", repo_path, "push", "origin",
                     f"refs/heads/{branch}:refs/heads/{branch}"])
         resumed = False
+        # A branch being created here has no origin tip to be behind.
+        synced = {}
     # A linked worktree's submodule directory is empty until initialised; do it
     # here so `skill_dir` is the per-unit `$SDLC_DIR` from the first command on.
     skill = init_skill_submodule(path, runner=runner)
     return {"created": True, "path": path, "branch": branch, "base": base,
-            "resumed": resumed, **skill}
+            "resumed": resumed, **synced, **skill}
+
+
+def _rev_count(repo_path: str, rev_range: str, runner: Runner) -> int:
+    """`git rev-list --count <range>` as an int (0 when git prints nothing)."""
+    return int(runner(["git", "-C", repo_path, "rev-list", "--count",
+                       rev_range]).strip() or 0)
+
+
+def _resume_live_worktree(path: str, branch: str, repo_path: str, runner: Runner) -> dict:
+    """Hand back the live worktree that already holds `branch` -- **current with
+    `origin/<branch>`**, not at whatever commit it was last left on.
+
+    Handing it back untouched is what this did before 2026-09-16, and it is how
+    a whole run was worked on `epic-53` against a tree missing four
+    already-merged PRs. Every *other* resume path goes through `git worktree
+    add -B <branch> origin/<branch>`, which points the branch at the pushed tip
+    by construction, so this -- the path taken precisely when work is already
+    in flight and a tree exists -- was the only one that could return a stale
+    checkout, and it did so silently: nothing in the result said how old the
+    tree was, so no caller could have noticed.
+
+    Fast-forwards only when the local branch is **strictly behind** origin. A
+    branch that has diverged (commits on both sides) carries unpushed work, and
+    is reported as `diverged` and left exactly as it is -- never force-reset.
+    Discarding somebody's commit to make a resume look clean is the one outcome
+    this must not have; the caller reconciles it (`sync-branch`, or push/discard
+    the local commits) and resumes again.
+
+    `synced_to_origin` says the returned tree is not behind origin;
+    `behind_before` says how far behind it was on arrival (0 = it was already
+    current, None = origin has no such branch yet)."""
+    runner(["git", "-C", repo_path, "fetch", "origin"])
+    result = {"created": False, "path": path, "branch": branch, "resumed": True,
+              "reason": "branch already checked out in a live worktree"}
+    if not origin_branch_exists(repo_path, branch, runner=runner):
+        # Never pushed -- a just-cut epic branch, or a first-touch child still
+        # mid-stage. No origin tip exists to be behind, so the tree is as
+        # current as it can be and there is nothing to fast-forward to.
+        return {**result, "synced_to_origin": False, "behind_before": None,
+                "origin_missing": True}
+    behind = _rev_count(path, f"{branch}..origin/{branch}", runner)
+    ahead = _rev_count(path, f"origin/{branch}..{branch}", runner)
+    if behind and ahead:
+        return {**result, "synced_to_origin": False, "behind_before": behind,
+                "diverged": True, "ahead_of_origin": ahead,
+                "reason": f"local {branch} has diverged from origin/{branch} ({ahead} "
+                          f"local commit(s), {behind} on origin) -- refusing to "
+                          f"fast-forward over unpushed work. Reconcile it (sync-branch, "
+                          f"or push/discard the local commits), then resume."}
+    if behind:
+        runner(["git", "-C", path, "merge", "--ff-only", f"origin/{branch}"])
+    return {**result, "synced_to_origin": True, "behind_before": behind}
 
 
 def release_worktree(branch: str, runner: Runner = _default_runner,
@@ -2582,7 +2864,8 @@ def active_worktree_branches(repo_path: str, runner: Runner = _default_runner) -
 
 
 def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional[int] = None,
-                             runner: Runner = _default_runner) -> dict:
+                             runner: Runner = _default_runner,
+                             run_id: Optional[str] = None) -> dict:
     """Every open child of `epic` at `lld`/`development`/`testing` that's safe to
     start (or resume) concurrently, in its own `git worktree`, right now -- see
     "Parallel implementation lane" in references/parallelism.md. This is the mechanical
@@ -2623,9 +2906,22 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
         raise GhError(f"#{epic} is not an epic (a top-level Type: Feature issue, or a V2 unit "
                        f"pipeline.classification calls \"epic\") -- pass the epic's own issue "
                        f"number, not a child issue's")
+    cap_state = run_cap_state(epic, run_id)
+    cap_enforced = bool(run_id) and MAX_TASKS_PER_RUN > 0
     base = {"parallel_ready": [], "count": 0, "eligible_total": 0, "active_count": 0,
             "active_branches": [], "limit": limit, "slots_available": 0, "epic": epic,
-            "skipped": []}
+            "skipped": [], "cap_enforced": cap_enforced}
+    if run_cap_reached(cap_state):
+        # The dev lane is the other way fresh work gets handed out, so the cap
+        # has to close it too -- capping `next-action` alone would just move the
+        # overflow into the parallel lane. An empty list with the flag set, not
+        # an error: there is nothing wrong, the run is simply full.
+        completed = list(cap_state.get("terminal", []))
+        return {**base, "stop_at_cap": True, "cap": MAX_TASKS_PER_RUN, "completed": completed,
+                "note": f"run has driven {len(completed)} unit(s) to a terminal state, at "
+                        f"the maxTasksPerRun cap of {MAX_TASKS_PER_RUN} -- no new work is "
+                        f"handed out until a new run (a fresh --run-id) starts. Units "
+                        f"already in flight finish through resume/pass-gate as normal."}
     if is_epic_legacy(epic_issue):
         return {**base, "note": f"epic #{epic} is epic:legacy -- not driven by this pipeline"}
     if resolve_profile(epic_issue)["childrenNeedArchitectedEpic"] \
@@ -2751,7 +3047,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
     return {"parallel_ready": selected, "count": len(selected), "eligible_total": len(eligible),
             "active_count": active_count, "active_branches": sorted(occupied),
             "limit": limit, "slots_available": slots, "epic": epic, "skipped": skipped,
-            "stale_worktrees": stale}
+            "stale_worktrees": stale, "cap_enforced": cap_enforced, "stop_at_cap": False}
 
 
 def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional[int] = None,
@@ -3322,7 +3618,7 @@ class MergeConflict(GhError):
 
 
 def cmd_sync_branch(gh: GitHub, repo_path: Optional[str], issue: int, unit: str = "issue",
-                     runner: Runner = _default_runner) -> dict:
+                     runner: Runner = _default_runner, base: Optional[str] = None) -> dict:
     """Reconcile `<unit>-<issue>`'s branch with `origin/main` -- see "Keeping a
     branch current" in references/parallelism.md. Run this before delegating to *any* new stage's
     subagent, not just at a gate pass (which already reconciles internally via
@@ -3338,35 +3634,70 @@ def cmd_sync_branch(gh: GitHub, repo_path: Optional[str], issue: int, unit: str 
     should crash on. So `MergeConflict` is caught here specifically and
     reported as `{"synced": false, "conflict": true, "conflicting_files": [...]}`
     at exit 0, instead of propagating as `GhError` (exit 1) the way every
-    other git failure from this command still does."""
+    other git failure from this command still does.
+
+    **`base` overrides the auto-detected integration base**, mirroring
+    `worktree-add --base` and added for the same reason (2026-09-16 retro). A
+    V2 Architecture-phase or LLD-phase Task is a plain child of a non-standing
+    Epic, so `integration_base` resolves it to `origin/epic-<n>` -- but those
+    two Tasks gate against `main`, so reconciling them with the epic branch
+    merges the wrong tree, and on a fresh Epic whose branch has not been pushed
+    yet it failed outright at exit 1, making `sync-branch` unrunnable on them
+    at all. When the caller names the base, `integration_base` is never
+    consulted, so this works before the epic branch exists and costs no
+    `issue_list` call. Either spelling is accepted -- `main` or `origin/main`,
+    since the mirrored `worktree-add --base` takes a full `origin/<ref>`.
+
+    A base that does not exist on origin is likewise a **structured exit-0
+    result** (`{"synced": false, "base_missing": true, ...}`), not a crash: it
+    is a legitimate state (a unit cut before its base branch was ever pushed),
+    and a branch with nothing to reconcile against is already as current as it
+    can be. Crashing there told the orchestrator the command was broken."""
     branch = f"{unit}-{issue}"
-    base = "main" if unit == "epic" else integration_base(gh, issue, unit)
+    if base:
+        base = base[len("origin/"):] if base.startswith("origin/") else base
+    else:
+        base = "main" if unit == "epic" else integration_base(gh, issue, unit)
     result = {"issue": issue, "unit": unit, "branch": branch, "base": base, "synced": True}
     with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
-        try:
-            git_reconcile_branch(ws.path, branch, base=base, runner=runner)
-            # The merge may have moved the skill submodule's gitlink; a merge
-            # alone leaves the working files at the OLD pin ("modified (new
-            # commit)"). Re-init here -- sync-branch runs between stage agents,
-            # so this is the one naturally quiet point per worktree. Only for a
-            # live worktree an agent will read from; an ephemeral tree exists
-            # for the git op alone.
-            if not ws.ephemeral:
-                skill = init_skill_submodule(ws.path, runner=runner)
-                if skill.get("skill_dir"):
-                    result.update(skill)
-        except MergeConflict as e:
-            # Persist the conflict on the issue -- the JSON result alone doesn't
-            # survive a crashed session, and the sync-branch-conflict <->
-            # development escalation-valve pairing must be reconstructible from the
-            # thread (cmd_pairing_counts reads this marker back).
-            timestamp = _utc_now_marker()
-            gh.issue_comment(issue,
-                f"⚠️ Merge conflict reconciling `{branch}` with `origin/{base}` — "
-                f"{len(e.files)} file(s): {', '.join(f'`{f}`' for f in e.files)}. "
-                f"Routing to `development` for resolution in its own worktree.\n\n"
-                f"<!-- sync-conflict: {branch} @ {timestamp} -->")
-            result.update({"synced": False, "conflict": True, "conflicting_files": e.files})
+        # Fetch before the existence check so it reads origin's current state,
+        # not a stale remote-tracking ref (`git_reconcile_branch` fetches again;
+        # a second fetch is cheap next to reporting a branch as missing because
+        # this checkout had not heard of it yet).
+        runner(["git", "-C", ws.path, "fetch", "origin"])
+        if not origin_branch_exists(ws.path, base, runner=runner):
+            result.update({
+                "synced": False, "base_missing": True,
+                "reason": f"origin/{base} does not exist -- there is nothing to reconcile "
+                          f"`{branch}` with, so it is already as current as it can be. If "
+                          f"this unit integrates somewhere else, pass `--base <ref>` (a V2 "
+                          f"Architecture-/LLD-phase Task takes `--base main`); otherwise "
+                          f"create origin/{base} first."})
+        else:
+            try:
+                git_reconcile_branch(ws.path, branch, base=base, runner=runner)
+                # The merge may have moved the skill submodule's gitlink; a merge
+                # alone leaves the working files at the OLD pin ("modified (new
+                # commit)"). Re-init here -- sync-branch runs between stage agents,
+                # so this is the one naturally quiet point per worktree. Only for a
+                # live worktree an agent will read from; an ephemeral tree exists
+                # for the git op alone.
+                if not ws.ephemeral:
+                    skill = init_skill_submodule(ws.path, runner=runner)
+                    if skill.get("skill_dir"):
+                        result.update(skill)
+            except MergeConflict as e:
+                # Persist the conflict on the issue -- the JSON result alone doesn't
+                # survive a crashed session, and the sync-branch-conflict <->
+                # development escalation-valve pairing must be reconstructible from the
+                # thread (cmd_pairing_counts reads this marker back).
+                timestamp = _utc_now_marker()
+                gh.issue_comment(issue,
+                    f"⚠️ Merge conflict reconciling `{branch}` with `origin/{base}` — "
+                    f"{len(e.files)} file(s): {', '.join(f'`{f}`' for f in e.files)}. "
+                    f"Routing to `development` for resolution in its own worktree.\n\n"
+                    f"<!-- sync-conflict: {branch} @ {timestamp} -->")
+                result.update({"synced": False, "conflict": True, "conflicting_files": e.files})
     return _with_workspace(result, ws)
 
 
@@ -3790,6 +4121,183 @@ def cmd_add_blocked_by(gh: GitHub, issue: int, dep: int) -> dict:
     posts a comment) -- wrong shape for a Task that was never started."""
     gh.add_blocked_by(issue, dep)
     return {"issue": issue, "blocked_on": dep, "added": True}
+
+
+_DEPENDS_ON_LINE = re.compile(r"^\s*(?:[-*]\s+)?(?:\*\*)?Depends on(?:\*\*)?\s*:\s*(.+?)\s*$",
+                              re.IGNORECASE | re.MULTILINE)
+
+
+def parse_task_depends_on(section_text: str) -> list:
+    """The task keys one `## Task <KEY>` section declares it depends on, read off
+    its `Depends on: <KEY>` line. Accepts a comma- or `and`-separated list and
+    tolerates backticks and a trailing period, so ``Depends on: `skeleton-health`,
+    config-loader`` parses as two keys. Returns [] when none are declared."""
+    keys = []
+    for m in _DEPENDS_ON_LINE.finditer(section_text):
+        for raw in re.split(r",|\band\b", m.group(1)):
+            key = raw.strip().strip("`").strip().rstrip(".")
+            if _TASK_KEY_RE.match(key) and key not in keys:
+                keys.append(key)
+    return keys
+
+
+def _commit_doc_to_epic_branch(repo_path: Optional[str], epic: str, doc_path: str,
+                                text: str, runner: Runner, message: str) -> dict:
+    """Commit `text` at `doc_path` on branch `epic` and push it, through that
+    branch's own worktree or an ephemeral one -- never the main checkout.
+
+    Carries the same guards as `_publish_doc`, for the same reasons: a dirty
+    tree or unpushed commits touching anything other than this doc are refused
+    rather than reset over, and a push rejected because origin moved is reported
+    as a structured `conflict` rather than raised, so the caller can re-run."""
+    with branch_lock(epic):
+        ensure_branch_on_origin(repo_path or ".", epic, runner=runner)
+        with BranchWorkspace(epic, repo_path, runner) as ws:
+            runner(["git", "-C", ws.path, "fetch", "origin"])
+            unpushed = runner(["git", "-C", ws.path, "diff", "--name-only",
+                               f"origin/{epic}...{epic}"]).split()
+            if runner(["git", "-C", ws.path, "status", "--porcelain"]).strip():
+                out = {"committed": None, "pushed": False,
+                       "reason": f"epic worktree {ws.path} has uncommitted changes -- "
+                                 f"refusing to reset it; commit or stash them, then re-run"}
+            elif any(f != doc_path for f in unpushed):
+                out = {"committed": None, "pushed": False,
+                       "reason": f"local {epic} carries unpushed commits touching "
+                                 f"{', '.join(f for f in unpushed if f != doc_path)} -- "
+                                 f"refusing to reset it; push or discard them, then re-run"}
+            else:
+                runner(["git", "-C", ws.path, "checkout", "-B", epic, f"origin/{epic}"])
+                target = os.path.join(ws.path, doc_path)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "w") as f:
+                    f.write(text)
+                runner(["git", "-C", ws.path, "add", "--", doc_path])
+                runner(["git", "-C", ws.path, "commit", "-m", message, "--", doc_path])
+                sha = git_rev_parse_head(ws.path, runner=runner)
+                try:
+                    runner(["git", "-C", ws.path, "push", "origin", epic])
+                    out = {"committed": sha, "pushed": True}
+                except GhError as e:
+                    if not _PUSH_REJECTED_RE.search(str(e)):
+                        raise
+                    out = {"committed": sha, "pushed": False, "conflict": True,
+                           "reason": f"push to {epic} was rejected -- the branch moved "
+                                     f"under this command. The Task issues exist and are "
+                                     f"recorded; re-run to replay the doc rewrite onto the "
+                                     f"new tip."}
+    return _with_workspace(out, ws)
+
+
+def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
+                          runner: Runner = _default_runner) -> dict:
+    """Create one Task issue per `## Task <KEY>` section of an Epic's published
+    `lld.md`, renumber the doc's headings in place, wire every declared
+    `Depends on:` as a native `blockedBy` edge, and push the rewritten doc.
+
+    **Why this is a command instead of something `lld` does in its own turn.**
+    It used to be the latter: `lld` carved the Tasks and created their issues
+    while writing the document. But `lld-review` is chartered to review the
+    carving itself -- whether this is the right split at all -- and by the time
+    it ran, the carving already existed as live issues that other commands could
+    see and act on. A carving-level bounce therefore meant editing and closing
+    real issues, making the cheapest review outcome the most expensive one to
+    act on. Creating them only after approval turns that bounce back into what
+    it should be: an edit to a document.
+
+    **Idempotent, and specifically repair-shaped rather than merely safe.** A
+    heading that already carries a number is skipped, so a re-run after a
+    partial failure finishes the job instead of duplicating it. Two independent
+    records make that hold even across a crash *between* creating an issue and
+    pushing the rewritten doc -- the `<!-- task-key: KEY -->` marker left on
+    each rewritten heading, and the same marker written into each created
+    issue's body, which lets this match the Epic's existing children back to
+    their keys when the doc on origin still shows them unnumbered.
+
+    Order is: create every issue (a `Depends on:` may name a key carved further
+    down the document, so they must all exist first), then the edges, then one
+    commit and push."""
+    epic_br = epic_branch(epic)
+    doc_path = f"{DOC_ROOT}/epic-{epic}/lld.md"
+    runner(["git", "-C", repo_path, "fetch", "origin"])
+    try:
+        doc = runner(["git", "-C", repo_path, "show", f"origin/{epic_br}:{doc_path}"])
+    except GhError:
+        raise GhError(f"cannot read {doc_path} on origin/{epic_br} -- publish the Epic's "
+                       f"lld.md first (publish-doc), then re-run create-lld-tasks")
+    headings = parse_task_headings(doc)
+    pending = [h for h in headings if h["key"]]
+    result = {"epic": epic, "doc": doc_path, "created": [], "reused": [],
+              "already_numbered": [h["number"] for h in headings if h["number"]],
+              "blocked_by": [], "blocked_by_failed": []}
+    if not pending:
+        return {**result, "committed": None, "pushed": False, "tasks": {},
+                "reason": "every `## Task` heading already carries an issue number -- "
+                          "nothing to create. A re-run after a completed pass lands here, "
+                          "which is what makes this command safe to retry."}
+    # Recover any key whose issue already exists -- a crash between the create
+    # and the push below -- so this repairs rather than duplicating.
+    key_to_number = {h["task_key"]: h["number"] for h in headings
+                     if h["number"] and h["task_key"]}
+    for child in gh.issue_list():
+        if (child.get("parent") or {}).get("number") != epic:
+            continue
+        m = _TASK_KEY_MARKER.search(child.get("body") or "")
+        if m:
+            key_to_number.setdefault(m.group(1), child["number"])
+    # When `pipeline.classification.task` is label-based, that label is the only
+    # thing that will ever classify these as Tasks (`classify_unit_from_issue`),
+    # and `merge-lld-doc --unit epic` advances Tasks and nothing else -- so
+    # attach it here instead of leaving every caller to remember it.
+    rule = PIPELINE.get("classification", {}).get("task") or {}
+    labels = [rule["value"]] if rule.get("field") == "label" else []
+    rewritten = doc
+    for h in pending:
+        key = h["key"]
+        title = h["title"] or key
+        number = key_to_number.get(key)
+        if number is None:
+            body = (f"{doc[h['line_end']:h['end']].strip()}\n\n"
+                    f"Carved from `{doc_path}` on `{epic_br}` (Epic #{epic}).\n\n"
+                    f"<!-- task-key: {key} -->")
+            created = cmd_create_issue(gh, title, body, epic, list(labels), type_name="Task")
+            if created.get("ok") is False:
+                # `cmd_create_issue` is atomic up to the create and structured
+                # after it. Hand its own repair instructions straight back
+                # rather than renumbering a document against a half-made issue.
+                return {**result, "ok": False, "committed": None, "pushed": False,
+                        "tasks": key_to_number, "failed_key": key,
+                        "failed_step": created.get("failed_step"),
+                        "partial_issue": created.get("issue"),
+                        "reason": created.get("reason")}
+            number = created["issue"]
+            result["created"].append({"key": key, "issue": number, "title": title})
+        else:
+            result["reused"].append({"key": key, "issue": number, "title": title})
+        key_to_number[key] = number
+        rewritten = rewritten.replace(
+            doc[h["line_start"]:h["line_end"]],
+            f"{h['hashes']} Task #{number}: {title} <!-- task-key: {key} -->", 1)
+    for h in pending:
+        issue_number = key_to_number[h["key"]]
+        for dep_key in parse_task_depends_on(doc[h["line_end"]:h["end"]]):
+            dep = key_to_number.get(dep_key)
+            if dep is None or dep == issue_number:
+                result["blocked_by_failed"].append(
+                    {"issue": issue_number, "on_key": dep_key,
+                     "error": f"no `## Task {dep_key}` section in {doc_path} to depend on"})
+                continue
+            try:
+                gh.add_blocked_by(issue_number, dep)
+                result["blocked_by"].append({"issue": issue_number, "on": dep})
+            except GhError as e:
+                # Recorded, never raised: re-adding an edge that already exists
+                # errors, and a resumed run must not crash on its own last pass.
+                result["blocked_by_failed"].append(
+                    {"issue": issue_number, "on": dep, "error": str(e)})
+    published = _commit_doc_to_epic_branch(
+        repo_path, epic_br, doc_path, rewritten, runner,
+        message=f"docs(sdlc): number epic-{epic} lld tasks")
+    return {**result, "tasks": key_to_number, **published}
 
 
 def _complete_epic_architecture(gh: GitHub, epic_number: int, note: str) -> dict:
@@ -4602,6 +5110,39 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
         result["pr_is_draft"] = pr_data.get("isDraft")
         result["pr_head"] = pr_data.get("headRefName")
         result["pr_base"] = pr_data.get("baseRefName")
+        # Handoff-marker gate, added 2026-09-16. `development`'s exit is two
+        # actions, not one: `open-dev-pr` (which moves the Stage field to `PR
+        # Review`) and `handoff-to-pr-review` (which posts the marker that IS
+        # the review queue and IS the merge-time evidence). Only the first
+        # wrote the field this command checked, so an agent that did the first
+        # and skipped the second verified clean here -- and the miss surfaced
+        # much later at `merge-pr`, as `missing_pipeline_evidence`, after the
+        # branch had already been reviewed and was sitting ready to merge. The
+        # check belongs at the handoff it gates, where re-running one command
+        # fixes it.
+        #
+        # Scoped to `expect_stage == "pr-review"` with a PR in hand: that is
+        # exactly the development->pr-review handoff this marker governs. Every
+        # other stage's exit check is unchanged.
+        #
+        # Reported, never repaired. Posting the marker from here would have
+        # this command manufacture the evidence it exists to check -- the
+        # marker has to mean "development ran and handed off", not "something
+        # asked whether it had".
+        if expect_stage == "pr-review":
+            problems = []
+            marker_present = last_transition_to(
+                issue_data.get("comments", []), "pr-review") is not None
+            result["handoff_marker_present"] = marker_present
+            if not marker_present:
+                result["ok"] = False
+                problems.append(
+                    f"no `development->pr-review` handoff marker on #{issue} -- "
+                    f"`development` skipped its exit action. Run "
+                    f"`handoff-to-pr-review {issue} --pr {pr} --summary ...`. Until it "
+                    f"is posted, `list-ready-for-review` never queues this PR and "
+                    f"`merge-pr` refuses it as missing_pipeline_evidence.")
+            result["problems"] = problems
     docs_dir = os.path.join(repo_path, DOC_ROOT, f"{unit}-{issue}")
     result["docs_present"] = sorted(os.listdir(docs_dir)) if os.path.isdir(docs_dir) else []
     # Citation gate: re-checks only the single record the completing stage
@@ -4710,13 +5251,42 @@ def base_delta_needs_reattest(base_delta_files: list) -> bool:
     pipeline's own config, so the docs-only fast path is taken only on a delta
     read in full that demonstrably triggers no required workflow. An empty delta
     (base moved by commits with no net file change) needs no re-attest. Reuses
-    the same prefix/workflow-file match as `missing_required_workflows`."""
+    the same prefix/workflow-file match as `missing_required_workflows`.
+
+    **The carry-forward test is positive ("is every file a doc?"), not negative
+    ("does anything touch a required-workflow tree?")** -- inverted on
+    2026-09-16 after the negative form was proven wrong live. It asked whether
+    the delta hit a configured suite tree, so in a repo with
+    `requiredWorkflows: []` -- no suites configured at all, which is the
+    default and the state of every repo that has not wired CI yet -- *nothing*
+    could ever match and *every* non-config delta carried its attestation
+    forward. A `pom.xml` + test-class delta, unambiguously suite-covered code,
+    was carried forward exactly like a docs bump. The positive form cannot fail
+    that way: an unrecognised path is not a doc, so it re-attests. A doc is a
+    path under the configured `docRoot`, a `*.md` file anywhere, or anything
+    under `docs/`. Where `requiredWorkflows` IS configured, a delta touching a
+    suite tree still forces re-attest even if every file in it is a `.md` --
+    the suite is what decides, and it runs over that tree."""
     if len(base_delta_files) >= 300:
+        return True
+    if touches_pipeline_config(base_delta_files):
         return True
     for spec in REQUIRED_WORKFLOWS:
         if any(p.startswith(spec["prefixes"]) or p in spec["files"] for p in base_delta_files):
             return True
-    return touches_pipeline_config(base_delta_files)
+    return not all(_is_doc_path(p) for p in base_delta_files)
+
+
+def _is_doc_path(path: str) -> bool:
+    """Whether one file in a base delta is documentation -- the positive test
+    `base_delta_needs_reattest` carries an attestation forward on. Three forms,
+    deliberately narrow: under the config's own `docRoot` (this pipeline's
+    per-issue/-epic records), any `*.md` file, or anything under a top-level
+    `docs/`. Everything else -- source, build files, fixtures, lockfiles,
+    workflows, assets -- is not a doc and re-attests."""
+    return (path.startswith(DOC_ROOT.rstrip("/") + "/")
+            or path.endswith(".md")
+            or path.startswith("docs/"))
 
 
 def touches_pipeline_config(changed_files: list) -> bool:
@@ -4858,9 +5428,14 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
     # than in cmd_mark_issue_closed, which runs in CI where no dev worktree
     # exists. Everything is on origin by definition at this point, so the
     # unpushed/dirty guards in release_worktree should be no-ops.
+    # A merged PR is one of the two genuinely terminal outcomes, so it is what
+    # the run cap counts (see `record_terminal_unit`). A no-op unless this
+    # epic's run is being tracked by a `--run-id`.
+    terminal = record_terminal_unit(gh, issue)
     return {"pr": pr_number, "issue": issue, "merged": True, "issue_closed": issue_closed,
             "config_changed": touches_pipeline_config(files),
             **carried_forward,
+            **({"run_terminal": terminal} if terminal else {}),
             "worktree": release_worktree(issue_branch(issue), base_repo=repo_path, runner=gh._run)}
 
 
@@ -4974,7 +5549,11 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
     gh.issue_close(issue)
     cmd_mark_issue_closed(gh, issue)
     released = release_worktree(issue_branch(issue), runner=runner, base_repo=repo_path or ".")
-    return {"issue": issue, "closed": True, "worktree": released}
+    # The other terminal outcome the run cap counts -- a phase-Task whose work
+    # never merges through `merge-pr` still consumed a slot of this run.
+    terminal = record_terminal_unit(gh, issue)
+    return {"issue": issue, "closed": True, "worktree": released,
+            **({"run_terminal": terminal} if terminal else {})}
 
 
 # Tracked file holding the closed-issue count at the last completed retrospective
@@ -5148,11 +5727,55 @@ def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: lis
             f"Nothing would ever classify this issue as {kind!r}. Pass "
             f"--label {rule['value']} (see \"Cutting Epics from an approved "
             f"Initiative\" in SKILL.md).")
+    # The OTHER precondition, hoisted above the create on 2026-09-16: a
+    # `type_name` with no `projectFields.issueTypeIds` entry and no label-based
+    # rule to fall back on. `set_issue_type` has always refused it with a clear
+    # error -- but it ran *after* `issue_create`, so the refusal landed on an
+    # issue that already existed, with no type and (the create being step one of
+    # three) no parent either. That is issue #52: a real orphan, invisible to
+    # every later read, that had to be found and closed by hand. The identical
+    # refusal costs nothing here and leaves the tracker untouched. Both
+    # preconditions are now checked before any mutation, which is the whole
+    # atomicity claim this command makes.
+    if not skip_native_type and type_name not in ISSUE_TYPE_IDS:
+        raise GhError(
+            f"type_name={type_name!r} is not in projectFields.issueTypeIds "
+            f"(configured: {sorted(ISSUE_TYPE_IDS)}), and "
+            f"pipeline.classification.{kind!r} has no label-based rule to fall back on "
+            f"-- nothing would ever classify this issue. Provision the native Issue "
+            f"Type and add its id to the config, or configure a label-based rule for "
+            f"{kind!r}. Refused BEFORE creating anything: an issue created with no "
+            f"type and no parent is an orphan no later command can find (#52).")
     number = gh.issue_create(title, body, labels)
+    result = {"issue": number, "parent": parent, "type": type_name}
+    # Past this line the issue EXISTS on the tracker. A failure in either
+    # remaining step is reported as a structured result that names the failed
+    # step and carries the number -- never re-raised. A bare exception tells the
+    # caller only "create-issue failed", and the obvious response to that, a
+    # retry, creates a SECOND issue for the same work; with the number in hand
+    # the caller repairs the one that exists instead. `ok: False` still exits
+    # nonzero, so this stops the run rather than being read past.
     if not skip_native_type:
-        gh.set_issue_type(number, type_name)
-    gh.add_sub_issue(parent, number)
-    return {"issue": number, "parent": parent, "type": type_name}
+        try:
+            gh.set_issue_type(number, type_name)
+        except GhError as e:
+            return {**result, "ok": False, "complete": False,
+                    "failed_step": "set_issue_type", "error": str(e),
+                    "reason": f"issue #{number} was created but its Issue Type could not "
+                              f"be set to {type_name!r}, and it is not yet linked under "
+                              f"#{parent}. Do NOT re-run create-issue -- that duplicates "
+                              f"it. Repair #{number} in place (set the type, then link it "
+                              f"under #{parent})."}
+    try:
+        gh.add_sub_issue(parent, number)
+    except GhError as e:
+        return {**result, "ok": False, "complete": False,
+                "failed_step": "add_sub_issue", "error": str(e),
+                "reason": f"issue #{number} was created and typed, but the parent link to "
+                          f"#{parent} failed -- it is an orphan until that is repaired. Do "
+                          f"NOT re-run create-issue -- that duplicates it. Link #{number} "
+                          f"under #{parent} and continue."}
+    return result
 
 
 def cmd_list_needs_human(gh: GitHub) -> dict:
@@ -5465,6 +6088,12 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("next-action")
     p.add_argument("epic", type=int, help="The epic issue number to drive end-to-end -- required, "
                                            "see \"Epic number is mandatory\" in SKILL.md")
+    p.add_argument("--run-id", default=None,
+                    help="This orchestrator run's own id. Enables the maxTasksPerRun cap: "
+                         "once the run has driven that many units to a terminal state, "
+                         "next-action returns action=stop-at-cap instead of new work "
+                         "(resume/pass-gate/address-gate-feedback are never capped). A new "
+                         "id starts a fresh count. Omit it and nothing is enforced.")
     p.set_defaults(func=lambda a: cmd_next_action(get_work_item_provider(), a))
     p = sub.add_parser("list-ready-for-review",
                         help="Up to PR_REVIEW_PARALLELISM of this epic's children whose draft PR "
@@ -5486,13 +6115,21 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--limit", type=int, default=None,
                     help=f"Total concurrent children allowed (default: DEV_LANE_PARALLELISM = "
                          f"{DEV_LANE_PARALLELISM})")
-    p.set_defaults(func=lambda a: cmd_list_parallel_ready(get_work_item_provider(), a.repo_path, a.epic, a.limit))
+    p.add_argument("--run-id", default=None,
+                    help="This orchestrator run's own id -- same maxTasksPerRun cap as "
+                         "next-action. At the cap this returns an empty list with "
+                         "stop_at_cap: true rather than proposing new lane work.")
+    p.set_defaults(func=lambda a: cmd_list_parallel_ready(
+        get_work_item_provider(), a.repo_path, a.epic, a.limit, run_id=a.run_id))
     p = sub.add_parser("lld-section",
                         help="Print one Task's `## Task #<n>` subsection of its Epic's "
                              "epic-<n>/lld.md -- what a V2 functional Task's development/pr-review "
                              "read as their design doc, instead of the whole Epic document")
     p.add_argument("--epic", type=int, required=True, help="The Epic whose lld.md holds the subsection")
-    p.add_argument("--task", type=int, required=True, help="The Task whose `## Task #<n>` subsection to print")
+    p.add_argument("--task", required=True,
+                    help="The Task whose subsection to print -- its issue number (51) or, "
+                         "before create-lld-tasks has renumbered the doc, its design-time "
+                         "task key (skeleton-health). Both heading forms resolve.")
     p.add_argument("--repo-path", default=".",
                     help="Repo/worktree with an `origin/epic-<n>` remote-tracking ref to git-show from")
     p.set_defaults(func=lambda a: cmd_lld_section(a.repo_path, a.epic, a.task))
@@ -5717,7 +6354,15 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--repo-path", default=None,
                     help="Any path inside the repository (base for the worktree map); the command operates in the branch's own live worktree or an ephemeral one, never the main checkout")
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
-    p.set_defaults(func=lambda a: cmd_sync_branch(get_work_item_provider(), a.repo_path, a.issue, a.unit))
+    p.add_argument("--base", default=None,
+                    help="Override the auto-detected integration base (e.g. main, or "
+                         "origin/main -- both spellings work). REQUIRED for a V2 "
+                         "Architecture-phase or LLD-phase Task, whose gate targets main "
+                         "while integration_base would resolve it to the epic branch. A "
+                         "base that does not exist on origin returns a structured "
+                         "base_missing result at exit 0, not an error.")
+    p.set_defaults(func=lambda a: cmd_sync_branch(get_work_item_provider(), a.repo_path,
+                                                   a.issue, a.unit, base=a.base))
     p = sub.add_parser("merge-lld-doc",
                         help="V1 (--unit issue, default): publish a normal-epic child's lld.md "
                              "onto its epic branch as soon as lld-review is CLEAN, then advance "
@@ -5750,6 +6395,21 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--on", type=int, required=True, dest="dep")
     p.set_defaults(func=lambda a: cmd_add_blocked_by(get_work_item_provider(), a.issue, a.dep))
+    p = sub.add_parser("create-lld-tasks",
+                        help="V2: create one Task issue per `## Task <KEY>` section of the "
+                             "Epic's published lld.md (parent = the Epic), renumber the "
+                             "doc's headings to `## Task #<n>` in place, translate every "
+                             "`Depends on: <KEY>` into a native blockedBy edge, and push "
+                             "the rewritten doc. Run it AFTER lld-review approves the "
+                             "carving. Idempotent: an already-numbered heading is skipped, "
+                             "so a re-run repairs a partial failure instead of duplicating")
+    p.add_argument("epic", type=int, help="The Epic whose lld.md carves the Tasks")
+    p.add_argument("--repo-path", default=".",
+                    help="Any path inside the repository; the doc is rewritten on the epic "
+                         "branch's own live worktree or an ephemeral one, never the main "
+                         "checkout")
+    p.set_defaults(func=lambda a: cmd_create_lld_tasks(get_work_item_provider(), a.epic,
+                                                        a.repo_path))
     p = sub.add_parser("open-dev-pr")
     p.add_argument("issue", type=int)
     p.add_argument("--title", required=True)
