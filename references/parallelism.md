@@ -338,13 +338,17 @@ earlier runs' output has vanished with the container.
   `sdlc_next.py pairing-counts <issue>` reads the strike count back mechanically —
   the counter survives crashed sessions and fresh continuous-mode agents.
 - **Merge-time freshness gate**: `merge-pr` refuses — as a structured exit-0 result
-  (`"merged": false, "behind_main": N`), not an error — whenever the branch is behind
-  `origin/main`. Green CI on a stale base proves nothing about the combined state:
+  (`"merged": false, "behind_main": N`), not an error — when the branch is behind
+  `origin/main` **and** the base delta it lacks touches anything other than doc paths.
+  Green CI on a stale base proves nothing about the combined state:
   with the parallel lane, two sibling PRs can each be green independently yet break
   `main` together (a semantic conflict no textual merge check catches). The response
   is mechanical: `sync-branch` (the push re-triggers CI), wait for green, re-run
   `merge-pr`. A `sync-branch` conflict at this point routes through the conflict
-  handling above.
+  handling above. **When the base delta is every-file-a-doc-path**, the PR's existing
+  attestation carries forward instead (`carried_attestation_forward: true`) and it
+  merges without a forced re-sync — `references/operations.md`, "Carry-forward on a
+  behind-base merge is a positive docs-only test".
 - **Merge-time backstop**: if GitHub itself reports the PR non-mergeable,
   `gh pr merge` exits nonzero and `merge-pr` raises loudly — treat that like a
   `sync-branch` conflict: resume `development` to reconcile, don't blindly retry.
@@ -458,6 +462,19 @@ The branch is fully done once the epic reaches `epic:architected` — remove the
 worktree then; nothing works on `epic-<n>` afterward, except a second Gate B round
 from a deviation escalation, which stands the worktree up again on this same branch.
 
+**Resuming an existing worktree now fast-forwards it to `origin/<branch>` before
+handing it back.** An epic worktree in particular is long-lived — it can sit untouched
+across several later child merges that landed straight on `origin/epic-<n>` via
+`merge-lld-doc`/`pass-gate`, none of which necessarily touched *this* worktree — so a
+naive resume that just reused the local checkout as-is could silently hand the next
+stage a tree missing PRs already merged into origin. `worktree-add` now fetches and
+fast-forwards the local branch to match origin on every resume, and reports
+`synced_to_origin` (bool) and `behind_before` (the commit count it was behind prior to
+the fast-forward) in its result. **It refuses to force when the local branch and
+origin have diverged** — real local commits not yet on origin are never discarded;
+that refusal is a structured result to investigate (likely an unpushed commit from a
+crashed stage), not a reason to `git reset --hard` by hand.
+
 **Land the epic's docs on `main` at that point, and delete the branch.** An
 `architecture.md` that lives only on `epic-<n>` is reachable only by SHA, which is how
 a `pr-review` has come to quote a superseded draft; and an epic branch created as an
@@ -556,6 +573,17 @@ python3 "$SDLC" sync-branch <n> [--unit epic]   # auto-resolves the branch's wor
 
 The one skip: when the step just run was itself `pass-gate`/`skip-gate` — both
 reconcile internally, so an immediate second call is a redundant (harmless) no-op.
+
+**`sync-branch` takes `--base <ref>`, mirroring `worktree-add --base`, for the one
+case its own base auto-detection gets wrong: an Epic's Architecture-phase or
+LLD-phase Task.** `integration_base()` cannot tell a phase-Task apart from an
+ordinary functional Task under the same Epic, so on either phase-Task it resolves to
+`epic-<n>` — the wrong base, and one that does not exist yet at the Architecture-phase
+Task's first transition. Pass `--base origin/main` explicitly there (`SKILL.md`,
+"Cutting an Epic's phase-Tasks"). A resolved base that doesn't exist on origin no
+longer crashes the command — it returns `{"synced": false, "base_missing": true}` at
+exit 0, a structured result to route on rather than a bug to work around by omitting
+`--base`.
 
 **Never hand-type the fetch/checkout/merge/push sequence.** Typing it directly caused
 a real incident: a `git checkout` failed silently in a shell sequence that didn't stop

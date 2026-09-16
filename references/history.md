@@ -4,6 +4,112 @@ Provenance for rules that would otherwise read as arbitrary. Newest first. Keep
 entries to a few lines; the rule itself lives in the spine or its reference file —
 this file records *why* and *when*.
 
+## 2026-09-16 — retrospective: v2 live integration test — control-plane gaps, a miscalibrated confidence marker, and fan-out cost
+
+First live end-to-end run of the v2 skill (config, skill submodule @v2, vendored
+agents wired for integration test). Six control-plane findings, a review-quality
+finding, and a cost finding — the last the largest of the run.
+
+**Two phase-Task base-resolution gaps, same root cause as `worktree-add --base`
+already had a fix for.** `sync-branch` had no `--base` override, so a phase-Task's
+transition sync (`architecture`→`arch-review`, `lld`→`lld-review`) resolved via
+`integration_base`, which cannot tell a phase-Task apart from an ordinary Task under
+the same Epic and returned the epic branch — wrong, and for the Architecture-phase
+Task's first-ever transition, nonexistent. It also crashed instead of returning a
+result. Fix: `sync-branch` now takes `--base <ref>`, required as `origin/main` on
+both phase-Tasks (`SKILL.md`, "Cutting an Epic's phase-Tasks"; `references/
+parallelism.md`), and a missing base is a structured `{"synced": false,
+"base_missing": true}` result, not a crash.
+
+**A resumed epic worktree could silently miss already-merged PRs.** An epic worktree
+is long-lived and can sit untouched across several child merges that landed on
+`origin/epic-<n>` via `merge-lld-doc`/`pass-gate` without touching that worktree
+again; resuming it reused the local checkout as-is. `worktree-add` now fast-forwards
+a resumed branch to origin before handing it back, reporting `synced_to_origin` /
+`behind_before`, and refuses to force a diverged branch rather than discard real
+local commits.
+
+**A `development` agent skipping `handoff-to-pr-review` was invisible until
+`merge-pr` refused.** Nothing read the queue marker's absence between the handoff and
+the eventual `missing_pipeline_evidence` refusal, often stages later. `verify-exit`
+now reports `handoff_marker_present` when checking a `pr-review` exit, so the
+orchestrator catches it immediately after the agent's turn ends.
+
+**`maxTasksPerRun` was reported, not enforced** — the orchestrator was trusted to
+count its own turns against the cap by hand, and a long unattended run had no
+mechanical stop. `next-action` and `list-parallel-ready` now take `--run-id`
+(one per invocation) and count terminal states server-side; at the cap `next-action`
+returns `action: "stop-at-cap"`. `resume`/`pass-gate`/`address-gate-feedback` stay
+uncapped.
+
+**A behind-base merge's attestation carry-forward used a negative test that was
+trivially true in a repo with no configured suites.** "The base delta doesn't touch a
+required suite" reads the same as a docs-only test only when `requiredWorkflows`
+actually covers the moved files — in a narrow or empty config it is true of *any*
+delta, code included, and would have carried a stale attestation forward over real
+application-code changes on the base. Fixed to a positive, unconditional test: every
+file in the base delta must be a doc path, or it re-attests, independent of what
+`requiredWorkflows` declares (`references/operations.md`).
+
+**Task issues moved from `lld`'s own turn to the orchestrator, after `lld-review` is
+clean.** No behavioral defect, but a sequencing one worth closing while touching this
+area: `lld` used to `create-issue` its own Tasks mid-turn, so a bounced `lld-review`
+round left half-created sibling issues from the rejected draft. `lld` now writes
+`## Task <KEY>: <title>` slug-headed subsections (no issue exists yet to create
+against) with an optional `Depends on: <KEY>` line; the new `create-lld-tasks <epic>
+--repo-path <p>`, run by the orchestrator only once `lld-review` is clean, creates the
+issues, rewrites the headings to `## Task #<n>: <title>`, applies the `blockedBy`
+edges, and pushes. Sequence: `publish-doc` → `create-lld-tasks` → `merge-lld-doc
+--unit epic` → `close-issue`.
+
+**`arch-review` returned clean, zero blockers, and self-scored 60 — below the
+default threshold, with nothing named that justified the discount.** That made Gate
+B's skip unreachable on a review that had, by its own account, found nothing wrong.
+The confidence marker had no stated definition beyond "your coverage," which left
+"nothing jumped out" and "I verified everything that would have made this unsound"
+indistinguishable in practice. Fixed in `agents/sdlc-design-review.md`: the marker is
+now defined as confidence the design is implementable as written without a human
+catching something first; a clean, zero-blocker verdict normally sits at or above the
+threshold; scoring below it requires naming the specific unverifiable thing in the
+handoff comment; and uncertainty about something the design deliberately excludes
+(a declared non-goal) is explicitly not a reason to score low. Separately, the
+operator lowered the global default threshold itself, `gates.skipConfidenceThreshold`,
+80 from 95 (`references/gates.md`, `references/epics.md`, `SKILL.md`).
+
+**The terse-handback contract didn't bind a fan-out child reporting to its parent
+reviewer, and the failure it was written to prevent recurred one layer down.**
+Measured: 22 fan-out children across the run's reviews returned 8,320–14,592
+characters each, re-pasting gathered evidence straight into the parent's context —
+the orchestrator-facing handback contract was solid, but nothing said the same thing
+applied one layer down. Fixed in `references/review-fanout.md`: a child's reply to
+its parent is capped at 1,200 characters — one-word verdict, one line per finding
+(claim + `file:line`), evidence left in the file or a scratch file, never inlined. A
+parent receiving an over-cap reply asks for a terse re-send, same as the orchestrator
+does. Pointer added from `references/stage-playbooks.md`.
+
+**Reviews were 63% of the run's cost ($65 `pr-review`, $31 `lld-review`, $25
+`arch-review` of ~$194), and most of it was avoidable fan-out, not the review work
+itself.** Two separate causes, both fixed as defaults in `references/review-fanout.md`
+(operator decision, 2026-09-16, accepting a slight review-depth trade-off for
+roughly half the review cost): first, every review stage fanned out on the first
+round regardless of artifact size, including small diffs and short docs that a
+single pass covers fine — now gated on a real size threshold (diff over 400 lines or
+more than 10 files for `pr-review`; a design doc over ~500 lines for the others),
+with fan-out capped at 3 children when it does fire. Second, and the larger of the
+two: a dispatched child with no `model` param does not fall back to a neutral tier,
+it silently inherits the *parent's* tier — opus, for every review stage. All 12
+`pr-review` children this run were dispatched with no `model` at all; `arch-review`/
+`lld-review` omitted it on 1 of 5 children each. Opus-inherited children cost $50.0
+against $12.5 for the ones correctly dispatched at sonnet — the single largest
+contributor to the run's review cost, from a missing parameter rather than a missing
+rule. `model: "sonnet"` on every fan-out dispatch is now stated as a MUST, with the
+mechanism and these figures, in `references/review-fanout.md`,
+`agents/sdlc-pr-review.md`, `agents/sdlc-design-review.md`, and
+`agents/sdlc-product-review.md`. Third default added the same pass: never fan out on
+a rework round, regardless of size — evidence from this same run, `lld-review` round
+1 fanned to 5 children over 45 tool calls, round 2 (scoped, fan-out-free) used 9
+calls and still verified the fix by execution.
+
 ## 2026-09-14 — retrospective: model-tier revert, IT scoping, mechanism-proof gap, review recurrence
 
 **`product-review`/`arch-review` reverted from `fable` back to `opus`, repeating a

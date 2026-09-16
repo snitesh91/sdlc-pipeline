@@ -98,26 +98,51 @@ Nobody is available to answer a question. State what you are reviewing and proce
 
 ## Step 2 — Three review layers
 
-Run all three against the diff. Keep them genuinely separate — the value is that each
-looks for a different failure class and none of them inherits another's conclusions.
+**Fan out to three parallel subagents only when the diff earns it — the
+`references/review-fanout.md` default: over 400 changed lines, or more than 10
+files.** Below that, work the three layers yourself in one pass; the layer split
+below is unchanged either way, only whether each runs as its own subagent. Exceeding
+or skipping the default is fine when the diff's shape calls for it — state the reason
+in the review comment. **Never fan out on a rework round** — a rework pass reviews the
+bounded delta yourself, dispatching a layer only where the delta plausibly reopens
+something an earlier round established (`references/review-fanout.md`, "Defaults for
+when a review stage fans out").
 
-**Run them as three parallel subagents, in a single message with three `Agent` calls**
-(`subagent_type: "general-purpose"`). Separate contexts are what actually delivers the
-independence this step has always asked for — three passes sharing one context window
-inherit each other's conclusions no matter how the prompt is worded. It is also the
-difference between wall-clock `max(layer)` and `sum(layer)`.
+When fan-out is warranted, keep the three layers genuinely separate — the value is
+that each looks for a different failure class and none of them inherits another's
+conclusions.
+
+**Run them as three parallel subagents, in a single message with three `Agent`
+calls** (`subagent_type: "general-purpose"`). **You MUST pass `model: "sonnet"`
+explicitly on all three calls.** This is not a default to lean on: an `Agent` call
+with no `model` param does not run at some neutral tier — it silently inherits
+*your own* tier, which for `pr-review` is opus, at roughly 4x the cost of the sonnet
+layer you meant to run. This is not hypothetical: on the 2026-09-16 live v2
+integration test, all 12 `pr-review` children were dispatched with no `model` at all
+and every one of them ran opus — the single largest, and entirely avoidable,
+contributor to that run's review cost ($50.0 across the omitted-`model` children
+against $12.5 for the ones dispatched correctly; `references/review-fanout.md`,
+"Defaults for when a review stage fans out"). The parent itself stays at its own
+table tier and owns the verdict — only the three dispatched layers take
+`model: "sonnet"`. Separate contexts are what actually delivers the independence this
+step has always asked for — three passes sharing one context window inherit each
+other's conclusions no matter how the prompt is worded. It is also the difference
+between wall-clock `max(layer)` and `sum(layer)`.
 
 Give each subagent: the PR number and issue number, the worktree path, the diff scope,
 its own layer brief from the list below, and — verbatim — the "Empirical, not
 diff-only" rule and the positive-control requirement further down this file. Each
-returns a list of candidate findings with file:line and a concrete failure scenario.
+returns a list of candidate findings with file:line and a concrete failure scenario,
+**in the terse shape `references/review-fanout.md`'s "A fan-out child's reply is
+terse too" requires** — capped at 1,200 characters, verdict plus a one-line-per-finding
+list, evidence left in the file it came from.
 
 Fan-out discipline (subagents propose/you dispose, serialized execution, wait for
 every axis before posting) is universal across every review stage —
 `references/review-fanout.md`, "Review fan-out discipline". Not restated here.
 
-If the `Agent` tool is unavailable, run the three layers yourself in sequence — the
-layer briefs are unchanged.
+If the `Agent` tool is unavailable, or the diff is below the fan-out threshold, run
+the three layers yourself in sequence — the layer briefs are unchanged.
 
 - **Blind Hunter** — adversarial pass over the diff with no spec in hand. Real bugs,
   security, correctness, data integrity, concurrency, error handling. What breaks in

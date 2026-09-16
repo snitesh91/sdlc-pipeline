@@ -136,6 +136,20 @@ structured exit-0 result — on a branch behind `origin/main` (green CI on a sta
 is meaningless under the parallel lane; see `references/parallelism.md`, "Merge-time
 freshness gate").
 
+**Carry-forward on a behind-base merge is a positive docs-only test, not "the base
+delta doesn't touch a required suite."** Those read the same in a repo whose config
+happens to declare a required suite over every file the base moved — but not in one
+with a narrow or empty `requiredWorkflows`, where "doesn't touch a required suite" is
+trivially true of *any* delta, code included, and would carry a stale attestation
+forward over a base that changed real application code. The actual test is the
+inverse and unconditional: the branch's existing attestation is carried forward only
+when **every file** the base delta touched is a doc path; a base delta containing even
+one non-doc file is re-attested, regardless of whether any `requiredWorkflows` entry's
+`prefixes`/`files` happens to cover it. `merge-pr`'s result carries
+`carried_attestation_forward: true` when this fires — treat its absence on a
+behind-base result as "this needs `sync-branch`, fresh CI, and a re-attest," never as
+"the config has no suite configured for this, so it's fine."
+
 **Local-CI attestation (main-only GHA CI, 2026-09-04 operator cost directive).** The
 backend (`Backend CI`) and frontend (`Frontend CI`) suites
 no longer run on child PRs in GitHub Actions — the backend suite alone is a ~30-minute

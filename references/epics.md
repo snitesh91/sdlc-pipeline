@@ -21,7 +21,7 @@ match `epic:standing`, `RTB`, or anything it likes. The toggles:
 | `childEntryStage` | `"lld"` | `"product"` = children enter at `product` (full flow) instead of `lld` |
 | `childrenNeedArchitectedEpic` | `true` | `false` = children eligible without the epic being `epic:architected` |
 | `closes` | `true` | `false` = epic never closes and has no integration branch |
-| `gates.skipConfidenceThreshold` | `95` (global) | per-profile Gate B skip bar |
+| `gates.skipConfidenceThreshold` | `80` (global, operator instruction 2026-09-16 — was 95) | per-profile Gate B skip bar |
 | `gates.requiresHumanGateA` | `true` (global) | `false` = Gate A auto-passed (no human) |
 
 The three shipped default profiles reproduce the historical behaviour exactly:

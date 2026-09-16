@@ -213,6 +213,11 @@ handback that inlines evidence the record already holds is a finding on the hand
 the same way an over-cap comment is: the orchestrator asks for a terse re-send before
 acting, then routes on the fields.
 
+**This contract binds a stage agent reporting to the orchestrator. A fan-out child
+reporting to its parent reviewer is the same discipline one layer down, capped
+tighter (1,200 characters) — `references/review-fanout.md`, "A fan-out child's reply
+is terse too".**
+
 
 ## Commenting discipline
 
