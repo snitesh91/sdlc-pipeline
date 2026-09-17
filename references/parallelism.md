@@ -191,6 +191,18 @@ The rules, so nobody has to rediscover it a third time:
   foreground call over the whole suite. Epic #430 lost both agents at once this way: two
   concurrent full IT suites saturated the Docker VM, each blew past the 600s stream
   watchdog, and the watchdog killed both (see `references/history.md`).
+- **A timing-sensitive AC needs the Docker VM to itself.** A Task whose acceptance
+  criterion is a wall-clock measurement (a suite, build, or e2e run completing under a
+  budget) must hold the shared Docker VM exclusively for that measurement — no other
+  heavy-Docker stage running concurrently (a sibling's suite, a reviewer's re-run, a
+  second stack), or the number measures VM contention, not the code. This is stricter
+  than the one-IT-suite rule above: even a *light* concurrent stage that touches Docker
+  can perturb the timing, so it is a full serialization requirement for the duration of
+  the timing run. The machine-wide heavy-Docker slot lease that would enforce this
+  automatically is documented-not-built (see "Cross-epic coordination file" below), so
+  until it exists the rule is manual — the operator/orchestrator quiesces every other
+  heavy-Docker stage on the machine before starting the timing run and holds them back
+  until it finishes.
 - **A resource kill is never a code finding.** If a run dies from exhaustion, say so
   explicitly, name which suites did and did not execute, and never report an unrun
   suite as passing.
@@ -345,6 +357,18 @@ earlier runs' output has vanished with the container.
 - **Merge-time backstop**: if GitHub itself reports the PR non-mergeable,
   `gh pr merge` exits nonzero and `merge-pr` raises loudly — treat that like a
   `sync-branch` conflict: resume `development` to reconcile, don't blindly retry.
+- **Epic-level conflict (`epic-<n>` <- `main`) has its own owner.** The routing above
+  (`sync-branch-conflict` <-> that child's `development`) covers a *child* branch only.
+  An `epic-<n>` integration branch reconciling `origin/main` at close
+  (`close-epic`, or `sync-branch --unit epic`) has no stage agent of its own — an Epic
+  runs no stage — so its conflict is resolved by the orchestrator in the epic branch's
+  own worktree, or, when the reconcile is non-trivial, by a dedicated
+  `development`-type subagent dispatched for that single reconcile, never any child's
+  tracked agent. **Resolve it semantically, not just textually:** a clean textual merge
+  is necessary, not sufficient. Re-check the invariants no file-conflict surfaces — an
+  allow-list/count pin both sides edited to different values, spec files moved or
+  renamed on one side, a footprint or Task boundary the merge silently widened. The
+  reconcile is done only once those hold.
 
 ## Parallel PR review — reviews fan out, rework stays sequential
 
@@ -503,6 +527,17 @@ that already existed. This — not a crash losing the file — was the real re-r
 any resume, check `origin/issue-<n>` first and base the worktree on it (`-B issue-<n>
 origin/issue-<n>` recreates the local branch at the pushed tip); use the epic-branch
 create form only for a genuinely first-touch child with no `origin/issue-<n>` yet.
+
+**A fresh worktree lacks the gitignored profile files.** `.secrets.<profile>` and
+`.env.<profile>` are gitignored and live only in the main checkout, so a worktree
+created by `worktree-add` starts without them — a stage agent that looks there for e2e
+credentials finds none and (wrongly) concludes none are configured, then skips live
+verification. After standing up any worktree a stage may run e2e or a live-credential
+check from, make those files reach it: symlink each from the main checkout
+(`ln -s <repo-root>/.secrets.<profile> <worktree>/.secrets.<profile>`, same for
+`.env.<profile>`), or name their absolute path in the main checkout in the delegation
+prompt. (*Which* credentials are actually configured is answered by the stage-playbooks
+helper — this rule only guarantees the files reach the worktree.)
 
 Who creates it: the orchestrator's `worktree-add` — with `--base origin/main` for a
 phase-Task, and at `development` for a non-standing Epic's Task (off
@@ -721,6 +756,17 @@ still does not.
   (SKILL.md Step 5) now scopes to the epic being bumped, not the whole machine. The
   config file (`sdlc-pipeline.config.json`) is committed on the branch, so it was
   already per-branch.
+- **Config is resolved per-checkout, and the merge gate reads the gate command's
+  checkout.** `_find_config` walks up from the cwd, so every command inherits whichever
+  branch's config its checkout holds: `record-local-ci` runs in the child's worktree and
+  validates against the *epic branch's* config, while `merge-pr`/`close-epic` run from
+  the main checkout and read *main's*. A config change made only on an epic branch is
+  therefore accepted at attestation but **not enforced at the merge gate** until it has
+  reached the branch the gate command runs from — normally `main`; an epic-branch-only
+  config edit is a local override that `merge-pr`/`close-epic` from the main checkout do
+  not see. This is intentional and documentation-only — no code reconciles the two.
+  **Land config changes on `main`** (their own PR) so the gate enforces what the branches
+  attest against.
 - **Git requirement — verified, and checked at runtime.** Submodules inside linked
   worktrees only isolate if git gives each worktree its own submodule gitdir under
   `$GIT_COMMON_DIR/worktrees/<id>/modules/<name>` (older gits shared one

@@ -34,6 +34,27 @@ them, regardless of what the fan-out is called in a given stage's own file:
 Each review stage's own file states only its role-specific axis/layer list and any
 axis-specific model tier — not these three rules again.
 
+## Persist each axis as it lands — crash-safe resume
+
+A fan-out is a long, multi-subagent pass, and it can die mid-way. On a 2026-09-16 run a
+stage review hit the harness weekly-API rate limit (HTTP 429) after some axis children
+had already returned, with no crash-safe state, so the orchestrator had to resume it by
+hand, re-sending context. Prevent that:
+
+- **Persist each axis result to the scratchpad the moment it arrives** — one file per
+  axis under the review's scratch dir (e.g. `<scratch>/review-<n>/<axis>.md`), holding
+  that axis's terse candidate list — not once at the end. A parent that waits for every
+  child and only then writes has nothing to resume from when the last child never
+  returns.
+- **Resume recipe.** On resume, before dispatching anything, read the already-persisted
+  axis files; re-dispatch **only** the axes with no file yet. A completed axis is done —
+  its candidates are captured, and the parent still re-verifies each against the real
+  file before it becomes a finding ("subagents propose; you dispose"), so a persisted
+  candidate is exactly as trustworthy as a fresh one.
+- This composes with "wait for every dispatched subagent before forming your verdict":
+  a rate-limit death is not a verdict, and resume finishes the missing axes before the
+  parent disposes.
+
 ## A fan-out child's reply is terse too — same contract, one layer down
 
 `references/stage-playbooks.md`, "The handback is terse" binds a stage agent

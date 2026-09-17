@@ -182,6 +182,29 @@ big" is not the instinct. The bias is the opposite:
   sections, so `## 12. Footprint` parses identically to a bare `## Footprint`. Nothing
   else about the shape is negotiable.
 
+- **Beyond paths — the `## Contract` note.** A path footprint catches two Tasks that
+  edit the same file; it is blind to two Tasks that break each other through a shared
+  *contract* they never co-locate in a file — an API request/response shape, a pinned
+  count or allow-list size, a DB invariant, an enum's membership. This has shipped a
+  real break: one Task changed an endpoint's pinned allow-list count and silently broke
+  a sibling's assertion of that count, though the two shared no path. So each `## Task`
+  subsection that **depends on or changes** such a contract adds a `## Contract`
+  heading — a plain bullet list, one contract per bullet, each naming the shared surface
+  and whether the Task `reads:` or `changes:` it:
+
+  ```markdown
+  ## Contract
+
+  - changes: `GET /api/pinned` response — pinned-count invariant (max 12)
+  - reads: seller-role permission set
+  ```
+
+  `lld` declares these in the same session it carves the Tasks. The orchestrator raises
+  a **cross-session notice** when two in-flight units declare an overlapping contract
+  (one `changes:` what another `reads:` or `changes:`), the same way `lld-review` flags
+  overlapping path footprints. A contract no sibling touches needs no notice — the note
+  costs nothing then and catches the collision the day a later sibling adds one.
+
   **An Epic's `architecture.md` carries no Footprint section at all.** Nothing ever
   parses one: `read_footprint` reads a standing child's `issue-<n>/architecture.md`, or
   the Task's own subsection of `epic-<n>/lld.md` — never the Epic's architecture doc.
@@ -380,7 +403,14 @@ record is the only thing between a green branch and an irreversible merge to `ma
   scripted suite cannot — the judgment half of what used to be "manual testing done by
   a human".
 
-Each records durable evidence via `record-epic-verification <n> --kind e2e|exploratory`.
+**The verification agents return their verdict and summary to the orchestrator; the
+orchestrator records the marker and posts the epic comment — an agent never calls
+`record-epic-verification` itself.** The harness permission system blocks a closing
+agent's `record-epic-verification` and its epic comment as external writes, so an agent
+that tried would stall on a denied write; the orchestrator holds the close decision, so
+it owns the durable record too. Durable evidence lands via
+`record-epic-verification <n> --kind e2e|exploratory`, run by the orchestrator once per
+returned verdict (`sdlc-exploratory` is written to return, not record).
 `missing_epic_verification()` requires both, **and requires each to postdate the last
 `origin/main` reconcile** — evidence gathered before the final merge describes a
 different tree than the one that ships. Same ordering trap `missing_pipeline_evidence`
@@ -406,6 +436,30 @@ case:
 A "before" and an "after" that are each a single run of a zero-retry suite is not a
 comparison — pin the confirmation procedure (retries, workers, and what counts as a
 stable delta) in the e2e-test Task's own `## Task` subsection of `lld.md`.
+
+### The close-blocker lane
+
+A Blocker/Critical delta from the closing verification is filed as an epic child and,
+by default, routed by hand through the full development / Architecture-revision lane —
+heavier than most close-blockers need. With **operator authorisation** — this lane is
+never taken on an agent's own initiative — a close-blocker may take a lighter route:
+
+- **lld-skip threshold.** When the fix is small and self-contained — bounded within one
+  component, no new component boundary, no data-model or contract change (the *fits*
+  test from "Architecture deviation escalation") — skip `product`/`lld` and route the
+  child straight to a scoped `development` pass against the epic branch
+  (`set-stage <n> --stage development`). A fix that fails the *fits* test still cuts an
+  Architecture revision Task. The improvised route this replaces was a raw fix commit
+  on the epic branch then re-running the suites; a scoped `development` pass on a child
+  is that, with a PR and `pr-review` around it.
+- **What a fix invalidates.** Any **non-docs** change to the epic branch invalidates
+  the closing e2e *and* exploratory evidence — both must be re-run after it lands. A
+  **docs-only** change invalidates neither. The e2e marker only auto-invalidates on a
+  `main` reconcile (`missing_epic_verification` postdating the last reconcile); a fix
+  committed *after* the reconcile does not trip it, so re-running the two verifications
+  here is a **manual discipline**, not something the CLI enforces.
+- **Who decides.** The operator authorises the lighter lane. Absent that, a
+  close-blocker runs the full lane.
 
 **Any issue caught by manual testing (item 6) gets filed as its own `Bug` child of the
 epic** — never folded silently into the closing comment. Use `create-issue --parent

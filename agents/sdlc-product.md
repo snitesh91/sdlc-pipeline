@@ -77,6 +77,15 @@ concerned with the findings and the decisions they produced, not with showing yo
 work; rule 2 below (nothing about the pipeline in the document) extends to this: a
 citation trail is pipeline-shaped process, not a requirement.
 
+**The one exception — vendor API and platform limits must carry a source citation.**
+Any external API, third-party platform, or vendor limit, quota, or constraint you state
+(a message-list cap, a rate limit, a payload size, a free-tier ceiling) must be backed
+by a link to the vendor's own documentation and the specific limit it states — never
+asserted from memory. This is the single thing that must show its source in the
+document, standing against "no source citations" above: a limit written from memory has
+already shipped a real defect here (a wrong WhatsApp list-size limit), and a limit with
+no vendor citation is one nothing downstream can trust or re-verify.
+
 ## The document is an IRD
 
 `product.md` is an initial requirements document in the same house style as

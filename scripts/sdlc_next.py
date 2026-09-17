@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import fnmatch
 import io
 import json
 import os
@@ -226,11 +227,6 @@ _PIPELINE_DEFAULTS = {
     # (`pass-gate` / `address-gate-feedback`) are never gated. `0` disables.
     "productWip": {"maxGateAPending": 5},
     "escalation": {"replaceAt": 3, "needsHumanAt": 6},
-    # `{docRoot}` is formatted with the config's `docRoot` at load time, so the
-    # default lands next to the committed docs of the driven repo (e.g.
-    # `docs/sdlc/retro-watermark`) rather than inside the skill checkout.
-    "retro": {"everyClosedIssues": 5,
-              "watermarkFile": "{docRoot}/retro-watermark"},
     "continuous": {"cycleCap": 8},
     # `auto: true` lets the orchestrator invoke the second `close-epic` call itself
     # once the epic is closeable and both closing verifications are clean -- no human
@@ -289,7 +285,6 @@ def _pipeline_config() -> dict:
             merged[key] = {**default, **(user.get(key) or {})}
         else:
             merged[key] = user.get(key, default)
-    merged["retro"]["watermarkFile"] = merged["retro"]["watermarkFile"].format(docRoot=DOC_ROOT)
     return merged
 
 
@@ -355,6 +350,21 @@ STAGE_FIELD_NAMES = {
     # "no stage at all".
     "Testing": "testing",
 }
+
+# Every accepted spelling of a Stage -> its canonical slug: the field display value
+# ("PR Review"), the slug ("pr-review"), and case/space-insensitive variants of
+# either. `--expect-stage "PR Review"` once mismatched the stored slug `pr-review`
+# and was read as a failed handoff (retro #45); normalising both sides fixes it.
+_STAGE_ALIASES = {}
+for _display, _slug in STAGE_FIELD_NAMES.items():
+    for _spelling in (_display, _slug):
+        _STAGE_ALIASES[_spelling.lower().replace(" ", "-")] = _slug
+
+
+def normalize_stage(name: str) -> Optional[str]:
+    """Canonical slug for any accepted spelling of a Stage, or None if unknown."""
+    return _STAGE_ALIASES.get((name or "").strip().lower().replace(" ", "-"))
+
 
 # Stages a child can be sitting at when its draft PR is waiting for `pr-review`.
 # `pr-review` is what `open-dev-pr` now sets; `testing` is the retired value an
@@ -1061,12 +1071,33 @@ _DESIGN_REVIEW_OUTCOME_MARKER = re.compile(
 # `development` both writes and validates its own tests since the `testing` stage
 # was merged into it (2026-09-12), so the only thing standing between a claim and
 # the merge gate is that the evidence is machine-produced and sha-pinned.
+# The suite key allows hyphens (`[\w-]+`, not `\w+`): a hyphenated suite name like
+# `e2e-smoke` used to parse only up to the hyphen, so its attestation could never be
+# matched and the suite stayed `missing` even after `record-local-ci` accepted it
+# (retro #42). Config load additionally rejects a suite key with any other character.
 _LOCAL_CI_MARKER = re.compile(
-    r"<!--\s*local-ci:\s*(\w+):(\d+)\s*@\s*([0-9a-fA-F]{7,40})\s*-->")
+    r"<!--\s*local-ci:\s*([\w-]+):(\d+)\s*@\s*([0-9a-fA-F]{7,40})\s*-->")
 
 # Suite keys a `local-ci` attestation may carry, one per required GHA workflow that
 # went main-only. Kept in step with the `suite` field on REQUIRED_WORKFLOWS below.
 LOCAL_CI_SUITES = tuple(dict.fromkeys(w["suite"] for w in CONFIG["requiredWorkflows"]))
+
+# A suite key must be a token the marker regex can round-trip -- `[\w-]+` and nothing
+# else. Validated once at import so a bad key in `requiredWorkflows` fails loudly at
+# config load, not silently as a never-matched attestation at merge time (retro #42).
+_SUITE_KEY_RE = re.compile(r"^[\w-]+$")
+for _suite in LOCAL_CI_SUITES:
+    if not _SUITE_KEY_RE.match(_suite):
+        raise ValueError(
+            f"requiredWorkflows suite key {_suite!r} is not a valid suite token "
+            f"([A-Za-z0-9_-]+) -- the local-ci attestation marker could never match it")
+
+# Optional per-suite required-command regex (retro #43): suite -> pattern the
+# `record-local-ci --command` must contain. Absent when a workflow declares no
+# `commandPattern`, in which case any non-empty command is accepted (prior behaviour).
+LOCAL_CI_COMMAND_PATTERNS = {
+    w["suite"]: w["commandPattern"]
+    for w in CONFIG["requiredWorkflows"] if w.get("commandPattern")}
 
 
 def local_ci_suites_attested(comments: list, head_sha: str) -> set:
@@ -1711,6 +1742,67 @@ def record_terminal_unit(gh: WorkItemProvider, issue: int) -> Optional[dict]:
             "terminal_count": len(state["terminal"]), "cap": MAX_TASKS_PER_RUN}
 
 
+# --- Per-run analytics (retro #59) -----------------------------------------
+# The control plane cannot see Claude's own token/tool usage -- that lives in the
+# harness, surfaced per subagent in each task-notification's `<usage>` block
+# (subagent_tokens, tool_uses, duration_ms) and in the orchestrator's own context
+# reads. So the orchestrator FEEDS those numbers here with `record-run-metric`
+# after each stage/agent finishes, and `run-report` aggregates them at close --
+# turning cost analysis from after-the-fact transcript archaeology into a
+# repeatable, data-driven step. Metrics live in the same per-epic run-state file
+# as the run cap (#5), so `next-action --run-id` resetting that file per run also
+# scopes the metrics to one run. Open question for a later pass: whether the
+# harness can hand the control plane these numbers directly instead of via the
+# orchestrator relaying them.
+_METRIC_FIELDS = ("tokens_out", "cache_read", "cache_write", "tool_calls",
+                  "peak_context", "duration_ms")
+
+
+def cmd_record_run_metric(epic: int, stage: Optional[str] = None, agent: Optional[str] = None,
+                          tokens_out: int = 0, cache_read: int = 0, cache_write: int = 0,
+                          tool_calls: int = 0, peak_context: int = 0,
+                          duration_ms: int = 0) -> dict:
+    """Append one stage/agent's usage sample to the epic's run-state metrics.
+
+    Appends only -- never resets terminal/cap accounting. When no run-state file
+    exists yet (metrics recorded before any `next-action --run-id`), a minimal one
+    is created; a later `next-action` with a fresh run id resets it as usual."""
+    state = read_run_state(epic) or {"terminal": []}
+    state.setdefault("metrics", [])
+    entry = {"stage": stage, "agent": agent, "at": _utc_now_marker(),
+             "tokens_out": tokens_out, "cache_read": cache_read, "cache_write": cache_write,
+             "tool_calls": tool_calls, "peak_context": peak_context, "duration_ms": duration_ms}
+    state["metrics"].append(entry)
+    _write_run_state(epic, state)
+    return {"epic": epic, "recorded": entry, "metric_count": len(state["metrics"])}
+
+
+def _summarise_metrics(items: list) -> dict:
+    summary = {"count": len(items)}
+    for f in _METRIC_FIELDS:
+        if f == "peak_context":
+            summary[f] = max((m.get(f, 0) for m in items), default=0)
+        else:
+            summary[f] = sum(m.get(f, 0) for m in items)
+    return summary
+
+
+def cmd_run_report(epic: int) -> dict:
+    """Aggregate the epic's recorded run metrics -- totals plus a per-stage and
+    per-agent breakdown -- for a cost-optimisation review at close (retro #59)."""
+    state = read_run_state(epic) or {}
+    metrics = state.get("metrics", [])
+    by_stage: dict = {}
+    by_agent: dict = {}
+    for m in metrics:
+        by_stage.setdefault(m.get("stage") or "unknown", []).append(m)
+        by_agent.setdefault(m.get("agent") or "unknown", []).append(m)
+    return {"epic": epic, "run_id": state.get("run_id"), "metric_count": len(metrics),
+            "total": _summarise_metrics(metrics),
+            "by_stage": {k: _summarise_metrics(v) for k, v in by_stage.items()},
+            "by_agent": {k: _summarise_metrics(v) for k, v in by_agent.items()}}
+
+
 def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> dict:
     """Picks the one unit -- one of the named Epic's/Initiative's children --
     to work next. `epic` is now
@@ -2006,9 +2098,19 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
 
 # The optional `17. ` prefix: architecture.template.md numbers its sections, so the
 # heading is `## 17. Footprint` there and a bare `## Footprint` in older docs. Both parse.
-_FOOTPRINT_HEADING = re.compile(r"^#+\s*(?:\d+[.)]\s*)?Footprint\b.*$",
+# The heading must be EXACTLY "Footprint" (optional leading number, optional
+# trailing colon) -- NOT any heading that merely starts with the word. A prose
+# heading like `## Footprint overlap outside this task` used to match, and because
+# `.search` takes the first match, the real `## Footprint` after it was never read
+# and the footprint parsed as `[]` (retro #16, #513).
+_FOOTPRINT_HEADING = re.compile(r"^#+\s*(?:\d+[.)]\s*)?Footprint\s*:?\s*$",
                                 re.IGNORECASE | re.MULTILINE)
 _FOOTPRINT_BULLET_PATH = re.compile(r"^-\s+`([^`]+)`")
+# A bold sub-label inside the section (e.g. `**Verify-only:**`) starts a different
+# category of path -- read/verified, not changed -- and must NOT be collected as
+# footprint, or a task that only reads a file would collide with the one that owns
+# it (retro #16). Path collection stops at the first such sub-label.
+_FOOTPRINT_SUBLABEL = re.compile(r"^\*\*.+")
 # An Epic's lld.md convention (sdlc-lld.md, "The document"): one `##
 # Task #<n>` subsection per Task, each carrying its own `### Footprint`.
 # `## Task #<n>` is the documented form (`sdlc-lld.md`, "The document"); `###`
@@ -2098,7 +2200,10 @@ def parse_footprint(doc_text: str) -> list:
     body = rest[:end.start()] if end else rest
     paths = []
     for line in body.splitlines():
-        bm = _FOOTPRINT_BULLET_PATH.match(line.strip())
+        stripped = line.strip()
+        if _FOOTPRINT_SUBLABEL.match(stripped):
+            break  # a bold sub-label (e.g. **Verify-only:**) ends the changed-path list
+        bm = _FOOTPRINT_BULLET_PATH.match(stripped)
         if bm:
             paths.append(bm.group(1))
     return paths
@@ -2287,6 +2392,57 @@ def init_skill_submodule(worktree: str, runner: Runner = _default_runner) -> dic
     return {"skill_dir": skill_dir, "skill_commit": pinned}
 
 
+def _skill_version_info(repo_path: str = ".", runner: Runner = _default_runner) -> dict:
+    """The SHA of the skill code actually running vs. the SHA the driven repo pins
+    (retro #58, #48). `running_sha` is HEAD of this file's own checkout (the skill
+    repo). `pinned_sha` is the gitlink the driven repo committed for the submodule
+    (`git rev-parse HEAD:<submodulePath>`). `drift` is True when they differ -- the
+    2026-09-11 incident where the control plane silently ran unpinned code because
+    the bootstrap checkout had drifted off the pin. Best-effort: any field that
+    can't be read (not a git checkout, no submodule) comes back None, never raising,
+    so `show-config` still prints in a non-git context."""
+    info = {"running_sha": None, "pinned_sha": None, "drift": None, "submodule_path": None}
+    skill_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        info["running_sha"] = runner(["git", "-C", skill_root, "rev-parse", "HEAD"]).strip()
+    except Exception:
+        return info
+    sub = (PIPELINE["skill"].get("submodulePath") or "").strip("/")
+    info["submodule_path"] = sub or None
+    if not sub:
+        return info
+    try:
+        info["pinned_sha"] = runner(
+            ["git", "-C", repo_path, "rev-parse", f"HEAD:{sub}"]).strip()
+    except Exception:
+        return info
+    if info["running_sha"] and info["pinned_sha"]:
+        info["drift"] = info["running_sha"] != info["pinned_sha"]
+    return info
+
+
+def cmd_show_config(repo_path: str = ".") -> dict:
+    """Effective pipeline tunables plus the running skill SHA and any pin drift."""
+    skill_version = _skill_version_info(repo_path)
+    result = {"repo": REPO, "docRoot": DOC_ROOT,
+              # designLane is defaulted in code (not required in the config), so
+              # surface the effective value alongside the raw devLane/prReview.
+              "parallelism": {**CONFIG["parallelism"],
+                              "designLane": DESIGN_LANE_PARALLELISM,
+                              "maxTasksPerRun": MAX_TASKS_PER_RUN},
+              "requiredWorkflows": CONFIG["requiredWorkflows"],
+              "localCiSuites": list(LOCAL_CI_SUITES),
+              "skillVersion": skill_version,
+              **PIPELINE}
+    if skill_version.get("drift"):
+        result["skill_drift_warning"] = (
+            f"the running skill ({skill_version['running_sha']}) is NOT the SHA this repo "
+            f"pins for {skill_version['submodule_path']} ({skill_version['pinned_sha']}) -- "
+            f"the control plane is running unpinned code; re-sync the submodule before relying "
+            f"on it (retro #48)")
+    return result
+
+
 _AGENT_TEMPLATE_PLACEHOLDERS = {
     "<docRoot>": lambda: DOC_ROOT,
     "<your-token-file>": lambda: TOKEN_PATH,
@@ -2348,6 +2504,53 @@ def cmd_sync_skill(repo_path: str = ".", ref: Optional[str] = None,
             "changed": old_sha != new_sha, "agents_vendored": vendored}
 
 
+# Transient git-over-network failures (SSH timeout, connection reset, temporary DNS)
+# that a single immediate retry usually clears (retro #17). A non-transient failure
+# (auth, non-fast-forward, unknown ref) is re-raised on the first try, never retried.
+_TRANSIENT_NET_RE = re.compile(
+    r"(timed out|timeout|connection (?:reset|refused|closed)|could not resolve host|"
+    r"temporary failure|ssh_exchange_identification|kex_exchange_identification|"
+    r"early eof|the remote end hung up|rpc failed|operation timed out)",
+    re.IGNORECASE)
+
+
+def _run_retry_transient(argv: list, runner: Runner, attempts: int = 2):
+    """Run a git command, retrying once on a transient network error. Any other
+    error, and the final attempt's error, propagate unchanged (retro #17)."""
+    for i in range(attempts):
+        try:
+            return runner(argv)
+        except Exception as e:  # GhError from the default runner
+            if i + 1 < attempts and _TRANSIENT_NET_RE.search(str(e)):
+                time.sleep(1)
+                continue
+            raise
+
+
+def _add_fresh_worktree(repo_path: str, path: str, branch: str, base: str,
+                         runner: Runner) -> None:
+    """First-touch `git worktree add -b <branch> <base>`, recovering from a stale
+    local `<branch>` left by a crashed earlier run (no remote, `-b` refuses it).
+    The stale branch is recreated ONLY when it carries no commits the base lacks;
+    a branch with unique commits is real work and is never silently discarded --
+    that surfaces as an error instead (retro #17)."""
+    try:
+        runner(["git", "-C", repo_path, "worktree", "add", path, "-b", branch, base])
+        return
+    except Exception:
+        local = runner(["git", "-C", repo_path, "branch", "--list", branch]).strip()
+        if not local:
+            raise  # the failure was not a pre-existing local branch
+        unique = _rev_count(repo_path, f"{base}..{branch}", runner)
+        if unique:
+            raise GhError(
+                f"local branch {branch!r} already exists and has {unique} commit(s) not in "
+                f"{base} -- refusing to discard unmerged work; inspect and delete it by hand")
+        # Safe: no unique commits, so recreate it off base and retry.
+        runner(["git", "-C", repo_path, "branch", "-D", branch])
+        runner(["git", "-C", repo_path, "worktree", "add", path, "-b", branch, base])
+
+
 def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: str = ".",
                      runner: Runner = _default_runner, base: Optional[str] = None) -> dict:
     """Stand up the unit's worktree the one correct way, so the orchestrator never
@@ -2375,7 +2578,7 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
     existing = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
     if existing:
         return _resume_live_worktree(existing, branch, repo_path, runner)
-    runner(["git", "-C", repo_path, "fetch", "origin"])
+    _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
     on_origin = runner(["git", "-C", repo_path, "branch", "-r", "--list",
                         f"origin/{branch}"]).strip()
     if on_origin:
@@ -2389,12 +2592,12 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
         synced = {"synced_to_origin": True, "behind_before": None}
     else:
         base = base or f"origin/{integration_base(gh, number, unit)}"
-        runner(["git", "-C", repo_path, "worktree", "add", path, "-b", branch, base])
+        _add_fresh_worktree(repo_path, path, branch, base, runner)
         if unit == "epic":
             # An epic branch is shared: every branch-writing command resolves it
             # from origin, so a local-only one is invisible to them.
-            runner(["git", "-C", repo_path, "push", "origin",
-                    f"refs/heads/{branch}:refs/heads/{branch}"])
+            _run_retry_transient(["git", "-C", repo_path, "push", "origin",
+                                  f"refs/heads/{branch}:refs/heads/{branch}"], runner)
         resumed = False
         # A branch being created here has no origin tip to be behind.
         synced = {}
@@ -3218,6 +3421,17 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
         raise GhError(f"sha must be a 7-40 char hex commit id, got {sha!r}")
     if not (command or "").strip():
         raise GhError("--command is required: the exact command the suite was run with")
+    # Per-suite command check (retro #43): a non-empty `--command` alone let an
+    # attestation claim any command, e.g. a `backend` attestation that never ran
+    # coverage. When `requiredWorkflows[suite].commandPattern` is configured, the
+    # command must match it, so a suite can require its real invocation (e.g.
+    # `test:coverage`) rather than trusting the summary.
+    pattern = LOCAL_CI_COMMAND_PATTERNS.get(suite)
+    if pattern and not re.search(pattern, command):
+        raise GhError(
+            f"--command {command.strip()!r} does not match the required pattern for the "
+            f"{suite!r} suite ({pattern!r}) -- attest the real suite command "
+            f"(configure it in requiredWorkflows[].commandPattern)")
     evidence = read_ci_evidence(output)
     timestamp = _utc_now_marker()
     fence = "```"
@@ -3297,6 +3511,19 @@ def cmd_claim(gh: GitHub, issue: int, role: str) -> dict:
         # Stage option.
         raise GhError(f"unknown role {role!r} -- must be one of "
                        f"{sorted(STAGE_OPTION_IDS)}")
+    # A rework round is resumed, never re-claimed: `claim --role development` on a
+    # unit that already has an open PR moves Stage off "PR Review" and drops the
+    # unit from the marker-driven review pool (retro #2, #19). Refuse it and point
+    # to the resume path rather than silently derailing the handoff.
+    if role == "development":
+        open_prs = gh.pr_list_for_branch(issue_branch(issue))
+        if open_prs:
+            pr = open_prs[0]["number"]
+            raise GhError(
+                f"issue #{issue} already has open PR #{pr} on {issue_branch(issue)} -- "
+                f"claiming `development` would move Stage off PR Review and drop the unit "
+                f"from the review pool. Resume the rework round (see references/rework.md) "
+                f"instead of re-claiming.")
     gh.set_stage_field(issue, role)
     gh.set_pipeline_status_field(issue, "in-progress")
     _post_start_comment(gh, issue, role)
@@ -3438,8 +3665,17 @@ def git_reconcile_branch(repo_path: str, branch: str, base: str = "main",
     since a gate PR is doc-only and a real conflict there is unexpected enough
     to warrant stopping loudly rather than routing through rework. See
     "Parallel implementation lane" / git-conflict handling in references/parallelism.md."""
-    runner(["git", "-C", repo_path, "fetch", "origin"])
+    _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
     runner(["git", "-C", repo_path, "checkout", branch])
+    # Fast-forward the local branch to its own origin tip BEFORE merging base, so
+    # the push below is a fast-forward. A stale live worktree that never pulled its
+    # own pushed commits would otherwise merge base onto an old tip and be rejected
+    # non-fast-forward at push (retro #8, #35). ff-only, never a reset: a genuinely
+    # diverged local branch surfaces loudly here instead of being discarded.
+    on_origin = runner(["git", "-C", repo_path, "branch", "-r", "--list",
+                        f"origin/{branch}"]).strip()
+    if on_origin:
+        runner(["git", "-C", repo_path, "merge", "--ff-only", f"origin/{branch}"])
     try:
         runner(["git", "-C", repo_path, "merge", f"origin/{base}"])
     except GhError:
@@ -3449,7 +3685,7 @@ def git_reconcile_branch(repo_path: str, branch: str, base: str = "main",
             raise
         runner(["git", "-C", repo_path, "merge", "--abort"])
         raise MergeConflict(conflicted, base=base)
-    runner(["git", "-C", repo_path, "push", "origin", branch])
+    _run_retry_transient(["git", "-C", repo_path, "push", "origin", branch], runner)
 
 
 class MergeConflict(GhError):
@@ -4396,7 +4632,8 @@ def cmd_mark_feedback_addressed(gh: GitHub, issue: int) -> dict:
     return {"issue": issue, "pipeline_status": "awaiting-human-review"}
 
 
-def cmd_pause_for_epic_regate(gh: GitHub, issue: int, epic: int, gate_pr: int) -> dict:
+def cmd_pause_for_epic_regate(gh: GitHub, issue: int, epic: int, gate_pr: int,
+                               found_by: str = "lld") -> dict:
     """Parks a unit that found an architecture deviation while the owning Epic's
     Architecture revision Task (a second Gate B round -- see "Architecture
     deviation escalation" in references/epics.md) is pending. Clears only
@@ -4404,13 +4641,20 @@ def cmd_pause_for_epic_regate(gh: GitHub, issue: int, epic: int, gate_pr: int) -
     eligibility loop -- rather than sitting in the crash-recovery in-progress
     slot forever -- the moment the revision's gate merges and `next-action`
     runs again. Also add a `blockedBy` edge on the revision Task so the unit
-    is not picked before the revised design is published."""
+    is not picked before the revised design is published.
+
+    `--found-by` names the stage that hit the deviation (lld, development,
+    pr-review, ...). A deviation is not only found at lld -- pr-review and
+    development can hit one too (retro #1, #3) -- so the comment must not
+    hardcode "lld found". Stage is deliberately kept so the unit resumes at the
+    stage that was running when it paused, not reset to lld."""
     gh.clear_pipeline_status_field(issue)
     gh.issue_comment(issue,
-        f"⏸️ Paused — `lld` found this doesn't fit epic #{epic}'s current architecture. "
-        f"Epic #{epic}'s architecture is being revised; see gate PR #{gate_pr}. This task "
-        f"resumes automatically once that gate merges.")
-    return {"issue": issue, "paused_for_epic_regate": epic, "gate_pr": gate_pr}
+        f"⏸️ Paused — `{found_by}` found this doesn't fit epic #{epic}'s current "
+        f"architecture. Epic #{epic}'s architecture is being revised; see gate PR "
+        f"#{gate_pr}. This task resumes automatically once that gate merges.")
+    return {"issue": issue, "paused_for_epic_regate": epic, "gate_pr": gate_pr,
+            "found_by": found_by}
 
 
 def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str) -> dict:
@@ -4668,8 +4912,14 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
     fields = gh.issue_fields(issue)
     actual_stage = STAGE_FIELD_NAMES.get(fields.get("Stage"))
     actual_status = PIPELINE_STATUS_FIELD_NAMES.get(fields.get("Pipeline Status"))
+    # Normalise the caller's --expect-stage so "PR Review", "pr-review" and
+    # "pr review" all compare equal to the stored slug (retro #45). An unknown
+    # spelling falls back to the raw value so the mismatch (and the accepted
+    # spellings) still surface in the error below rather than silently passing.
+    expect_norm = normalize_stage(expect_stage) or expect_stage
     result = {"issue": issue, "labels": sorted(labels), "stage": actual_stage,
-              "pipeline_status": actual_status, "expected_stage_present": actual_stage == expect_stage}
+              "pipeline_status": actual_status,
+              "expected_stage_present": actual_stage == expect_norm}
     # Exit nonzero when the Stage field does not say what the caller expected.
     # This used to be reported and read past: #238 returned
     # `expected_stage_present: false` and the orchestrator dispatched the next
@@ -4699,11 +4949,15 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
                             f"marker), not by --expect-stage.")
     elif not result["expected_stage_present"]:
         result["ok"] = False
-        result["reason"] = (f"Stage is {actual_stage!r}, expected {expect_stage!r} -- the "
+        accepted = "" if normalize_stage(expect_stage) else (
+            f" (unrecognised --expect-stage {expect_stage!r}; accepted spellings: "
+            f"{', '.join(sorted(STAGE_FIELD_NAMES))} or their slugs "
+            f"{', '.join(sorted(set(STAGE_FIELD_NAMES.values())))}, case-insensitive)")
+        result["reason"] = (f"Stage is {actual_stage!r}, expected {expect_norm!r} -- the "
                             f"previous stage's exit action did not run, or ran against a "
                             f"different issue. Do not dispatch the next stage until this is "
                             f"resolved; advancing on an unverified handoff is how a stage's "
-                            f"evidence ends up existing only in one session's memory.")
+                            f"evidence ends up existing only in one session's memory." + accepted)
     if pr is not None:
         pr_data = gh.pr_view(pr, fields="isDraft,headRefName,baseRefName")
         result["pr"] = pr
@@ -4793,9 +5047,16 @@ def checks_status(checks: list) -> str:
 # longer run on child PRs; see each workflow's `on:` block), so on a child PR the
 # suite is proven by a `record-local-ci --suite <suite>` attestation instead -- see
 # `local_ci_suites_attested` and `references/operations.md`, "Local-CI attestation".
+#
+# `excludeGlobs` mirrors a workflow's own path NEGATIONS (`!**/*.md` etc). Its
+# `prefixes`/`files` are only half the workflow's `paths:` filter -- without the
+# negations, a docs-only edit inside a required prefix (e.g. `backend/AGENTS.md`)
+# demanded a full suite attestation the real workflow would have skipped (retro #39).
+# A changed file that matches an excludeGlob does not count as touching the suite.
 REQUIRED_WORKFLOWS = tuple(
     {"workflow": w["workflow"], "suite": w["suite"],
-     "prefixes": tuple(w["prefixes"]), "files": tuple(w.get("files", ()))}
+     "prefixes": tuple(w["prefixes"]), "files": tuple(w.get("files", ())),
+     "excludeGlobs": tuple(w.get("excludeGlobs", ()))}
     for w in CONFIG["requiredWorkflows"]
 )
 
@@ -4822,7 +5083,11 @@ def missing_required_workflows(changed_files: list, checks: list,
     attested = local_ci_suites_attested(comments or [], head_sha)
     missing = []
     for spec in REQUIRED_WORKFLOWS:
-        touched = any(p.startswith(spec["prefixes"]) or p in spec["files"] for p in changed_files)
+        def _counts(p):
+            if any(fnmatch.fnmatch(p, g) for g in spec["excludeGlobs"]):
+                return False  # matches a workflow path-negation -> the suite ignores it
+            return p.startswith(spec["prefixes"]) or p in spec["files"]
+        touched = any(_counts(p) for p in changed_files)
         if not touched:
             continue
         if spec["workflow"] in passing:
@@ -4962,6 +5227,13 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
     re-CI + re-attest (`base_delta_needs_reattest`). The result then carries
     `carried_attestation_forward: True`. The head-SHA attestation match below is
     unchanged either way."""
+    if gh.pr_view(pr_number, fields="state,mergedAt").get("state") == "MERGED":
+        # Idempotent recovery: a prior call merged the PR but failed afterwards --
+        # e.g. GitHub returned 502 after the squash had already landed (#552) --
+        # leaving the merge done but the issue-close/worktree bookkeeping undone,
+        # and a naive retry then refuses as behind-base (the branch is gone / behind
+        # its own merge). Finish the bookkeeping instead of erroring (retro #9).
+        return _finalize_merged_pr(gh, pr_number, issue, repo_path, recovered=True)
     base = integration_base(gh, issue)
     behind = gh.branch_behind_by(issue_branch(issue), base=base)
     carried_forward = {}
@@ -5005,9 +5277,34 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
         detail = f" (no passing check or fresh local-ci attestation from: {', '.join(missing)})" if missing else ""
         raise GhError(f"PR #{pr_number} checks not passed (status={status}){detail}")
     gh.pr_ready(pr_number)
-    gh.pr_merge(pr_number)
-    gh.pr_comment(pr_number, f"Auto-merged under the pipeline's scoped PR-merge override — "
-                              f"see \"PRs merge automatically\" in the pipeline docs.")
+    try:
+        gh.pr_merge(pr_number)
+    except GhError:
+        # GitHub sometimes returns a 5xx AFTER the squash has already landed (#552):
+        # the merge succeeded but the CLI reports failure. Re-check the PR; if it is
+        # now MERGED, the error was cosmetic -- continue to the bookkeeping rather
+        # than raising and leaving a merged PR with an open issue (retro #9).
+        if gh.pr_view(pr_number, fields="state,mergedAt").get("state") != "MERGED":
+            raise
+    return _finalize_merged_pr(gh, pr_number, issue, repo_path,
+                               carried_forward=carried_forward, files=files)
+
+
+def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
+                        carried_forward: dict = None, recovered: bool = False,
+                        files: list = None) -> dict:
+    """Post-merge bookkeeping shared by the normal merge path and the idempotent
+    recovery paths (retro #9): the override-audit comment (only on a fresh merge,
+    not a recovery, to avoid duplicates), closing an epic-branch child that the
+    PR's `Closes #<n>` didn't auto-close, the `Merged via` note, run-cap
+    accounting, and releasing the worktree."""
+    carried_forward = carried_forward or {}
+    base = integration_base(gh, issue)
+    if not recovered:
+        gh.pr_comment(pr_number, f"Auto-merged under the pipeline's scoped PR-merge override — "
+                                  f"see \"PRs merge automatically\" in the pipeline docs.")
+    if files is None:  # recovery path had no gate run to fetch them
+        files = gh.pr_files(pr_number)
     issue_state = gh.issue_view(issue)["state"]
     issue_closed = issue_state == "CLOSED"
     if not issue_closed and base != "main":
@@ -5035,6 +5332,7 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
     return {"pr": pr_number, "issue": issue, "merged": True, "issue_closed": issue_closed,
             "config_changed": touches_pipeline_config(files),
             **carried_forward,
+            **({"recovered": True} if recovered else {}),
             **({"run_terminal": terminal} if terminal else {}),
             "worktree": release_worktree(issue_branch(issue), base_repo=repo_path, runner=gh._run)}
 
@@ -5156,52 +5454,10 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
             **({"run_terminal": terminal} if terminal else {})}
 
 
-# Tracked file holding the closed-issue count at the last completed retrospective
-# -- committed alongside the retro's own skill edits (Step 5 commits anyway), so
-# the trigger is a watermark ("5 or more closed since the last retro") instead of
-# the old `count % 5 == 0`, which both skipped whenever two issues closed between
-# checks and fired forever once the count query capped out.
-RETRO_WATERMARK_FILE = PIPELINE["retro"]["watermarkFile"]
-RETRO_EVERY = PIPELINE["retro"]["everyClosedIssues"]
-
-
-def cmd_retro_check(gh: GitHub, repo_path: str = ".", mark_done: bool = False,
-                     count: Optional[int] = None) -> dict:
-    """`run_retro` is true once >= 5 issues have closed since the last completed
-    retrospective. `--mark-done --count N` records N as the new watermark -- N
-    must be the `closed_count` this same command returned at the invocation that
-    found `run_retro: true`, captured by the caller and carried through the fix
-    work, not re-read live. The live count moves while the retro's evidence sweep
-    and fix land (2026-09-14: watermark stayed at 171 through an evidence sweep and
-    a four-item fix while the repo's own closed count kept climbing); stamping
-    that later, larger live count as the watermark silently marks every issue that
-    closed in between as reviewed by a sweep that never looked at them -- the next
-    retro's sweep starts counting friction only from the inflated number forward.
-    `--mark-done` without `--count` falls back to the live count for backward
-    compatibility, and the result says so via `count_was_live_fallback` -- prefer
-    always passing `--count`."""
-    path = os.path.join(repo_path, RETRO_WATERMARK_FILE)
-    watermark = 0
-    if os.path.isfile(path):
-        with open(path) as f:
-            watermark = int(f.read().strip() or 0)
-    live_count = gh.closed_issue_count()
-    if mark_done:
-        used_live_fallback = count is None
-        stamp = live_count if used_live_fallback else count
-        if stamp < watermark:
-            raise GhError(f"--count {stamp} is behind the existing watermark {watermark} -- "
-                           f"the watermark must not move backwards")
-        if stamp > live_count:
-            raise GhError(f"--count {stamp} is ahead of the live closed count {live_count} -- "
-                           f"pass the count captured when run_retro went true, not a guess")
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w") as f:
-            f.write(f"{stamp}\n")
-        return {"closed_count": live_count, "watermark": stamp, "marked_done": True,
-                "count_was_live_fallback": used_live_fallback}
-    return {"closed_count": live_count, "watermark": watermark,
-            "run_retro": live_count - watermark >= RETRO_EVERY}
+# Retrospectives are always operator-driven -- there is no auto-trigger. The old
+# `retro-check` watermark command and its `retro.everyClosedIssues` config were
+# removed 2026-09-17: the operator decides when to run a retro and applies the
+# parked findings by hand (see SKILL.md Step 5).
 
 
 def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
@@ -5641,18 +5897,60 @@ def cmd_provision_epic_stack(epic: int, up: bool = True, shell: Shell = _default
             "use": f"COMPOSE_PROJECT_NAME={lay['project']} make <target> PROFILE={lay['profile']}"}
 
 
+def _docker_compose_running(project: str) -> list:
+    """Container ids still running for a compose project, by the label compose
+    stamps on every container it starts -- independent of any `--env-file` or
+    `--project-directory` flag. This is the teardown post-condition's ground
+    truth: a `compose down` given a relative `--env-file` that didn't resolve
+    once exited 0 having stopped nothing (retro #10), and the only way to catch
+    that is to ask docker directly rather than trust the down command's exit."""
+    try:
+        out = subprocess.run(
+            ["docker", "ps", "-q", "--filter",
+             f"label=com.docker.compose.project={project}"],
+            capture_output=True, text=True)
+    except FileNotFoundError:
+        return []  # no docker on this host -- nothing could be running
+    return [line for line in out.stdout.split() if line.strip()]
+
+
 def cmd_teardown_epic_stack(epic: int, keep_data: bool = False,
-                            shell: Shell = _default_shell) -> dict:
+                            shell: Shell = _default_shell,
+                            project: Optional[str] = None, profile: Optional[str] = None,
+                            running_probe: Callable[[str], list] = _docker_compose_running) -> dict:
     """The inverse: `downCommand` (volumes included), then remove the generated
     env + secrets profile files and the data directory. Structured no-op when
     nothing is provisioned. A failing down command still removes nothing, so a
-    half-torn stack is visible rather than orphaned."""
+    half-torn stack is visible rather than orphaned.
+
+    Two retro fixes:
+    - #10: after the down command, verify via `running_probe` that no container
+      for this compose project is still running. A silent-no-op down (e.g. a
+      relative `--env-file` that didn't resolve) exits 0 but tears down nothing;
+      when that happens teardown returns `torn_down: False` with `still_running`
+      and removes no files, rather than reporting success over a live stack.
+    - #49: `--project` / `--profile` tear down a hand-made isolated stack even
+      when `pipeline.stack.enabled` is false, using the same file/data naming
+      forced onto the given profile."""
     s = PIPELINE["stack"]
-    if not s["enabled"]:
+    override = bool(project or profile)
+    if not s["enabled"] and not override:
         return {"epic": epic, "torn_down": False,
-                "reason": "pipeline.stack.enabled is false — shared stack in use"}
+                "reason": "pipeline.stack.enabled is false — pass --project/--profile "
+                          "to tear down a hand-made isolated stack"}
     lay = _stack_layout(epic)
-    if not os.path.exists(lay["env_file"]):
+    if profile:
+        root = lay["workspace_root"]
+        fmt = {"profile": profile, "n": epic, "workspaceRoot": root}
+        env_rel = s["envFile"].format(**fmt)
+        lay = {**lay, "profile": profile,
+               "project": project or s["composeProjectTemplate"].format(**fmt),
+               "env_file": os.path.join(root, env_rel),
+               "secrets_file": os.path.join(root, s["secretsFile"].format(**fmt)),
+               "data_dir": s["dataDirTemplate"].format(**fmt), "env_file_rel": env_rel}
+    elif project:
+        lay = {**lay, "project": project}
+    if not override and not os.path.exists(lay["env_file"]):
         return {"epic": epic, "torn_down": False, "profile": lay["profile"],
                 "reason": f"no stack provisioned ({lay['env_file']} absent)"}
     fmt = {"profile": lay["profile"], "project": lay["project"], "envFile": lay["env_file_rel"],
@@ -5661,6 +5959,15 @@ def cmd_teardown_epic_stack(epic: int, keep_data: bool = False,
     cmd = (s.get("downCommand") or "").format(**fmt)
     if cmd.strip():
         shell(cmd, lay["workspace_root"])
+    still_running = running_probe(lay["project"])
+    if still_running:
+        return {"epic": epic, "torn_down": False, "profile": lay["profile"],
+                "project": lay["project"], "down_command": cmd,
+                "still_running": still_running,
+                "reason": f"{len(still_running)} container(s) for compose project "
+                          f"{lay['project']} are still running after the down command — "
+                          f"nothing removed; the down was a no-op (check the --env-file "
+                          f"path resolves from {lay['workspace_root']})"}
     removed = []
     for p in (lay["env_file"], lay["secrets_file"]):
         if os.path.exists(p):
@@ -5671,7 +5978,7 @@ def cmd_teardown_epic_stack(epic: int, keep_data: bool = False,
         shutil.rmtree(data_abs, ignore_errors=True)
         removed.append(data_abs)
     return {"epic": epic, "torn_down": True, "profile": lay["profile"], "project": lay["project"],
-            "down_command": cmd, "removed": removed}
+            "down_command": cmd, "removed": removed, "still_running": []}
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -5882,7 +6189,10 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--epic", type=int, required=True)
     p.add_argument("--gate-pr", type=int, required=True)
-    p.set_defaults(func=lambda a: cmd_pause_for_epic_regate(get_work_item_provider(), a.issue, a.epic, a.gate_pr))
+    p.add_argument("--found-by", default="lld",
+                    help="Stage that hit the deviation (lld, development, pr-review, ...); "
+                         "names it in the pause comment instead of hardcoding 'lld'")
+    p.set_defaults(func=lambda a: cmd_pause_for_epic_regate(get_work_item_provider(), a.issue, a.epic, a.gate_pr, a.found_by))
     p = sub.add_parser("verify-exit")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
@@ -6036,31 +6346,36 @@ def main(argv: Optional[list] = None) -> int:
                     help="Repo root whose worktree list is searched to release this "
                          "unit's worktree")
     p.set_defaults(func=lambda a: cmd_mark_needs_human(get_work_item_provider(), a.issue, a.reason, a.repo_path))
-    p = sub.add_parser("retro-check")
-    p.add_argument("--repo-path", default=".",
-                    help="Repo root holding the tracked retro-watermark file")
-    p.add_argument("--mark-done", action="store_true",
-                    help="Record --count (or the live count, if omitted) as the new "
-                         "watermark (commit the file with the retro's own commit)")
-    p.add_argument("--count", type=int, default=None,
-                    help="The closed_count from the retro-check that found run_retro: "
-                         "true -- pass this back verbatim so issues closed after the "
-                         "retro was triggered, during the fix work, aren't silently "
-                         "counted as reviewed")
-    p.set_defaults(func=lambda a: cmd_retro_check(get_work_item_provider(), a.repo_path, a.mark_done, a.count))
     p = sub.add_parser("show-config",
                         help="Print the effective pipeline tunables (config `pipeline` "
-                             "block merged over defaults) plus repo/docRoot/parallelism")
-    p.set_defaults(func=lambda a: {"repo": REPO, "docRoot": DOC_ROOT,
-                                   # designLane is defaulted in code (not required in the
-                                   # config), so surface the effective value alongside the
-                                   # raw devLane/prReview rather than the raw block alone.
-                                   "parallelism": {**CONFIG["parallelism"],
-                                                   "designLane": DESIGN_LANE_PARALLELISM,
-                                                   "maxTasksPerRun": MAX_TASKS_PER_RUN},
-                                   "requiredWorkflows": CONFIG["requiredWorkflows"],
-                                   "localCiSuites": list(LOCAL_CI_SUITES),
-                                   **PIPELINE})
+                             "block merged over defaults) plus repo/docRoot/parallelism "
+                             "and the running skill SHA (retro #58) with any pin drift (#48)")
+    p.add_argument("--repo-path", default=".",
+                    help="Driven-repo root to read the pinned skill SHA from (for drift check)")
+    p.set_defaults(func=lambda a: cmd_show_config(a.repo_path))
+
+    p = sub.add_parser("record-run-metric",
+                        help="Append one stage/agent's usage sample (tokens, tool calls, "
+                             "context, duration) to the epic's run analytics (retro #59). The "
+                             "orchestrator feeds these from each task-notification's <usage>.")
+    p.add_argument("epic", type=int)
+    p.add_argument("--stage", default=None)
+    p.add_argument("--agent", default=None)
+    p.add_argument("--tokens-out", type=int, default=0)
+    p.add_argument("--cache-read", type=int, default=0)
+    p.add_argument("--cache-write", type=int, default=0)
+    p.add_argument("--tool-calls", type=int, default=0)
+    p.add_argument("--peak-context", type=int, default=0)
+    p.add_argument("--duration-ms", type=int, default=0)
+    p.set_defaults(func=lambda a: cmd_record_run_metric(
+        a.epic, stage=a.stage, agent=a.agent, tokens_out=a.tokens_out,
+        cache_read=a.cache_read, cache_write=a.cache_write, tool_calls=a.tool_calls,
+        peak_context=a.peak_context, duration_ms=a.duration_ms))
+    p = sub.add_parser("run-report",
+                        help="Aggregate the epic's recorded run metrics (totals + per-stage + "
+                             "per-agent) for a cost review at close (retro #59)")
+    p.add_argument("epic", type=int)
+    p.set_defaults(func=lambda a: cmd_run_report(a.epic))
 
     p = sub.add_parser("pairing-counts",
                         help="Marker-derived escalation-valve bounce counts for one issue "
@@ -6114,7 +6429,14 @@ def main(argv: Optional[list] = None) -> int:
                              "files and data dir")
     p.add_argument("epic", type=int)
     p.add_argument("--keep-data", action="store_true", help="Leave the DB data dir in place")
-    p.set_defaults(func=lambda a: cmd_teardown_epic_stack(a.epic, keep_data=a.keep_data))
+    p.add_argument("--project", default=None,
+                    help="Compose project name of a hand-made isolated stack to tear down "
+                         "even when pipeline.stack.enabled is false (retro #49)")
+    p.add_argument("--profile", default=None,
+                    help="Profile name of a hand-made isolated stack; forces its env/secrets/"
+                         "data naming so a stack.enabled:false stack can be torn down (retro #49)")
+    p.set_defaults(func=lambda a: cmd_teardown_epic_stack(a.epic, keep_data=a.keep_data,
+                                                          project=a.project, profile=a.profile))
     args = parser.parse_args(argv)
     try:
         result = args.func(args)

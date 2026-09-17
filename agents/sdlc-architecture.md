@@ -256,6 +256,14 @@ and a `file:line` you have not opened in this session is a fabrication — ancho
 quote (`grep -n "<literal>" <path>`) rather than a bare number, because line numbers
 rot between revisions.
 
+**An external limit carries the vendor's own citation.** Any third-party API,
+platform, or vendor limit, quota, or constraint the design relies on (a rate limit, a
+message-list cap, a payload ceiling, a free-tier bound) must be backed by a link to the
+vendor's own documentation and the specific limit it states — never asserted from
+memory. Writing one from memory is how a wrong external limit reached a design and
+became a real defect here (a wrong WhatsApp list-size limit); a limit with no vendor
+citation is one `lld` and `development` build on and nobody can re-verify.
+
 **On a rework round, edit the design in place — do not add a permanent record of what
 each review round found.** The document is a current-state design for `development` to
 build from, not a ledger of its own review history; a "round 1 findings" section that

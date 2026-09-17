@@ -401,10 +401,11 @@ operational failure: stop and report, never retry by hand.
 | `record-design-review <n> --role <r> --outcome clean\|rework` | Last action of **every** design review — the bounce marker `pairing-counts` reads |
 | `pr-checks <pr>` / `merge-pr <pr> --issue <n>` | CI status / the only merge gate (refuses behind-base; reports `config_changed`) |
 | `create-issue --parent <epic>` | The only issue-creation path |
-| `mark-blocked` / `mark-needs-human` / `pause-for-epic-regate <n> --epic <e> --gate-pr <pr>` | Park a unit (the first two also release its worktree; the third parks a unit behind an Architecture revision Task's gate) |
+| `mark-blocked` / `mark-needs-human` / `pause-for-epic-regate <n> --epic <e> --gate-pr <pr> [--found-by <stage>]` | Park a unit (the first two also release its worktree; the third parks a unit behind an Architecture revision Task's gate; `--found-by` names the stage that hit the deviation) |
 | `pairing-counts <n>` | Marker-derived escalation-valve strike counts, with the configured thresholds |
-| `show-config` | Effective tunables (`pipeline` block over defaults) — read it once per invocation |
-| `list-needs-human` / `check-epics-closeable` / `retro-check [--mark-done --count <n>]` | End-of-invocation sweeps |
+| `show-config` | Effective tunables (`pipeline` block over defaults) plus `skillVersion`/pin-drift — read it once per invocation |
+| `record-run-metric <n> --stage --agent --tokens-out --tool-calls --peak-context --duration-ms …` / `run-report <n>` | Feed per-stage/agent usage (from each task-notification's `<usage>`) and print the per-run cost report at close |
+| `list-needs-human` / `check-epics-closeable` | End-of-invocation sweeps |
 | `sync-skill [--ref <ref>]` | Bump the skill submodule + re-vendor `.claude/agents/` (Step 5's manual bump/re-vendor, automated); stages both, does not commit |
 | `close-epic <n>` / `record-epic-verification <n> --kind e2e\|exploratory` | Epic close, two-call shape (`references/epics.md`, "Epic closing") |
 | `check-initiative-closeable <n>` / `record-initiative-verification <n> --summary` / `close-initiative <n>` | Initiative close, one-call shape ("Closing an Initiative", above) |
@@ -887,23 +888,23 @@ and resume cycles per pairing, what changed, current state of each. Above the fo
 - Every merged PR and closed issue; every epic newly `epic:architected`.
 - Any epic `check-epics-closeable` newly notified.
 
-## Step 5 — Retrospective checkpoint (only after a merge closed an issue)
+## Step 5 — Retrospective (operator-driven; there is no auto-trigger)
 
-```bash
-python3 "$SDLC" retro-check
-```
+A retrospective runs **only when the operator asks for one** — retros are always
+manual. There is no `retro-check` / watermark / `run_retro` trigger; do not try to
+decide on your own that a retro is "due". Between retros, park each friction finding
+as it is observed (recurring bouncing pairings — `pairing-counts` gives the
+marker-backed ones — docs too thin for the next stage, dead references, gates too
+strict or loose), **recording the skill submodule SHA it was seen on** so a later
+reader can tell the finding's fix apart from one already landed. Where the parked
+findings live between retros is the operator's call (e.g. a memory file); do not file
+them as GitHub issues unless the operator says so.
 
-`run_retro` is true once `pipeline.retro.everyClosedIssues` (default 5) issues have
-closed since the last retrospective. **Capture the `closed_count` this invocation
-returns — that number is what `--mark-done` stamps later, not whatever the live count
-has become by then.** The watermark file (`pipeline.retro.watermarkFile`, default
-`<docRoot>/retro-watermark`) is **state of the driven repo**; the fixes go to **the
-skill repo**, which is a separate git repository (`$SDLC_DIR`, typically a submodule
-such as `.github/sdlc-pipeline`). When true: grep the recently merged units' handoff
-comments and docs for recurring friction — bouncing pairings (`pairing-counts` gives
-the marker-backed ones), docs too thin for the next stage, dead references, gates too
-strict or loose. **This file and its references are the primary fix target.** Present
-findings in chat and ask before editing. Once approved:
+When the operator invokes the retro: sweep the recently merged units' handoff comments
+and docs for the parked friction, grouping the findings. The fixes go to **the skill
+repo**, which is a separate git repository (`$SDLC_DIR`, typically a submodule such as
+`.github/sdlc-pipeline`). **This file and its references are the primary fix target.**
+Present findings in chat and ask before editing. Once approved:
 
 1. In `$SDLC_DIR`: `git checkout -B retro/<date> origin/main`, edit `SKILL.md` /
    `references/*` / `agents/*`, append the dated why to `references/history.md`,
@@ -927,17 +928,9 @@ findings in chat and ask before editing. Once approved:
    re-vendors this half mechanically; it does not write `references/history.md` or
    any prose — that stays a hand-authored part of step 1.
 3. In the driven repo: `python3 "$SDLC" sync-skill` bumps the submodule to the merged
-   skill commit and re-vendors `.claude/agents/`, staging both — then run
-   `retro-check --mark-done --count <the closed_count captured at Step 5's start>`,
-   and commit the watermark and the submodule pointer together (message naming the
-   retrospective). That commit is the record of "retro done at skill version X".
-   **Always pass `--count`.** Fix work and the evidence sweep take real time, during
-   which more issues close; `--mark-done` without `--count` falls back to whatever
-   the live count is *at that later moment* and stamps it as the watermark, silently
-   marking every issue closed in between as covered by a sweep that never read them
-   (2026-09-14: the fallback exists only for backward compatibility and flags itself
-   via `count_was_live_fallback` in the result — treat that flag as true meaning
-   "re-run with the right `--count`", not as a pass).
+   skill commit and re-vendors `.claude/agents/`, staging both — then commit the
+   submodule pointer (message naming the retrospective and the skill SHA it landed).
+   That commit is the record of "retro done at skill version X".
 
 **A retrospective is merged only when the lane is quiet** — no live stage agent. Stage
 agents Read the playbook from `$SDLC_DIR` mid-run; bumping the submodule under one

@@ -82,18 +82,15 @@ and its destination in your final message; the orchestrator files them.
 
 ## Output
 
-Post your findings as a comment on the epic, then record your half of the closing
-verification:
-
-```bash
-GITHUB_TOKEN=$(cat <your-token-file>) python3 $SDLC_DIR/scripts/sdlc_next.py \
-  record-epic-verification <epic> --kind exploratory --summary "<one sentence>"
-```
-
-**Post the comment and run the recorder even if your instructions ask you to "return" a
-summary.** Returning to whoever dispatched you is *in addition to*, never instead of —
-`close-epic` reads that marker back and refuses to merge without it, and evidence living
-in one session's memory reads to the next session as a run that never happened.
+**Return your findings and verdict to the orchestrator — do not post the epic comment
+or run the recorder yourself.** The harness permission system blocks a subagent's
+`record-epic-verification` (and the epic comment) as an external write, so both are the
+**orchestrator's** to perform after you return: it posts your findings comment on the
+epic and records your half of the closing verification —
+`record-epic-verification <epic> --kind exploratory --summary "<one sentence>"`, the
+marker `close-epic` reads back and refuses to merge without. So your final message must
+carry everything the orchestrator needs to do that without you: the findings comment
+body, the one-sentence summary, and each finding's severity, evidence, and destination.
 
 Say plainly what you covered and what you did not. An exploratory pass that names its
 own blind spots is worth more than one that implies it looked everywhere.

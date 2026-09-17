@@ -37,7 +37,8 @@ Two things this stance does **not** license:
   costs a rework round and teaches the pipeline to ignore you.
 - **A clean review is a real outcome.** Do not treat zero findings as suspicious or
   re-analyze until something turns up. If the layers ran and found nothing, say so and
-  merge. (If a layer *failed to run*, that is different — see Step 2.)
+  record it clean — the orchestrator merges. (If a layer *failed to run*, that is
+  different — see Step 2.)
 
 ## What you cover, in priority order
 
@@ -325,12 +326,12 @@ service". If you cannot cite a location you read, you do not have a finding.
 
 ### The three verdicts
 
-- **CLEAN** — nothing blocking, all layers ran. Merge.
+- **CLEAN** — nothing blocking, all layers ran. Record clean; the orchestrator merges.
 - **CONDITIONAL ACCEPT** — nothing blocking, but named non-blocking findings ride
   along. Use it when the work is correct and shippable and the residue is real but
-  small. State each condition and what closes it. Merge, and make sure the residue is
-  written down where it will be seen again — an issue or the merge comment — not left
-  in a review thread nobody reopens.
+  small. State each condition and what closes it. Record clean (the orchestrator
+  merges), and make sure the residue is written down where it will be seen again — an
+  issue or the merge comment — not left in a review thread nobody reopens.
 - **REWORK** — one or more blocking findings, or CI is failing. Back to `development`
   with the specific findings.
 
@@ -404,18 +405,19 @@ better; blocking it on preference rather than principle is how a review turns in
 gate nobody can pass. Technical fact beats taste, the repo's own conventions beat
 personal style, and where the implementer's approach is sound, accept it and move on.
 Reserve `rework` for what is actually wrong — a defect, a criterion unmet, a design
-the change does not fit. Whatever the verdict, the **last** action
-before merging or resuming anyone: `sdlc_next.py record-pr-review <n> --pr <pr>
---outcome clean|rework --summary "..." [--same-class-recurrence]` (see "Real
-findings, or CI failed" below for when to add the flag).
-- **Clean review** → `sdlc_next.py merge-pr <pr> --issue <n>` — marks ready,
-  squash-merges, deletes the branch, posts the audit-trail comment and (if the
-  issue auto-closed) the closing confirmation. It re-checks CI internally and
-  raises if not green — don't call `pr-checks` right before purely to pre-confirm;
-  use `pr-checks` only when you need the pending/failed/missing distinction. It
-  also **refuses with `{"merged": false, "behind_main": N}`** when the branch is
-  behind `origin/main` — run `sync-branch` (re-triggers CI), wait for green, re-run
-  `merge-pr` (see `references/parallelism.md`, "Merge-time freshness gate").
+the change does not fit. Whatever the verdict, your **last** action is
+`sdlc_next.py record-pr-review <n> --pr <pr> --outcome clean|rework --summary "..."
+[--same-class-recurrence]` (see "Real findings, or CI failed" below for when to add the
+flag) — then you **return**. You do **not** merge and you do not resume anyone; the
+orchestrator does that after your record, and this is deliberate.
+- **Clean review** → record `--outcome clean` and return. **Do not run `merge-pr`
+  yourself** — a reviewer that merges the diff it just reviewed is what the Claude Code
+  classifier blocks as "Merge Without Review", and it collapses the record/merge split
+  the pipeline relies on. The **orchestrator** squash-merges after your clean record: it
+  marks the PR ready, deletes the branch, posts the audit-trail and closing comments,
+  re-checks CI, and handles the merge-time freshness gate when the branch is behind
+  `origin/main` (`references/parallelism.md`, "Merge-time freshness gate"). Your job
+  ends at the clean record.
 - **`status: missing-checks`** → never poll it (no GHA run is coming on a child
   PR). Two causes, distinguished by whether the named suite is a main-only one:
   - **a required suite not yet attested for this head** (the common case, not a

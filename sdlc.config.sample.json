@@ -11,6 +11,7 @@
     "designLane": 2,
     "maxTasksPerRun": 0
   },
+  "_requiredWorkflows_comment": "Each entry mirrors ONE GHA workflow's paths filter. `prefixes`/`files` are the positive paths; `excludeGlobs` mirrors the workflow's path NEGATIONS (e.g. `!**/*.md`) so a docs-only edit inside a required prefix does not demand a suite attestation the workflow itself would skip. `commandPattern` (optional) is a regex the `record-local-ci --command` must contain, so a suite can require its real invocation (e.g. test:coverage) rather than any non-empty command.",
   "requiredWorkflows": [
     {
       "workflow": "Backend CI",
@@ -20,6 +21,9 @@
       ],
       "files": [
         ".github/workflows/backend-ci.yml"
+      ],
+      "excludeGlobs": [
+        "**/*.md"
       ]
     },
     {
@@ -30,6 +34,9 @@
       ],
       "files": [
         ".github/workflows/frontend-ci.yml"
+      ],
+      "excludeGlobs": [
+        "**/*.md"
       ]
     }
   ],

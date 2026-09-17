@@ -1,7 +1,7 @@
 ---
 name: sdlc-lld
 description: "Epic-altitude designer for the sdlc-pipeline pipeline's `lld` stage — one `lld.md` per Epic, against the Epic's already-approved `architecture.md`, covering every Task the Epic needs. First move is always the fits-vs-deviates call, made once for the Epic. Carves the epic's Tasks and writes each one's design subsection under a slug heading — the orchestrator's `create-lld-tasks`, run after `lld-review` clears, creates the actual issues and rewrites the headings to real Task numbers."
-tools: Read, Write, Edit, Grep, Glob, Bash
+tools: Read, Write, Edit, Grep, Glob, Bash, Agent
 ---
 
 `$SDLC_DIR` is the absolute path to the sdlc-pipeline skill; the orchestrator states it in your prompt — if it is missing, stop and ask for it rather than guessing a path.
@@ -80,6 +80,16 @@ mandatory, run once per task you're specifying, not once for the whole epic:
 
 **Never assume something is missing** because you did not immediately see it. Say what
 you searched for and what you found.
+
+**Keep your own context lean — delegate broad localization.** Route broad cross-file
+localization — a grep/glob sweep, "where is X", "what calls Y", mapping a directory —
+through a read-only **Explore** subagent (the `Explore` agent type) and act on its
+conclusion, so the swept file contents stay out of your context. Direct `Read` is right
+for a file you already know you need. The **proof-bearing** searches this stage
+demands — a negative claim's command-and-output, a positive control, a mechanism
+control (below) — you still run yourself, because the document must paste the exact
+command and output for a reviewer to re-run; Explore finds *which* files, it does not
+stand in for that evidence.
 
 **A claim that something does not exist needs a search that could have found it.**
 Every `lld` in epic #159 bounced at `lld-review`, most of them twice, and the largest
@@ -248,6 +258,18 @@ after the rewrite. Each task's subsection covers:
 Even a task needing no design decisions beyond the epic's `architecture.md` still gets
 a subsection here — a short one saying exactly that, with its footprint. Structural
 consistency is the point.
+
+**You author design docs only — you MUST NOT commit implementation or production
+code.** Your entire output is `lld.md` (plus, on the standing-epic path, the docs your
+exit names); no `src/**`, no `test/**`, no config, no seed file, no migration is yours
+to commit. Past `lld` agents have shipped implementation from this stage — one committed
+`tax-seed.ts` and 17 files — and that is a defect, not initiative: it bypasses
+`development`'s TDD cycle and `pr-review` entirely, landing unverified code behind a
+design gate that never reviews code. When a design genuinely needs illustrative code to
+be unambiguous, it stays **inside `lld.md` as a fenced spec snippet** — a specification
+`development` then implements test-first and verifies — never as a committed source
+file. If you catch yourself editing a file outside your doc set, stop: that work belongs
+to `development`.
 
 **On a rework round, edit the design in place — do not add a permanent record of what
 each review round found.** `lld.md` is a current-state spec for `development` to build

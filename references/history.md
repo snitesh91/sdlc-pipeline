@@ -4,6 +4,48 @@ Provenance for rules that would otherwise read as arbitrary. Newest first. Keep
 entries to a few lines; the rule itself lives in the spine or its reference file —
 this file records *why* and *when*.
 
+## 2026-09-17 — Retrospective (operator-run, skill SHA 8318802)
+
+The operator ran the manual retro over parked findings from epics #365/#159/#157/#623.
+Retros are now always operator-driven: the `retro-check` watermark command,
+`retro.everyClosedIssues` config, and the SKILL.md Step 5 auto-trigger are removed (#7).
+
+Control plane (`scripts/sdlc_next.py`, each with a paired regression + positive control):
+- `pause-for-epic-regate --found-by` names the finding stage instead of hardcoding
+  "lld found" (#1); a deviation can be found at pr-review/development, not only lld.
+- `git_reconcile_branch` fast-forwards the branch to its own origin tip before merging
+  base, so the push is a fast-forward, not a rejected non-fast-forward (#8, #35); fetch
+  and push retry once on a transient network error (#17).
+- `merge-pr` is idempotent when the PR is already MERGED and recovers when GitHub
+  returns 5xx after the squash landed (#9).
+- `teardown-epic-stack` verifies the project's containers actually stopped before
+  removing files (#10) and can tear down a hand-made isolated stack by `--profile`/
+  `--project` even when `stack.enabled` is false (#49).
+- `parse_footprint` requires an exact `Footprint` heading (no decoy match) and stops at
+  a bold `**Verify-only**` sub-label (#16).
+- `worktree-add` recreates a stale local branch that has no unique commits, and refuses
+  to discard one that does (#17).
+- `claim --role development` refuses when the unit already has an open PR — a rework is
+  resumed, not re-claimed (#19, #2).
+- The merge gate mirrors a workflow's `!**/*.md` negations via `requiredWorkflows[].excludeGlobs`
+  (#39); the local-ci marker/suite keys allow hyphens (#42); `record-local-ci` can require a
+  per-suite `commandPattern` (#43); `verify-exit --expect-stage` normalises stage spellings (#45).
+- `show-config` reports the running skill SHA and warns on drift from the repo's pin
+  (#58, #48). New `record-run-metric` / `run-report` accumulate per-run token/tool-call/
+  context/duration analytics in the run-state file, fed by the orchestrator from each
+  task-notification's `<usage>` (#59).
+- #40 (config split-brain) and the epic→main close path are documented, not code-changed;
+  #34 (merge-as-approval) was reaffirmed, not changed; #12 (post-close deploy verification)
+  is out of scope (bookshaw infra).
+
+Docs/agents: cite vendor docs for external API limits (#4); development updates `lld.md`
+in the same PR on a deviation (#5) and delegates broad search to Explore (#53) with a
+narrowed `tools:` set (#54); lld authors docs only, never impl code (#30); close-blocker
+lane, footprint contract note, epic-conflict owner, degraded local-merge, container/secrets
+etiquette, env-dump ban, timing-lease, crash-safe fan-out resume, and orchestrator-records-
+closing-verification are all documented (#15/#44, #27, #26, #25, #20/#21/#22, #33, #41, #46).
+Findings #36/#37/#38/#47/#51 are driven-repo (bookshaw) work, tracked there.
+
 ## 2026-09-16 (b) — V1 lifecycle removed; Initiative → Epic → phase-Tasks is the only flow
 
 Operator instruction: the agent definitions no longer work with V1, so the control

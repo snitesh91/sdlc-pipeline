@@ -205,3 +205,94 @@ they route differently:
   `references/stage-playbooks.md` (`pr-review` exit actions); `mark-needs-human`.
 
 Either way `missing-checks` is never a "still running" state — don't poll it.
+
+**Config keys that shape the gate (retro #39, #42, #43).** Each `requiredWorkflows` entry
+mirrors ONE GHA workflow's `paths:` filter:
+
+- `prefixes` / `files` are the positive paths; `excludeGlobs` mirrors the workflow's own
+  path **negations** (e.g. `!**/*.md` → `"excludeGlobs": ["**/*.md"]`). A changed file
+  matching an `excludeGlob` does not count as touching the suite, so a docs-only edit
+  inside a required prefix (e.g. `backend/AGENTS.md`) no longer demands a full attestation
+  the real workflow would have skipped.
+- `suite` keys may contain hyphens (`e2e-smoke`); a bad key is rejected at config load.
+- `commandPattern` (optional) is a regex the `record-local-ci --command` must contain, so
+  a suite can require its real invocation (e.g. `test:coverage`) instead of any non-empty
+  command. Absent → any non-empty command is accepted.
+
+## Per-run analytics (retro #59)
+
+The control plane cannot see Claude's own token/tool usage — it lives in the harness,
+surfaced per subagent in each task-notification's `<usage>` block (`subagent_tokens`,
+`tool_uses`, `duration_ms`). So the orchestrator **feeds** those numbers in after each
+stage/agent finishes:
+
+```bash
+python3 "$SDLC" record-run-metric <epic> --stage <s> --agent <a> \
+  --tokens-out N --cache-read N --cache-write N --tool-calls N --peak-context N --duration-ms N
+python3 "$SDLC" run-report <epic>      # totals + per-stage + per-agent, at close
+```
+
+Metrics live in the same per-epic run-state file as the run cap (`{worktrees.root}/.sdlc-runs/
+epic-<n>.json`), so `next-action --run-id` resetting that file per run also scopes the
+metrics to one run. `run-report` at close turns cost review into a repeatable, data-driven
+step instead of after-the-fact transcript mining. (Open question for a later pass: whether
+the harness can hand these numbers to the control plane directly.)
+
+## Skill version and pin drift (retro #58, #48)
+
+`show-config` reports `skillVersion` — the SHA of the skill code actually running
+(`running_sha`), the SHA this repo pins for the submodule (`pinned_sha`), and `drift`.
+When they differ it also returns `skill_drift_warning`: the control plane is running
+unpinned code (the 2026-09-11 incident where the bootstrap checkout had drifted off the
+pin). Read `show-config` once per invocation and re-sync the submodule if it warns.
+
+## Break-glass: degraded local merge when the PR API is down
+
+`merge-pr` completes a merge through the GitHub PR API (`gh pr ready`, then
+`gh pr merge`). During a transient PR-API outage — those calls erroring while the git
+remote itself still accepts pushes — the gate cannot finish and the merge has to be done
+by hand. This is **break-glass only**: use it while the API is genuinely down, never as
+a routine shortcut, and never to skip the checks `merge-pr` enforces. First verify every
+one of them by hand — a passing GHA check or a fresh matching local-CI attestation, the
+`development->pr-review` handoff with a clean `pr-review` outcome, and the behind-base
+freshness gate (`sync-branch` first if the branch is behind `origin/main` on anything but
+doc paths; see `references/parallelism.md`, "Merge-time freshness gate").
+
+**Squash locally without a merge commit.** Merge the way `merge-pr` would — squash, never
+a merge commit. A plain `git merge` leaves a merge commit that then has to be
+force-fixed into a squash, which is exactly the mess this avoids:
+
+```bash
+git -C <ephemeral-worktree-on-origin/main> fetch origin
+git -C <...> merge --squash origin/issue-<n>
+git -C <...> commit -m "<message>  (Closes #<issue>)"
+git -C <...> push origin main
+```
+
+Never force-push `main` to turn an already-pushed merge commit into a squash — reconcile
+forward (below) instead.
+
+**Detect a GitHub auto-merge before re-merging.** The transient commits can trip GitHub
+into marking a PR merged on its own. Before merging by hand — and again once the API
+recovers — read each affected PR's real state rather than trusting the last `merge-pr`
+error:
+
+```bash
+GITHUB_TOKEN=$(cat <your GitHub token file>) gh pr view <pr> --json state,mergedAt,mergeCommit
+```
+
+A PR already `MERGED` needs no second merge; re-running the squash would double-apply it.
+
+**Reconcile once the API is back.**
+
+- For any PR GitHub already marked `MERGED`, confirm its content is on `main` and only
+  close out issue state — do not re-merge.
+- For a PR you squashed locally, close it with the audit-trail comment `merge-pr` would
+  have left (this policy, "Merged via #<n>"), close its issue with the "Merged via #<n>"
+  wording, and delete the merged branch.
+- Reconcile the ledger the pipeline reads: the issue's closing comment and the
+  Stage/Pipeline Status fields (`Done` on close), since the API path that normally sets
+  them didn't run.
+
+Record the outage and what was merged by hand, so the next survey doesn't read a
+hand-closed PR as an anomaly.

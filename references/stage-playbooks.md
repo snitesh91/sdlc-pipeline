@@ -94,45 +94,28 @@ The rules that came out of it:
   it merges into `main` as a record that actively misleads the next reader. That has
   been a blocking finding on a design doc that still documented a locator the suite
   run had empirically disproved.
-- **A citation can be correct when written and wrong when merged — nothing re-checks
-  it after a merge.** A merge commit that pulls a sibling's refactor onto the branch
-  after the docs were authored breaks every line number that pointed into the
-  refactored files, and every stage will have verified them honestly (see
-  `references/history.md`).
-
-  So, concretely: **in a document that ships — a runbook, an HLD, anything under the
-  repo's doc/ops trees — prefer the grep-anchored quote alone and drop the line
-  number.** A quote survives a sibling's refactor; a number does not, and correcting
-  numbers just resets a clock that the next sibling edit restarts. Keep line numbers
-  where they are genuinely a working aid — a stage's own evidence log, a review comment
-  — and treat them there as hints, per the first rule above.
-
-  For the same reason, **when `sync-branch` pulls a sibling's work onto a branch whose
-  docs cite that sibling's files, re-check those citations before the PR merges.** It
-  is the one moment the pipeline creates staleness by itself rather than inheriting it.
+- **A citation can be correct when written and wrong when merged** — a merge that pulls
+  a sibling's refactor onto the branch after the docs were authored breaks every line
+  number, though every stage verified honestly (see `references/history.md`). So in a
+  document that ships — a runbook, an HLD, anything under the repo's doc/ops trees —
+  **prefer the grep-anchored quote alone and drop the line number**; a quote survives a
+  refactor, a number does not, and re-numbering just resets a clock the next sibling
+  edit restarts. Keep line numbers only as a working aid (a stage's evidence log, a
+  review comment), treated as hints. And **when `sync-branch` pulls a sibling's work
+  onto a branch whose docs cite that sibling's files, re-check those citations before
+  the PR merges** — the one moment the pipeline creates staleness itself rather than
+  inheriting it.
 
 ### Attribution is falsifiable — run the check, do not recall it
 
-The rules above govern *where* a citation points. They do not govern whether the words
-you attribute to a source are actually in it, and that is the gap epic #159 lost four
-review rounds to — two of them buying nothing but prose edits, on a branch whose code
-was already proven sound.
-
-Every one of these passed a conscientious author's own reading:
-
-- A `development.md` wrote *Per the footprint note ("keep your changes compatible with
-  that shape and do not remove or relocate those guards")*. That sentence exists in no
-  artifact: zero hits across the whole doc tree, the issue body, and its fifteen
-  comments. Its real origin was **the delegation prompt**. The agent quoted an
-  instruction it had been given and cited it to a design doc.
-- The next round, the same document asserted in four separate places that a spec and
-  its timeouts were untouched, while its own later section correctly described raising
-  them. Self-contradiction inside one file.
-- Another presented a comma-joined paraphrase inside a fenced block introduced as a
-  command "run for real". The real script prints one row per line with identifiers.
-  Its stated diff stat was stale in the same paragraph.
-
-So, as a mechanical pass before any handoff, not as a habit of care:
+The rules above govern *where* a citation points, not whether the words you attribute
+to a source are actually in it — the gap epic #159 lost four review rounds to. Each of
+these passed the author's own reading: a `development.md` quoting a "footprint note"
+that existed in no artifact (its real origin was the delegation prompt); the same doc
+asserting in four places that a spec was untouched while its own later section raised
+its timeouts; a comma-joined paraphrase fenced as a command "run for real" whose real
+output is one row per line. So, as a mechanical pass before any handoff, not a habit of
+care:
 
 - **Every quoted string must be reproducible by grep against the file you cite.** If
   `grep -F "<the quoted words>" <cited file>` returns nothing, the quotation is wrong —
@@ -156,26 +139,18 @@ quotation there invents a directive that some future reader will follow.
 
 ## Subagents finish in one turn — never park awaiting a wake
 
-Every stage agent is a subagent, and a subagent is **not** re-invoked across turns:
-nothing wakes it once its turn ends. So a stage must complete everything it needs while
-its turn is live. For a long command — the integration suite, a container/image build,
-the e2e suite — run it with `run_in_background` and **wait on it in-turn via the Monitor
-tool** (foreground `sleep` is blocked). What must never happen is ending the turn
-"standing by" for a background job or a Monitor notification to resume the agent: the
-notification never arrives, the stage stalls until a human nudges it, and it registers
-as no progress. This recurred across every implementing agent of epic #430
-and killed two agents outright on earlier epics (see `references/history.md`). Those
-three agent definitions used to restate it, and had drifted into three different
-strengths — the weakest of them is what the agent that stalled on 2026-09-13 was
-reading. They now carry the one-sentence contract and point here for the rest.
-
-**Restating this rule has stopped working — so it is now a contract on the final
-message.** It is already stated here, and again in three agent definitions, with two
-agents killed by it on earlier epics and a recurrence across every implementing agent
-of epic #430. On 2026-09-13 an epic-159 agent did it again: it started an e2e run,
-set up a Monitor, and ended its turn saying it would resume when the notification
-arrived. Nothing wakes a subagent. It sat idle until the orchestrator noticed, drove
-the run by hand, and re-messaged it.
+A stage agent is a subagent: nothing re-invokes it across turns, so it must complete
+everything while its turn is live. For a long command — the integration suite, a
+container/image build, the e2e suite — run it with `run_in_background` and **wait on it
+in-turn via the Monitor tool** (foreground `sleep` is blocked). What must never happen
+is ending the turn "standing by" for a background job or a Monitor notification to
+resume the agent: the notification never arrives, the stage stalls until a human nudges
+it, and it registers as no progress. Restating the rule has stopped working — it is
+stated here and in three agent definitions, yet it killed two agents on earlier epics,
+recurred across every implementing agent of epic #430, and on 2026-09-13 an epic-159
+agent started an e2e run, set a Monitor, and ended its turn saying it would resume on
+the notification; it sat idle until the orchestrator drove the run by hand (see
+`references/history.md`). So it is now a contract on the final message.
 
 **Your final message must declare a terminal state**, and there are exactly three:
 finished, blocked on something named, or stopped for a decision you have stated. Any
@@ -191,13 +166,12 @@ waiting for rather than treating the stage as complete.
 
 ### The handback is terse — the detail already shipped
 
-Your final message to the orchestrator is read for routing, not for record. Every
-piece of evidence you gathered — command tables, mutation logs, suite output, file
-paths, the criterion→test map — already lives in the artifact this stage owns: the PR
-description, the issue comment, or the committed doc. Re-pasting it into the handback
-pays for it a second time, in the orchestrator's context — the one context in the run
-that every later stage inherits. So the handback carries only what the orchestrator
-routes on, in this fixed shape and nothing else:
+Your final message is read for routing, not for record. Every piece of evidence you
+gathered — command tables, mutation logs, suite output, the criterion→test map —
+already lives in the artifact this stage owns: the PR description, the issue comment, or
+the committed doc. Re-pasting it pays for it a second time in the orchestrator's
+context, the one context every later stage inherits. So the handback carries only what
+the orchestrator routes on, in this fixed shape and nothing else:
 
 - **VERDICT:** one word. `finished` / `blocked` / `stopped` for an implementing stage;
   `clean` / `rework` / `blocked` for a review; `fits` / `deviates` for `lld` and the
@@ -242,12 +216,10 @@ ran the previous stage. Comments are the **visibility record** for a human and t
 - **Enough to resume from a crash**: if a fresh session couldn't tell from comments
   plus docs where a crashed run left off, there weren't enough.
 
-**Comment size is a contract, not a style preference.** Measured before this rule
-existed: `arch-review` rounds of 24,284 / 18,689 / 16,070 characters, an `lld-review`
-of 15,365, a `pr-review` of 14,640 — against stage handoffs that owned a doc and stayed
-at 1.4–3.3K. A round-4 architect dispatch pulled 59K characters of review text across
-three fetches. Comment bulk is an **input cost on every downstream stage**, and it
-dilutes the few lines that decide whether a round succeeds. So:
+**Comment size is a contract, not a style preference.** Before this rule, `arch-review`
+rounds ran 24K / 19K / 16K characters and a round-4 architect dispatch pulled 59K across
+three fetches, against doc-owning handoffs at 1.4–3.3K. Comment bulk is an **input cost
+on every downstream stage** and dilutes the few lines that decide a round. So:
 
 - **Stage handoff comment: ≤ 2,000 characters.** What changed, where the doc/commit is,
   the delta since the last round, the marker. The doc carries the detail.
@@ -277,6 +249,38 @@ lives in committed artifacts (the doc files, commits, the issue body for durable
 requirements). Pipeline tooling (this skill, the agent definitions, and any sibling
 tooling the repo tracks alongside them) is tracked in the repo: when a stage touches
 it, commit that change with the related code.
+
+
+## Secrets and containers — names only, ownership only
+
+These bind every stage agent, and each comes from a live leak or a real collision.
+
+- **Never dump the environment.** `process.env`, `env`, `printenv`, `set`, a debugger
+  that prints the environment block — all forbidden. A review sub-agent printed
+  `process.env` and put a live `GIT_TOKEN` and the gh EMU token into an on-disk
+  transcript that does not expire. When you must probe configuration, print variable
+  **NAMES ONLY, never values** (`printenv | cut -d= -f1`). This is a prohibition, not a
+  preference.
+- **Never hand-roll a credential grep.** An ad-hoc `grep '^[A-Z_]+=' .env.<profile>`
+  silently skips every key containing a digit — every `E2E_*` key — and an agent that
+  ran it wrongly concluded no e2e credentials existed. To see which credentials are
+  configured, list their **names only** from the profile files (`.env.<profile>` and
+  `.secrets.<profile>` at the workspace root; the driven repo's `CLAUDE.md` owns their
+  exact location and naming) with a pattern robust to digits in the key:
+
+  ```bash
+  sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' .env.<profile> .secrets.<profile>
+  ```
+
+  Its key pattern allows digits after the first character — the exact bug `^[A-Z_]+=`
+  had. Confirming a name is present is enough; never read, echo, or log a value to
+  prove a credential is set.
+- **Stop only containers you own.** Before any `docker stop`/`docker kill`, run
+  `docker ps` and stop **only** containers you started — a development agent once
+  `docker kill`ed another Task's live e2e run. Label every container you start
+  `sdlc.issue=<n>` (`--label`, or the compose label) so ownership is visible, and
+  **never touch an unlabelled container or one labelled with another issue** — it
+  belongs to a concurrent Task, and killing it corrupts that run's evidence.
 
 
 ## Rework and blockers — what it means for you

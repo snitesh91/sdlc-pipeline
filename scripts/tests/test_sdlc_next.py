@@ -1031,13 +1031,20 @@ def test_git_reconcile_branch_runs_fetch_checkout_merge_push_in_order():
     runner = ScriptedRunner({
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "checkout", "issue-9"): "",
+        ("git", "-C", "/repo", "branch", "-r", "--list", "origin/issue-9"): "",
+        ("git", "-C", "/repo", "branch", "-r", "--list", "origin/issue-9"): "  origin/issue-9\n",
+        ("git", "-C", "/repo", "merge", "--ff-only", "origin/issue-9"): "",
         ("git", "-C", "/repo", "merge", "origin/main"): "",
         ("git", "-C", "/repo", "push", "origin", "issue-9"): "",
     })
     git_reconcile_branch("/repo", "issue-9", runner=runner)
+    # ff-only to the branch's own origin tip precedes the base merge, so the final
+    # push is a fast-forward (retro #8).
     assert runner.calls == [
         ["git", "-C", "/repo", "fetch", "origin"],
         ["git", "-C", "/repo", "checkout", "issue-9"],
+        ["git", "-C", "/repo", "branch", "-r", "--list", "origin/issue-9"],
+        ["git", "-C", "/repo", "merge", "--ff-only", "origin/issue-9"],
         ["git", "-C", "/repo", "merge", "origin/main"],
         ["git", "-C", "/repo", "push", "origin", "issue-9"],
     ]
@@ -1239,129 +1246,6 @@ _SEARCH_COUNT_ARGV = ("gh", "api",
                        "--jq", ".total_count")
 
 
-def test_retro_watermark_default_is_formatted_with_the_config_doc_root(tmp_path):
-    """`pipeline.retro.watermarkFile` defaults to `{docRoot}/retro-watermark`, resolved
-    against the config's own `docRoot` at load time -- so the watermark lives with the
-    driven repo's committed docs, not inside the skill checkout (where a leaked client
-    value once sat at the skill root)."""
-    from sdlc_next import RETRO_WATERMARK_FILE, _PIPELINE_DEFAULTS, DOC_ROOT
-    assert _PIPELINE_DEFAULTS["retro"]["watermarkFile"] == "{docRoot}/retro-watermark"
-    assert RETRO_WATERMARK_FILE == f"{DOC_ROOT}/retro-watermark" == "docs/sdlc/retro-watermark"
-    cfg = json.loads((Path(__file__).resolve().parents[2] / "sdlc.config.sample.json").read_text())
-    cfg["docRoot"] = "design/pipeline"
-    del cfg["pipeline"]["retro"]["watermarkFile"]  # fall back to the default
-    cfg_path = tmp_path / "sdlc-pipeline.config.json"
-    cfg_path.write_text(json.dumps(cfg))
-    out = subprocess.check_output(
-        [sys.executable, "-c", "import sdlc_next as s; print(s.RETRO_WATERMARK_FILE)"],
-        env={**os.environ, "SDLC_CONFIG": str(cfg_path)},
-        cwd=str(Path(__file__).resolve().parents[1]), text=True).strip()
-    assert out == "design/pipeline/retro-watermark"
-
-
-def test_retro_check_mark_done_creates_the_watermark_parent_directory(tmp_path):
-    from sdlc_next import GitHub, cmd_retro_check, RETRO_WATERMARK_FILE
-    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "3\n"}))
-    assert cmd_retro_check(gh, str(tmp_path), mark_done=True)["marked_done"] is True
-    assert (tmp_path / RETRO_WATERMARK_FILE).read_text().strip() == "3"
-
-
-def test_retro_check_true_when_five_or_more_closed_since_watermark(tmp_path):
-    from sdlc_next import GitHub, cmd_retro_check, RETRO_WATERMARK_FILE
-    wm = tmp_path / RETRO_WATERMARK_FILE
-    wm.parent.mkdir(parents=True)
-    wm.write_text("5\n")
-    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "10\n"}))
-    assert cmd_retro_check(gh, str(tmp_path)) == {"closed_count": 10, "watermark": 5,
-                                                    "run_retro": True}
-
-
-def test_retro_check_false_when_fewer_than_five_since_watermark(tmp_path):
-    from sdlc_next import GitHub, cmd_retro_check, RETRO_WATERMARK_FILE
-    wm = tmp_path / RETRO_WATERMARK_FILE
-    wm.parent.mkdir(parents=True)
-    wm.write_text("5\n")
-    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "7\n"}))
-    assert cmd_retro_check(gh, str(tmp_path)) == {"closed_count": 7, "watermark": 5,
-                                                    "run_retro": False}
-
-
-def test_retro_check_missing_watermark_reads_as_zero(tmp_path):
-    # No watermark file yet = 0, so run_retro fires at the fifth-ever close --
-    # and, unlike the old `count % 5 == 0` trigger, keeps firing until a retro
-    # actually records --mark-done, instead of skipping when two issues close
-    # between checks.
-    from sdlc_next import GitHub, cmd_retro_check
-    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "7\n"}))
-    assert cmd_retro_check(gh, str(tmp_path)) == {"closed_count": 7, "watermark": 0,
-                                                    "run_retro": True}
-
-
-def test_retro_check_mark_done_without_count_falls_back_to_live_count(tmp_path):
-    # Backward-compatible default when the caller omits --count -- flagged in the
-    # result so it's visible, not silent.
-    from sdlc_next import GitHub, cmd_retro_check, RETRO_WATERMARK_FILE
-    wm = tmp_path / RETRO_WATERMARK_FILE
-    wm.parent.mkdir(parents=True)
-    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "12\n"}))
-    result = cmd_retro_check(gh, str(tmp_path), mark_done=True)
-    assert result == {"closed_count": 12, "watermark": 12, "marked_done": True,
-                       "count_was_live_fallback": True}
-    assert wm.read_text().strip() == "12"
-    gh2 = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "13\n"}))
-    assert cmd_retro_check(gh2, str(tmp_path))["run_retro"] is False
-
-
-def test_retro_check_mark_done_with_count_stamps_the_captured_trigger_count(tmp_path):
-    # Positive control for the 2026-09-14 fix: the retro was triggered when the
-    # live count was 120 (captured by the caller); by the time --mark-done runs,
-    # 10 more issues closed (live count 130) during the fix work. The watermark
-    # must land on the captured 120, not the now-live 130, so those 10 issues stay
-    # in scope for the next retro's evidence sweep instead of being silently
-    # absorbed as reviewed.
-    from sdlc_next import GitHub, cmd_retro_check, RETRO_WATERMARK_FILE
-    wm = tmp_path / RETRO_WATERMARK_FILE
-    wm.parent.mkdir(parents=True)
-    wm.write_text("115\n")
-    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "130\n"}))
-    result = cmd_retro_check(gh, str(tmp_path), mark_done=True, count=120)
-    assert result == {"closed_count": 130, "watermark": 120, "marked_done": True,
-                       "count_was_live_fallback": False}
-    assert wm.read_text().strip() == "120"
-    # The 10 issues closed between trigger and mark-done (121-130) are still
-    # in scope -- five more (135) fires the next retro, not ten more (140).
-    gh2 = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "125\n"}))
-    assert cmd_retro_check(gh2, str(tmp_path))["run_retro"] is True
-
-
-def test_retro_check_mark_done_rejects_a_count_behind_the_existing_watermark(tmp_path):
-    # Negative control: a stale/wrong --count that would move the watermark
-    # backwards must be refused, not silently applied.
-    from sdlc_next import GitHub, GhError, cmd_retro_check, RETRO_WATERMARK_FILE
-    wm = tmp_path / RETRO_WATERMARK_FILE
-    wm.parent.mkdir(parents=True)
-    wm.write_text("120\n")
-    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "130\n"}))
-    import pytest
-    with pytest.raises(GhError, match="behind the existing watermark"):
-        cmd_retro_check(gh, str(tmp_path), mark_done=True, count=100)
-    assert wm.read_text().strip() == "120"  # untouched
-
-
-def test_retro_check_mark_done_rejects_a_count_ahead_of_the_live_count(tmp_path):
-    # Negative control: a --count claiming more closes than have actually
-    # happened must be refused, not silently applied.
-    from sdlc_next import GitHub, GhError, cmd_retro_check, RETRO_WATERMARK_FILE
-    wm = tmp_path / RETRO_WATERMARK_FILE
-    wm.parent.mkdir(parents=True)
-    wm.write_text("115\n")
-    gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "120\n"}))
-    import pytest
-    with pytest.raises(GhError, match="ahead of the live closed count"):
-        cmd_retro_check(gh, str(tmp_path), mark_done=True, count=121)
-    assert wm.read_text().strip() == "115"  # untouched
-
-
 def test_claim_raises_on_unknown_role():
     from sdlc_next import GitHub, GhError, cmd_claim
     gh = GitHub(runner=ScriptedRunner({}))
@@ -1557,6 +1441,7 @@ def test_merge_pr_refuses_when_checks_not_passed():
     from tests.test_sdlc_next import ScriptedRunner
     import json
     runner = ScriptedRunner({
+        ("gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state,mergedAt"): json.dumps({"state": "OPEN", "mergedAt": None}),
         ("gh", "pr", "checks", "42", "--repo", "owner/repo",
          "--json", "name,state,bucket,link,workflow"): json.dumps([{"name": "ci", "bucket": "pending"}]),
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
@@ -1588,6 +1473,7 @@ def test_merge_pr_merges_and_confirms_issue_closed_when_checks_pass():
     from tests.test_sdlc_next import ScriptedRunner
     import json
     runner = ScriptedRunner({
+        ("gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state,mergedAt"): json.dumps({"state": "OPEN", "mergedAt": None}),
         ("gh", "pr", "checks", "42", "--repo", "owner/repo",
          "--json", "name,state,bucket,link,workflow"): json.dumps([{"name": "ci", "bucket": "pass"}]),
         ("gh", "api", "--paginate", "repos/owner/repo/pulls/42/files", "--jq", ".[].filename"):
@@ -1873,6 +1759,7 @@ def test_merge_pr_refuses_when_backend_workflow_reported_no_check():
     from tests.test_sdlc_next import ScriptedRunner
     import json
     runner = ScriptedRunner({
+        ("gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state,mergedAt"): json.dumps({"state": "OPEN", "mergedAt": None}),
         ("gh", "pr", "checks", "42", "--repo", "owner/repo",
          "--json", "name,state,bucket,link,workflow"): json.dumps(
             [{"name": "gate", "bucket": "pass", "workflow": "sdlc-next Gate Auto-Advance"}]),
@@ -1900,6 +1787,7 @@ def test_merge_pr_refuses_when_required_workflow_only_skipped():
     from tests.test_sdlc_next import ScriptedRunner
     import json
     runner = ScriptedRunner({
+        ("gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state,mergedAt"): json.dumps({"state": "OPEN", "mergedAt": None}),
         ("gh", "pr", "checks", "42", "--repo", "owner/repo",
          "--json", "name,state,bucket,link,workflow"): json.dumps(
             [{"name": "build", "bucket": "skipping", "workflow": "Backend CI"}]),
@@ -1927,6 +1815,7 @@ def test_merge_pr_allows_docs_only_pr_with_no_checks():
     from tests.test_sdlc_next import ScriptedRunner
     import json
     runner = ScriptedRunner({
+        ("gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state,mergedAt"): json.dumps({"state": "OPEN", "mergedAt": None}),
         ("gh", "pr", "checks", "42", "--repo", "owner/repo",
          "--json", "name,state,bucket,link,workflow"): json.dumps([]),
         ("gh", "api", "--paginate", "repos/owner/repo/pulls/42/files", "--jq", ".[].filename"):
@@ -1960,6 +1849,7 @@ def test_merge_pr_reports_config_changed_when_the_merged_pr_touched_the_pipeline
     from tests.test_sdlc_next import ScriptedRunner
     import json
     runner = ScriptedRunner({
+        ("gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state,mergedAt"): json.dumps({"state": "OPEN", "mergedAt": None}),
         ("gh", "pr", "checks", "42", "--repo", "owner/repo",
          "--json", "name,state,bucket,link,workflow"): json.dumps([]),
         ("gh", "api", "--paginate", "repos/owner/repo/pulls/42/files", "--jq", ".[].filename"):
@@ -1999,6 +1889,7 @@ def test_merge_pr_refuses_as_structured_result_when_branch_behind_main():
     from sdlc_next import GitHub, cmd_merge_pr
     from tests.test_sdlc_next import ScriptedRunner
     runner = ScriptedRunner({
+        ("gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state,mergedAt"): json.dumps({"state": "OPEN", "mergedAt": None}),
         ("gh", "api", "repos/owner/repo/compare/main...issue-9", "--jq", ".behind_by"): "2\n",
         # the base delta touches a suite-covered tree, so the stale-base risk is
         # real and the refusal stands (C1 only carries forward a docs-only delta)
@@ -2021,6 +1912,7 @@ def test_merge_pr_allows_when_both_required_workflows_pass():
     from tests.test_sdlc_next import ScriptedRunner
     import json
     runner = ScriptedRunner({
+        ("gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state,mergedAt"): json.dumps({"state": "OPEN", "mergedAt": None}),
         ("gh", "pr", "checks", "42", "--repo", "owner/repo",
          "--json", "name,state,bucket,link,workflow"): json.dumps([
             {"name": "b", "bucket": "pass", "workflow": "Backend CI"},
@@ -2155,6 +2047,7 @@ def test_pass_gate_reconciles_comments_and_reclaims_next_stage():
         **_live_wt("issue-9"),
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "checkout", "issue-9"): "",
+        ("git", "-C", "/repo", "branch", "-r", "--list", "origin/issue-9"): "",
         ("git", "-C", "/repo", "merge", "origin/main"): "",
         ("git", "-C", "/repo", "push", "origin", "issue-9"): "",
     })
@@ -2255,6 +2148,8 @@ def test_skip_gate_sets_fields_comments_and_reclaims_next_stage():
     })
     gh_runner.prefix_responses = {
         ("gh", "issue", "comment", "9"): "",
+        # claim(development) now checks for an open PR on the branch (retro #19 guard).
+        ("gh", "pr", "list", "--repo", "owner/repo", "--head", "issue-9"): "[]",
     }
     gh = GitHub(runner=gh_runner)
     result = cmd_skip_gate(gh, issue=9, stage="architecture", confidence=97,
@@ -2510,10 +2405,32 @@ def test_pause_for_epic_regate_clears_only_pipeline_status():
     gh_runner.prefix_responses = {("gh", "issue", "comment", "101"): ""}
     gh = GitHub(runner=gh_runner)
     result = cmd_pause_for_epic_regate(gh, 101, epic=92, gate_pr=141)
-    assert result == {"issue": 101, "paused_for_epic_regate": 92, "gate_pr": 141}
+    assert result == {"issue": 101, "paused_for_epic_regate": 92, "gate_pr": 141,
+                      "found_by": "lld"}
     comment_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"])
     body = comment_call[comment_call.index("--body") + 1]
     assert "#92" in body and "#141" in body
+
+
+def test_pause_for_epic_regate_names_the_finding_stage():
+    # Retro #1: a deviation found at pr-review/development must not be reported as
+    # "lld found" -- --found-by names the real stage in the pause comment.
+    from sdlc_next import GitHub, cmd_pause_for_epic_regate, _ISSUE_NODE_ID_QUERY, \
+        _DELETE_ISSUE_FIELD_VALUE_MUTATION, PIPELINE_STATUS_FIELD_ID
+    node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=101)}")
+    del_status_argv = ("gh", "api", "graphql", "-f",
+        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_101', field_id=PIPELINE_STATUS_FIELD_ID)}")
+    gh_runner = ScriptedRunner({
+        node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_101"}}}}),
+        del_status_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 101}}}}),
+    })
+    gh_runner.prefix_responses = {("gh", "issue", "comment", "101"): ""}
+    result = cmd_pause_for_epic_regate(GitHub(runner=gh_runner), 101, epic=92, gate_pr=141,
+                                       found_by="pr-review")
+    assert result["found_by"] == "pr-review"
+    comment_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "comment"])
+    body = comment_call[comment_call.index("--body") + 1]
+    assert "`pr-review` found" in body and "lld found" not in body
 
 
 # --- auto-pass-gate (real-time gate-auto-advance webhook backstop) ---
@@ -2684,6 +2601,7 @@ def test_auto_pass_gate_dispatches_to_pass_gate_for_matching_open_gate():
         **_live_wt("issue-9"),
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "checkout", "issue-9"): "",
+        ("git", "-C", "/repo", "branch", "-r", "--list", "origin/issue-9"): "",
         ("git", "-C", "/repo", "merge", "origin/main"): "",
         ("git", "-C", "/repo", "push", "origin", "issue-9"): "",
     })
@@ -3088,6 +3006,7 @@ def test_git_reconcile_branch_raises_merge_conflict_and_aborts_on_real_conflict(
     runner = ScriptedRunner({
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "checkout", "issue-9"): "",
+        ("git", "-C", "/repo", "branch", "-r", "--list", "origin/issue-9"): "",
         ("git", "-C", "/repo", "diff", "--name-only", "--diff-filter=U"): "src/a.ts\nsrc/b.ts\n",
         ("git", "-C", "/repo", "merge", "--abort"): "",
     })
@@ -3108,6 +3027,7 @@ def test_git_reconcile_branch_reraises_plain_ghererror_when_no_unmerged_paths():
     runner = ScriptedRunner({
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "checkout", "issue-9"): "",
+        ("git", "-C", "/repo", "branch", "-r", "--list", "origin/issue-9"): "",
         ("git", "-C", "/repo", "diff", "--name-only", "--diff-filter=U"): "",
     })
     runner.fail_on = {("git", "-C", "/repo", "merge", "origin/main")}
@@ -3131,6 +3051,7 @@ def test_sync_branch_returns_conflict_result_without_raising_and_posts_marker():
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"): "",
         ("git", "-C", "/repo", "checkout", "issue-9"): "",
+        ("git", "-C", "/repo", "branch", "-r", "--list", "origin/issue-9"): "",
         ("git", "-C", "/repo", "diff", "--name-only", "--diff-filter=U"): "src/a.ts\n",
         ("git", "-C", "/repo", "merge", "--abort"): "",
     })
@@ -3153,6 +3074,7 @@ def test_sync_branch_success_posts_no_comment():
         ("git", "-C", "/repo", "fetch", "origin"): "",
         ("git", "-C", "/repo", "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"): "",
         ("git", "-C", "/repo", "checkout", "issue-9"): "",
+        ("git", "-C", "/repo", "branch", "-r", "--list", "origin/issue-9"): "",
         ("git", "-C", "/repo", "merge", "origin/main"): "",
         ("git", "-C", "/repo", "push", "origin", "issue-9"): "",
     })
@@ -3180,6 +3102,7 @@ def test_sync_branch_auto_resolves_worktree_when_repo_path_omitted():
         ("git", "-C", "/tmp/sdlc-dev-9", "show-ref", "--verify", "--quiet",
          "refs/remotes/origin/main"): "",
         ("git", "-C", "/tmp/sdlc-dev-9", "checkout", "issue-9"): "",
+        ("git", "-C", "/tmp/sdlc-dev-9", "branch", "-r", "--list", "origin/issue-9"): "",
         ("git", "-C", "/tmp/sdlc-dev-9", "merge", "origin/main"): "",
         ("git", "-C", "/tmp/sdlc-dev-9", "push", "origin", "issue-9"): "",
     })
@@ -3529,6 +3452,7 @@ def test_sync_branch_with_no_live_worktree_runs_in_an_ephemeral_one():
         ("git", "-C", path, "fetch", "origin"): "",
         ("git", "-C", path, "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"): "",
         ("git", "-C", path, "checkout", "epic-92"): "",
+        ("git", "-C", path, "branch", "-r", "--list", "origin/epic-92"): "",
         ("git", "-C", path, "merge", "origin/main"): "",
         ("git", "-C", path, "push", "origin", "epic-92"): "",
         ("git", "-C", path, "status", "--porcelain"): "",
@@ -3617,7 +3541,8 @@ def test_teardown_epic_stack_downs_and_removes_profile_and_data(monkeypatch, tmp
     _enable_stack(monkeypatch, tmp_path)
     cmd_provision_epic_stack(159, shell=lambda c, cwd: "", probe=lambda p: True)
     ran = []
-    result = cmd_teardown_epic_stack(159, shell=lambda c, cwd: ran.append(c) or "")
+    result = cmd_teardown_epic_stack(159, shell=lambda c, cwd: ran.append(c) or "",
+                                     running_probe=lambda proj: [])
     assert result["torn_down"] is True
     assert ran == ["COMPOSE_PROJECT_NAME=sdlc-epic159 docker compose --env-file .env.epic159 "
                    "down -v --remove-orphans"]
@@ -3627,7 +3552,8 @@ def test_teardown_epic_stack_downs_and_removes_profile_and_data(monkeypatch, tmp
     # The base profile is untouched.
     assert (tmp_path / ".env.dev").exists() and (tmp_path / ".secrets.dev").exists()
     # Second teardown: structured no-op.
-    assert cmd_teardown_epic_stack(159, shell=lambda c, cwd: "")["torn_down"] is False
+    assert cmd_teardown_epic_stack(159, shell=lambda c, cwd: "",
+                                   running_probe=lambda proj: [])["torn_down"] is False
 
 
 def test_teardown_epic_stack_keeps_files_when_down_fails(monkeypatch, tmp_path):
@@ -3639,8 +3565,46 @@ def test_teardown_epic_stack_keeps_files_when_down_fails(monkeypatch, tmp_path):
     def failing(c, cwd):
         raise GhError("compose down failed")
     with pytest.raises(GhError):
-        cmd_teardown_epic_stack(159, shell=failing)
+        cmd_teardown_epic_stack(159, shell=failing, running_probe=lambda proj: [])
     assert (tmp_path / ".env.epic159").exists()
+
+
+def test_teardown_epic_stack_is_a_no_op_when_containers_survive_the_down(monkeypatch, tmp_path):
+    # Retro #10 regression: a down command that exits 0 but leaves the project's
+    # containers running (a relative --env-file that didn't resolve) must NOT be
+    # reported as torn down, and must remove nothing -- so the live stack and its
+    # profile files are still there to retry.
+    from sdlc_next import cmd_provision_epic_stack, cmd_teardown_epic_stack
+    _enable_stack(monkeypatch, tmp_path)
+    cmd_provision_epic_stack(159, shell=lambda c, cwd: "", probe=lambda p: True)
+    result = cmd_teardown_epic_stack(159, shell=lambda c, cwd: "",
+                                     running_probe=lambda proj: ["abc123", "def456"])
+    assert result["torn_down"] is False
+    assert result["still_running"] == ["abc123", "def456"]
+    # Positive control: nothing was removed, so a retry is possible.
+    assert (tmp_path / ".env.epic159").exists()
+    assert (tmp_path / ".secrets.epic159").exists()
+    assert (tmp_path / ".docker/postgres-data-epic159").exists()
+
+
+def test_teardown_named_profile_when_stack_disabled(monkeypatch, tmp_path):
+    # Retro #49: a hand-made isolated stack (stack.enabled false) is torn down by
+    # naming its --profile, instead of the command being an unconditional no-op.
+    from sdlc_next import cmd_teardown_epic_stack
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env.e2e159").write_text("X=1\n")
+    (tmp_path / ".secrets.e2e159").write_text("Y=2\n")
+    # stack.enabled defaults false in the sample config -> no --profile is a no-op...
+    assert cmd_teardown_epic_stack(159, running_probe=lambda proj: [])["torn_down"] is False
+    # ...but naming the hand-made profile tears it down.
+    ran = []
+    result = cmd_teardown_epic_stack(159, profile="e2e159",
+                                     shell=lambda c, cwd: ran.append(c) or "",
+                                     running_probe=lambda proj: [])
+    assert result["torn_down"] is True
+    assert result["profile"] == "e2e159"
+    assert not (tmp_path / ".env.e2e159").exists()
+    assert not (tmp_path / ".secrets.e2e159").exists()
 
 
 # --- Parallel implementation lane: list-parallel-ready ---
@@ -4526,6 +4490,7 @@ def test_sync_branch_reinits_the_skill_submodule_after_the_merge_in_a_live_workt
         ("git", "-C", wt, "fetch", "origin"): "",
         ("git", "-C", wt, "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"): "",
         ("git", "-C", wt, "checkout", "issue-9"): "",
+        ("git", "-C", wt, "branch", "-r", "--list", "origin/issue-9"): "",
         ("git", "-C", wt, "merge", "origin/main"): "",
         ("git", "-C", wt, "push", "origin", "issue-9"): "",
         ("git", "-C", wt, "ls-files", "--error-unmatch", ".github/sdlc-pipeline"): ".github/sdlc-pipeline\n",
@@ -4552,6 +4517,7 @@ def test_merge_pr_closes_child_explicitly_when_merged_into_epic_branch():
     from tests.test_sdlc_next import ScriptedRunner
     import json
     runner = ScriptedRunner({
+        ("gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state,mergedAt"): json.dumps({"state": "OPEN", "mergedAt": None}),
         tuple(_list_argv()): _list_response([
             _issue(9, parent=90), _issue(90, issue_type="Feature")]),
         ("gh", "api", "repos/owner/repo/compare/epic-90...issue-9", "--jq", ".behind_by"): "0\n",
@@ -4589,6 +4555,7 @@ def test_merge_pr_does_not_close_the_issue_itself_when_the_base_is_main():
     from tests.test_sdlc_next import ScriptedRunner
     import json
     runner = ScriptedRunner({
+        ("gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state,mergedAt"): json.dumps({"state": "OPEN", "mergedAt": None}),
         tuple(_list_argv()): _list_response([_issue(9)]),
         ("gh", "api", "repos/owner/repo/compare/main...issue-9", "--jq", ".behind_by"): "0\n",
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
@@ -6178,6 +6145,7 @@ def test_merge_pr_refuses_behind_base_when_delta_touches_suite_covered_files():
     from sdlc_next import GitHub, cmd_merge_pr
     from tests.test_sdlc_next import ScriptedRunner
     runner = ScriptedRunner({
+        ("gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state,mergedAt"): json.dumps({"state": "OPEN", "mergedAt": None}),
         ("gh", "api", "repos/owner/repo/compare/main...issue-9", "--jq", ".behind_by"): "2\n",
         ("gh", "api", "repos/owner/repo/compare/issue-9...main", "--jq", ".files[]?.filename"):
             "backend/src/service.ts\n",
@@ -6196,6 +6164,7 @@ def test_merge_pr_carries_attestation_forward_when_behind_base_is_docs_only():
     from tests.test_sdlc_next import ScriptedRunner
     import json
     runner = ScriptedRunner({
+        ("gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state,mergedAt"): json.dumps({"state": "OPEN", "mergedAt": None}),
         ("gh", "pr", "checks", "42", "--repo", "owner/repo",
          "--json", "name,state,bucket,link,workflow"): json.dumps([]),
         ("gh", "api", "--paginate", "repos/owner/repo/pulls/42/files", "--jq", ".[].filename"):
@@ -6250,6 +6219,7 @@ def test_sync_branch_base_override_never_consults_integration_base():
         ("git", "-C", "/repo", "show-ref", "--verify", "--quiet",
          "refs/remotes/origin/main"): "",
         ("git", "-C", "/repo", "checkout", "issue-43"): "",
+        ("git", "-C", "/repo", "branch", "-r", "--list", "origin/issue-43"): "",
         ("git", "-C", "/repo", "merge", "origin/main"): "",
         ("git", "-C", "/repo", "push", "origin", "issue-43"): "",
     })
@@ -6294,6 +6264,7 @@ def test_sync_branch_without_base_still_auto_detects_the_integration_base():
         ("git", "-C", "/repo", "show-ref", "--verify", "--quiet",
          "refs/remotes/origin/epic-110"): "",
         ("git", "-C", "/repo", "checkout", "issue-185"): "",
+        ("git", "-C", "/repo", "branch", "-r", "--list", "origin/issue-185"): "",
         ("git", "-C", "/repo", "merge", "origin/epic-110"): "",
         ("git", "-C", "/repo", "push", "origin", "issue-185"): "",
     })
@@ -6562,3 +6533,284 @@ def test_config_still_overrides_the_skip_confidence_threshold(tmp_path):
     assert effective["gates"]["skipConfidenceThreshold"] == 95
     standing = next(p for p in effective["profiles"] if p["name"] == "standing")
     assert standing["gates"]["skipConfidenceThreshold"] == 90
+
+
+# ===========================================================================
+# Retro 2026-09-17 regression tests (skill SHA at retro: 8318802). Each control-
+# plane fix is a regression + a positive control that stays green (SKILL.md Step 5).
+# ===========================================================================
+
+def test_footprint_ignores_a_decoy_heading_and_stops_at_a_sublabel():
+    # Retro #16 regression: a prose heading that merely starts with "Footprint"
+    # ("## Footprint overlap ...") must NOT be taken as THE footprint (it used to,
+    # because `.search` returns the first match and the regex allowed trailing
+    # words), and bullets under a bold **Verify-only** sub-label are read/verified
+    # paths, not changed paths, so they are excluded.
+    from sdlc_next import parse_footprint
+    doc = (
+        "## Footprint overlap outside this task\n"
+        "- `src/other.ts`\n"
+        "\n"
+        "## Footprint\n"
+        "- `src/real.ts`\n"
+        "- `src/also.ts`\n"
+        "**Verify-only:**\n"
+        "- `src/readonly.ts`\n"
+        "\n"
+        "## Next section\n")
+    assert parse_footprint(doc) == ["src/real.ts", "src/also.ts"]
+
+
+def test_footprint_positive_control_plain_section_still_parses():
+    # Positive control: an ordinary `## Footprint` list is unchanged by the fix.
+    from sdlc_next import parse_footprint
+    assert parse_footprint("## Footprint\n- `a/b.ts`\n- `c/d.ts`\n") == ["a/b.ts", "c/d.ts"]
+
+
+def test_missing_required_workflows_excludes_docs_only_touch_via_excludeglobs():
+    # Retro #39 regression: a docs-only edit inside a required prefix must not
+    # demand a suite attestation, because the workflow's own `!**/*.md` negation
+    # (mirrored as excludeGlobs) skips it.
+    from sdlc_next import missing_required_workflows
+    assert missing_required_workflows(["backend/AGENTS.md"], []) == []
+
+
+def test_missing_required_workflows_positive_control_code_touch_still_required():
+    # Positive control: a real code file under the same prefix still requires the suite.
+    from sdlc_next import missing_required_workflows
+    assert missing_required_workflows(["backend/AGENTS.md", "backend/src/x.ts"], []) == ["Backend CI"]
+
+
+def test_local_ci_marker_parses_a_hyphenated_suite_name():
+    # Retro #42 regression: `\w+` stopped at the hyphen, so an `e2e-smoke`
+    # attestation could never be matched. `[\w-]+` parses it.
+    from sdlc_next import _LOCAL_CI_MARKER
+    m = _LOCAL_CI_MARKER.search("<!-- local-ci: e2e-smoke:42 @ abc1234 -->")
+    assert m.group(1) == "e2e-smoke"
+
+
+def test_local_ci_marker_positive_control_plain_suite_still_parses():
+    from sdlc_next import _LOCAL_CI_MARKER
+    assert _LOCAL_CI_MARKER.search("<!-- local-ci: backend:42 @ abc1234 -->").group(1) == "backend"
+
+
+def test_record_local_ci_enforces_a_configured_command_pattern(monkeypatch):
+    # Retro #43 regression: with a per-suite commandPattern configured, a command
+    # that does not match it is refused rather than attested.
+    import sdlc_next
+    from sdlc_next import GitHub, GhError, cmd_record_local_ci
+    monkeypatch.setitem(sdlc_next.LOCAL_CI_COMMAND_PATTERNS, "backend", "test:coverage")
+    gh = GitHub(runner=ScriptedRunner({}))
+    import pytest
+    with pytest.raises(GhError, match="does not match the required pattern"):
+        cmd_record_local_ci(gh, 42, "backend", "abc1234", "npm run test:it", "/dev/null")
+
+
+def test_record_local_ci_positive_control_matching_command_is_accepted(monkeypatch, tmp_path):
+    # Positive control: the same suite with a matching command attests normally.
+    import sdlc_next
+    from sdlc_next import GitHub, cmd_record_local_ci
+    monkeypatch.setitem(sdlc_next.LOCAL_CI_COMMAND_PATTERNS, "backend", "test:coverage")
+    out = tmp_path / "out.txt"
+    out.write_text("PASS all suites\n")
+    runner = ScriptedRunner({})
+    runner.prefix_responses = {("gh", "pr", "comment", "42"): ""}
+    result = cmd_record_local_ci(GitHub(runner=runner), 42, "backend", "abc1234",
+                                 "npm run test:coverage", str(out))
+    assert result["attested"] is True
+
+
+def test_normalize_stage_accepts_field_value_slug_and_case():
+    # Retro #45 regression: "PR Review", "pr-review" and "pr review" all resolve to
+    # the stored slug; an unknown spelling is None (surfaced, not silently passed).
+    from sdlc_next import normalize_stage
+    assert normalize_stage("PR Review") == "pr-review"
+    assert normalize_stage("pr-review") == "pr-review"
+    assert normalize_stage("pr review") == "pr-review"
+    assert normalize_stage("Development") == "development"
+    assert normalize_stage("nonsense") is None
+
+
+def test_claim_refuses_development_when_an_open_pr_exists():
+    # Retro #19 regression: re-claiming development on a unit that already has an
+    # open PR would move Stage off PR Review; refuse and point to resume instead.
+    from sdlc_next import GitHub, GhError, cmd_claim
+    runner = ScriptedRunner({
+        ("gh", "pr", "list", "--repo", "owner/repo", "--head", "issue-9", "--state", "open",
+         "--json", "number,isDraft,headRefName,title,url"):
+            json.dumps([{"number": 77, "isDraft": True, "headRefName": "issue-9",
+                         "title": "wip", "url": "u"}]),
+    })
+    import pytest
+    with pytest.raises(GhError, match="already has open PR"):
+        cmd_claim(GitHub(runner=runner), 9, "development")
+
+
+def test_claim_positive_control_development_allowed_with_no_open_pr():
+    # Positive control: no open PR -> claim proceeds to the field writes + start comment.
+    from sdlc_next import (GitHub, cmd_claim, _SET_ISSUE_FIELD_MUTATION, _ISSUE_NODE_ID_QUERY,
+                            STAGE_FIELD_ID, STAGE_OPTION_IDS, PIPELINE_STATUS_FIELD_ID,
+                            PIPELINE_STATUS_OPTION_IDS)
+    runner = ScriptedRunner({
+        ("gh", "pr", "list", "--repo", "owner/repo", "--head", "issue-9", "--state", "open",
+         "--json", "number,isDraft,headRefName,title,url"): "[]",
+        ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}"):
+            json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
+        ("gh", "api", "graphql", "-f",
+         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=STAGE_FIELD_ID, option_id=STAGE_OPTION_IDS['development'])}"):
+            json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
+        ("gh", "api", "graphql", "-f",
+         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['in-progress'])}"):
+            json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
+    })
+    runner.prefix_responses = {("gh", "issue", "comment", "9"): ""}
+    assert cmd_claim(GitHub(runner=runner), 9, "development") == {"issue": 9, "claimed": True}
+
+
+def test_add_fresh_worktree_recreates_a_stale_local_branch_with_no_unique_commits():
+    # Retro #17 regression: a first-touch `-b` fails on a stale local branch left by
+    # a crashed run; when it carries no commits the base lacks it is recreated.
+    from sdlc_next import _add_fresh_worktree, GhError
+    calls = []
+    state = {"add_failed_once": False}
+    add = ("git", "-C", "/r", "worktree", "add", "/wt", "-b", "issue-5", "origin/main")
+
+    def runner(argv):
+        calls.append(argv)
+        a = tuple(argv)
+        if a == add:
+            if not state["add_failed_once"]:
+                state["add_failed_once"] = True
+                raise GhError("fatal: a branch named 'issue-5' already exists")
+            return ""
+        if a == ("git", "-C", "/r", "branch", "--list", "issue-5"):
+            return "  issue-5\n"
+        if a == ("git", "-C", "/r", "rev-list", "--count", "origin/main..issue-5"):
+            return "0\n"
+        if a == ("git", "-C", "/r", "branch", "-D", "issue-5"):
+            return ""
+        raise AssertionError(f"unexpected: {argv}")
+
+    _add_fresh_worktree("/r", "/wt", "issue-5", "origin/main", runner)
+    assert ["git", "-C", "/r", "branch", "-D", "issue-5"] in calls
+
+
+def test_add_fresh_worktree_refuses_to_discard_a_branch_with_unique_commits():
+    # Positive control for the safety half: a stale branch that DOES carry unique
+    # commits is never silently discarded -- it raises instead.
+    from sdlc_next import _add_fresh_worktree, GhError
+    deleted = []
+
+    def runner(argv):
+        a = tuple(argv)
+        if a == ("git", "-C", "/r", "worktree", "add", "/wt", "-b", "issue-5", "origin/main"):
+            raise GhError("fatal: a branch named 'issue-5' already exists")
+        if a == ("git", "-C", "/r", "branch", "--list", "issue-5"):
+            return "  issue-5\n"
+        if a == ("git", "-C", "/r", "rev-list", "--count", "origin/main..issue-5"):
+            return "2\n"
+        if a[:4] == ("git", "-C", "/r", "branch") and "-D" in a:
+            deleted.append(argv)
+            return ""
+        raise AssertionError(f"unexpected: {argv}")
+
+    import pytest
+    with pytest.raises(GhError, match="not in origin/main"):
+        _add_fresh_worktree("/r", "/wt", "issue-5", "origin/main", runner)
+    assert deleted == []  # unmerged work was NOT deleted
+
+
+def test_run_retry_transient_retries_once_then_succeeds():
+    # Retro #17 regression: a transient network error is retried once.
+    from sdlc_next import _run_retry_transient, GhError
+    n = {"c": 0}
+
+    def runner(argv):
+        n["c"] += 1
+        if n["c"] == 1:
+            raise GhError("ssh: connect to host github.com port 22: Connection timed out")
+        return "ok"
+
+    assert _run_retry_transient(["git", "fetch"], runner) == "ok"
+    assert n["c"] == 2
+
+
+def test_run_retry_transient_does_not_retry_a_non_transient_error():
+    # Positive control: a non-network error (e.g. non-fast-forward) is not retried.
+    from sdlc_next import _run_retry_transient, GhError
+    n = {"c": 0}
+
+    def runner(argv):
+        n["c"] += 1
+        raise GhError("! [rejected] main -> main (non-fast-forward)")
+
+    import pytest
+    with pytest.raises(GhError):
+        _run_retry_transient(["git", "push"], runner)
+    assert n["c"] == 1
+
+
+def test_merge_pr_is_idempotent_when_the_pr_is_already_merged():
+    # Retro #9 regression: a retry after a 502-that-landed finds the PR already
+    # MERGED and finishes the bookkeeping instead of erroring on behind-base.
+    from sdlc_next import GitHub, cmd_merge_pr
+    runner = ScriptedRunner({
+        ("gh", "pr", "view", "42", "--repo", "owner/repo", "--json", "state,mergedAt"):
+            json.dumps({"state": "MERGED", "mergedAt": "2026-09-17T00:00:00Z"}),
+        tuple(_list_argv()): _list_response([_issue(9)]),
+        ("gh", "api", "--paginate", "repos/owner/repo/pulls/42/files", "--jq", ".[].filename"):
+            "docs/sdlc/issue-9/lld.md\n",
+        ("gh", "issue", "view", "9", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"state": "OPEN", "comments": _clean_pipeline_comments()}),
+        **_NO_UNIT_WORKTREE,
+    })
+    gh = GitHub(runner=runner)
+    result = cmd_merge_pr(gh, 42, issue=9)
+    assert result["merged"] is True and result.get("recovered") is True
+    # It must NOT try to squash-merge again.
+    assert not any(c[:3] == ["gh", "pr", "merge"] for c in runner.calls)
+
+
+def test_skill_version_info_flags_pin_drift():
+    # Retro #48 regression: running SHA != the repo's pinned submodule SHA -> drift.
+    from sdlc_next import _skill_version_info
+    def runner(argv):
+        a = tuple(argv)
+        if a[-1] == "HEAD" and a[3:5] == ("rev-parse", "HEAD"):
+            return "aaaaaaa\n"  # running skill HEAD
+        if a[-1].startswith("HEAD:"):
+            return "bbbbbbb\n"  # pinned gitlink
+        raise AssertionError(argv)
+    info = _skill_version_info("/driven", runner=runner)
+    assert info["running_sha"] == "aaaaaaa" and info["pinned_sha"] == "bbbbbbb"
+    assert info["drift"] is True
+
+
+def test_skill_version_info_positive_control_no_drift_when_pin_matches():
+    from sdlc_next import _skill_version_info
+    def runner(argv):
+        return "cafe123\n"  # both HEAD and HEAD:<sub> resolve to the same sha
+    info = _skill_version_info("/driven", runner=runner)
+    assert info["drift"] is False
+
+
+def test_run_metric_record_and_report_aggregate():
+    # Retro #59: metrics recorded per stage/agent aggregate into totals and
+    # per-stage / per-agent breakdowns; peak_context is a max, the rest sums.
+    from sdlc_next import cmd_record_run_metric, cmd_run_report
+    epic = 987654
+    cmd_record_run_metric(epic, stage="development", agent="sdlc-development",
+                          tokens_out=100, cache_read=1000, tool_calls=50, peak_context=300000,
+                          duration_ms=6000)
+    cmd_record_run_metric(epic, stage="pr-review", agent="sdlc-pr-review",
+                          tokens_out=40, cache_read=500, tool_calls=20, peak_context=120000,
+                          duration_ms=3000)
+    report = cmd_run_report(epic)
+    assert report["metric_count"] == 2
+    assert report["total"]["tokens_out"] == 140
+    assert report["total"]["cache_read"] == 1500
+    assert report["total"]["tool_calls"] == 70
+    assert report["total"]["peak_context"] == 300000  # max, not sum
+    assert report["by_stage"]["development"]["tokens_out"] == 100
+    assert report["by_agent"]["sdlc-pr-review"]["tool_calls"] == 20
