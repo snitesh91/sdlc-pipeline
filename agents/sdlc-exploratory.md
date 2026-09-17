@@ -67,7 +67,8 @@ repo were lost that way. Blocking calls, or stop and report. Docker only, per th
 
 - **Blocker / Critical** — anything attributable to a surface this epic moved, plus
   unconditionally any access-boundary delta, any 5xx, any crash, any data-integrity
-  problem → **a `Bug` child of this epic**, and it blocks the close.
+  problem → **a `Bug` child of this epic**, and it blocks the close. It is filed
+  Stage-less; the orchestrator routes it (`next-action` reports it as `unstaged`).
 - **Normal / Low** — an unmapped surface, a non-reproducible flake, or a pre-existing
   problem this epic did not touch → **the standing RTB epic**.
 - **Architecture deviation with no functional defect** — the system works but no longer

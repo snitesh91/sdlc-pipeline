@@ -9,7 +9,8 @@ not told to read it.
 
 ## Document altitude — two different documents, two different contracts
 
-`product.md` and `architecture.md` (epic-level, or issue-level for a standing child)
+`product.md` (an Initiative's, or a standing child's) and `architecture.md` (an Epic's,
+or a standing child's)
 are both read by a **human** at a gate, but they are not the same kind of document and
 do not follow the same rules. `lld.md` has **no** human gate and no altitude
 requirement at all — it can stay as technical as the work demands.
@@ -111,9 +112,9 @@ Within that:
 - **`Footprint` and `Implementation notes` appear only in a standing-epic child's
   doc.** That doc is the only design doc `development` ever gets, and the only
   `architecture.md` `parse_footprint` is ever pointed at. **Both are omitted entirely
-  from an epic-level doc**: per-child footprints live in each child's `lld.md`, and
-  implementation depth is that `lld`'s job — putting it in the epic doc duplicates it
-  at the wrong altitude, which is how one epic-level doc grew to many times its useful
+  from an Epic's doc**: per-Task footprints live in each Task's subsection of the
+  Epic's `lld.md`, and implementation depth is `lld`'s job — putting it in the Epic doc
+  duplicates it at the wrong altitude, which is how one epic doc grew to many times its useful
   length (see `references/history.md`).
 
 See "Review altitude" under `arch-review` below for how this shapes review findings.

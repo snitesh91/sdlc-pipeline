@@ -49,8 +49,8 @@ The integration decision is fixed — open the draft PR, then stop; you never ma
 ready or merge it — and the orchestrator owns worktrees and has already told you which
 directory to use, so neither is a decision you make here.
 
-**V2 testing split — know which task you are before you decide what to test.** Under
-epic-level `lld`, an epic always carries two kinds of task: normal functional tasks,
+**Testing split — know which task you are before you decide what to test.** An Epic
+always carries two kinds of task: normal functional tasks,
 and two standing tasks (Integration-test, e2e-test) created alongside them. A normal
 task writes **unit tests only** — no integration tests of its own, that's not a gap,
 it's deferred by design to the standing Integration-test task, which runs the full
@@ -64,7 +64,7 @@ rule says so at the point it matters, but this is the frame to hold going in.
 
 Your design doc depends on which kind of unit you are:
 
-- **A V2 functional Task** (a Task under an Epic, epic-level `lld`): your design is
+- **A functional Task** (a Task under an Epic): your design is
   *only your own* `## Task #<n>` subsection of the Epic's `epic-<n>/lld.md`. Read it
   with `python3 "$SDLC" lld-section --epic <parent-n> --task <n> --repo-path <your
   worktree>` — it prints that one subsection. **Do not read the whole
@@ -73,8 +73,8 @@ Your design doc depends on which kind of unit you are:
   nothing — your subsection is self-contained by design (`sdlc-lld.md`, "The
   document"). Read the Epic's `architecture.md` only if your subsection points you at
   a specific part of it.
-- **A standing-epic child** (V1/standing shape): your design doc is your own
-  `issue-<n>/lld.md` (or `architecture.md`/`product.md`), read in full as before.
+- **A standing-epic child**: your design doc is your own `issue-<n>/architecture.md`
+  (with its `product.md`), read in full.
 
 ## Trust the design; do not redo it
 
@@ -254,8 +254,8 @@ have bitten this repo hardest:
      artifact, not against an earlier draft of the same document.
 
 2. **Every plan-flagged risk is closed against the real system, not mocked away —
-   except a normal V2 task, where this gate does not apply at all.** In V2's
-   epic-level-`lld` model, a normal task writes **unit tests only**; closing
+   except a normal functional task, where this gate does not apply at all.** A normal
+   task writes **unit tests only**; closing
    integration risk against the real system is deferred entirely to the epic's two
    standing tasks (Integration-test, e2e-test) created alongside the functional
    tasks. A normal task's PR is not missing anything by having no integration
@@ -265,7 +265,8 @@ have bitten this repo hardest:
    suites run on. A unit test against a mock does not close an integration risk; it
    tests the mock. If it genuinely cannot be closed there, say so explicitly in the
    PR description and name what would close it. Do not let the mock stand in for the
-   answer. (V1, no epic-level `lld`: this gate applies to every task as before.)
+   answer. (A standing-epic child has no Integration-test task behind it: this gate
+   applies to it in full.)
 3. **"Manually verified" claims cite evidence, not assertion.** Anywhere you write
    that a path was verified manually, attach the concrete observation that proves it:
    terminal output, a log excerpt, a response body, or numbered repro steps someone
@@ -278,7 +279,7 @@ have bitten this repo hardest:
    `git diff origin/<base>...HEAD --name-only`. An AC whose satisfying file is not in
    the diff is not done. Validators have shipped unit-tested and wired into no
    entrypoint, with commit messages reading as a finished build.
-6. **Every numbered task-local decision in `lld.md` is swept, not scanned.** Walk the
+6. **Every numbered task-local decision in your design doc is swept, not scanned.** Walk the
    decisions in order — decision 1, decision 2, decision 3 — and for each one quote the
    code that realises it and write `conform` or `deviate`. This is a sweep over a list
    the design already enumerated for you, so it is bounded and mechanical, and it is
@@ -297,7 +298,11 @@ have bitten this repo hardest:
    > decision and then reading the code.
 
    Deviating is allowed — silently deviating is not. A `deviate` row states what you
-   did instead and why, and goes in the PR description as an explicit delta.
+   did instead and why, and goes in the PR description as an explicit delta. A
+   deviation that is not task-local — the Epic's `architecture.md` itself does not
+   fit what this task has to do — is not yours to absorb: stop and report it in your
+   handoff; the orchestrator cuts an Architecture revision Task and parks this one
+   (`references/epics.md`, "Architecture deviation escalation").
 7. **A build you cite as verification must be a real build.** A stale gitignored
    `*.tsbuildinfo` makes an incremental `nest build` emit nothing and exit 0 — twice on
    epic #159 a "passing" build produced no `dist/main.js`. Delete the stale cache
@@ -501,13 +506,11 @@ closing") — by the epic's standing e2e-test task, which this rule does not app
 On a normal task, if you believe the change genuinely cannot be validated without it,
 say so in your handoff and stop; do not start a run.
 
-**V2: a normal task runs no intermediate IT at all — the two paragraphs below are V1
-behavior, dead for a normal task once epic-level `lld` is in effect.** Integration
-coverage moves entirely to the epic's standing Integration-test task, which runs the
-full suite (not scoped) once every functional task has merged. Kept here for repos
-still on V1's per-task-`lld` shape, and because the standing IT task itself still
-benefits from the same scoping discipline if its own diff is large enough to want an
-intermediate run before its final full pass:
+**A normal task runs no intermediate IT at all.** Integration coverage belongs to the
+Epic's standing Integration-test task, which runs the full suite (not scoped) once
+every functional task has merged. The two paragraphs below are for that standing IT
+task, when its own diff is large enough to want an intermediate run before its final
+full pass:
 
 **Affected-graph scoping (once workspace packages + Turborepo exist).** When the repo
 has explicit package boundaries and a Turborepo DAG, an intermediate run may be scoped

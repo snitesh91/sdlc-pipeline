@@ -4,6 +4,25 @@ Provenance for rules that would otherwise read as arbitrary. Newest first. Keep
 entries to a few lines; the rule itself lives in the spine or its reference file —
 this file records *why* and *when*.
 
+## 2026-09-16 (b) — V1 lifecycle removed; Initiative → Epic → phase-Tasks is the only flow
+
+Operator instruction: the agent definitions no longer work with V1, so the control
+plane stops carrying it. Removed: the parentless-`Type: Feature` epic heuristic
+(`is_epic` now reads `pipeline.classification` only — a standing or legacy epic needs
+the epic label too), the epic's own Product/Architecture phase in `next-action`,
+`--unit epic` on every gate command plus `record-design-review`/`verify-exit`, the
+`epic-<n>-gate-<stage>` sub-branches (`pipeline.branches.gateSuffix`), per-child
+`merge-lld-doc --unit issue` and task-level `lld`, and the `childEntryStage` profile
+toggle. Kept: standing and legacy profiles, `worktree-add`/`sync-branch --unit epic`.
+Two V2 gaps the V1 machinery had been covering, decided with the operator:
+
+- **A Stage-less child filed under an architected Epic is not guessed.**
+  `default_stage` returned `lld` (a task-level pass the epic-level `lld` agent does
+  not do); `next-action` now reports it as `unstaged` for the orchestrator to route.
+- **Architecture deviation re-gates through an Architecture revision phase-Task**,
+  reusing the Architecture-phase Task's mechanics, instead of a second Gate B on the
+  epic issue itself. `pause-for-epic-regate` still parks the reporting unit.
+
 ## 2026-09-16 — retrospective: v2 live integration test — control-plane gaps, a miscalibrated confidence marker, and fan-out cost
 
 First live end-to-end run of the v2 skill (config, skill submodule @v2, vendored

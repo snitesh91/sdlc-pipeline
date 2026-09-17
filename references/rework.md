@@ -6,9 +6,10 @@ Moved out of `references/stage-playbooks.md` on 2026-09-13: every stage agent re
 that file in full, and none of these are a stage agent's decisions. The stage-facing
 half stayed there as "Rework and blockers — what it means for you".
 
-(A design-level deviation found by `lld` against a normal epic's approved
-`architecture.md` has its own path — `references/epics.md`, "Epic-level deviation
-escalation". Everything else below applies to any child of any epic.)
+(A design-level deviation from an Epic's approved `architecture.md` — found by the
+LLD-phase Task, a Task in `development`, or a review — has its own path, an
+Architecture revision Task: `references/epics.md`, "Architecture deviation escalation".
+Everything else below applies to any child of any epic.)
 
 If a later stage (`arch-review`/`lld-review`, `pr-review`) finds a real
 problem attributable to an earlier stage, **do not spawn a fresh subagent and do not

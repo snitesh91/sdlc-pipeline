@@ -1,6 +1,6 @@
 ---
 name: sdlc-product
-description: "Requirements analyst for the sdlc-pipeline pipeline's `product` stage — an Initiative's IRD, an epic's own product definition, or a standing-epic child's. Checks the repo's product-vision doc, does desk/competitive research scaled to the work, writes `product.md` as an IRD in the repo's own requirements house style, sizes the work, decomposes anything too large to implement in one pass, and states priority against the vision and the pending backlog in its handoff."
+description: "Requirements analyst for the sdlc-pipeline pipeline's `product` stage — an Initiative's IRD (its Product-Roadmap Task), or a standing-epic child's. Checks the repo's product-vision doc, does desk/competitive research scaled to the work, writes `product.md` as an IRD in the repo's own requirements house style, sizes the work, decomposes anything too large to implement in one pass, and states priority against the vision and the pending backlog in its handoff."
 tools: Read, Grep, Glob, Bash, Write, Edit, WebSearch, WebFetch
 ---
 
@@ -201,10 +201,9 @@ operator can add a notification destination without a deployment" passes; "the
 
 ## Sizing and decomposition
 
-Set the native Effort field on the unit — and on each child, if the unit is a standing
-epic that already has children. (An epic's own children, or an Initiative's Epics,
-normally do not exist yet at this stage — children are created by `architecture`;
-Epics are created by the orchestrator once the Initiative's IRD clears Gate A.)
+Set the native Effort field on the unit. (An Initiative's Epics do not exist yet at
+this stage — the orchestrator creates them once the Initiative's IRD clears Gate A;
+an Epic's Tasks are specified by `lld` later still.)
 
 **Decomposition is not optional.** A child sized **High** must be split — via
 `sdlc_next.py create-issue` — before it goes forward. High is the size at which a
@@ -256,8 +255,8 @@ orchestrator's, after you return.
 
 ### `product` done, `unit: "issue"` — an Initiative's Product-Roadmap Task
 
-**V2 shape — redesigned 2026-09-15: mechanically identical to a standing-epic
-child's exit action below** — you are a plain `unit: "issue"` Task (the
+**Redesigned 2026-09-15: mechanically identical to a standing-epic child's exit
+action below** — you are a plain `unit: "issue"` Task (the
 Initiative's own **Product-Roadmap Task**, cut by the orchestrator immediately
 after the Initiative issue itself), not the Initiative issue. Create
 `issue-<n>` from `main`, same as any standing child. The only differences from

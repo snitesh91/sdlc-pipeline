@@ -26,8 +26,9 @@ python3 "$SDLC" create-issue \
   --title "..." --body "..." --parent <epic-issue-number>
 ```
 
-No stage label needed — a fresh issue simply has no Stage value, which
-`default_stage()` reads correctly. `--label` accepts a real label (e.g.
+No stage label needed under a standing epic — a fresh issue simply has no Stage
+value, which `default_stage()` reads correctly. Under a non-standing Epic, follow with
+`set-stage` (or let `merge-lld-doc` advance it, for a Task `create-lld-tasks` made). `--label` accepts a real label (e.g.
 `epic:standing`) if genuinely needed.
 
 Every other `gh issue`/`gh pr` porcelain subcommand works with this token, including
@@ -37,7 +38,7 @@ Every other `gh issue`/`gh pr` porcelain subcommand works with this token, inclu
 boards **are** usable (confirmed via `gh project list`, field-list, and the v2
 GraphQL mutations). The pipeline still doesn't *read* board state for decisions —
 Stage/Pipeline Status/Priority/Effort are native Issue custom fields, not board
-fields; the board's own `Status` field gets best-effort epic-level writes only (see
+fields; the board's own `Status` field gets best-effort epic writes only (see
 `references/epics.md`, "Epic board Status"). One real API limitation: a view's
 `groupBy` cannot be set via GraphQL — UI-only.
 
@@ -57,28 +58,33 @@ keep those labels or use its own (e.g. `RTB`).
 
 An ordered array; `resolve_profile(epic)` returns the first entry whose `match` (a
 `{ "label": "<name>" }` or the string `"*"` catch-all) holds against the epic's labels.
-Each entry is a bundle of toggles (`driven`, `epicLevelPhase`, `childEntryStage`,
+Each entry is a bundle of toggles (`driven`, `epicLevelPhase` — `false` = standing,
 `childrenNeedArchitectedEpic`, `closes`, and a `gates` block with
 `skipConfidenceThreshold` / `requiresHumanGateA`); omitted toggles inherit shipped
-defaults, and `gates` inherit the global `pipeline.gates`. The shipped defaults reproduce
-the historical `standing` / `legacy` / `default` behaviour. Full field reference and a
+defaults, and `gates` inherit the global `pipeline.gates`. The shipped defaults are
+`legacy`, `standing` and the `"*"` catch-all `default`. A profile only ever applies to an
+issue `pipeline.classification` already calls an epic — the profile label rides on top
+of the epic classification, it never makes an issue an epic. Full field reference and a
 worked example live in `sdlc.config.sample.json`. `product-review` is universal (not a
 profile toggle); its model is `pipeline.models.product-review` (default opus).
 
 | Category | Mechanism | Meaning |
 |---|---|---|
-| Stage | Native "Stage" field (`Product` / `Architecture` / `Development` / `Testing` / `PR Review` / `LLD`) | Sole source of truth `current_stage()` reads. Set in place as the unit advances (`claim`, `open-dev-pr`). `arch-review`/`lld-review`/`pr-review` set no value of their own (the `PR Review` option exists but nothing writes it) — they run immediately after the stage before them, signaled by comment content. `next-action` assigns `default_stage()`'s value the first time it sees an eligible issue with none set (`lld` for a child of a normal architected epic; else `product`, or `architecture` for a `Bug`). Cleared entirely on issue close (`mark-issue-closed`) and on `_complete_epic_architecture`. |
+| Stage | Native "Stage" field (`Product` / `Architecture` / `Development` / `Testing` / `PR Review` / `LLD`) | Sole source of truth `current_stage()` reads. Set in place as the unit advances (`claim`, `open-dev-pr`). `arch-review`/`lld-review`/`pr-review` set no value of their own (the `PR Review` option exists but nothing writes it) — they run immediately after the stage before them, signaled by comment content. `next-action` assigns `default_stage()`'s value the first time it sees an eligible issue with none set (`product` for an Initiative's child, a standing child or a parentless issue; `architecture` for a standing child or parentless `Bug`). A non-standing Epic's children get **no** default: phase-Tasks are staged by `set-stage`, functional Tasks by `merge-lld-doc`, and a late Stage-less child is reported as `unstaged`. Cleared entirely on issue close (`mark-issue-closed`), and on the Epic itself when `merge-lld-doc` marks it `epic:architected`. |
 | Pipeline Status | Native "Pipeline Status" field (`Todo` / `In Progress` / `Awaiting Human Review` / `Feedback Received` / `Needs Human` / `Done`) | `In Progress` = actually claimed by a live run (crash-recovery marker) — the CI gate-advance path deliberately never sets it. `Awaiting Human Review` / `Feedback Received` = paused at an open gate (the latter is a visibility flip, same gate-pending state — `GATE_PENDING_STATUSES`). `Needs Human` = a resumed agent concluded only the operator can decide. `Todo` = set by the Action's `init-todo-status` job on `issues: opened` (fields have no schema default); the pipeline itself never writes it. `Done` = issue closed — set by the Action's `mark-issue-closed` job on every close, pipeline-driven or manual. Blocked-ness has **no** value here — derived live from `blockedBy`. |
-| Type | Native Issue Type: `Task` / `Bug` / `Feature` | `Feature` **with no parent** = an Epic (there is no separate Epic type). `Bug` fast-tracks to `architecture` **only for a standing-epic child**; against a normal architected epic it starts at `lld` like any child. Everything else is `Task`. |
+| Type | Native Issue Type: `Task` / `Bug` / `Feature` (plus `Initiative`/`Epic` where provisioned) | Unit kind (Initiative / Epic / Task) is read **only** from `pipeline.classification` — label-based by default (`type:initiative` / `type:epic` / `type:task`); a parentless `Feature` is not an epic by itself. `Bug` fast-tracks to `architecture` **only for a standing-epic child** (or a parentless issue); under a non-standing Epic it gets no default stage and is routed by the orchestrator. |
 | Priority | Native "Priority" field (`Urgent`/`High`/`Medium`/`Low`) | Assigned primarily **on epics**. No value = `Medium` for sorting. Readable on children too (`sort_key`) for intra-epic ordering. |
-| Effort | Native "Effort" field (`High`/`Medium`/`Low`) | Assigned at the product stage (epic-level pass sets all children at once). `High` alone is **not** a reason to split a normal-epic child — footprint collision is (see `references/epics.md`). |
+| Effort | Native "Effort" field (`High`/`Medium`/`Low`) | Assigned at the product stage. `High` alone is **not** a reason to split a Task — footprint collision is (see `references/epics.md`). |
 | Relationship (blocking) | Native `blockedBy` (`addBlockedBy` mutation) | ≥1 *open* blocker = not eligible — derived live every `next-action` run, auto-clears when the blocker closes. Set via `mark-blocked <issue> --dep <n>`. |
 | Assignee | Native assignee | Unassigned **is** the agent-owned state (see below). |
 
-A hand-filed **child** needs no Stage value but **must** be linked as a sub-issue of
-an epic before `next-action` will ever see it (the picker only looks at the named
-epic's children). A brand-new **epic** needs nothing — eligible for its epic-level
-phase the moment it exists, unless marked `epic:standing`/`epic:legacy`.
+A hand-filed **child** **must** be linked as a sub-issue of an epic before
+`next-action` will ever see it (the picker only looks at the named epic's children).
+Under a standing epic it needs no Stage value; under a non-standing Epic it needs one
+(`set-stage`), or `next-action` reports it as `unstaged`. A brand-new **Epic** runs
+nothing by itself — the orchestrator cuts its Architecture-phase and LLD-phase Tasks
+(`SKILL.md`, "Cutting an Epic's phase-Tasks"); it must carry the epic classification
+label/type to be recognised at all.
 
 ## Assignee convention
 

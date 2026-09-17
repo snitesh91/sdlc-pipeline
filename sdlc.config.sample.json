@@ -79,8 +79,7 @@
     },
     "branches": {
       "issuePrefix": "issue-",
-      "epicPrefix": "epic-",
-      "gateSuffix": "-gate-"
+      "epicPrefix": "epic-"
     },
     "worktrees": {
       "root": "/tmp",
@@ -152,10 +151,10 @@
       "pr-review": "opus"
     },
     "workItemProvider": {
-      "_comment": "V2 (2026-09-14): which WorkItemProvider get_work_item_provider() returns. Only \"github\" is implemented -- Jira is a documented seam (README.md, \"V2: Initiative-driven lifecycle\"), not built. Naming anything else is a refusal, not a silent fallback.",
+      "_comment": "Which WorkItemProvider get_work_item_provider() returns. Only \"github\" is implemented -- Jira is a documented seam (README.md, \"Initiative-driven lifecycle\"), not built. Naming anything else is a refusal, not a silent fallback.",
       "type": "github"
     },
-    "_classification_comment": "V2: how GitHub.classify_unit tells an Initiative from an Epic from a Task. Defaults here to LABELS, not Issue Types: custom Issue Types are an organization-level GitHub feature (as of 2026) and are not available on a personal (non-org) repo at any plan tier, while labels work identically everywhere -- create the three labels below in your repo and this works with zero further setup. If your repo IS in an org and you'd rather use real Issue Types (Initiative/Epic provisioned as custom types), swap each rule's \"field\" to \"issueType\" and \"value\" to the type's exact name, and add matching entries to projectFields.issueTypeIds above so set_issue_type can write them back. classify_unit returns \"other\", never a guess, for any issue matching none of these.",
+    "_classification_comment": "How GitHub.classify_unit tells an Initiative from an Epic from a Task. Defaults here to LABELS, not Issue Types: custom Issue Types are an organization-level GitHub feature (as of 2026) and are not available on a personal (non-org) repo at any plan tier, while labels work identically everywhere -- create the three labels below in your repo and this works with zero further setup. If your repo IS in an org and you'd rather use real Issue Types (Initiative/Epic provisioned as custom types), swap each rule's \"field\" to \"issueType\" and \"value\" to the type's exact name, and add matching entries to projectFields.issueTypeIds above so set_issue_type can write them back. classify_unit returns \"other\", never a guess, for any issue matching none of these. This is the ONLY way an Epic is recognised -- a standing or legacy epic needs the epic label too, alongside its profile label.",
     "classification": {
       "initiative": {"field": "label", "value": "type:initiative"},
       "epic": {"field": "label", "value": "type:epic"},
@@ -173,7 +172,6 @@
         "name": "standing",
         "match": { "label": "epic:standing" },
         "epicLevelPhase": false,
-        "childEntryStage": "product",
         "childrenNeedArchitectedEpic": false,
         "closes": false,
         "gates": {
@@ -186,7 +184,6 @@
         "name": "default",
         "match": "*",
         "epicLevelPhase": true,
-        "childEntryStage": "lld",
         "childrenNeedArchitectedEpic": true,
         "closes": true
       }

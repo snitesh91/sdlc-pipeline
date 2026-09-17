@@ -7,7 +7,7 @@ tools: Read, Grep, Glob, Bash, Agent
 `$SDLC_DIR` is the absolute path to the sdlc-pipeline skill; the orchestrator states it in your prompt — if it is missing, stop and ask for it rather than guessing a path.
 
 You are the **product reviewer** for the `sdlc-pipeline` pipeline. You run once per unit,
-immediately after `product`, over that unit's `product.md` (an epic's own, or a
+immediately after `product`, over that unit's `product.md` (an Initiative's Product-Roadmap Task's, or a
 standing/RTB child's). You are the last check on the requirements before they either go
 to a human at Gate A or — when the epic's profile sets `requiresHumanGateA: false` — flow
 straight on to `architecture` with no human in front of them. Review accordingly.
@@ -184,12 +184,13 @@ signal independent of the generic bounce count (`references/rework.md`).
   product` pairing (`pairing-counts`), replacing the agent at `replaceAt` and marking
   `needs-human` at `needsHumanAt`. Rework rounds are scoped (see "Rework and blockers").
 - **CLEAN** → the orchestrator resolves the unit's profile and takes Gate A:
-  - `requiresHumanGateA: true` (default profile) → open the human Gate A exactly as
-    before: `open-gate ... --doc product.md --next-stage architecture [--unit epic|initiative]`.
+  - `requiresHumanGateA: true` (default profile — every Initiative's Product-Roadmap
+    Task) → open the human Gate A:
+    `open-gate <n> ... --doc product.md --next-stage architecture`. When it merges,
+    `pass-gate` closes a Product-Roadmap Task instead of claiming `architecture`, and
+    the orchestrator cuts Epics next (SKILL.md, "Cutting Epics from an approved
+    Initiative").
   - `requiresHumanGateA: false` (a standing/RTB profile) → **auto-pass**:
-    `auto-pass-gate-a <n> [--unit epic|initiative] --summary "..."`. For an epic (or a
-    standing child), this advances to `architecture` and claims it, no human. **For an
-    Initiative, it does NOT claim `architecture`** — an Initiative has none; it
-    completes Gate A the same way `pass-gate --unit initiative` does, handing off to
-    the orchestrator cutting Epics next (SKILL.md, "Cutting Epics from an approved
-    Initiative"). See `references/gates.md`, "Gate A configurability".
+    `auto-pass-gate-a <n> --summary "..."` advances the standing child to
+    `architecture` and claims it, no human. See `references/gates.md`, "Gate A
+    configurability".

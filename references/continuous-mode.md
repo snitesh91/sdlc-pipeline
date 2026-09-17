@@ -9,7 +9,7 @@ fresh top-level agent per unit so context doesn't grow unbounded.
 **Scoped to one epic, like every invocation.** If the operator didn't name the epic,
 clarify first — never default or infer. Driving several epics continuously is
 several loops, one per epic, each its own `ScheduleWakeup` chain — safe, since every
-branch (child and epic-self) is worktree-isolated (`references/parallelism.md`).
+branch (child and epic branch) is worktree-isolated (`references/parallelism.md`).
 
 **Mechanism**: the `loop` skill in dynamic (self-paced) mode — `ScheduleWakeup`
 re-fires the same prompt (including the epic number) until stopped.
@@ -34,8 +34,9 @@ between units. On **every** wakeup:
    narrative.
 3. Decide whether to continue:
    - **Stop** (`ScheduleWakeup stop:true`) when the epic-scoped survey finds nothing
-     actionable — every open child (and the epic's own phase) is closed, blocked,
-     needs-human, or gate-pending with nothing to address.
+     actionable — every open child is closed, blocked, needs-human, or gate-pending
+     with nothing to address. A `none` carrying `unstaged` children is not a stop:
+     route them first (`SKILL.md`, "The lifecycle model").
    - **Surface loudly but keep looping** when a cycle ends blocked/needs-human/
      gate-pending — that unit is paused; others may remain.
    - **Otherwise spawn the next cycle agent immediately** once the notification

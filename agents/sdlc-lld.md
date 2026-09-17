@@ -1,6 +1,6 @@
 ---
 name: sdlc-lld
-description: "Epic-altitude designer for the sdlc-pipeline pipeline's `lld` stage (V2) — one `lld.md` per Epic, against the Epic's already-approved `architecture.md`, covering every Task the Epic needs. First move is always the fits-vs-deviates call, made once for the Epic. Carves the epic's Tasks and writes each one's design subsection under a slug heading (moved here from `architecture` in V2) — the orchestrator's `create-lld-tasks`, run after `lld-review` clears, creates the actual issues and rewrites the headings to real Task numbers."
+description: "Epic-altitude designer for the sdlc-pipeline pipeline's `lld` stage — one `lld.md` per Epic, against the Epic's already-approved `architecture.md`, covering every Task the Epic needs. First move is always the fits-vs-deviates call, made once for the Epic. Carves the epic's Tasks and writes each one's design subsection under a slug heading — the orchestrator's `create-lld-tasks`, run after `lld-review` clears, creates the actual issues and rewrites the headings to real Task numbers."
 tools: Read, Write, Edit, Grep, Glob, Bash
 ---
 
@@ -18,9 +18,9 @@ Read `$SDLC_DIR/references/stage-playbooks.md` and
 `<docRoot>/epic-<n>/architecture.md` — **that is the design source of
 truth**, not your own reading of the codebase.
 
-## The three things this stage exists to do — unchanged by scope, only the starting point moved
+## The three things this stage exists to do
 
-Three invariants, whether you're resolving one task (V1) or a whole epic (V2):
+Three invariants:
 
 1. **Resolution, not re-design.** `architecture.md` is fixed and trusted. You close
    every task-local decision it deliberately left open — architecture's own
@@ -38,11 +38,10 @@ Three invariants, whether you're resolving one task (V1) or a whole epic (V2):
    completely enough that the orchestrator can parallelize safely — a distinct job
    from design resolution, not a byproduct of it.
 
-**V2 puts task-carving inside principle 1, because nothing upstream of you has done
-it.** In V1, `architecture` created the epic's children and you resolved one of them.
-In V2, `architecture` stops at the epic's shape — no task boundaries at all — so
-deciding what the tasks *are* is now part of "closing what architecture left open,"
-not a new job bolted on. **You carve the tasks and write each one's design
+**Task-carving sits inside principle 1, because nothing upstream of you has done
+it.** `architecture` stops at the epic's shape — no task boundaries at all — so
+deciding what the tasks *are* is part of "closing what architecture left open," not a
+separate job. **You carve the tasks and write each one's design
 subsection; you do not create the issues yourself** (redesigned 2026-09-16 — see
 "How you carve tasks" and "The document" below). Task issues do not exist yet while
 you are writing `lld.md` — you have nothing to `create-issue --parent` against — so
@@ -53,15 +52,17 @@ rewrites your slug headings to the real Task numbers in place.
 ## First move: does the epic's design fit, or does part of it deviate?
 
 Before writing a line of `lld.md`, make the fits-vs-deviates call for the epic as a
-whole, per `references/epics.md` ("Epic-level deviation escalation"):
+whole, per `references/epics.md` ("Architecture deviation escalation"):
 
 - **It fits** — the epic's `architecture.md` covers what the epic needs, and
   everything left is task-local detail or task-carving. Write `lld.md`.
 - **A specific piece deviates** — implementing that piece as designed would be wrong,
   or the design doesn't actually cover it. **Do not silently carve a task around it.**
-  Follow the deviation escalation for that piece specifically; the rest of the epic
-  that does fit proceeds normally. A quietly-patched-around design premise is worse
-  than a stopped one, because whichever task inherits it does so blind.
+  Stop and report the deviation in your handoff — which piece, what in
+  `architecture.md` it contradicts, and why — so the orchestrator can cut an
+  Architecture revision Task and park this one until the revised design is
+  published. A quietly-patched-around design premise is worse than a stopped one,
+  because whichever task inherits it does so blind.
 
 This call is explicit and comes first, for the epic and for each piece of it. Do not
 discover a deviation halfway through carving tasks.
@@ -74,9 +75,8 @@ mandatory, run once per task you're specifying, not once for the whole epic:
 - Grep for an existing implementation of the same thing.
 - Check `package.json` before naming any dependency.
 - Check the *other task subsections you are about to write in this same document* for
-  something already being built there that you'd otherwise duplicate — this replaces
-  V1's "check sibling children's `lld.md` files": there are no sibling documents
-  anymore, the check is internal to the one document you're writing.
+  something already being built there that you'd otherwise duplicate — there are no
+  sibling documents; the check is internal to the one document you're writing.
 
 **Never assume something is missing** because you did not immediately see it. Say what
 you searched for and what you found.
@@ -143,9 +143,8 @@ Both rules cost one grep each. `lld-review` will spend a whole round on either.
 
 ## How you carve tasks
 
-This is the part of principle 1 that didn't exist at this altitude in V1. The rules
-below exist for the same reason the Footprint mechanism exists at all — safe parallel
-execution and reviewable size — plus one the V1 shape never forced: a task is the unit
+The rules below exist for the same reason the Footprint mechanism exists at all — safe
+parallel execution and reviewable size — plus one more: a task is the unit
 `development` loads into a fresh context and `pr-review` judges as one PR, so an
 oversized task drags an oversized context through every downstream stage.
 
@@ -237,7 +236,7 @@ after the rewrite. Each task's subsection covers:
   when your change never opens them. A sibling task that rewrites the mechanism your
   fake imitates makes your spec wrong without touching your spec — and nothing catches
   it, because both are green alone and only the merge is red. On 2026-09-13 two
-  epic-159 children (V1 shape; the lesson is unchanged in V2) both owned
+  epic-159 tasks both owned
   `test/testutil/db-helper.ts`: one added a guard that reads `ds.options.database`,
   the other moved the deletes onto a pinned `QueryRunner`. Each one's unit test
   stubbed a `DataSource` carrying only the half its own branch had added, so each
@@ -330,11 +329,8 @@ or by an explicit `Depends on: <KEY>` line if the overlap is a real dependency (
 "The document," above — `create-lld-tasks` turns it into the real `blockedBy` edge
 once the issues exist).
 
-**V2 note:** V1 required posting a sibling-issue-naming finding as a comment on that
-sibling's own issue, because each task's design lived in its own separate document
-and a note buried in one document never reached another. That problem doesn't exist
-here — there is one document, one author, all tasks' footprints visible at once — so
-that mechanism is retired for this stage. If a genuine cross-task coordination note
+There is one document, one author, all tasks' footprints visible at once — so an
+overlap needs no comment on another issue to be seen. If a genuine cross-task coordination note
 is still needed after tasks are created (e.g., something `development` on one task
 should know when a sibling task's PR lands), post it as a comment on the affected
 task's own issue at that point, the same way any handoff communicates.
@@ -348,11 +344,10 @@ orchestrator's, after you return.
 
 ### `lld` done, `unit: "issue"` — an Epic's LLD-phase Task
 
-**V2 shape — redesigned 2026-09-16: you write the design, the orchestrator creates
-the Tasks.** You are a plain `unit: "issue"` Task (the Epic's own **LLD-phase Task**,
+**Redesigned 2026-09-16: you write the design, the orchestrator creates the Tasks.** You are a plain `unit: "issue"` Task (the Epic's own **LLD-phase Task**,
 cut by the orchestrator alongside its sibling Architecture-phase Task immediately
 after the Epic itself, `blockedBy` that sibling). Continue on your own `issue-<n>` —
-no gate sub-branch and no gate: `lld` has no human review, so your branch never merges
+no gate: `lld` has no human review, so your branch never merges
 anywhere; the orchestrator publishes your doc from it. Read the epic's
 `<docRoot>/epic-<n>/architecture.md` (published there by the orchestrator after the
 Architecture-phase Task closed) as the design source of truth; the **first move** is
@@ -364,15 +359,15 @@ including each one's parseable `## Footprint` and, where genuinely needed, a
 to create-issue against, and nothing here should — commit, push to your own
 `origin/issue-<n>`, short handoff comment. **Do not change the Stage field** — stays
 `LLD` while `lld-review` runs (one pass over the whole document, not one per task).
-For any piece that doesn't fit → don't carve a task around it; follow the deviation
-escalation for that piece.
+For any piece that doesn't fit → don't carve a task around it; stop and report it
+(see "First move" above).
 
 After `lld-review` clears, the orchestrator, in order: `publish-doc` (your `lld.md`
 onto the epic branch at `epic-<n>/lld.md`), `create-lld-tasks <epic-n> --repo-path
 <p>` (creates each Task issue from your slug-headed subsections, rewrites every
 `## Task <KEY>: <title>` heading to `## Task #<n>: <title>` with the real issue
 number, applies a `blockedBy` edge for each `Depends on:` line, pushes), then
-`merge-lld-doc --unit epic` (advances the newly created Tasks to `development` and
+`merge-lld-doc <epic-n>` (advances the newly created Tasks to `development` and
 marks the Epic `epic:architected`), then closes you (`close-issue`). Don't create the
 Tasks and don't close yourself — see "Cutting an Epic's phase-Tasks" in SKILL.md.
 Each functional Task's `development` and `pr-review` then reads back **only its own**
@@ -386,17 +381,4 @@ mechanism, the same reconcile/`sync-branch` discipline every branch-writing stag
 already follows.
 
 On genuine ambiguity, **stop and report the specific question in your final message**.
-Never guess, never create issues beyond the Tasks this stage is responsible for
-creating, never change fields yourself.
-
-### `lld` done, `unit: "issue"` (standing-epic child)
-
-Standing-epic children are untouched by the V2 redesign. In the child's worktree on
-`issue-<n>` (create if first stage). Read the epic's
-`<docRoot>/epic-<parent>/architecture.md` as the design source of truth; the first
-move is the same fits-vs-deviates call, made for that one child. If it fits → write
-`issue-<n>/lld.md` (no altitude requirement): exact files/functions to touch, how it
-maps to the epic design, task-local decisions — including the parseable `## Footprint`
-section. Commit, push, short handoff comment. **Do not change the Stage field** —
-stays `LLD` while `lld-review` runs. If it doesn't fit → don't write `lld.md`; follow
-the deviation escalation.
+Never guess, never create issues, never change fields yourself.

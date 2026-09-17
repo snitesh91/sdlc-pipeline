@@ -2,9 +2,9 @@
 
 Referenced from `SKILL.md` ("Concurrency"). This file owns the full mechanics of every
 concurrent path in the pipeline and every git rule that keeps them safe. The one-line
-summary: **the epic's own Product/Architecture phase is strictly sequential; everything
-at the child level fans out in bounded, worktree-isolated pools with mechanically
-computed eligibility.**
+summary: **an Epic's design phase (its Architecture-phase Task, then its LLD-phase Task)
+is strictly sequential; everything after it fans out in bounded, worktree-isolated
+pools with mechanically computed eligibility.**
 
 Worktree paths in this file are the defaults from the config's `pipeline.worktrees`
 block — `root` (default `/tmp`) joined with `devPrefix` (`sdlc-dev-`), `epicPrefix`
@@ -18,16 +18,16 @@ is quoted.
 | Work | Concurrency | Detail |
 |---|---|---|
 | `pr-review` (within the one epic being driven) | Up to `PR_REVIEW_PARALLELISM` finished PRs at once, one worktree + one subagent each | "Parallel PR review" below |
-| Epic-level `product` / `architecture` (epic-self, default profile) | **Never**, within one invocation — one epic, one architecture pass at a time | `SKILL.md`, "Epic number is mandatory" |
+| A non-standing Epic's Architecture-phase / LLD-phase Task | **Never** — one at a time, ordered by a native `blockedBy` edge, driven by `next-action` | `references/epics.md`, "How a non-standing Epic runs" |
 | Standing-epic child `product` / `architecture` | Up to `DESIGN_LANE_PARALLELISM` children of one standing epic at once, each in its own `git worktree` — `list-design-ready` computes eligibility mechanically | "Design lane" below |
-| `lld` / `development` | Up to `DEV_LANE_PARALLELISM` children of one epic at once, each always in its own `git worktree` — `list-parallel-ready` computes eligibility mechanically | "Parallel implementation lane" below |
+| `development` / `testing` | Up to `DEV_LANE_PARALLELISM` children of one epic at once, each always in its own `git worktree` — `list-parallel-ready` computes eligibility mechanically | "Parallel implementation lane" below |
 | Rework from any review finding | **One development thread per issue, always** — a finding resumes that issue's own tracked `development` agent; several issues' rework threads may be live at once (one each), but a single issue never has two | "Rework routing stays sequential" below |
 
 **Concurrency across two *different* epics is achieved by running two separate
 `/sdlc-pipeline <epic>` invocations** (different sessions/conversations), not by anything
 inside this script. GitHub-side this is always safe: each invocation's `claim`/field
 writes only ever touch its own epic and children. Git-side, every branch this
-pipeline touches — child `issue-<n>` *and* epic-self `epic-<n>` — lives in its own
+pipeline touches — child `issue-<n>` *and* the epic integration branch `epic-<n>` — lives in its own
 worktree (see "Working on a branch" below), so two invocations never contend for a
 checkout. Two invocations targeting the *same* epic would still race on
 GitHub state — don't do that.
@@ -56,9 +56,9 @@ second one running alongside it.
 
 ## Parallel implementation lane — mechanical eligibility, worktree-always
 
-Applies to children at `lld`/`development`: a **normal,
-already-`epic:architected` epic**'s children (past the epic-level design phase), and a
-standing-epic child once it reaches those stages. A standing-epic child's earlier
+Applies to children at `development`/`testing`: an **already-`epic:architected`
+non-standing Epic**'s Tasks (past its design phase), and a standing-epic child once it
+reaches those stages. A standing-epic child's earlier
 per-issue `product`/`architecture` fans out through the **design lane** instead (see
 "Design lane" below), not this one.
 
@@ -81,27 +81,20 @@ each already checked against:
    outcome, not this command).
 4. **Footprint doesn't overlap** any currently-active child's, or any higher-priority
    candidate already selected earlier in the same call — read off the required
-   `## Footprint` bullet list in the child's own committed `lld.md`/`architecture.md`
-   on `origin/issue-<n>` (see `references/epics.md`, "How to size the children", for
-   the format contract). A child whose branch exists but carries no parseable
-   footprint is excluded, not assumed safe.
+   `## Footprint` bullet list — a Task's own `## Task #<n>` subsection of
+   `epic-<n>/lld.md` on `origin/epic-<n>`, or a standing child's committed
+   `architecture.md` on `origin/issue-<n>` (see `references/epics.md`, "How to size the
+   Tasks", for the format contract). A child with no parseable footprint is excluded,
+   not assumed safe.
 
 The command refuses a non-epic argument, returns empty (with a `note`) for an
 `epic:legacy` or not-yet-`epic:architected` epic — same guard `next-action`'s children
 loop applies — and runs `git fetch origin` first so every origin-ref read (footprints,
 branch existence) reflects current remote state.
 
-**Bootstrap rule — a never-started child needs no footprint.** A fresh child (Stage
-`lld`, or no Stage value yet, with no `origin/issue-<n>` branch) has no committed
-`lld.md` to declare a footprint — the footprint is written *by* the `lld` stage this
-command exists to start, so requiring one would deadlock the lane. Starting `lld`
-itself is safe: it writes only that issue's own `<docRoot>/issue-<n>/`
-folder, which cannot collide with a sibling; that folder stands in as the child's
-footprint for the call's collision bookkeeping. From the next call onward (branch
-exists), the real committed footprint is required. `lld-review` independently checks
-the freshly declared footprint against active siblings before `development` starts —
-that's the check that catches a bootstrapped child whose real footprint turns out to
-overlap one.
+A Stage-less child is never proposed: a non-standing Epic's Tasks are staged by
+`merge-lld-doc` (with their `lld.md` subsection already published, so a footprint always
+exists), and a late Stage-less child is routed by hand (`next-action`'s `unstaged`).
 
 **Ordering rule — worktree before claim.** When starting a child the orchestrator
 creates its worktree *first*, then `claim`s it. The collision set and `active_count`
@@ -110,8 +103,8 @@ to both for that window (and reads as a crashed run to `list-parallel-ready`). *
 resume, base that worktree on `origin/issue-<n>` when the branch exists, never fresh
 off `main`** — see "Resume base" under "Working on a branch" below.
 
-`architecture.md`'s "Execution order" note is optional narrative for a human reader —
-`list-parallel-ready` derives the ordering from `blockedBy` plus per-child footprints
+An "Execution order" note in `lld.md` is optional narrative for a human reader —
+`list-parallel-ready` derives the ordering from `blockedBy` plus per-Task footprints
 every time it's called, rather than trusting a paragraph to stay accurate.
 
 **Mechanics** — every child, solo or concurrent, always gets its own worktree (see
@@ -123,8 +116,8 @@ off, it enters the same `list-ready-for-review` pool as any other child.
 
 ## Design lane — standing-epic children's product/architecture fan out
 
-A **standing** epic (profile `epicLevelPhase == false`) runs no epic-level design
-phase; each child runs its own full `product`→`architecture`→`lld`→`development`
+A **standing** epic (profile `epicLevelPhase == false`) has no Architecture-/LLD-phase
+Tasks; each child runs its own full `product`→`architecture`→`development`
 flow on its own issue number/branch/worktree. Without a pool query for the design
 stages, the orchestrator could only run one child's `product`/`architecture` at a time
 — serializing all design work on a backlog of 20+ children. The design lane fixes
@@ -152,10 +145,10 @@ no shared-source overlap to verify. `active_count` counts only worktrees whose c
 is *itself* in a design stage — a sibling that has moved on to the dev lane holds a
 worktree but is the dev lane's slot, on the dev lane's cap, never a design slot.
 
-**Standing-profile only.** For a default-profile epic (`epicLevelPhase == true`),
-`list-design-ready` returns empty with a `note`: that epic's `product`/`architecture`
-is the epic-level phase — a single epic-self unit run in the `epic-<n>` worktree,
-strictly serial, never fanned out. The gate is the resolved profile's `epicLevelPhase`,
+**Standing-profile only.** For a non-standing Epic (`epicLevelPhase == true`),
+`list-design-ready` returns empty with a `note`: that Epic's design is its
+Architecture-phase Task then its LLD-phase Task, driven one at a time by
+`next-action`, never fanned out. The gate is the resolved profile's `epicLevelPhase`,
 not the hardcoded `epic:standing` label, so a client's own label→profile mapping is
 honoured. The command also refuses a non-epic argument and returns empty for an
 `epic:legacy` epic, and runs `git fetch origin` first so the active-worktree read
@@ -320,7 +313,7 @@ earlier runs' output has vanished with the container.
 
 - **Prevention** is the footprint-overlap check above — non-overlapping footprints
   between siblings is the pipeline's stated design goal (see `references/epics.md`,
-  "How to size the children"), not a constraint invented for parallelism.
+  "How to size the Tasks"), not a constraint invented for parallelism.
 - **Early detection**: `sync-branch` runs before every stage transition on every
   active worktree (see "Keeping a branch current" below), so a conflict that slips
   through surfaces mid-development — while the responsible agent still has full
@@ -447,25 +440,17 @@ incumbent before dispatching, and the replacement takes over the same worktree.
 
 ## Working on a branch — worktree-always, for every branch this pipeline touches
 
-**Epic-self work (`product`/`architecture` on `epic-<n>`) gets its own worktree too**
-— one uniform rule instead of two. (It used to use the shared checkout; that was the
-last second code path, and the only remaining way two invocations could collide.)
-Created by the epic's first stage:
-
-```bash
-git -C <repo-root> worktree add /tmp/sdlc-epic-<n> -b epic-<n> origin/main
-# or, resuming a crashed run / later stage on an existing branch:
-git -C <repo-root> worktree add /tmp/sdlc-epic-<n> epic-<n>
-```
-
-The branch is fully done once the epic reaches `epic:architected` — remove the
-worktree then; nothing works on `epic-<n>` afterward, except a second Gate B round
-from a deviation escalation, which stands the worktree up again on this same branch.
+**The epic integration branch (`epic-<n>`) never has a stage agent working in it** —
+an Epic runs no stage of its own. Nobody commits to it by hand: `publish-doc` lands the
+phase-Tasks' docs, Task PRs merge into it, and `close-epic` reconciles it. When a live
+worktree is wanted anyway (e.g. the closing verification), stand it up with
+`worktree-add <epic-n> --unit epic`, which pushes a fresh epic branch if it cuts one;
+otherwise branch-writing commands use an ephemeral worktree.
 
 **Resuming an existing worktree now fast-forwards it to `origin/<branch>` before
 handing it back.** An epic worktree in particular is long-lived — it can sit untouched
-across several later child merges that landed straight on `origin/epic-<n>` via
-`merge-lld-doc`/`pass-gate`, none of which necessarily touched *this* worktree — so a
+across several later Task merges and doc publishes that landed straight on
+`origin/epic-<n>`, none of which necessarily touched *this* worktree — so a
 naive resume that just reused the local checkout as-is could silently hand the next
 stage a tree missing PRs already merged into origin. `worktree-add` now fetches and
 fast-forwards the local branch to match origin on every resume, and reports
@@ -508,20 +493,22 @@ git -C <repo-root> worktree add /tmp/sdlc-dev-<n> -B issue-<n> origin/issue-<n>
 ```
 
 **Resume base — `origin/issue-<n>` when it exists, never `main`.** A resumed child's
-first stage already pushed its work to `origin/issue-<n>` — its `lld.md` (and, later
+first stage already pushed its work to `origin/issue-<n>` — its design doc (and, later
 stages, its code). A worktree recreated fresh off `origin/epic-<parent>`/`main`
 (e.g. the *create* form above, or a bare `worktree add <path> -b issue-<n> origin/main`)
 silently starts from a tree that has none of it, and the resumed agent rewrites work
 that already existed. This — not a crash losing the file — was the real re-run bug
-(`references/history.md`, 2026-09-04): `lld.md` survives a crash because it is on
+(`references/history.md`, 2026-09-04): the doc survives a crash because it is on
 `origin/issue-<n>`; what dropped it was branching the resume off the wrong base. So on
 any resume, check `origin/issue-<n>` first and base the worktree on it (`-B issue-<n>
 origin/issue-<n>` recreates the local branch at the pushed tip); use the epic-branch
 create form only for a genuinely first-touch child with no `origin/issue-<n>` yet.
 
-Which stage creates it: `lld` for a normal-epic child; `product` for a standing-epic
-child; `architecture` for a bug fast-tracked there. Branch-writing commands
-(`sync-branch`/`pass-gate`/`merge-lld-doc`/`close-epic`) resolve this worktree
+Who creates it: the orchestrator's `worktree-add` — with `--base origin/main` for a
+phase-Task, and at `development` for a non-standing Epic's Task (off
+`origin/epic-<parent>`); `product` for a standing-epic child; `architecture` for a bug
+fast-tracked there. Branch-writing commands
+(`sync-branch`/`pass-gate`/`publish-doc`/`close-epic`) resolve this worktree
 themselves, or create an ephemeral one — see "`--repo-path` means any path inside the
 repository" under "Keeping a branch current"; there is no main-checkout path for any
 branch.
@@ -556,10 +543,11 @@ stages; origin is the recovery point if a session ends mid-unit.
 returns. No `git checkout main && git pull` detour is ever needed; `git fetch origin`
 updates the `origin/main` ref regardless of what's checked out.
 
-**A child branches from its epic's integration branch, not from `main`.** Use
+**A Task branches from its epic's integration branch, not from `main`.** Use
 `origin/epic-<parent>` — the epic's own branch, which already carries every sibling
-merged so far. `origin/main` is correct only for a standing epic's child or a top-level
-issue with no parent; `integration_base()` in the control script is the authority, and
+merged so far. `origin/main` is correct only for a phase-Task (always passed as
+`--base origin/main`), a standing epic's child, an Initiative's Product-Roadmap Task,
+or a top-level issue with no parent; `integration_base()` in the control script is the authority, and
 `sync-branch` reconciles against whatever it returns rather than always `origin/main`.
 
 ## Keeping a branch current — sync before every stage, not just gates
@@ -603,7 +591,7 @@ This is also why gate PRs are never squash-merged: so a later `sync-branch` merg
 `main` back into that same branch is a clean no-op, not a phantom diff.
 
 `--repo-path` means **"any path inside the repository"** on every branch-writing
-command (`sync-branch`, `pass-gate`, `merge-lld-doc`, `close-epic`) — it is where the
+command (`sync-branch`, `pass-gate`, `publish-doc`, `merge-lld-doc`, `close-epic`) — it is where the
 worktree map is read from, not the checkout to write in. The command then operates in
 the branch's own live worktree, or in an ephemeral one it creates and removes when
 nothing holds the branch; it never writes in the main checkout (see "Concurrent
@@ -612,7 +600,7 @@ branch's live worktree for its doc listing; `open-gate` reads `origin/<head>` af
 fetch and needs no working tree at all.
 
 **The main checkout must be on `main`, and since 2026-09-12 the control plane refuses
-to make it otherwise.** Until then a `sync-branch`/`merge-lld-doc`/`pass-gate` run
+to make it otherwise.** Until then a `sync-branch`/doc-publish/`pass-gate` run
 from an orchestrator shell whose cwd was the main checkout could leave that checkout
 *on* a pipeline branch (`epic-<n>`, `issue-<n>`), which forces the branch's real
 `/tmp/sdlc-*` worktree into **detached HEAD** — twice on epic #430 (once under a live
@@ -627,69 +615,49 @@ WIP) → `git push origin issue-<n>`; verify with `git merge-base --is-ancestor`
 the detached HEAD descends from the branch tip before trusting it. Incidents: memory
 `ops_main_checkout_steals_branch`, `sdlc_merge_lld_doc_branch_steal_bug`.
 
-## Publishing lld.md to the epic branch — durable design, sibling visibility
+## Publishing an Epic's docs to the epic branch
 
-A normal-epic child's `lld.md` used to reach the epic branch only when the child's
-whole pipeline merged. As soon as `lld-review` comes back CLEAN, publish it early
-instead:
+A phase-Task's doc is authored on its own `issue-<n>` branch and published onto the
+epic branch at the Epic-scoped path every reader expects:
 
 ```bash
-python3 "$SDLC" merge-lld-doc <n>   # auto-resolves the epic branch's worktree
+python3 "$SDLC" publish-doc <phase-task-n> --doc architecture.md   # run by pass-gate/skip-gate itself
+python3 "$SDLC" publish-doc <lld-task-n> --doc lld.md               # after a clean lld-review
+python3 "$SDLC" create-lld-tasks <epic-n> --repo-path <p>
+python3 "$SDLC" merge-lld-doc <epic-n>
 ```
 
-Run it right after `record-design-review` (see `references/stage-playbooks.md`, the
-`lld-review` exit action). It takes `<docRoot>/issue-<n>/lld.md` verbatim from
-`origin/issue-<n>` and commits **only that one file** onto `epic-<parent>` as a
-doc-only commit, then pushes — not a merge of the whole child branch, so none of the
-child's in-progress code goes with it. Two payoffs: the low-level design is durable on
-the epic branch independent of the still-open `issue-<n>` branch, and every sibling
-picks it up in-tree on its next `sync-branch`, so cross-child overlap checks read the
-real committed design.
+`publish-doc` stages the doc's blob from `origin/issue-<n>` at
+`<docRoot>/epic-<n>/<doc>` as a single doc-only commit on `epic-<n>` (creating the
+branch on origin from `main` if it doesn't exist yet), then pushes — never a merge of
+the Task's branch. `merge-lld-doc <epic-n>` then verifies `epic-<n>/lld.md` is on
+origin, advances every Stage-less Task under the Epic to `Development` and clears its
+Pipeline Status — **advance-not-claim**: no `in-progress`, no start comment — and marks
+the Epic `epic:architected`. Each Task is then a fresh `next-action` /
+`list-parallel-ready` unit. Re-running it skips Tasks already staged.
 
-**It also advances the child — advance-not-claim (2026-09-12).** Once the doc is
-verified on origin, the command sets Stage to `Development` and clears Pipeline
-Status, exactly as `pass-gate --unit epic` hands off to children: no `in-progress`, no
-start comment, no `claim`. `development` is then a *fresh* `next-action` /
-`list-parallel-ready` unit — so a single orchestrator pass can return, say, one
-`development` plus the two sibling `lld`s that were `blockedBy` it, scheduled by lane
-and priority instead of chained opportunistically onto whichever lld finished first.
-Mechanism only: an independent child still goes `lld` → `development` on the very next
-pick; this is **not** "all llds merge before any development starts".
-
-- **Every persisted state maps to one next step** (the old chain left `Stage=LLD,
-  in-progress` with a clean review marker after a crash — an ambiguous resume). Stage
-  is written *before* the status clear, so the only crash window is `Stage=Development,
-  in-progress`, which `next-action` reads as `resume` at `development` — the same work,
-  from `origin/issue-<n>` + the published doc. A crash *before* the field write leaves
-  `Stage=LLD` with the doc already on origin; the re-run lands on `up-to-date`
-  (verified on origin) and still advances. A child already at `Development` is left
-  untouched (`advanced: false`).
-- **`sync-branch` still runs first, every transition.** Decoupling widens the gap
-  between the lld merge and the development pick, so the worktree freshness rule
-  ("Keeping a branch current") matters more here, not less.
-- **Not advanced on a conflict or refusal** — the doc is not on origin, so the child
-  stays at `LLD`; re-run once the branch is quiet.
-
-- **Scope: normal-epic children only.** A standing-epic child (integrates into `main`,
-  not an epic branch) or a parentless issue is a structured no-op at exit 0, never an
-  error.
+- **Scope: a non-standing Epic's children only.** A standing-epic child (integrates
+  into `main`, not an epic branch) or a parentless issue is a structured `publish-doc`
+  no-op at exit 0, never an error.
 - **Idempotent, judged on origin.** The doc's blob on `origin/issue-<n>` is compared
-  with its blob on `origin/epic-<parent>` — identical → `up-to-date` with
-  `verified_on_origin: true`; safe to re-run. The local tree is never the reference:
-  the 2026-09-12 defect was exactly a re-run comparing a working tree that already
-  held the doc (committed on a stale base, push rejected) to itself and reporting
-  `up-to-date` while `origin/epic-<n>` never received the file (memory
+  with the blob at the destination path on `origin/epic-<n>` — identical →
+  `up-to-date` with `verified_on_origin: true`; safe to re-run. The local tree is never
+  the reference: the 2026-09-12 defect was exactly a re-run comparing a working tree
+  that already held the doc (committed on a stale base, push rejected) to itself and
+  reporting `up-to-date` while `origin/epic-<n>` never received the file (memory
   `sdlc_merge_lld_doc_branch_steal_bug`).
 - **`merged: true` is only reported after a post-push fetch shows the blob on
-  `origin/epic-<parent>`.** The commit is replayed from origin's current tip
-  (`checkout -B epic-<n> origin/epic-<n>`, then the doc from `origin/issue-<n>`), so a
-  stale doc-only commit from an earlier rejected attempt is discarded and redone;
-  unpushed local commits touching anything *else* on the epic branch make it refuse.
+  `origin/epic-<n>`.** The commit is replayed from origin's current tip
+  (`checkout -B epic-<n> origin/epic-<n>`, then the doc blob), so a stale doc-only
+  commit from an earlier rejected attempt is discarded and redone; unpushed local
+  commits touching anything *else* on the epic branch make it refuse.
 - **A push refused because the epic branch advanced under it** is retried once from
   the re-fetched tip; still refused → a structured `conflict` result at exit 0 whose
   reason says the doc is **not** on origin (same spirit as `sync-branch`'s conflict),
   never a crash and never a false success. Any genuine operational git failure still
   raises.
+- **Never create the Tasks or advance them before the doc is verified on origin** —
+  `create-lld-tasks` refuses when `epic-<n>/lld.md` is not published.
 
 ## Concurrent multi-epic isolation — N invocations on N epics, zero shared mutable state
 
@@ -703,7 +671,7 @@ still does not.
 ### Git — the main checkout is never a write target
 
 - **Every branch-writing command works in a worktree that holds its branch, never the
-  main checkout.** `sync-branch`, `merge-lld-doc`, `pass-gate` and `close-epic` resolve
+  main checkout.** `sync-branch`, `publish-doc`, `merge-lld-doc`, `pass-gate` and `close-epic` resolve
   the branch's live worktree from `git worktree list`; when nothing holds it (the
   normal state of an epic branch at gate-pass, doc-publish and close time) they create
   an **ephemeral** worktree at `<worktrees.root>/<ephemeralPrefix><branch>-<pid>` from

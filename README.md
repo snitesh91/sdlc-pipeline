@@ -1,8 +1,8 @@
 # sdlc-pipeline
 
 An agent-driven SDLC pipeline over GitHub Issues. One invocation drives actionable
-work — an epic through `product` → `architecture`, then each child through
-`lld` → `development` → `pr-review` → merge — with the design and
+work — an Initiative's `product`, an Epic's `architecture` and `lld` as their own
+phase-Tasks, then each Task through `development` → `pr-review` → merge — with the design and
 implementation stages fanning out into bounded, worktree-isolated parallel pools.
 Eligibility is computed mechanically from native `blockedBy` edges and declared
 footprints, never hand-tracked.
@@ -87,6 +87,8 @@ under `pipeline` in the config, each with a default (see `sdlc.config.sample.jso
 |---|---|---|
 | `parallelism.devLane` / `.prReview` | 3 / 3 | Dev-lane and review-pool caps (top-level, required) |
 | `pipeline.labels.*` | `epic:standing` / `epic:legacy` / `epic:architected` | The three epic labels |
+| `pipeline.classification.*` | `{}` (the sample config uses `type:initiative` / `type:epic` / `type:task` labels) | The **only** way an issue is recognised as an Initiative, Epic or Task — a standing/legacy epic needs the epic classification too |
+| `pipeline.profiles` | `legacy`, `standing`, `"*"` default | Epic behaviour by label: `driven`, `epicLevelPhase` (`false` = standing), `childrenNeedArchitectedEpic`, `closes`, `gates.*` |
 | `pipeline.branches.issuePrefix` / `.epicPrefix` | `issue-` / `epic-` | Branch naming; also how gate PRs are recognised |
 | `pipeline.worktrees.*` | `/tmp`, `sdlc-dev-`, `sdlc-epic-`, `sdlc-review-`, `sdlc-tmp-` | Where the orchestrator puts worktrees; `ephemeralPrefix` names the throwaway worktree a branch-writing command creates when nothing holds its branch |
 | `pipeline.locks.dir` / `.waitSeconds` | `{worktreesRoot}/.sdlc-locks` / 600 | Per-branch `flock` every branch-writing command takes (`SDLC_LOCK_DIR` env overrides the dir) |
@@ -104,12 +106,11 @@ Repo-specific *commands* (lint, test, e2e) are not config — they belong in the
 `sdlc-*` agent definitions and the repo's own `CLAUDE.md`, which every stage agent
 already reads.
 
-## V2: Initiative-driven lifecycle, pluggable issue tracking
+## Initiative-driven lifecycle, pluggable issue tracking
 
-Two lifecycles now coexist:
+Two entry points share one lifecycle:
 
-- **Engineering-driven** (unchanged in spirit from V1) — a bare Epic, manual scope,
-  no product doc. `architecture` asks its own clarifying questions if scope is unclear.
+- **Engineering-driven** — a bare Epic, manual scope, no product doc. `architecture` asks its own clarifying questions if scope is unclear.
 - **Initiative-driven** — product-motivated work. `product` writes one IRD for the
   whole Initiative (market/competitive research, vision-doc awareness, sizing against
   the vision and backlog); once Gate A passes, **the orchestrator itself** — not a
@@ -117,9 +118,14 @@ Two lifecycles now coexist:
   see SKILL.md's "Cutting Epics from an approved Initiative"). Each Epic then runs
   independently from there.
 
-Within an Epic, `lld` moved from Task-level to Epic-level: one `lld.md` covers every
-Task, `lld` itself creates the Task issues (carving footprint/dependency boundaries,
-not even-slicing), and `lld-review` judges both the design and the carving. Every
+Within an Epic, `architecture` and `lld` each run as the Epic's own phase-Task (a
+plain child issue, gated `issue-<n>` → `main`); the Epic issue itself never runs a
+stage. One `lld.md` covers every Task, carving footprint/dependency boundaries rather
+than even-slicing; once `lld-review` is clean the orchestrator publishes it
+(`publish-doc`), creates the Task issues (`create-lld-tasks`) and advances them
+(`merge-lld-doc <epic>`). `lld-review` judges both the design and the carving. A
+design that turns out not to fit is revised through an Architecture revision
+phase-Task, not by re-opening a gate on the Epic. Every
 Epic always carries two standing Tasks — Integration-test and e2e-test — that write
 the coverage a normal Task's unit tests don't; `pr-review` reviews what a normal
 Task's PR actually contains, and epic-close reuses the standing Tasks' attestations
@@ -156,7 +162,7 @@ mkdir -p <repo>/<docRoot>/_templates && cp templates/*.template.md <repo>/<docRo
 
 - **Agent definitions** (`agents/`): `sdlc-product`, `sdlc-product-review`,
   `sdlc-architecture`, `sdlc-design-review`, `sdlc-lld`, `sdlc-development`,
-  `sdlc-pr-review`, `sdlc-exploratory`, `sdlc-initiative-close` (V2). Each carries
+  `sdlc-pr-review`, `sdlc-exploratory`, `sdlc-initiative-close`. Each carries
   persona, procedure, refusal criteria and `tools:` only; pipeline rules stay in
   `references/stage-playbooks.md`. They reference the skill only as `$SDLC_DIR/...`
   (see Setup step 3).
@@ -178,7 +184,7 @@ Still external — not in this repository:
 
 - **GitHub's org-level custom Issue Fields** `Stage`, `Pipeline Status`, `Priority`,
   `Effort` with the option names the sample config lists, plus custom Issue Types
-  (Task/Bug/Feature, and Initiative/Epic for V2) — provisioned once per org via
+  (Task/Bug/Feature, and optionally Initiative/Epic — label-based `pipeline.classification` works without them) — provisioned once per org via
   Settings → Issue types / Issue fields, not a Projects-v2 board.
 
 `references/stage-playbooks.md` and `references/parallelism.md` still quote the

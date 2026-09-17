@@ -27,16 +27,17 @@ says "the repo's own commands", that is where to look.
 
 ## Per-issue docs (the source of record)
 
-Each child issue gets a folder `<docRoot>/issue-<n>/`, committed on the
-`issue-<n>` branch and merged into `main` with the eventual squash-merge. (A normal
-epic's own phase writes into `<docRoot>/epic-<n>/` instead — see
-`references/epics.md`, "Doc layout at the epic level".) **Three filenames exist in
-this pipeline and no others:**
+Each issue that runs a design stage gets a folder `<docRoot>/issue-<n>/`, committed on
+the `issue-<n>` branch. A phase-Task's doc is then published to `<docRoot>/epic-<n>/`
+on the epic branch by `publish-doc` — see `references/epics.md`, "Doc layout at the epic
+level"; a standing child's docs reach `main` with its eventual squash-merge. **Three
+filenames exist in this pipeline and no others:**
 
 | File | Written by | Required? |
 |---|---|---|
-| `product.md` | `product` (standing-epic children only) | Required for a standing-epic child, except a bug fast-track where `architecture` determined no product input was needed. **Never written for a normal-epic child** — that work happened in the epic's own `product.md`. |
-| `architecture.md` (standing-epic child) or `lld.md` (normal-epic child) | `architecture` or `lld` stage | Always — even a child needing no design decisions beyond the epic's `architecture.md` gets a short `lld.md` saying so, for structural consistency |
+| `product.md` | `product` — an Initiative's Product-Roadmap Task, or a standing-epic child | Required for both, except a standing child's bug fast-track where `architecture` determined no product input was needed. **Never written for an Epic's Task** — its requirements are the Initiative's `product.md` (or the Epic's issue body, engineering-driven). |
+| `architecture.md` | `architecture` — an Epic's Architecture-phase (or revision) Task, or a standing-epic child | Always, for those units |
+| `lld.md` | `lld` — an Epic's LLD-phase Task only | Always: one `## Task` subsection per Task the Epic will run |
 
 **`development`, `arch-review`/`lld-review` and `pr-review` write no doc file at all.**
 The two reviews are point-in-time passes whose findings live in the issue comment
@@ -56,9 +57,10 @@ independently**, without reconstructing context from the comment history. A doc 
 double as the stage's working/scratch space (e.g. an internal checklist inside
 `lld.md`), but the filenames above are canonical — no alternate names.
 
-A normal-epic child's `lld.md` and every child's design doc must carry a `## Footprint`
-section in the exact parseable shape defined in `references/epics.md`, "How to size
-the children" — backticked paths, one per bullet.
+Every `## Task` subsection of an Epic's `lld.md`, and a standing child's
+`architecture.md`, must carry a `## Footprint` section in the exact parseable shape
+defined in `references/epics.md`, "How to size the Tasks" — backticked paths, one per
+bullet.
 
 
 ## Citation discipline — every stage, without exception
@@ -327,9 +329,10 @@ agent is guaranteed to read its own definition.
   (`references/gates.md`).
 - **Posting `start-comment <n> --role <role>`** before a review stage, since the
   review agent is dispatched after the marker exists.
-- **`merge-lld-doc`** on a clean `lld-review`, which publishes the doc and advances the
-  child to `development` without claiming it (see SKILL.md, "After the subagent
-  returns").
+- **`publish-doc`, `create-lld-tasks`, `merge-lld-doc <epic>`, `close-issue`** on the
+  LLD-phase Task's clean `lld-review`, which publish the doc, create the Tasks and
+  advance them to `development` without claiming them (see SKILL.md, "After the
+  subagent returns").
 - Exit actions update the same issue's fields in place — **never a new issue for a
   normal handoff.**
 

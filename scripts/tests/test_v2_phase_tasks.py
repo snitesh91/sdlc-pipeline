@@ -231,7 +231,7 @@ def test_epic_announces_lld_md_once_across_publish_doc_and_merge_lld_doc(repo):
     _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", "# lld\n")
 
     s.cmd_publish_doc(gh, str(repo), 11, "lld.md")
-    merged = s.cmd_merge_lld_doc(gh, str(repo), 9, unit="epic")
+    merged = s.cmd_merge_lld_doc(gh, str(repo), 9)
 
     assert merged["advanced_tasks"] == [13]
     announcements = [c for c in gh.comments_on(9) if "`lld.md` published" in c]
@@ -410,8 +410,8 @@ def test_merge_lld_doc_cites_the_epic_branch_commit_and_a_rerun_is_not_merged(re
     _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", "# lld\n")
     s.cmd_publish_doc(gh, str(repo), 11, "lld.md")
 
-    first = s.cmd_merge_lld_doc(gh, str(repo), 9, unit="epic")
-    rerun = s.cmd_merge_lld_doc(gh, str(repo), 9, unit="epic")
+    first = s.cmd_merge_lld_doc(gh, str(repo), 9)
+    rerun = s.cmd_merge_lld_doc(gh, str(repo), 9)
 
     tip = _git("rev-parse", "origin/epic-9", cwd=repo).strip()
     [phase_comment] = [c for c in gh.comments_on(9) if "design phase" in c]
@@ -862,7 +862,7 @@ def test_merge_lld_doc_epic_still_advances_the_tasks_it_finds(repo):
     _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", "# lld\n")
     s.cmd_publish_doc(gh, str(repo), 11, "lld.md")
 
-    merged = s.cmd_merge_lld_doc(gh, str(repo), 9, unit="epic")
+    merged = s.cmd_merge_lld_doc(gh, str(repo), 9)
 
     assert merged["advanced_tasks"] == [13]
     assert gh.issues[13]["stage"] == "development"

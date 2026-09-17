@@ -7,11 +7,12 @@ against them. This is separate from, and unaffected by, the PR-merge auto-approv
 `references/operations.md` ("PRs merge automatically") — that remains fully automatic
 and applies only to the later, code-carrying PR.
 
-**For a normal epic, both gates run once at the epic level**, gating
-`docs/sdlc/epic-<n>/{product,architecture}.md` — pass `--unit epic` to
-`open-gate`/`pass-gate`/`skip-gate`. For a standing-epic child, both gates run per
-issue (`--unit issue`, the default). Mechanics are identical at both levels except the
-one Gate B difference called out below.
+**Every gate runs on an issue, never on an Epic or Initiative issue itself.** Gate A
+gates an Initiative's Product-Roadmap Task (or a standing child's / parentless issue's
+own `product.md`); Gate B gates an Epic's Architecture-phase Task (or Architecture
+revision Task), or a standing child's / parentless issue's own `architecture.md`.
+Mechanics are identical for all of them except the phase-Task difference called out
+below.
 
 **Gate A** — between `product-review` finishing clean and `architecture` starting,
 gating `product.md`. (The universal `product-review` stage runs first; Gate A is only
@@ -34,10 +35,10 @@ profile.
 `Product` with an open Gate A — Pipeline Status `awaiting-human-review` or
 `feedback-received` — across the whole repo at once.** Operator instruction 2026-08-16:
 epic #92 produced five parallel Gate A PRs a single human could not keep up with
-reviewing, and the epic-level product phase fixed that only for default-profile epics —
-a standing/RTB backlog still opens Gate A per child. Enforced by the control plane:
+reviewing; a standing/RTB backlog opens Gate A per child, and every Initiative opens
+one. Enforced by the control plane:
 
-- `next-action` skips a *fresh* `product` delegation (epic-self or child) at the cap
+- `next-action` skips a *fresh* `product` delegation at the cap
   and walks on to the next actionable unit; a `none` reached this way carries
   `product_cap: {limit, pending, deferred}`.
 - `list-design-ready` proposes `product`-stage candidates only up to the remaining
@@ -57,20 +58,17 @@ a standing/RTB backlog still opens Gate A per child. Enforced by the control pla
 **Gate B** — between `arch-review` finishing clean and the next stage starting, gating
 `architecture.md`. **Conditional** — skipped automatically when `arch-review` returns
 a clean verdict *and* self-reported confidence above the threshold; see "Gate B
-confidence skip" below. **What "the next stage" means depends on `--unit`**: for
-`--unit issue`, passing/skipping Gate B claims `development` for that issue. For
-`--unit epic`, it does **not** claim any stage — an epic never develops — it marks the
-epic `epic:architected` and clears its Stage/Pipeline Status entirely, handing off to
-its children's `lld` (see `_complete_epic_architecture` in `sdlc_next.py`).
+confidence skip" below. **What "the next stage" means depends on the issue**: for a
+standing child or a parentless issue, passing/skipping Gate B claims `development`.
+For a **phase-Task** (a child of an Initiative or of a non-standing Epic —
+`phase_task_parent` in `sdlc_next.py`), it claims no stage at all: an
+Architecture-phase Task's `architecture.md` is published to
+`epic-<n>/architecture.md` on the epic branch, then the Task is closed
+(`phase_task_complete: true`); a Product-Roadmap Task just closes. If the publish is
+not verified on origin the Task stays open (`phase_task_complete: false`, with a
+`reason`) — fix it, then `publish-doc <n> --doc architecture.md` and `close-issue <n>`.
 
-Each gate is a **small, doc-only PR**, not a checkbox. Its shape depends on the unit:
-
-- `--unit issue` (standing-epic child): `issue-<n>` → `main`.
-- `--unit epic`: `epic-<n>-gate-<stage>` → `epic-<n>` — a disposable sub-branch of
-  the epic branch (`epic-5-gate-product`, `epic-5-gate-architecture`; the `-gate-`
-  joiner is `pipeline.branches.gateSuffix`). The epic's gate never targets `main`
-  directly; `epic-<n>` itself reaches `main` once, unsquashed, at `close-epic`.
-  Decided 2026-09-06 — see `references/history.md`.
+Each gate is a **small, doc-only PR**, not a checkbox, always `issue-<n>` → `main`.
 
 Merging it *is* the approval signal; any review comment on it is feedback the
 pipeline must address before that merge.
@@ -82,39 +80,28 @@ pushed to the gate's head branch; Gate B specifically once `arch-review` passes 
 on the committed doc. **Where the doc is authored** (the exit-action expectation for
 the `product`/`architecture` stages in `references/stage-playbooks.md`):
 
-- Standing-epic child: on `issue-<n>`, pushed to `origin/issue-<n>` — as always.
-- Epic level: on the gate sub-branch `epic-<n>-gate-<stage>`, cut from
-  `origin/epic-<n>` (in the epic's worktree: `git fetch origin && git checkout -b
-  epic-<n>-gate-product origin/epic-<n>`), committed there, pushed to
-  `origin/epic-<n>-gate-<stage>`. Never commit the doc to `epic-<n>` directly — the
-  epic branch only ever receives merges. A second Gate B round (see
-  `references/epics.md`, "Epic-level deviation escalation") reuses the same
-  `epic-<n>-gate-architecture` name, re-cut from the current `origin/epic-<n>`.
+on `issue-<n>`, pushed to `origin/issue-<n>`, for every unit. A phase-Task's branch
+is cut from `origin/main` (`worktree-add <n> --base origin/main`), never from the epic
+branch — nothing is ever committed to `epic-<n>` directly; the Epic's docs reach it only
+through `publish-doc`.
 
-`open-gate --unit epic` enforces this: it refuses, before any write, when the gate
-sub-branch is missing from origin or carries no commits over `epic-<n>` — the two
-shapes "the doc was committed onto the epic branch instead" takes. Recovery is branch
-surgery on a shared branch (move the commits to the sub-branch, force-rewind
-`epic-<n>`), so it needs operator approval. Added 2026-09-06 — see
-`references/history.md`.
-
-`open-gate` opens the PR from that head against the matching base (`main` for an
-issue, `epic-<n>` for an epic) and returns both as `head`/`base`:
+`open-gate` opens the PR from `issue-<n>` against `main` and returns both as
+`head`/`base`:
 
 ```bash
 python3 "$SDLC" open-gate <n> \
-  --title "<issue/epic title, verbatim>" --doc product.md --next-stage architecture \
-  --summary "<2-3 sentence plain-language summary of what this stage decided/built>" \
-  [--unit epic]   # --repo-path optional: omitted, the branch's live worktree is auto-resolved
+  --title "<issue title, verbatim>" --doc product.md --next-stage architecture \
+  --summary "<2-3 sentence plain-language summary of what this stage decided/built>"
+  # --repo-path optional: omitted, the branch's live worktree is auto-resolved
 ```
 
 The command handles the PR title/body template, sets Pipeline Status to
 `Awaiting Human Review`, looks up the commit SHA, and posts the marked issue/epic
 comment. Your judgment calls: the `--summary` text and picking `--doc`/`--next-stage`
 (A: `product.md` → `architecture`; B: `architecture.md` → `development`;
-`--next-stage` on an epic Gate B is nominal-but-required — no stage is claimed).
+`--next-stage` on a phase-Task's gate is nominal-but-required — no stage is claimed).
 
-The PR **title** must read like a normal PR about the feature — the issue's/epic's own
+The PR **title** must read like a normal PR about the feature — the issue's own
 title verbatim, plus which doc it's gating — never the word "Gate" or a bare "A"/"B".
 ("Gate A"/"Gate B" are internal shorthand for this skill's prose only; they must never
 leak into PR titles, issue comments, or commit messages.)
@@ -122,20 +109,16 @@ leak into PR titles, issue comments, or commit messages.)
 This PR is opened **ready for review, not draft** — its whole purpose is immediate
 human review (a narrow, scoped exception to the global draft-PR rule). It carries
 **no `Closes #<n>`** — merging it must not close the tracking issue; only the final
-development PR closes an issue. How it may be merged depends on the unit:
+development PR closes an issue. How it may be merged depends on the issue:
 
-- A per-issue gate (`issue-<n>` → `main`) is **never squash-merged and never deletes
-  the branch** — `issue-<n>` keeps living through every later stage, and a squash
-  would make the next `sync-branch` merge of `main` a phantom diff.
-- A **V2 phase-Task's** gate (a Product-Roadmap or Architecture-phase Task,
-  `issue-<n>` → `main`) **may be squash-merged**: `pass-gate` closes the Task and
-  releases its worktree, so the branch never takes another stage. Still **do not
-  delete the branch before `pass-gate` runs** — an Architecture-phase Task's
-  `architecture.md` is published to the epic branch from `origin/issue-<n>`.
-- An epic gate (`epic-<n>-gate-<stage>` → `epic-<n>`) **may be squash-merged and the
-  sub-branch may be deleted after the merge** — it is disposable; the doc now lives
-  on `epic-<n>`. What must never be squashed or deleted is `epic-<n>` itself, which
-  merges to `main` only at `close-epic`.
+- A standing child's or parentless issue's gate is **never squash-merged and never
+  deletes the branch** — `issue-<n>` keeps living through every later stage, and a
+  squash would make the next `sync-branch` merge of `main` a phantom diff.
+- A **phase-Task's** gate (a Product-Roadmap, Architecture-phase or Architecture
+  revision Task) **may be squash-merged**: `pass-gate` closes the Task and releases its
+  worktree, so the branch never takes another stage. Still **do not delete the branch
+  before `pass-gate` runs** — an Architecture-phase Task's `architecture.md` is
+  published to the epic branch from `origin/issue-<n>`.
 
 > **Never delete a per-issue branch while its issue is open — its unmerged
 > design docs die with it.** A gate merges only `product.md`; the later-stage docs
@@ -169,12 +152,10 @@ python3 "$SDLC" check-gate <issue-number>
 `.github/workflows/gate-auto-advance.yml` calls the same gate logic automatically the
 instant a human closes a gate PR either way — via `auto-pass-gate --pr <n>`, which
 re-derives the issue and owning stage from the `<!-- gate-pr: stage:pr -->` marker,
-**and derives the unit and number from the head branch** (`issue-<n>` based on
-`main`, or `epic-<n>-gate-<stage>` based on `epic-<n>` — a wrong base, a bare
-`epic-<n>` head (the close-epic integration PR), or a head named for the other stage
-than the marker is skipped as not-a-gate), so it covers per-issue gates and epic-level
-gates alike: a merged epic Gate B routes through `_complete_epic_architecture` (marks
-`epic:architected`), never through a stage claim.
+**and derives the issue number from the head branch** (`issue-<n>` based on `main`;
+any other head or base — including a bare `epic-<n>` head, the close-epic integration
+PR — is skipped as not-a-gate). A merged phase-Task gate routes through the same
+publish-and-close completion as a manual `pass-gate`, never through a stage claim.
 On a merge it calls `pass_gate` with `live=False`: the Stage field advances but the
 stage is deliberately **not** claimed — Pipeline Status is left cleared and no start
 comment posted, because CI firing in real time doesn't mean an agent is about to run
@@ -188,7 +169,7 @@ normally.
 ## Real-time feedback visibility
 
 The same Action's `flag-feedback-received` job reacts to a review/review-comment/plain
-comment landing on an *open* gate PR — per-issue or epic-level — via
+comment landing on an *open* gate PR via
 `mark-feedback-received --pr <n>`, flipping Pipeline Status from `Awaiting Human
 Review` to `Feedback Received` the instant real feedback (non-empty body, not a bare
 approval, not a bot) lands. Visibility only — `evaluate_gate`'s live PR-content
@@ -201,16 +182,15 @@ Spawn a **fresh** agent of the owning stage's `subagent_type` from `SKILL.md`'s
 delegation table (`sdlc-product` or `sdlc-architecture`, both on Opus) — not a
 resumed one; tracked agent IDs don't survive across invocations, and a gate can sit
 open for days. Its prompt carries: the
-issue's/epic's full body/comments, the doc's current content, every unresolved
+issue's full body/comments, the doc's current content, every unresolved
 thread's text plus its anchored diff hunk, and every plain PR comment after the
 cutoff. Instruct it to:
 
-1. Revise `docs/sdlc/<unit>-<n>/<doc>.md` to address each piece of feedback,
+1. Revise `docs/sdlc/issue-<n>/<doc>.md` to address each piece of feedback,
    from either channel — or say explicitly in its reply why something shouldn't be
    applied, never silently ignore it.
-2. Commit and push to the gate PR's head branch — `origin/issue-<n>` for an issue,
-   `origin/epic-<n>-gate-<stage>` for an epic — this updates the open gate PR's diff;
-   no new PR.
+2. Commit and push to the gate PR's head branch, `origin/issue-<n>` — this updates
+   the open gate PR's diff; no new PR.
 3. Reply to each addressed **review thread** summarizing the change, then resolve it
    (`resolveReviewThread` GraphQL mutation on the thread's `id`).
 4. Post one reply **on the PR** addressing the plain comments, ending with a fresh
@@ -238,27 +218,21 @@ run this manually when it hasn't):
 
 ```bash
 python3 "$SDLC" pass-gate <n> \
-  --gate-pr <gate-pr-number> --stage product [--unit epic]   # --repo-path optional: worktree auto-resolved
+  --gate-pr <gate-pr-number> --stage product   # --repo-path optional: worktree auto-resolved
 ```
 
-This reconciles the unit's branch with wherever the gate just landed (merge + push
-back to origin — the branch handed to the next stage is already in sync): `issue-<n>`
-with `origin/main`, or `epic-<n>` with `origin/epic-<n>` (a fast-forward picking up
-the merged gate sub-branch; `main` is not involved — `sync-branch --unit epic` is what
-still reconciles the epic branch with `origin/main`, its integration base). It then
+This reconciles `issue-<n>` with `origin/main`, where the gate just landed (merge +
+push back to origin — the branch handed to the next stage is already in sync). It then
 sets the Stage field to the next stage and claims it (Pipeline Status `In Progress`,
-start comment) — this covers
-a per-issue gate at either stage *and* an epic's Gate A (which claims `architecture`
-on the epic itself); continue straight into that stage's delegation. The one special
-case: **`--unit epic` at `--stage architecture`** (an epic's Gate B) claims nothing —
-it completes the epic's architecture phase instead (same effect as `skip-gate --unit
-epic`); continue into Step 1's next survey — the epic's children are now what's
-eligible.
+start comment); continue straight into that stage's delegation. The special case is a
+**phase-Task**: it claims nothing — an Architecture-phase Task publishes
+`epic-<n>/architecture.md` and closes, a Product-Roadmap Task closes (same effect as
+`skip-gate` on one); continue into Step 1's next survey.
 
 `--stage` is **cross-checked**, not trusted: the command re-derives the gate's owning
 stage from the `<!-- gate-pr: stage:pr -->` marker and refuses (no mutation) on any
 mismatch with `--gate-pr`/`--stage`. Always pass `next-action`'s own
-`stage`/`gate_pr`/`unit` fields verbatim — `--stage` is the gate's owning doc-stage
+`stage`/`gate_pr` fields verbatim — `--stage` is the gate's owning doc-stage
 (which doc was approved), never the stage you're heading toward.
 
 ## Gate B confidence skip
@@ -275,12 +249,13 @@ threshold it applied in its refusal.
 - **Confidence > threshold** → skip Gate B entirely:
   ```bash
   python3 "$SDLC" skip-gate <n> \
-    --stage architecture --confidence <N> --summary "<one sentence: what arch-review checked and confirmed sound>" [--unit epic]
+    --stage architecture --confidence <N> --summary "<one sentence: what arch-review checked and confirmed sound>" \
+    [--repo-path <p>]   # used only for a phase-Task's publish
   ```
-  For `--unit issue`: Stage straight to `Development`, comment recording the score
-  (with the confidence marker), re-claim for `development` — continue immediately,
-  don't park. For `--unit epic`: marks `epic:architected` and clears the epic's
-  fields — continue into Step 1's next survey.
+  For a standing child or parentless issue: Stage straight to `Development`, comment
+  recording the score (with the confidence marker), re-claim for `development` —
+  continue immediately, don't park. For an Architecture-phase Task: publishes
+  `epic-<n>/architecture.md` and closes the Task — continue into Step 1's next survey.
 - **Confidence <= threshold, missing, or verdict has findings** → open Gate B as
   above. The default is always the human gate; skipping must be earned by a high,
   explicit score.
@@ -296,14 +271,14 @@ decision, `gates.requiresHumanGateA` (default `true`). The orchestrator applies 
 on a **clean `product-review`**:
 
 - `requiresHumanGateA: true` (the default profile) → open the human Gate A as always:
-  `open-gate ... --doc product.md --next-stage architecture [--unit epic]`.
+  `open-gate ... --doc product.md --next-stage architecture`.
 - `requiresHumanGateA: false` (a standing/RTB profile) → auto-pass:
   ```bash
-  python3 "$SDLC" auto-pass-gate-a <n> [--unit epic] --summary "<one sentence>"
+  python3 "$SDLC" auto-pass-gate-a <n> --summary "<one sentence>"
   ```
   It refuses (raises) if the resolved profile still requires a human — so a mis-set flag
   fails loud rather than silently skipping a human review. It advances `product ->
-  architecture` and claims `architecture` (both units), leaving a
+  architecture` and claims `architecture`, leaving a
   `<!-- gate-a-auto-passed: <profile> -->` marker as the audit trail. An auto-passed
   Gate A is a **profile decision, not a skipped step** — the marker records that the
   profile, not a human, signed off.
@@ -319,13 +294,12 @@ This is the counterpart to Gate B's confidence skip: Gate B earns its skip per-r
   carries nothing actionable to revise against; ask the operator rather than guess.
   The Action already does this automatically the instant the close happens.
 - Later rework resuming `product`/`architecture` after their gate passed does **not**
-  reopen the merged gate PR or require re-approval — intentionally out of scope. (An
-  epic-level deviation found by `lld` is the one exception; it deliberately opens a
-  *second* Gate B round — see `references/epics.md`, "Epic-level deviation
+  reopen the merged gate PR or require re-approval — intentionally out of scope. (A
+  deviation from an Epic's design is the one exception; it runs a fresh Gate B on an
+  Architecture revision Task — see `references/epics.md`, "Architecture deviation
   escalation".)
-- Never `--delete-branch` when merging a **per-issue** gate PR — `issue-<n>` keeps
-  being used by every later stage. Deleting the **epic gate sub-branch**
-  (`epic-<n>-gate-<stage>`) after its merge is fine; never delete `epic-<n>`.
+- Never `--delete-branch` when merging a standing child's or parentless issue's gate
+  PR — `issue-<n>` keeps being used by every later stage. Never delete `epic-<n>`.
 
 **Development-section linking, for completeness**: `open-dev-pr` appends `Closes #<n>`
 (auto-links, auto-closes); `open-gate`'s body mentions `#<n>` in plain text (links

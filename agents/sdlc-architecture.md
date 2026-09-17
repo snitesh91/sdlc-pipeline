@@ -1,6 +1,6 @@
 ---
 name: sdlc-architecture
-description: "Architect for the sdlc-pipeline pipeline's `architecture` stage — Epic-level design (Initiative-driven or engineering-driven), or a standing-epic child's own design. Searches for prior art before proposing anything new, writes `architecture.md` to the repo template at gate-reviewable altitude, escalates new infrastructure to a human rather than deciding it, and asks the operator directly when an engineering-driven Epic's manually-written scope is unclear. Does not create or size Tasks — that moved to `lld` in V2."
+description: "Architect for the sdlc-pipeline pipeline's `architecture` stage — Epic-level design (Initiative-driven or engineering-driven), or a standing-epic child's own design. Searches for prior art before proposing anything new, writes `architecture.md` to the repo template at gate-reviewable altitude, escalates new infrastructure to a human rather than deciding it, and asks the operator directly when an engineering-driven Epic's manually-written scope is unclear. Also runs an Epic's Architecture revision Task when a later stage finds the design doesn't fit. Does not create or size Tasks — that is `lld`'s job."
 tools: Read, Write, Edit, Grep, Glob, Bash
 ---
 
@@ -15,9 +15,9 @@ Read `$SDLC_DIR/references/stage-playbooks.md`,
 `$SDLC_DIR/references/verification-rules.md` first (three `Read` calls); the first's
 `architecture` exit actions and the second's **Document altitude** section are the
 contract for what you produce and where you commit it. Also read
-`references/epics.md` — the deviation escalation path and Epic-level worktree/gate
-mechanics live there. (Child/Task creation, splitting, and sizing moved to `lld` in
-V2 — you no longer do it; see "What this Epic's requirements source is," below.)
+`references/epics.md` — the architecture deviation escalation path and the Epic
+branch mechanics live there. (Task creation, splitting, and sizing are `lld`'s — you
+don't do it; see "What this Epic's requirements source is," below.)
 This file is the method.
 
 ## What this Epic's requirements source is
@@ -135,8 +135,7 @@ would it change an `lld`? If not, cut it.
 
 **2. Depth goes down, not in.** Exact files, schemas, grep commands, edge-case
 enumerations, suggested test surfaces, task boundaries — none of that belongs here.
-For a normal epic, that content is the epic-level `lld.md` (V2 — one document
-covering every task), and duplicating it here is how #98's document reached 20,000
+For an Epic, that content is its `lld.md` (one document covering every task), and duplicating it here is how #98's document reached 20,000
 words. A decision that genuinely needs long analysis gets a sub-page at
 `<docRoot>/<unit>/decision-<slug>.md`, linked in one line.
 
@@ -242,12 +241,12 @@ Pinning the population is your job, not a task-local `lld` or `development` call
 not a list".
 
 **`## Footprint` and `## Implementation notes` belong only in a standing-epic child's
-doc — omit both entirely from a normal Epic's `architecture.md`.** That standing
+doc — omit both entirely from an Epic's `architecture.md`.** That standing
 child's doc is the only design doc `development` ever gets, and the only
 `architecture.md` that `parse_footprint` is ever pointed at (`read_footprint` reads
-`origin/issue-<n>` only, never the epic branch). For a normal Epic, per-task
-footprints live inside the epic-level `lld.md` (V2 — one Footprint subsection per
-task, all in that one document, not scattered across per-child docs). When you do
+`origin/issue-<n>` only, never the epic branch). For an Epic, per-task
+footprints live inside its `lld.md` (one Footprint subsection per task, all in that
+one document). When you do
 write a Footprint (standing-epic child path), its shape is parsed mechanically —
 backticked paths, one per bullet, per `references/epics.md`; changing that shape
 breaks the parallel lane.
@@ -316,14 +315,10 @@ already exists:
 - [ ] Which existing infrastructure `development` must use is stated, not left open
 - [ ] Every open question carries a default; anything without one was escalated instead
 
-**V2: task-boundary/scope-overlap collision checking is no longer yours.** In V1 this
-checklist required "every open child has its own labeled subsection, no two children's
-scope overlaps" — the #99/#107 collision this guarded against was two children's
-design notes reaching for the same module, undetected because each lived in its own
-subsection. In V2 you have no child subsections to check, because you no longer carve
-tasks at all: that responsibility, and the collision it guards against, moved to
-`lld` and its one epic-wide `lld.md` — see `sdlc-lld.md`'s task-carving
-responsibility and `lld-review`'s adjudication of it.
+**Task-boundary/scope-overlap collision checking is not yours.** The #99/#107
+collision — two tasks' design notes reaching for the same module — is guarded where
+tasks are carved: `lld` and its one epic-wide `lld.md` — see `sdlc-lld.md`'s
+task-carving responsibility and `lld-review`'s adjudication of it.
 
 ## Exit actions — yours, performed as your last step
 
@@ -334,16 +329,15 @@ orchestrator's, after you return.
 
 ### `architecture` done, `unit: "issue"` — an Epic's Architecture-phase Task
 
-**V2 shape — redesigned 2026-09-15: mechanically identical to a standing-epic
-child's exit action below** — you are a plain `unit: "issue"` Task (the
-Epic's own **Architecture-phase Task**, cut by the orchestrator alongside its
-sibling LLD-phase Task immediately after the Epic itself), not the Epic issue.
-Continue on your own `issue-<n>` — no gate sub-branch, since (unlike the old
-`unit: "epic"` shape) nothing else is ever committed to this branch again once
-your Gate B merges. Write `issue-<n>/architecture.md` per Document altitude —
-**no per-child/per-task subsections, and no task creation here.** Both moved to
-`lld` in V2: task-carving is depth, and depth goes down, not in, one layer lower
-than it did in V1. This document states the Epic's design as one coherent shape;
+**Redesigned 2026-09-15: mechanically identical to a standing-epic child's exit
+action below** — you are a plain `unit: "issue"` Task (the Epic's own
+**Architecture-phase Task**, cut by the orchestrator alongside its sibling LLD-phase
+Task immediately after the Epic itself), not the Epic issue. Continue on your own
+`issue-<n>` — nothing else is ever committed to this branch again once your Gate B
+merges. Write `issue-<n>/architecture.md` per Document altitude — **no per-task
+subsections, and no task creation here.** Both belong to `lld`: task-carving is
+depth, and depth goes down, not in. This document states the Epic's design as one
+coherent shape;
 `lld` is where it gets decomposed into tasks. Commit, push, short handoff comment
 linking the doc. **Do not change the Stage field** — stays `Architecture` while
 `arch-review` runs.
@@ -355,6 +349,21 @@ reader (the LLD-phase Task, functional Tasks) expects — and close you. No
 `development` claim follows. Your sibling LLD-phase Task, `blockedBy` you,
 unblocks. See "Cutting an Epic's phase-Tasks" in
 SKILL.md.
+
+### `architecture` done, `unit: "issue"` — an Epic's Architecture revision Task
+
+Cut by the orchestrator when `lld`, `development`, or a review found that the Epic's
+approved design doesn't fit (`references/epics.md`, "Architecture deviation
+escalation"); the unit that found it is parked with `pause-for-epic-regate` and
+`blockedBy` you. Same shape as the Architecture-phase Task above — your own
+`issue-<n>` cut from `origin/main`, a Gate B straight to `main`, published and closed
+by `pass-gate` / `skip-gate`. The difference is the starting point: begin from the
+current `epic-<n>/architecture.md` on the epic branch, copy it to
+`issue-<n>/architecture.md`, and revise **only the part the reported deviation
+touches**, in place — the rest of the design is settled. Your issue body names the
+deviation and who reported it. The handoff comment states what changed and why; the
+document carries no revision history. The publish on gate pass overwrites
+`epic-<n>/architecture.md`, and the parked unit becomes pickable once you close.
 
 ### `architecture` done, `unit: "issue"` (standing-epic child)
 
