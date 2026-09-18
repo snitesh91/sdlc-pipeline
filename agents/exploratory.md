@@ -49,14 +49,9 @@ List each finding with severity, evidence and destination; the orchestrator file
 
 ## Output
 
-Post your findings as a comment on the epic — state what you covered and what you did not —
-then record your half of the closing verification:
-
-```bash
-python3 "$SDLC" record-epic-verification <epic> --kind exploratory --summary "<one sentence>"
-```
-
-Do both even if your prompt asks you to "return" a summary — returning is in addition, never
-instead: `close-epic` refuses to merge without this marker. Then end your final message with
+The orchestrator records the exploratory half of the closing verification with your findings
+as its comment — you post and record nothing. Return that findings comment: what you covered
+and what you did not, then each finding's severity, evidence and destination. Then end your
+final message with
 `SDLC-RESULT: {"issue": <epic>, "stage": "exploratory", "outcome": "done"}` (`blocked` when
 the branch was not reconciled, `failed` when you could not run the system).

@@ -1,5 +1,5 @@
 {
-  "_comment": "The one home of model and fan-out policy; agent_guard.py enforces it. pipeline.models.<role> / pipeline.fanout.<role> in the driven repo's config override it (a role's entry replaces the default whole). A fanout role absent here may not fan out.",
+  "_comment": "The one home of model and fan-out policy; agent_guard.py enforces it. pipeline.models.<role> / pipeline.fanout.<role> in the driven repo's config override it (a role's entry replaces the default whole). A fanout role absent here may not fan out. `explore`: stage roles that may launch the read-only Explore agent for search (not a fan-out; its own model).",
   "orchestrator": {"model": "sonnet", "_comment": "Informational: the main session runs at skills/run/SKILL.md's frontmatter model, which must match."},
   "models": {
     "product": "opus",
@@ -13,6 +13,7 @@
     "exploratory": "sonnet",
     "initiative-close": "opus"
   },
+  "explore": ["development", "lld"],
   "fanout": {
     "product-review": {"allowed": false},
     "arch-review": {"allowed": true, "maxChildren": 2, "model": "sonnet", "axisModels": {}},

@@ -15,7 +15,7 @@ First, Read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md` and
 `${CLAUDE_PLUGIN_ROOT}/references/verification-rules.md` (two `Read` calls).
 
 - **No finding quota.** A manufactured finding costs a rework round.
-- **A clean review is a real outcome.** If the layers ran and found nothing, say so and merge.
+- **A clean review is a real outcome.** If the layers ran and found nothing, say so and record it clean.
   (A layer that *failed to run* is different — see Step 2.)
 - **Review what is present.** A normal functional Task has unit tests only; its Epic's standing
   Integration-test and e2e-test Tasks carry integration/e2e coverage. Never bounce a normal Task
@@ -202,26 +202,22 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
 
 **Verdicts:**
 
-- **CLEAN** — nothing blocking, all layers ran. Merge.
+- **CLEAN** — nothing blocking, all layers ran.
 - **CONDITIONAL ACCEPT** — nothing blocking; named non-blocking findings ride along. State
-  each condition and what closes it. Merge, and write the residue where it will be seen again
-  (an issue or the merge comment), not only in the review thread.
+  each condition and what closes it, and write the residue where it will be seen again (an
+  issue or your review comment), not only in the review thread.
 - **REWORK** — one or more blocking findings, or CI failing.
 
 ## Exit actions — yours, in order
 
-1. **Whatever the verdict, as the review's last action before merging or resuming anyone:**
+1. **Whatever the verdict, as the review's last action:**
    `python3 "$SDLC" record-pr-review <n> --pr <pr> --outcome clean|rework --summary "..." [--same-class-recurrence]`
    (CLEAN and CONDITIONAL ACCEPT → `clean`; REWORK → `rework`).
 2. Then by branch:
 
-- **Clean** → `python3 "$SDLC" merge-pr <pr> --issue <n>` — marks ready, squash-merges, deletes
-  the branch, posts the audit-trail and closing comments. It re-checks CI itself; do not call
-  `pr-checks` just to pre-confirm (use it only for the pending/failed/missing distinction).
-  - Refused with `{"merged": false, "behind_base": N}` → `python3 "$SDLC" sync-branch <n>`,
-    get fresh green CI or a fresh `record-local-ci` for the new head, re-run `merge-pr`
-    (`references/parallelism.md`, "Git-conflict handling").
-    `carried_attestation_forward: true` means it merged.
+- **Clean** → return. You never merge the diff you reviewed; the orchestrator runs
+  `merge-pr` after your record. Use `pr-checks` only for the pending/failed/missing
+  distinction.
 - **`pr-checks` status `missing-checks`** → never poll it; no GHA run is coming on a child PR.
   - **A main-only required suite not attested for this head** (the common case, not a defect —
     `development` skipped `record-local-ci`, or a rework push staled it) → re-run the suite on

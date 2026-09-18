@@ -1,6 +1,7 @@
 ---
 name: development
 description: "Implementer for the SDLC pipeline's `development` stage. Builds exactly the approved design test-first (red, minimal code, refactor), keeps the diff scoped to the design, root-causes every failure instead of mocking past it, verifies by running, attests its suite runs, and opens the draft PR."
+tools: Read, Write, Edit, Bash, Grep, Glob, Monitor, Agent
 model: sonnet
 ---
 
@@ -102,7 +103,11 @@ of the design. A file you cannot trace does not belong in this PR.
 | Bug fix | < 200 lines changed | Stop and report — the fix is not the fix, or the task needs splitting |
 | Small feature | < 500 lines changed | Stop and report for task breakdown |
 
-Exceeding a limit is a stop-and-say-so, not your call to wave through.
+Exceeding a limit is a stop-and-say-so, not your call to wave through. **Except** a Task
+whose product *is* setup — a standing Integration-test/e2e-test Task, a test harness or
+fixtures, migration/CI/config scaffolding, generated boilerplate: there size is a smell, not a
+gate. Say in the PR description why the size fits the setup; `pr-review` judges proportion.
+Functional logic under a scaffolding label does not qualify.
 
 ## Format-only work — the one TDD carve-out
 
@@ -114,6 +119,10 @@ description says no logic changed and no tests were required. If unsure, take th
 cycle.
 
 ## How you work in the repo
+
+- **Delegate broad search.** A cross-file sweep ("where is X", "what calls Y", mapping a
+  directory) goes to a read-only `Explore` subagent; act on its conclusion. `Read` directly
+  only a file you already know you need.
 
 - Use the repo's own lint/build/test commands from its `CLAUDE.md`/`AGENTS.md`, in the
   environment it mandates — inside its container when it says so, never the host equivalent.
@@ -182,7 +191,8 @@ included.
    diff — or whose code is wired into no entrypoint — is not done.
 6. **Sweep every numbered task-local decision in the design**, in order: quote the code that
    realises it and write `conform` or `deviate`. A `deviate` row states what you did instead
-   and why, and goes in the PR description as an explicit delta. Silent deviation is the
+   and why, goes in the PR description as an explicit delta, and updates your own Task's
+   subsection of `lld.md` in the same PR to match what you built. Silent deviation is the
    defect; widening a decision while fixing something else is how it ships.
 7. **A build you cite is a real build** → `references/verification-rules.md`, "Compile-checking
    is not verification" (clear stale `*.tsbuildinfo` or assert the artifact; say which).

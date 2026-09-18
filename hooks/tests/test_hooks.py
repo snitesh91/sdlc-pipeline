@@ -208,13 +208,11 @@ ROLE_ALLOWED = [
     ("sdlc:development", CP + "record-local-ci --pr 9 --suite backend --sha a --command c --output o"),
     ("sdlc:development", "python3 /p/scripts/sdlc_next.py handoff-to-pr-review 5 --pr 9 --summary s"),
     ("sdlc:development", 'git commit -m x && git push origin issue-5'),
-    ("sdlc:pr-review", CP + "merge-pr 9 --issue 5"),
-    ("sdlc:pr-review", CP + "sync-branch 5"),
     ("sdlc:pr-review", CP + "record-pr-review 5 --pr 9 --outcome clean --summary s"),
     ("sdlc:pr-review", "git restore src/a.ts && git status"),
     ("sdlc:design-review", CP + "record-design-review 5 --role lld-review --outcome clean --summary s"),
     ("sdlc:product-review", CP + "record-design-review 5 --role product-review --outcome rework --summary s"),
-    ("sdlc:exploratory", CP + "record-epic-verification 9 --kind exploratory --summary s"),
+    ("sdlc:exploratory", CP + "show-config"),
     ("sdlc:initiative-close", CP + "check-initiative-closeable 1"),
     ("sdlc:initiative-close", CP + "record-initiative-verification 1 --summary s"),
     ("sdlc:lld", CP + "lld-section --epic 9 --task 5 --repo-path /w"),
@@ -226,6 +224,10 @@ ROLE_ALLOWED = [
 ROLE_DENIED = [
     ("sdlc:development", CP + "set-stage 5 --stage pr-review", "orchestrator"),
     ("sdlc:development", CP + "merge-pr 9 --issue 5", "orchestrator"),
+    ("sdlc:pr-review", CP + "merge-pr 9 --issue 5", "orchestrator"),
+    ("sdlc:pr-review", CP + "sync-branch 5", "orchestrator"),
+    ("sdlc:exploratory", CP + "record-epic-verification 9 --kind exploratory --summary s",
+     "orchestrator"),
     ("sdlc:product", CP + "create-issue --parent 1 --title t --body b", "orchestrator"),
     ("sdlc:architecture", CP + "mark-needs-human 5 --reason r", "orchestrator"),
     ("sdlc:lld", 'SDLC=x; "$SDLC" finish-lld 5 --epic 9 --repo-path /w', "orchestrator"),
@@ -509,6 +511,13 @@ def test_agent_guard_denies_fanout_where_not_allowed(tmp_path, sdlc_repo, parent
     assert out["permissionDecision"] == "deny" and "single pass" in out["permissionDecisionReason"]
 
 
+def test_agent_guard_lets_explore_roles_launch_explore_only(tmp_path, sdlc_repo):
+    for role in ("development", "lld"):
+        assert launch(sdlc_repo, tmp_path, "Explore", parent=("p1", f"sdlc:{role}")) is None
+    out = launch(sdlc_repo, tmp_path, "Explore", parent=("p1", "sdlc:pr-review"))
+    assert out["permissionDecision"] == "deny" and "single pass" in out["permissionDecisionReason"]
+
+
 def test_agent_guard_enforces_max_children(tmp_path, sdlc_repo):
     parent = ("p1", "sdlc:design-review")
     assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)) == "sonnet"
@@ -633,6 +642,26 @@ def test_subagent_stop_records_metrics(tmp_path, sdlc_repo):
     assert (rec["issue"], rec["stage"], rec["outcome"], rec["epic"]) == (13, "development", "done", 9)
     assert rec["role"] == "development" and rec["session_id"] == "sess" and rec["repo"] == "o/r"
     assert rec["parent"] == {"spawn_depth": 1, "tool_use_id": "tu1"}
+
+
+def test_metrics_record_counts_tool_calls_peak_context_and_the_run(tmp_path, sdlc_repo):
+    data, runs = str(tmp_path / "data"), tmp_path / "runs"
+    _run_state(runs, "sess")
+    transcript = _agent_transcript(tmp_path)
+    with open(transcript, "a") as f:
+        for tool_id in ("t1", "t2", "t1"):  # a streamed tool_use can repeat across lines
+            f.write(json.dumps({"type": "assistant", "timestamp": "2026-09-18T10:02:00Z",
+                                "message": {"id": "m4", "role": "assistant", "model": "claude-opus-5",
+                                            "usage": _usage(50, 1),
+                                            "content": [{"type": "tool_use", "id": tool_id}]}}) + "\n")
+        f.write(json.dumps(_assistant("m5", "claude-sonnet-5", _usage(1, 1), RESULT,
+                                      ts="2026-09-18T10:02:30Z")) + "\n")
+    run_hook("subagent_stop.py", _stop_payload(sdlc_repo, transcript),
+             env={"CLAUDE_PLUGIN_DATA": data, "SDLC_RUNS_DIR": str(runs)})
+    [rec] = _records(data)
+    assert rec["tool_calls"] == 2
+    assert rec["peak_context"] == 1000 + 4000 + 100_000  # m1's input + cache write + cache read
+    assert rec["run_id"] == "r-1"
 
 
 def test_subagent_stop_records_non_sdlc_agents_without_a_result(tmp_path, sdlc_repo):

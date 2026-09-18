@@ -16,6 +16,10 @@ These rules apply whatever a stage calls its axes or layers:
   analysis, because two agents running the same command in one worktree collide.
 - **Wait for every dispatched child before you form a verdict or post anything.** A
   verdict that leaves out a dispatched axis claims coverage you did not have.
+- **Persist each child's reply the moment it lands** — one file per axis
+  (`<scratchpad>/review-<n>/<axis>.md`), never once at the end. Resuming a pass that died
+  mid-way (a rate limit, a crash), read those files first and re-dispatch only the axes
+  with none; a persisted candidate is still verified before it becomes a finding.
 
 ## A fan-out child's reply is terse too — same contract, one layer down
 

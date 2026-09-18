@@ -154,8 +154,25 @@ A Task is what `development` loads into a fresh context and `pr-review` judges a
   - `frontend/app/(admin)/sellers/**`
   ```
 
-  Any heading level and a numeric prefix (`## 12. Footprint`) parse. The list ends at the
-  next heading. Exact file paths or directory-prefix globs only; no mid-path wildcards.
+  The heading is exactly `Footprint` at any level (a numeric prefix `## 12. Footprint` or a
+  trailing colon parse; `## Footprint overlap ...` does not). The list ends at the next
+  heading or at a bold sub-label (`**Verify-only:**`): paths under one are read, not owned,
+  and never count as overlap. Exact file paths or directory-prefix globs only; no mid-path
+  wildcards.
+- **A shared contract no path shows gets a `Contract` heading** in the Task subsection:
+  an API shape, a pinned count or allow-list size, a DB invariant, an enum's members. One
+  bullet each, `reads:` or `changes:` —
+
+  ```markdown
+  ## Contract
+
+  - changes: `GET /api/pinned` response — pinned-count max 12
+  - reads: seller-role permission set
+  ```
+
+  `lld` declares them when it carves the Tasks. `lld-review`, and the orchestrator before
+  running two Tasks at once, treat a `changes:` that another in-flight Task `reads:` or
+  `changes:` like a footprint overlap.
 - **An Epic's `architecture.md` carries no Footprint** — nothing reads one there.
 - A missing or unparseable footprint excludes the Task from the parallel lane ("cannot
   verify non-overlap", never "no risk") and is an `lld-review` finding, as is a footprint
@@ -179,7 +196,7 @@ Task in `development`, a review) first decides whether its work fits it:
      `epic-<n>/architecture.md`; `pass-gate`/`skip-gate` publish the revised doc over it
      and close the Task.
   3. Once its gate PR is open, park the reporting unit:
-     `pause-for-epic-regate <n> --epic <epic-n> --gate-pr <pr>` (resets Pipeline Status
+     `pause-for-epic-regate <n> --epic <epic-n> --gate-pr <pr> --found-by <stage>` (resets Pipeline Status
      to `Todo` only, posts a linking comment; the `blockedBy` edge holds it until the revision
      closes). An LLD-phase Task then resumes `lld` against the revised doc; if `lld.md`
      must change, re-run the LLD pass before the affected Tasks proceed.
@@ -248,8 +265,10 @@ never reaches `main`; publish it). Remaining items: closing verification, then t
 
 **Closing verification — two runs in parallel, both by the pipeline**: the **full e2e
 suite** (against the epic's stack, built from the reconciled branch) and an
-**exploratory pass** (`sdlc:exploratory`). Record each with
-`record-epic-verification <n> --kind e2e|exploratory`. Run both in the epic branch's
+**exploratory pass** (`sdlc:exploratory`). The agents return verdicts; **you** record each
+half with `record-epic-verification <n> --kind e2e|exploratory --summary "..."` (the
+exploratory summary is the findings comment the agent returned) — an agent never records
+it. Run both in the epic branch's
 worktree (`worktree-add <n> --unit epic`), never the main checkout. Evidence older than the last
 `origin/main` reconcile counts as missing. **Never record a verification you did not run
 clean.**
@@ -276,6 +295,13 @@ the specs for surfaces that child moved.
 
 Pin the confirmation procedure (retries, workers, what counts as a stable delta) in the
 e2e-test Task's `## Task` subsection — two single zero-retry runs are not a comparison.
+
+**Close-blocker lane — only with operator authorisation.** A Blocker/Critical fix that
+passes the *fits* test ("Architecture deviation escalation") may skip `lld` and go
+straight to `set-stage <n> --stage development` against the epic branch; without the
+operator's say-so it runs the full lane. **Any non-docs change to `epic-<n>` after the
+reconcile invalidates both closing verifications** — re-run both; the CLI only notices a
+`main` reconcile. A docs-only change invalidates neither.
 
 **Every manual-testing finding is its own `Bug` child of the epic**
 (`create-issue --parent <epic> --type Bug`), never folded into the closing comment. It is

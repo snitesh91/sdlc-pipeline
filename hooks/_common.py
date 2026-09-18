@@ -83,11 +83,12 @@ def policy_file() -> dict:
 
 def model_policy(config: dict) -> dict:
     """hooks/model_policy.json with the config's `pipeline.models` / `pipeline.fanout` merged
-    over it per role, as sdlc_next.py's `show-config` reports it."""
+    over it per role, as sdlc_next.py's `show-config` reports it; `explore` as shipped."""
     policy = policy_file()
     user = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
-    return {key: {**(policy.get(key) or {}), **(user.get(key) or {})}
-            for key in ("models", "fanout")}
+    merged = {key: {**(policy.get(key) or {}), **(user.get(key) or {})}
+              for key in ("models", "fanout")}
+    return {**merged, "explore": policy.get("explore") or []}
 
 
 def sdlc_role(agent_type) -> str:

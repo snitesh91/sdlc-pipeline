@@ -84,6 +84,9 @@ The caps bound agents, not suite runs; the machine's memory/CPU is the real limi
   `pr-review` running the integration or e2e suite), whatever the cap. A light stage
   (`lld`, a design review not running suites) may run alongside. Hold the second
   suite-heavy stage until the first finishes.
+- A Task whose acceptance criterion is a wall-clock budget holds the Docker VM alone for
+  that measurement: quiesce every other Docker-using stage on the machine first, light
+  ones included, and hold them until it finishes.
 - Tell suite-running agents: a suite too big to run single-process runs in memory-scoped
   batches that partition the whole tree (record which batch covered which directories);
   run the integration suite backgrounded/chunked, never one blocking foreground call.
@@ -125,11 +128,17 @@ difference is minutes.
   `development`, counted by `pairing-counts <n>` (→ `references/rework.md`).
 - `base_missing: true` → nothing to reconcile yet; proceed.
 - **Merge-time freshness gate:** `merge-pr` returns `merged: false` + `behind_base` →
-  `sync-branch`, get fresh green CI / a fresh `record-local-ci` for the new head, re-run
-  `merge-pr`. `carried_attestation_forward: true` means it merged; nothing to do.
+  `sync-branch`, resume `development` to re-run and `record-local-ci` the new head (or
+  wait for green CI), re-run `merge-pr`. `carried_attestation_forward: true` means it
+  merged; nothing to do.
 - `merge-pr` fails because GitHub reports the PR non-mergeable → treat as a sync
   conflict (resume `development`); never blindly retry.
 - `publish-doc`/`finish-lld` returns `conflict` → the doc is not on origin; re-run.
+- An `epic-<n>` ← `main` conflict (`close-epic`, `sync-branch --unit epic`) has no stage
+  agent: resolve it yourself in the epic worktree, or dispatch a `development` agent for
+  that one reconcile — never a child's tracked agent. A clean textual merge is not enough:
+  re-check what no file conflict shows (a count or allow-list both sides pinned, specs
+  moved on one side, a footprint the merge widened).
 
 ## Working on a branch
 
@@ -145,7 +154,11 @@ difference is minutes.
 - **Keeping a branch current:** `transition` runs `sync-branch` before every stage
   (skip it only right after `pass-gate`/`skip-gate`). You and other agents never run
   `sync-branch` while an agent of the same unit is live — it moves that worktree under the
-  agent. The live agent itself may (e.g. `pr-review` after a `behind_base` refusal).
+  agent. The live agent itself may.
+- The gitignored `.env.<profile>` / `.secrets.<profile>` live only in the main checkout.
+  For a stage that runs e2e or a live-credential check, symlink them into its worktree
+  (`ln -s <repo-root>/.secrets.<profile> <worktree>/`) or name their main-checkout path
+  in the prompt; otherwise it wrongly concludes no credentials exist.
 - `mark-needs-human`, `mark-blocked` and `merge-pr` release the unit's worktree
   themselves (`worktree` key). Remove by hand only review worktrees and leftovers when
   an invocation ends.
@@ -158,6 +171,10 @@ difference is minutes.
   worktree was left on a detached HEAD: commit WIP there, confirm with `git merge-base
   --is-ancestor` that it descends from the branch tip, then `git checkout -B <branch>`
   in that worktree and push.
+- Config is read from the command's own checkout: `record-local-ci` in a child worktree
+  sees the epic branch's config, `merge-pr`/`close-epic` in the main checkout see
+  `main`'s. Land config changes on `main` (their own PR) so the gate enforces what the
+  branches attest against.
 - Caps and the one-suite-heavy-stage rule are machine-wide, but nothing enforces the
   latter across invocations; keep it by hand. (Cross-epic coordination file: DEFERRED,
   not built.)

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import fnmatch
 import io
 import json
 import os
@@ -85,8 +86,8 @@ MAX_TASKS_PER_RUN = _PARALLELISM.get("maxTasksPerRun", 0)
 
 HUMAN_ASSIGNEE = CONFIG["humanAssignee"]
 
-with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                       "hooks", "model_policy.json")) as _f:
+PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(PLUGIN_ROOT, "hooks", "model_policy.json")) as _f:
     _MODEL_POLICY = json.load(_f)
 
 # Everything below is tunable per repo via the optional `pipeline` block in the
@@ -126,8 +127,6 @@ _PIPELINE_DEFAULTS = {
     # fresh `product` delegation starts (resumes/rework are never gated). 0 disables.
     "productWip": {"maxGateAPending": 5},
     "escalation": {"replaceAt": 3, "needsHumanAt": 6},
-    "retro": {"everyClosedIssues": 5,
-              "watermarkFile": "{docRoot}/retro-watermark"},
     "continuous": {"cycleCap": 8},
     # `auto`: the orchestrator runs the final `close-epic` itself; close-epic's own
     # refusals (open children, stale verification, failing checks) still apply.
@@ -170,7 +169,6 @@ def _pipeline_config() -> dict:
             merged[key] = {**default, **(user.get(key) or {})}
         else:
             merged[key] = user.get(key, default)
-    merged["retro"]["watermarkFile"] = merged["retro"]["watermarkFile"].format(docRoot=DOC_ROOT)
     return merged
 
 
@@ -217,6 +215,17 @@ STAGE_FIELD_NAMES = {
     # Retired: nothing writes it; still read so an issue left at it is picked up.
     "Testing": "testing",
 }
+
+# Every accepted spelling of a Stage (field value or slug, any case, space or hyphen) -> slug.
+_STAGE_ALIASES = {spelling.lower().replace(" ", "-"): slug
+                  for display, slug in STAGE_FIELD_NAMES.items()
+                  for spelling in (display, slug)}
+
+
+def normalize_stage(name: str) -> Optional[str]:
+    """Canonical slug for any accepted spelling of a Stage, or None if unknown."""
+    return _STAGE_ALIASES.get((name or "").strip().lower().replace(" ", "-"))
+
 
 # Stages a child with a draft PR awaiting `pr-review` can be at (`testing` is retired).
 REVIEW_ENTRY_STAGES = ("pr-review", "testing")
@@ -265,7 +274,6 @@ class WorkItemProvider(Protocol):
     def issue_node_id(self, number: int) -> str: ...
     def issue_fields(self, number: int) -> dict: ...
     def issue_epic_info(self, number: int) -> dict: ...
-    def closed_issue_count(self) -> int: ...
     def issue_create(self, title: str, body: str, labels: list) -> int: ...
     def issue_comment(self, number: int, body: str) -> None: ...
     def issue_close(self, number: int) -> None: ...
@@ -431,13 +439,6 @@ class GitHub:
 
     def pr_comment(self, number: int, body: str):
         self._run(["gh", "pr", "comment", str(number), "--repo", self.repo, "--body", body])
-
-    def closed_issue_count(self) -> int:
-        """Exact repo-wide closed-issue count (search API `total_count`, uncapped)."""
-        out = self._run(["gh", "api",
-                          f"search/issues?q=repo:{self.repo}+type:issue+state:closed&per_page=1",
-                          "--jq", ".total_count"])
-        return int(out.strip())
 
     def issue_create(self, title: str, body: str, labels: list) -> int:
         argv = ["gh", "api", f"repos/{self.repo}/issues", "-f", f"title={title}", "-f", f"body={body}"]
@@ -699,9 +700,19 @@ _DESIGN_REVIEW_OUTCOME_MARKER = re.compile(
 # `<!-- local-ci: <suite>:<pr> @ <sha> -->`: a locally run required suite. Counts
 # only when <sha> matches the PR head, so any later push invalidates it.
 _LOCAL_CI_MARKER = re.compile(
-    r"<!--\s*local-ci:\s*(\w+):(\d+)\s*@\s*([0-9a-fA-F]{7,40})\s*-->")
+    r"<!--\s*local-ci:\s*([\w-]+):(\d+)\s*@\s*([0-9a-fA-F]{7,40})\s*-->")
 
 LOCAL_CI_SUITES = tuple(dict.fromkeys(w["suite"] for w in CONFIG["requiredWorkflows"]))
+
+# Fail at config load on a suite key the marker regex could never match.
+for _suite in LOCAL_CI_SUITES:
+    if not re.fullmatch(r"[\w-]+", _suite):
+        raise ValueError(f"requiredWorkflows suite key {_suite!r} must match [A-Za-z0-9_-]+")
+
+# Optional suite -> regex the `record-local-ci --command` must contain.
+LOCAL_CI_COMMAND_PATTERNS = {
+    w["suite"]: w["commandPattern"]
+    for w in CONFIG["requiredWorkflows"] if w.get("commandPattern")}
 
 
 def local_ci_suites_attested(comments: list, head_sha: str) -> set:
@@ -1406,10 +1417,13 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
             "eligible_total": len(ready), "limit": limit, "epic": epic, "skipped": skipped}
 
 
-# Accepts a numbered heading (`## 17. Footprint`) as well as a bare one.
-_FOOTPRINT_HEADING = re.compile(r"^#+\s*(?:\d+[.)]\s*)?Footprint\b.*$",
+# Exactly `Footprint` (optionally numbered, `## 17. Footprint`, or with a colon), so a
+# prose heading that merely starts with the word is never taken for the section.
+_FOOTPRINT_HEADING = re.compile(r"^#+\s*(?:\d+[.)]\s*)?Footprint\s*:?\s*$",
                                 re.IGNORECASE | re.MULTILINE)
 _FOOTPRINT_BULLET_PATH = re.compile(r"^-\s+`([^`]+)`")
+# A bold sub-label (`**Verify-only:**`) ends the changed-path list: what follows is read, not owned.
+_FOOTPRINT_SUBLABEL = re.compile(r"^\*\*.+")
 # A Task heading is `## Task #<n>` or, before issues exist, `## Task <slug-key>: ...`
 # (`###` and a missing `#` also parse). Keys must be slugs so prose headings like
 # `## Task Breakdown` are never read as Tasks.
@@ -1484,7 +1498,10 @@ def parse_footprint(doc_text: str) -> list:
     body = rest[:end.start()] if end else rest
     paths = []
     for line in body.splitlines():
-        bm = _FOOTPRINT_BULLET_PATH.match(line.strip())
+        stripped = line.strip()
+        if _FOOTPRINT_SUBLABEL.match(stripped):
+            break
+        bm = _FOOTPRINT_BULLET_PATH.match(stripped)
         if bm:
             paths.append(bm.group(1))
     return paths
@@ -1587,6 +1604,80 @@ def worktree_path(unit: str, number: int) -> str:
     return os.path.join(w["root"], f"{prefix}{number}")
 
 
+def plugin_version_info(runner: Runner = _default_runner) -> dict:
+    """The running plugin's manifest `version` and, when its root is its own git
+    checkout, that checkout's HEAD `sha` (else None)."""
+    info = {"root": PLUGIN_ROOT, "version": None, "sha": None}
+    try:
+        with open(os.path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json")) as f:
+            info["version"] = json.load(f).get("version")
+    except (OSError, ValueError):
+        pass
+    try:
+        top, sha = runner(["git", "-C", PLUGIN_ROOT, "rev-parse",
+                           "--show-toplevel", "HEAD"]).split()
+    except (GhError, ValueError):
+        return info
+    # An installed copy nested inside some other repo must not report that repo's HEAD.
+    if os.path.realpath(top) == os.path.realpath(PLUGIN_ROOT):
+        info["sha"] = sha
+    return info
+
+
+def cmd_show_config(runner: Runner = _default_runner) -> dict:
+    """Effective config (`pipeline` block over defaults) plus the running plugin version."""
+    return {"repo": REPO, "docRoot": DOC_ROOT, "tokenPath": TOKEN_PATH,
+            "requirementsDir": CONFIG.get("requirementsDir"),
+            "parallelism": {**_PARALLELISM,
+                            "devLane": DEV_LANE_PARALLELISM,
+                            "prReview": PR_REVIEW_PARALLELISM,
+                            "designLane": DESIGN_LANE_PARALLELISM,
+                            "maxTasksPerRun": MAX_TASKS_PER_RUN},
+            "requiredWorkflows": CONFIG["requiredWorkflows"],
+            "localCiSuites": list(LOCAL_CI_SUITES),
+            "plugin": plugin_version_info(runner),
+            **PIPELINE}
+
+
+# Network failures a single immediate retry usually clears; anything else fails at once.
+_TRANSIENT_NET_RE = re.compile(
+    r"(timed out|timeout|connection (?:reset|refused|closed)|could not resolve host|"
+    r"temporary failure|ssh_exchange_identification|kex_exchange_identification|"
+    r"early eof|the remote end hung up|rpc failed)",
+    re.IGNORECASE)
+
+
+def _run_retry_transient(argv: list, runner: Runner, attempts: int = 2):
+    """Run a git network command, retrying once on a transient network error."""
+    for i in range(attempts):
+        try:
+            return runner(argv)
+        except GhError as e:
+            if i + 1 < attempts and _TRANSIENT_NET_RE.search(str(e)):
+                time.sleep(1)
+                continue
+            raise
+
+
+def _add_fresh_worktree(repo_path: str, path: str, branch: str, base: str,
+                        runner: Runner) -> None:
+    """`git worktree add -b <branch> <base>`; a stale local `<branch>` (crashed earlier
+    run) is recreated only when it has no commits `base` lacks, else refused."""
+    add = ["git", "-C", repo_path, "worktree", "add", path, "-b", branch, base]
+    try:
+        runner(add)
+        return
+    except GhError:
+        if not runner(["git", "-C", repo_path, "branch", "--list", branch]).strip():
+            raise
+    unique = _rev_count(repo_path, f"{base}..{branch}", runner)
+    if unique:
+        raise GhError(f"local branch {branch!r} already exists with {unique} commit(s) not in "
+                      f"{base} -- refusing to discard unmerged work; inspect and delete it by hand")
+    runner(["git", "-C", repo_path, "branch", "-D", branch])
+    runner(add)
+
+
 def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: str = ".",
                      runner: Runner = _default_runner, base: Optional[str] = None) -> dict:
     """Create or resume the unit's worktree: reuse a live one (fast-forwarded), else
@@ -1597,7 +1688,7 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
     existing = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
     if existing:
         return _resume_live_worktree(existing, branch, repo_path, runner)
-    runner(["git", "-C", repo_path, "fetch", "origin"])
+    _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
     on_origin = runner(["git", "-C", repo_path, "branch", "-r", "--list",
                         f"origin/{branch}"]).strip()
     if on_origin:
@@ -1608,12 +1699,12 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
         synced = {"synced_to_origin": True, "behind_before": None}
     else:
         base = base or f"origin/{integration_base(gh, number, unit)}"
-        runner(["git", "-C", repo_path, "worktree", "add", path, "-b", branch, base])
+        _add_fresh_worktree(repo_path, path, branch, base, runner)
         if unit == "epic":
             # An epic branch is shared: every branch-writing command resolves it
             # from origin, so a local-only one is invisible to them.
-            runner(["git", "-C", repo_path, "push", "origin",
-                    f"refs/heads/{branch}:refs/heads/{branch}"])
+            _run_retry_transient(["git", "-C", repo_path, "push", "origin",
+                                  f"refs/heads/{branch}:refs/heads/{branch}"], runner)
         resumed = False
         synced = {}
     return {"created": True, "path": path, "branch": branch, "base": base,
@@ -2169,6 +2260,11 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
         raise GhError(f"sha must be a 7-40 char hex commit id, got {sha!r}")
     if not (command or "").strip():
         raise GhError("--command is required: the exact command the suite was run with")
+    pattern = LOCAL_CI_COMMAND_PATTERNS.get(suite)
+    if pattern and not re.search(pattern, command):
+        raise GhError(f"--command {command.strip()!r} does not match the {suite!r} suite's "
+                      f"requiredWorkflows[].commandPattern {pattern!r} -- attest the real "
+                      f"suite command")
     evidence = read_ci_evidence(output)
     timestamp = _utc_now_marker()
     fence = "```"
@@ -2216,11 +2312,24 @@ def _post_start_comment(gh: GitHub, issue: int, role: str):
     gh.issue_comment(issue, f"🚧 Picking this up — {role} stage starting.")
 
 
-def cmd_claim(gh: GitHub, issue: int, role: str) -> dict:
-    role = RETIRED_ROLES.get(role, role)
+def _check_claimable(gh: GitHub, issue: int, role: str) -> dict:
+    """Raise unless `role` is claimable on `issue`: a known role and, for `development`,
+    no open PR (re-claiming would move Stage off PR Review and drop it from review)."""
     if role not in STAGE_OPTION_IDS:
         raise GhError(f"unknown role {role!r} -- must be one of "
                        f"{sorted(STAGE_OPTION_IDS)}")
+    if role == "development":
+        open_prs = gh.pr_list_for_branch(issue_branch(issue))
+        if open_prs:
+            raise GhError(f"issue #{issue} already has open PR #{open_prs[0]['number']} -- "
+                          f"resume its development agent for the rework round instead of "
+                          f"re-claiming (references/rework.md)")
+    return {"issue": issue, "role": role, "claimable": True}
+
+
+def cmd_claim(gh: GitHub, issue: int, role: str) -> dict:
+    role = RETIRED_ROLES.get(role, role)
+    _check_claimable(gh, issue, role)
     gh.set_stage_field(issue, role)
     gh.set_pipeline_status_field(issue, "in-progress")
     _post_start_comment(gh, issue, role)
@@ -2287,11 +2396,15 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
 
 def git_reconcile_branch(repo_path: str, branch: str, base: str = "main",
                           runner: Runner = _default_runner):
-    """Fetch, merge `origin/<base>` into `branch` and push it. Always a merge, never a
-    rebase: squash-merged PRs share no ancestry with their branches. Raises
-    `MergeConflict` (after `merge --abort`) on real unmerged paths."""
-    runner(["git", "-C", repo_path, "fetch", "origin"])
+    """Fetch, fast-forward `branch` to its origin tip, merge `origin/<base>` and push.
+    Always a merge, never a rebase: squash-merged PRs share no ancestry with their
+    branches. Raises `MergeConflict` (after `merge --abort`) on real unmerged paths."""
+    _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
     runner(["git", "-C", repo_path, "checkout", branch])
+    # A stale local tip would make the final push non-fast-forward; ff-only so a
+    # genuinely diverged branch fails loudly instead of being reset.
+    if origin_branch_exists(repo_path, branch, runner=runner):
+        runner(["git", "-C", repo_path, "merge", "--ff-only", f"origin/{branch}"])
     try:
         runner(["git", "-C", repo_path, "merge", f"origin/{base}"])
     except GhError:
@@ -2301,7 +2414,7 @@ def git_reconcile_branch(repo_path: str, branch: str, base: str = "main",
             raise
         runner(["git", "-C", repo_path, "merge", "--abort"])
         raise MergeConflict(conflicted, base=base)
-    runner(["git", "-C", repo_path, "push", "origin", branch])
+    _run_retry_transient(["git", "-C", repo_path, "push", "origin", branch], runner)
 
 
 class MergeConflict(GhError):
@@ -2985,15 +3098,18 @@ def cmd_resolve_thread(gh: GitHub, thread_id: str, reply: Optional[str] = None) 
     return {"thread": thread_id, "replied": bool(reply), "resolved": True}
 
 
-def cmd_pause_for_epic_regate(gh: GitHub, issue: int, epic: int, gate_pr: int) -> dict:
+def cmd_pause_for_epic_regate(gh: GitHub, issue: int, epic: int, gate_pr: int,
+                              found_by: str = "lld") -> dict:
     """Park a unit waiting on its Epic's Architecture revision gate: Pipeline Status
-    `todo` (Stage kept) so it re-enters the normal loop once the gate merges."""
+    `todo` (Stage kept) so it re-enters the normal loop once the gate merges.
+    `found_by` names the stage that hit the deviation in the pause comment."""
     gh.set_pipeline_status_field(issue, "todo")
     gh.issue_comment(issue,
-        f"⏸️ Paused — `lld` found this doesn't fit epic #{epic}'s current architecture. "
-        f"Epic #{epic}'s architecture is being revised; see gate PR #{gate_pr}. This task "
-        f"resumes automatically once that gate merges.")
-    return {"issue": issue, "paused_for_epic_regate": epic, "gate_pr": gate_pr}
+        f"⏸️ Paused — `{found_by}` found this doesn't fit epic #{epic}'s current "
+        f"architecture. Epic #{epic}'s architecture is being revised; see gate PR "
+        f"#{gate_pr}. This task resumes automatically once that gate merges.")
+    return {"issue": issue, "paused_for_epic_regate": epic, "gate_pr": gate_pr,
+            "found_by": found_by}
 
 
 def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str) -> dict:
@@ -3202,23 +3318,28 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
     fields = gh.issue_fields(issue)
     actual_stage = STAGE_FIELD_NAMES.get(fields.get("Stage"))
     actual_status = PIPELINE_STATUS_FIELD_NAMES.get(fields.get("Pipeline Status"))
+    # Any spelling ("PR Review", "pr review") compares as its slug; an unknown one stays raw.
+    expect = normalize_stage(expect_stage) or expect_stage
     result = {"issue": issue, "labels": sorted(labels), "stage": actual_stage,
-              "pipeline_status": actual_status, "expected_stage_present": actual_stage == expect_stage}
+              "pipeline_status": actual_status, "expected_stage_present": actual_stage == expect}
     # Review roles inherit the preceding stage's value, so asking for one is misuse --
     # except `pr-review`, which is a real Stage value (development's exit writes it).
-    if expect_stage in REVIEW_ROLES and expect_stage not in STAGE_FIELD_NAMES.values():
+    if expect in REVIEW_ROLES and expect not in STAGE_FIELD_NAMES.values():
         result["ok"] = False
-        result["misuse"] = (f"`{expect_stage}` is a review role and has no Stage field value of "
+        result["misuse"] = (f"`{expect}` is a review role and has no Stage field value of "
                             f"its own -- it inherits the preceding stage's. Verify a review by "
                             f"its marker (`record-pr-review` / the arch-review confidence "
                             f"marker), not by --expect-stage.")
     elif not result["expected_stage_present"]:
         result["ok"] = False
-        result["reason"] = (f"Stage is {actual_stage!r}, expected {expect_stage!r} -- the "
+        accepted = "" if normalize_stage(expect_stage) else (
+            f" (unrecognised --expect-stage; accepted: "
+            f"{', '.join(sorted(set(STAGE_FIELD_NAMES.values())))} or their field names)")
+        result["reason"] = (f"Stage is {actual_stage!r}, expected {expect!r} -- the "
                             f"previous stage's exit action did not run, or ran against a "
                             f"different issue. Do not dispatch the next stage until this is "
                             f"resolved; advancing on an unverified handoff is how a stage's "
-                            f"evidence ends up existing only in one session's memory.")
+                            f"evidence ends up existing only in one session's memory." + accepted)
     if pr is not None:
         pr_data = gh.pr_view(pr, fields="isDraft,headRefName,baseRefName")
         result["pr"] = pr
@@ -3227,7 +3348,7 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
         result["pr_base"] = pr_data.get("baseRefName")
         # `open-dev-pr` moves the Stage field but only `handoff-to-pr-review` posts the
         # marker; check it here. Reported, never posted: this must not forge its own evidence.
-        if expect_stage == "pr-review":
+        if expect == "pr-review":
             problems = []
             marker_present = last_transition_to(
                 issue_data.get("comments", []), "pr-review") is not None
@@ -3245,7 +3366,7 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
     result["docs_present"] = sorted(os.listdir(docs_dir)) if os.path.isdir(docs_dir) else []
     # Only the completing stage's own record is re-checked, so an older doc's rotted
     # citation can't fail a later stage's exit.
-    record_filename = STAGE_RECORD_FILENAMES.get(expect_stage)
+    record_filename = STAGE_RECORD_FILENAMES.get(expect)
     if record_filename:
         record_path = os.path.join(docs_dir, record_filename)
         if os.path.isfile(record_path):
@@ -3279,11 +3400,22 @@ def checks_status(checks: list) -> str:
 
 # Workflows required when a PR touches their paths. `workflow` must match the
 # workflow file's `name:`; `suite` names the `local-ci` attestation that can stand in for it.
+# `excludeGlobs` mirrors the workflow's path negations (`!**/*.md`): a match never counts.
 REQUIRED_WORKFLOWS = tuple(
     {"workflow": w["workflow"], "suite": w["suite"],
-     "prefixes": tuple(w["prefixes"]), "files": tuple(w.get("files", ()))}
+     "prefixes": tuple(w["prefixes"]), "files": tuple(w.get("files", ())),
+     "excludeGlobs": tuple(w.get("excludeGlobs", ()))}
     for w in CONFIG["requiredWorkflows"]
 )
+
+
+def _workflow_covers(spec: dict, path: str) -> bool:
+    """Whether the workflow's `paths:` filter (prefixes/files minus excludeGlobs) matches.
+    A leading `**/` also matches at the repo root, as in GHA."""
+    if any(fnmatch.fnmatch(path, g) or (g.startswith("**/") and fnmatch.fnmatch(path, g[3:]))
+           for g in spec["excludeGlobs"]):
+        return False
+    return path.startswith(spec["prefixes"]) or path in spec["files"]
 
 
 def missing_required_workflows(changed_files: list, checks: list,
@@ -3294,8 +3426,7 @@ def missing_required_workflows(changed_files: list, checks: list,
     attested = local_ci_suites_attested(comments or [], head_sha)
     missing = []
     for spec in REQUIRED_WORKFLOWS:
-        touched = any(p.startswith(spec["prefixes"]) or p in spec["files"] for p in changed_files)
-        if not touched:
+        if not any(_workflow_covers(spec, p) for p in changed_files):
             continue
         if spec["workflow"] in passing:
             continue
@@ -3356,7 +3487,11 @@ def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
 def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -> dict:
     """Squash-merge the PR after its evidence and checks pass. Refuses (exit 0) when
     behind a base delta that needs re-attest; otherwise carries the attestation forward.
+    Idempotent: an already-MERGED PR only gets the post-merge bookkeeping (`recovered`).
     Stage/Pipeline Status are left to `mark-issue-closed` on the `issues: closed` event."""
+    if gh.pr_view(pr_number, fields="state").get("state") == "MERGED":
+        return _finalize_merged_pr(gh, pr_number, issue, repo_path, integration_base(gh, issue),
+                                   gh.pr_files(pr_number), {"recovered": True})
     base = integration_base(gh, issue)
     behind = gh.branch_behind_by(issue_branch(issue), base=base)
     carried_forward = {}
@@ -3390,9 +3525,21 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
         detail = f" (no passing check or fresh local-ci attestation from: {', '.join(missing)})" if missing else ""
         raise GhError(f"PR #{pr_number} checks not passed (status={status}){detail}")
     gh.pr_ready(pr_number)
-    gh.pr_merge(pr_number)
+    try:
+        gh.pr_merge(pr_number)
+    except GhError:
+        # GitHub can answer 5xx after the squash already landed; only a PR still open failed.
+        if gh.pr_view(pr_number, fields="state").get("state") != "MERGED":
+            raise
     gh.pr_comment(pr_number, f"Auto-merged under the pipeline's scoped PR-merge override — "
                               f"see \"PRs merge automatically\" in the pipeline docs.")
+    return _finalize_merged_pr(gh, pr_number, issue, repo_path, base, files, carried_forward)
+
+
+def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
+                        base: str, files: list, extra: dict) -> dict:
+    """Post-merge bookkeeping: close an epic-branch child `Closes #<n>` didn't, the
+    `Merged via` note, run-cap accounting and releasing the worktree."""
     issue_state = gh.issue_view(issue)["state"]
     issue_closed = issue_state == "CLOSED"
     if not issue_closed and base != "main":
@@ -3405,7 +3552,7 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
     terminal = record_terminal_unit(gh, issue)
     return {"pr": pr_number, "issue": issue, "merged": True, "issue_closed": issue_closed,
             "config_changed": touches_pipeline_config(files),
-            **carried_forward,
+            **extra,
             **({"run_terminal": terminal} if terminal else {}),
             "worktree": release_worktree(issue_branch(issue), base_repo=repo_path, runner=gh._run)}
 
@@ -3468,40 +3615,6 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
     terminal = record_terminal_unit(gh, issue)
     return {"issue": issue, "closed": True, "worktree": released,
             **({"run_terminal": terminal} if terminal else {})}
-
-
-# Closed-issue count at the last completed retrospective (a watermark, not a modulus).
-RETRO_WATERMARK_FILE = PIPELINE["retro"]["watermarkFile"]
-RETRO_EVERY = PIPELINE["retro"]["everyClosedIssues"]
-
-
-def cmd_retro_check(gh: GitHub, repo_path: str = ".", mark_done: bool = False,
-                     count: Optional[int] = None) -> dict:
-    """`run_retro` once RETRO_EVERY issues closed since the watermark. `mark_done`
-    stamps `count` -- the `closed_count` captured when the retro was triggered, since
-    the live count moves during the retro; without it, falls back to the live count."""
-    path = os.path.join(repo_path, RETRO_WATERMARK_FILE)
-    watermark = 0
-    if os.path.isfile(path):
-        with open(path) as f:
-            watermark = int(f.read().strip() or 0)
-    live_count = gh.closed_issue_count()
-    if mark_done:
-        used_live_fallback = count is None
-        stamp = live_count if used_live_fallback else count
-        if stamp < watermark:
-            raise GhError(f"--count {stamp} is behind the existing watermark {watermark} -- "
-                           f"the watermark must not move backwards")
-        if stamp > live_count:
-            raise GhError(f"--count {stamp} is ahead of the live closed count {live_count} -- "
-                           f"pass the count captured when run_retro went true, not a guess")
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w") as f:
-            f.write(f"{stamp}\n")
-        return {"closed_count": live_count, "watermark": stamp, "marked_done": True,
-                "count_was_live_fallback": used_live_fallback}
-    return {"closed_count": live_count, "watermark": watermark,
-            "run_retro": live_count - watermark >= RETRO_EVERY}
 
 
 def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
@@ -3834,10 +3947,11 @@ def stack_profile(epic: int) -> str:
     return PIPELINE["stack"]["profileTemplate"].format(n=epic)
 
 
-def _stack_layout(epic: int) -> dict:
-    """Every path/name the two stack commands share, derived from config once."""
+def _stack_layout(epic: int, profile: Optional[str] = None) -> dict:
+    """Every path/name the two stack commands share, derived from config once;
+    `profile` overrides the epic's own (a hand-made stack)."""
     s = PIPELINE["stack"]
-    profile = stack_profile(epic)
+    profile = profile or stack_profile(epic)
     root = os.path.abspath(s["workspaceRoot"])
     fmt = {"profile": profile, "n": epic, "workspaceRoot": root}
     env_file = s["envFile"].format(**fmt)
@@ -3959,16 +4073,34 @@ def cmd_provision_epic_stack(epic: int, up: bool = True, shell: Shell = _default
             "use": f"COMPOSE_PROJECT_NAME={lay['project']} make <target> PROFILE={lay['profile']}"}
 
 
+def _docker_compose_running(project: str) -> list:
+    """Ids of running containers carrying compose's project label (none without docker)."""
+    try:
+        out = subprocess.run(["docker", "ps", "-q", "--filter",
+                              f"label=com.docker.compose.project={project}"],
+                             capture_output=True, text=True)
+    except FileNotFoundError:
+        return []
+    return out.stdout.split()
+
+
 def cmd_teardown_epic_stack(epic: int, keep_data: bool = False,
-                            shell: Shell = _default_shell) -> dict:
-    """Run `downCommand`, then remove the generated env/secrets files and data dir.
-    A failing down command removes nothing, leaving a half-torn stack visible."""
+                            shell: Shell = _default_shell,
+                            project: Optional[str] = None, profile: Optional[str] = None,
+                            running_probe: Callable[[str], list] = _docker_compose_running) -> dict:
+    """Run `downCommand`, confirm no container of the project still runs, then remove
+    the generated env/secrets files and data dir. A failing or no-op down removes
+    nothing. `project`/`profile` name a hand-made stack, even with the stack disabled."""
     s = PIPELINE["stack"]
-    if not s["enabled"]:
+    named = bool(project or profile)
+    if not s["enabled"] and not named:
         return {"epic": epic, "torn_down": False,
-                "reason": "pipeline.stack.enabled is false — shared stack in use"}
-    lay = _stack_layout(epic)
-    if not os.path.exists(lay["env_file"]):
+                "reason": "pipeline.stack.enabled is false — pass --project/--profile "
+                          "to tear down a hand-made stack"}
+    lay = _stack_layout(epic, profile)
+    if project:
+        lay["project"] = project
+    if not named and not os.path.exists(lay["env_file"]):
         return {"epic": epic, "torn_down": False, "profile": lay["profile"],
                 "reason": f"no stack provisioned ({lay['env_file']} absent)"}
     fmt = {"profile": lay["profile"], "project": lay["project"], "envFile": lay["env_file_rel"],
@@ -3977,6 +4109,13 @@ def cmd_teardown_epic_stack(epic: int, keep_data: bool = False,
     cmd = (s.get("downCommand") or "").format(**fmt)
     if cmd.strip():
         shell(cmd, lay["workspace_root"])
+    still_running = running_probe(lay["project"])
+    if still_running:
+        return {"epic": epic, "torn_down": False, "profile": lay["profile"],
+                "project": lay["project"], "down_command": cmd, "still_running": still_running,
+                "reason": f"{len(still_running)} container(s) of {lay['project']} still run after "
+                          f"the down command; nothing removed (does --env-file resolve from "
+                          f"{lay['workspace_root']}?)"}
     removed = []
     for p in (lay["env_file"], lay["secrets_file"]):
         if os.path.exists(p):
@@ -4187,10 +4326,12 @@ def cmd_finish_lld(gh: GitHub, lld_task: int, epic: int, repo_path: str = ".",
 def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
                     repo_path: str = ".", base: Optional[str] = None,
                     runner: Runner = _default_runner) -> dict:
-    """`worktree-add` then `claim` -- worktree first, so the unit is never claimed
-    without a live tree. Returns `path`, `claimed` plus the steps."""
+    """Refusal check, `worktree-add`, then `claim` -- worktree first, so the unit is never
+    claimed without a live tree, and nothing runs when the claim would be refused.
+    Returns `path`, `claimed` plus the steps."""
     role = RETIRED_ROLES.get(role, role)
     seq = StepSequence()
+    seq.run("check-claimable", lambda: _check_claimable(gh, number, role))
     worktree = seq.run("worktree-add", lambda: cmd_worktree_add(
         gh, number, unit, repo_path, runner=runner, base=base), failed=_worktree_refused)
     claim = seq.run("claim", lambda: cmd_claim(gh, number, role))
@@ -4424,7 +4565,9 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--epic", type=int, required=True)
     p.add_argument("--gate-pr", type=int, required=True)
-    p.set_defaults(func=lambda a: cmd_pause_for_epic_regate(get_work_item_provider(), a.issue, a.epic, a.gate_pr))
+    p.add_argument("--found-by", default="lld",
+                    help="Stage that hit the deviation (lld, development, pr-review, ...)")
+    p.set_defaults(func=lambda a: cmd_pause_for_epic_regate(get_work_item_provider(), a.issue, a.epic, a.gate_pr, a.found_by))
     p = sub.add_parser("verify-exit")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
@@ -4534,26 +4677,9 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--repo-path", default=".",
                     help="Repo root (to release the unit's worktree)")
     p.set_defaults(func=lambda a: cmd_mark_needs_human(get_work_item_provider(), a.issue, a.reason, a.repo_path))
-    p = sub.add_parser("retro-check")
-    p.add_argument("--repo-path", default=".",
-                    help="Repo root holding the retro watermark")
-    p.add_argument("--mark-done", action="store_true",
-                    help="Record --count (or the live count) as the new watermark")
-    p.add_argument("--count", type=int, default=None,
-                    help="closed_count from the retro-check that triggered the retro")
-    p.set_defaults(func=lambda a: cmd_retro_check(get_work_item_provider(), a.repo_path, a.mark_done, a.count))
     p = sub.add_parser("show-config",
-                        help="Print the effective config")
-    p.set_defaults(func=lambda a: {"repo": REPO, "docRoot": DOC_ROOT, "tokenPath": TOKEN_PATH,
-                                   "requirementsDir": CONFIG.get("requirementsDir"),
-                                   "parallelism": {**_PARALLELISM,
-                                                   "devLane": DEV_LANE_PARALLELISM,
-                                                   "prReview": PR_REVIEW_PARALLELISM,
-                                                   "designLane": DESIGN_LANE_PARALLELISM,
-                                                   "maxTasksPerRun": MAX_TASKS_PER_RUN},
-                                   "requiredWorkflows": CONFIG["requiredWorkflows"],
-                                   "localCiSuites": list(LOCAL_CI_SUITES),
-                                   **PIPELINE})
+                        help="Print the effective config and the running plugin version")
+    p.set_defaults(func=lambda a: cmd_show_config())
 
     p = sub.add_parser("pairing-counts",
                         help="Escalation-valve bounce counts for one issue")
@@ -4612,7 +4738,12 @@ def main(argv: Optional[list] = None) -> int:
                         help="Tear down the epic's stack and its generated files")
     p.add_argument("epic", type=int)
     p.add_argument("--keep-data", action="store_true", help="Leave the DB data dir in place")
-    p.set_defaults(func=lambda a: cmd_teardown_epic_stack(a.epic, keep_data=a.keep_data))
+    p.add_argument("--project", default=None,
+                    help="Compose project of a hand-made stack (works with the stack disabled)")
+    p.add_argument("--profile", default=None,
+                    help="Profile of a hand-made stack (works with the stack disabled)")
+    p.set_defaults(func=lambda a: cmd_teardown_epic_stack(a.epic, keep_data=a.keep_data,
+                                                          project=a.project, profile=a.profile))
     # --- composites ---
     p = sub.add_parser("cut-phase-tasks",
                         help="Create/reuse an Epic's Architecture and LLD phase-Tasks")

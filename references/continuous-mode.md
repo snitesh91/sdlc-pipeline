@@ -17,8 +17,7 @@ On **every** wakeup:
    report back) and remembers nothing of prior units. On the unit it picks up it runs
    `pairing-counts <issue>` and counts those strikes toward the escalation valve's
    `thresholds` instead of starting at zero; a count ≥ 3 on a marker-backed pairing
-   means the replacement swap already happened — never repeat it. If it merged a PR,
-   it runs `retro-check` (`SKILL.md`, Step 5) before finishing.
+   means the replacement swap already happened — never repeat it.
 2. Wait for its completion notification. Note in one or two lines which unit ran and
    its outcome (merged / `epic:architected` / blocked / needs-human).
 3. Decide:

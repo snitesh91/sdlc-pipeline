@@ -83,8 +83,11 @@ this pipeline opens in the configured repo: `development` opens a draft; after a
 adversarial `pr-review` and green CI, `merge-pr` marks it ready and squash-merges it. The
 human gates on product/architecture are separate and unaffected.
 
-- Merge only with `merge-pr`. It posts the audit-trail comment on the PR and "Merged
-  via #<n>" on the issue, and closes a child merged into an epic branch.
+- Merge only with `merge-pr`, run by the orchestrator after `pr-review` records clean — a
+  reviewer never merges the diff it reviewed. It posts the audit-trail comment on the PR
+  and "Merged via #<n>" on the issue, and closes a child merged into an epic branch.
+- `merge-pr` is idempotent: on a PR already `MERGED` (a retry, or a 5xx after the squash
+  landed) it only finishes the bookkeeping and returns `recovered: true`.
 - Never delete the per-issue docs folder after merge.
 - `merge-pr` is the only merge gate (branch protection is unavailable — don't look for
   it). It refuses on a non-passing check, a code-touching PR whose required suite has
@@ -105,6 +108,10 @@ child PR to merge; the proof is `development`'s local run:
 - `merge-pr` / `pr-checks` accept it only while `<sha>` is the PR's current head. Any
   later push (rework, `sync-branch`) makes it stale: re-run the suite and re-attest.
 - Attest before `handoff-to-pr-review`; an unattested PR is not reviewable.
+- Each `requiredWorkflows` entry mirrors one workflow's `paths:` filter: `prefixes` /
+  `files`, plus `excludeGlobs` for its negations (`!**/*.md` → `"**/*.md"`); a changed
+  file matching one never requires the suite. `suite` keys are `[A-Za-z0-9_-]+` (checked
+  at config load). An optional `commandPattern` regex must match the attested `--command`.
 
 **`pr-checks` status `missing-checks`** is never "still running" — never poll it:
 
@@ -113,3 +120,20 @@ child PR to merge; the proof is `development`'s local run:
 - A still-required GHA workflow never reported (renamed out of step with
   `requiredWorkflows`, disabled, `paths:` mismatch) → config defect: `pr-review` stops
   with `needs-human` (`agents/pr-review.md`, exit actions); you run `mark-needs-human`.
+
+## Break-glass: local merge while the PR API is down
+
+Only while `gh pr ready`/`gh pr merge` fail and the git remote still accepts pushes — never
+as a shortcut, never skipping a check `merge-pr` enforces:
+
+1. Verify by hand what `merge-pr` would: passing checks or a fresh matching local-CI
+   attestation, the `development->pr-review` handoff with a clean `pr-review`, and the
+   freshness gate (`sync-branch` first when behind on anything but docs).
+2. Read each affected PR's real state (`gh pr view <pr> --json state,mergedAt`); a
+   `MERGED` PR needs no second merge.
+3. Squash, never a merge commit, in an ephemeral worktree on `origin/main`:
+   `git merge --squash origin/issue-<n>`, `git commit -m "<title> (Closes #<n>)"`,
+   `git push origin main`. Never force-push `main`; reconcile forward.
+4. Once the API is back: close the PR with the audit-trail comment `merge-pr` would post,
+   close the issue with "Merged via #<pr>", delete the branch, and set its terminal
+   fields (`close-issue`). Record the outage and what was merged by hand.

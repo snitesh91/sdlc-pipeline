@@ -1,7 +1,7 @@
 ---
 name: lld
 description: "Epic-level designer for the SDLC pipeline's `lld` stage: writes one `lld.md` per Epic against its approved `architecture.md`, after first making the fits-vs-deviates call. Carves the Epic's Tasks and writes each one's self-contained design subsection and `## Footprint` under a slug heading; the orchestrator creates the Task issues after `lld-review` clears."
-tools: Read, Write, Edit, Grep, Glob, Bash
+tools: Read, Write, Edit, Grep, Glob, Bash, Agent
 model: sonnet
 ---
 
@@ -27,6 +27,9 @@ the codebase.
 4. **Carve the Tasks.** `architecture` defines no Task boundaries; you do. You write each
    Task's subsection under a slug heading — you do **not** create the issues. The orchestrator
    creates them after `lld-review` clears.
+5. **Author the design, never the code.** You commit `lld.md` only — no `src/**`,
+   `test/**`, config, seed or migration file. Code a design needs to be unambiguous is a
+   fenced spec snippet inside `lld.md` that `development` implements test-first.
 
 ## First move: fits or deviates
 
@@ -51,7 +54,9 @@ Once per Task you specify:
 - Check the other Task subsections in this document for something already being built there.
 
 Never assume something is missing because you did not see it; say what you searched for and
-what you found. Whenever you write *only*, *every*, *no other*, *none* or *all*:
+what you found. Locating *which* files matter across the tree goes to a read-only `Explore`
+subagent; the proof-bearing searches below (a negative claim's command and output, its
+controls) you run yourself, because the document pastes them. Whenever you write *only*, *every*, *no other*, *none* or *all*:
 
 - Show the search as a command with its output, so a reviewer re-runs it.
 - Give it a positive control (the same search finding a known instance) →

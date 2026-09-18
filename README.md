@@ -67,7 +67,8 @@ sdlc.config.sample.json          config template
 
 **Upgrading**: bump the `ref` in `.claude/settings.json` and `SDLC_PIPELINE_REF` together,
 run `claude plugin marketplace update sdlc-pipeline`, and start a new session. Bump only
-when no run is live. There is one plugin version per driven repo.
+when no run is live. There is one plugin version per driven repo; `show-config` → `plugin`
+reports the running one (manifest version, plus the HEAD sha of a git checkout).
 
 Repo-specific commands (lint, build, test, suite names, ports) belong in the driven repo's
 `CLAUDE.md` / `AGENTS.md`, which every stage agent reads.
@@ -81,7 +82,7 @@ They are stdlib Python, and they fail open on internal errors.
 |---|---|
 | `SessionStart` | Exports `$SDLC` and `GITHUB_TOKEN` (from `tokenPath`) for every Bash call; warns when no token is available; suggests `rtk init` if `rtk` is absent; flags a session model off the policy's orchestrator model; after a compaction, restates this session's run (epic, run-id, units in flight) |
 | `PreToolUse` (Bash) | Denies hand-run `gh api graphql`, `gh issue create/edit/close/reopen`, `gh pr create/merge/ready/close`, mutating `gh api`, `git worktree add` (except `--detach`), force-push and rebase, naming the `python3 "$SDLC"` command to use instead; limits each `sdlc:<role>` agent to its role's control-plane commands and review roles to no git writes. Only each segment's leading words count |
-| `PreToolUse` (Agent) | Sets every `sdlc:*` agent's `model` from `hooks/model_policy.json` (overridable per role by `pipeline.models` / `pipeline.fanout`); denies nested stages and fan-out a role may not do or has exhausted |
+| `PreToolUse` (Agent) | Sets every `sdlc:*` agent's `model` from `hooks/model_policy.json` (overridable per role by `pipeline.models` / `pipeline.fanout`); denies nested stages and fan-out a role may not do or has exhausted; lets the policy's `explore` roles (`development`, `lld`) launch a read-only `Explore` search |
 | `SubagentStart` | Gives each `sdlc:*` agent `$SDLC`, `docRoot`, `requirementsDir`, the references path and the `SDLC-RESULT` format |
 | `SubagentStop` | An `sdlc:*` agent cannot stop until its final message ends with `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "done\|clean\|rework\|blocked\|needs-human\|failed"}`; records every finished agent's metrics |
 | `SessionEnd` | Records the orchestrator's (main thread's) metrics |
@@ -105,7 +106,6 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `pipeline.gates.skipConfidenceThreshold` / `.requiresHumanGateA` | 80 / `true` | Gate B skip bar; whether Gate A needs a human |
 | `pipeline.productWip.maxGateAPending` | 5 | Open Gate A PRs allowed repo-wide |
 | `pipeline.escalation.replaceAt` / `.needsHumanAt` | 3 / 6 | Bounces before a context-reset replacement / `needs-human` |
-| `pipeline.retro.everyClosedIssues` / `.watermarkFile` | 5 / `{docRoot}/retro-watermark` | Retro trigger and watermark (driven repo) |
 | `pipeline.continuous.cycleCap` | 8 | Merges per unattended run before pausing |
 | `pipeline.models.<role>` / `pipeline.fanout.<role>` | `hooks/model_policy.json` | Model per stage; which reviews fan out, how wide, at which model |
 | `pipeline.epicClose.auto` | `false` | Whether the orchestrator closes a verified epic itself |
@@ -117,11 +117,12 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 
 The `SubagentStop` and `SessionEnd` hooks append one JSON line per finished agent to
 `$CLAUDE_PLUGIN_DATA/metrics/<owner>__<repo>.jsonl` (never the driven repo's tree): per-model
-tokens, estimated cost (prices in `hooks/_metrics.py`), duration, turns, and the
-`SDLC-RESULT` issue/stage/outcome.
+tokens, estimated cost (prices in `hooks/_metrics.py`), duration, turns, tool calls, peak
+context (the largest single request), the `SDLC-RESULT` issue/stage/outcome, and the
+control-plane run id (`next-action --run-id`) when the session drives one.
 
 ```bash
-python3 scripts/sdlc_metrics.py report [--repo o/r] [--epic N] [--since YYYY-MM-DD] [--by role|model|issue|epic]
+python3 scripts/sdlc_metrics.py report [--repo o/r] [--epic N] [--run ID] [--since YYYY-MM-DD] [--by role|model|issue|epic]
 python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<project>   # history, idempotent
 ```
 

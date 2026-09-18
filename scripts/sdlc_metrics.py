@@ -36,14 +36,15 @@ def load_records(repo: str | None) -> list:
 
 
 def attribute_children(records: list) -> list:
-    """A fan-out child inherits its parent agent's epic/issue; its role becomes `<parent-role>:fanout`."""
+    """A fan-out child inherits its parent agent's epic/issue/run; its role becomes
+    `<parent-role>:fanout`."""
     by_agent = {r.get("agent_id"): r for r in records}
     own_role = {id(r): r.get("role") for r in records}
     for r in records:
         parent = by_agent.get((r.get("parent") or {}).get("agent_id"))
         if parent and parent is not r:
             r["role"] = f"{own_role[id(parent)]}:fanout"
-            for key in ("epic", "issue"):
+            for key in ("epic", "issue", "run_id"):
                 if key in parent:
                     r.setdefault(key, parent[key])
     return records
@@ -51,7 +52,7 @@ def attribute_children(records: list) -> list:
 
 def _blank() -> dict:
     return {"runs": 0, "tokens": dict.fromkeys(TOKEN_KINDS, 0), "est_cost_usd": 0.0,
-            "durations": [], "outcomes": {}}
+            "tool_calls": 0, "peak_context": 0, "durations": [], "outcomes": {}}
 
 
 def _add(group: dict, tokens: dict, cost: float, record: dict) -> None:
@@ -59,6 +60,8 @@ def _add(group: dict, tokens: dict, cost: float, record: dict) -> None:
     for kind in TOKEN_KINDS:
         group["tokens"][kind] += tokens.get(kind, 0)
     group["est_cost_usd"] += cost
+    group["tool_calls"] += record.get("tool_calls") or 0
+    group["peak_context"] = max(group["peak_context"], record.get("peak_context") or 0)
     if record.get("duration_s") is not None:
         group["durations"].append(record["duration_s"])
     if record.get("outcome"):
@@ -75,13 +78,16 @@ def _finish(group: dict) -> dict:
 
 
 def report(records: list, epic: int | None = None, since: str | None = None,
-           by: str = "role") -> dict:
-    """Totals plus per-group runs, tokens, cost, median duration and outcome counts."""
+           by: str = "role", run: str | None = None) -> dict:
+    """Totals plus per-group runs, tokens, cost, tool calls, peak context, median duration
+    and outcome counts; `run` keeps one control-plane run (`next-action --run-id`)."""
     records = attribute_children(records)
     if since:
         records = [r for r in records if (r.get("ts") or "") >= since]
     if epic is not None:
         records = [r for r in records if epic in (r.get("epic"), r.get("issue"))]
+    if run:
+        records = [r for r in records if r.get("run_id") == run]
     totals, groups = _blank(), {}
     for r in records:
         per_model = r.get("tokens") or {}
@@ -94,7 +100,8 @@ def report(records: list, epic: int | None = None, since: str | None = None,
         else:
             key = str(r.get(by) or "unattributed")
             _add(groups.setdefault(key, _blank()), summed, r.get("est_cost_usd", 0), r)
-    return {"filters": {"epic": epic, "since": since, "by": by}, "totals": _finish(totals),
+    return {"filters": {"epic": epic, "since": since, "by": by, "run": run},
+            "totals": _finish(totals),
             "groups": {k: _finish(g) for k, g in sorted(groups.items())}}
 
 
@@ -157,6 +164,7 @@ def main(argv: list | None = None) -> int:
     p.add_argument("--epic", type=int, default=None)
     p.add_argument("--since", default=None, help="YYYY-MM-DD")
     p.add_argument("--by", default="role", choices=["role", "model", "issue", "epic"])
+    p.add_argument("--run", default=None, help="One run's records (the run id next-action got)")
     p = sub.add_parser("backfill", help="Build records from existing transcripts")
     p.add_argument("--projects-dir", required=True,
                    help="One project's transcript dir, e.g. ~/.claude/projects/<slug>")
@@ -164,7 +172,8 @@ def main(argv: list | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "report":
         repo = args.repo or _current_repo()
-        result = {"repo": repo, **report(load_records(repo), args.epic, args.since, args.by)}
+        result = {"repo": repo, **report(load_records(repo), args.epic, args.since, args.by,
+                                              args.run)}
     else:
         result = backfill(os.path.expanduser(args.projects_dir), args.repo)
     print(json.dumps(result))

@@ -2,7 +2,8 @@
 
 A stage agent gets `models.<role>`; a child launched by an `sdlc:<parent>` agent gets
 `fanout.<parent>` and is denied when that parent may not fan out, is out of slots, or the
-child is itself a stage. Policy: `_common.model_policy`.
+child is itself a stage. An `explore` role's read-only Explore search passes untouched.
+Policy: `_common.model_policy`.
 """
 import fcntl
 import os
@@ -97,6 +98,8 @@ def main() -> int:
     if child:
         deny(f"a stage agent never launches another stage (sdlc:{child}); report it in your "
              "SDLC-RESULT/handoff and the orchestrator runs it.")
+        return 0
+    if tool_input.get("subagent_type") == "Explore" and parent in policy["explore"]:
         return 0
     if parent == DESIGN_REVIEW:
         parent = design_review_role(

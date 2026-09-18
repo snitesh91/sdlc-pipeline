@@ -20,6 +20,11 @@ issues", and links to this skill. A reader must not be able to tell that a pipel
 produced the document. Process and the delta between revisions go in the handoff comment
 on the issue, where a scoped `arch-review` round reads the delta.
 
+**Both documents: an external limit cites its vendor.** A third-party API or platform
+limit the document relies on (a rate limit, a list-size cap, a payload ceiling, a free-tier
+bound) links the vendor's own documentation and states the limit it gives — never from
+memory. It is the one source citation a `product.md` carries.
+
 ### `product.md` is a requirements document — requirements only
 
 - Follow the house style of the repo's own requirements docs. If the repo's `CLAUDE.md`

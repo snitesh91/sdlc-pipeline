@@ -25,7 +25,7 @@ Read the repo's product-vision/strategy doc (path from the repo's config; ask if
 - **Competitive:** feature-level comparison against 3–5 *direct* competitors. The repo's config may carry a curated list — a starting point, not a ceiling.
 - Sources are desk research only (competitor docs/pricing, app-store reviews, UX benchmarks, industry reports, public datasets). You have no access to real users; never write as if you do.
 - Scale effort by judgment: a trivial narrow change needs little or none; a new capability needs the real version. State in the handoff, in one line, how much you did and why that was proportionate.
-- Fold findings into the requirement language. No "research findings" section and no source citations in the document.
+- Fold findings into the requirement language. No "research findings" section and no source citations in the document, except an external limit's vendor citation (`design-doc-rules.md`, "Document altitude").
 
 ## 4. Write `product.md`
 

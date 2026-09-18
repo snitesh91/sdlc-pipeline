@@ -175,6 +175,17 @@ If a stage changes pipeline files the driven repo tracks (its `sdlc-pipeline.con
 the gate workflow), commit that with the related code. Never edit the plugin itself; flag
 a pipeline problem in your handoff.
 
+## Secrets and containers
+
+- **Never print the environment** (`env`, `printenv`, `set`, `process.env`, a debugger's
+  env dump): transcripts persist. Print variable **names only**, never values.
+- To see which credentials a profile configures, list names with a pattern that allows
+  digits (`E2E_*` keys): `sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' .env.<profile>
+  .secrets.<profile>`. Never read or echo a value to prove it is set.
+- **Stop only containers you started.** Label every container you start
+  `sdlc.issue=<n>`; check `docker ps` before any `docker stop`/`kill`, and never touch
+  an unlabelled container or another issue's — it is a concurrent Task's evidence.
+
 ## Rework and blockers — what it means for you
 
 Routing, resume messages, replacements and the escalation valve belong to the

@@ -46,8 +46,7 @@ ROLE_COMMANDS = {
     "product-review": {"record-design-review"},
     "design-review": {"record-design-review"},
     "development": {"open-dev-pr", "record-local-ci", "handoff-to-pr-review"},
-    "pr-review": {"record-pr-review", "record-local-ci", "merge-pr", "sync-branch"},
-    "exploratory": {"record-epic-verification"},
+    "pr-review": {"record-pr-review", "record-local-ci"},
     "initiative-close": {"record-initiative-verification"},
 }
 REVIEW_ROLES = {"product-review", "design-review", "pr-review"}

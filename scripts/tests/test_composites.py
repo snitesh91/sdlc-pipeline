@@ -26,6 +26,10 @@ class Gh(FakeGh):
     def pr_view(self, n, fields=""):
         return self.prs[n]
 
+    def pr_list_for_branch(self, branch, state="open"):
+        return [{"number": n, **p} for n, p in self.prs.items()
+                if p.get("headRefName") == branch and p.get("state", "OPEN") == "OPEN"]
+
 
 def _tree(*extra, epic_labels=("type:epic",)):
     return Gh([{"number": 9, "labels": list(epic_labels)}, *extra])
@@ -354,6 +358,30 @@ def test_start_stage_does_not_claim_when_worktree_add_refuses(monkeypatch):
     assert result["failed_step"] == "worktree-add" and result["claimed"] is False
     assert result["reason"] == "local has diverged"
     assert gh.issues[10]["status"] is None and gh.comments_on(10) == []
+
+
+def test_start_stage_development_with_an_open_pr_stops_before_worktree_and_claim(monkeypatch):
+    gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "pr-review"})
+    gh.prs = {77: {"headRefName": "issue-10"}}
+    monkeypatch.setattr(s, "cmd_worktree_add", _must_not_run("worktree-add"))
+
+    result = s.cmd_start_stage(gh, 10, "development")
+
+    assert (result["ok"], result["failed_step"], result["claimed"]) == (
+        False, "check-claimable", False)
+    assert "open PR #77" in result["error"]
+    assert gh.issues[10]["stage"] == "pr-review" and gh.comments_on(10) == []
+
+
+def test_start_stage_development_claims_when_only_another_branch_has_a_pr(monkeypatch):
+    gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "development"})
+    gh.prs = {77: {"headRefName": "issue-11"}}
+    monkeypatch.setattr(s, "cmd_worktree_add", lambda *a, **k: {"path": "/wt"})
+
+    result = s.cmd_start_stage(gh, 10, "development")
+
+    assert result["ok"] is True and result["claimed"] is True
+    assert result["completed_steps"] == ["check-claimable", "worktree-add", "claim"]
 
 
 # --- transition ---------------------------------------------------------------

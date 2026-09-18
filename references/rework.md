@@ -57,6 +57,9 @@ existing work, never from zero**. Its dispatch must carry:
 
 Test: it must ask for what a `SendMessage` to the original would — not a fresh assignment.
 
+A rework round is resumed, never re-claimed: `claim`/`start-stage --role development` refuse
+a unit with an open PR. Give a replacement the worktree `worktree-add <n>` restores.
+
 ## Rework rounds are scoped, not repeated from zero
 
 The resume message must:

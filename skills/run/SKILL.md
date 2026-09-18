@@ -141,7 +141,7 @@ python3 "$SDLC" open-arch-revision <epic-n> --title "Architecture revision: <dev
 
 It runs `architecture` → `arch-review` → Gate B like the Architecture-phase Task. Once
 its gate PR exists, park the reporting unit with
-`pause-for-epic-regate <n> --epic <epic-n> --gate-pr <pr>`. If `lld.md` must change too,
+`pause-for-epic-regate <n> --epic <epic-n> --gate-pr <pr> --found-by <stage that found it>`. If `lld.md` must change too,
 resume or re-run the LLD pass before the affected Tasks proceed. Escalation (third /
 sixth deviation, `mark-needs-human` on the Epic): `references/epics.md`, "Architecture
 deviation escalation".
@@ -152,9 +152,9 @@ Run from the driven repo's root; everything project-specific is in its `sdlc-pip
 
 - **SessionStart** exports `$SDLC` (the control plane) and `GITHUB_TOKEN` (from the config's `tokenPath`). If it reports the token missing, get it from the operator first; relay its optional `rtk init` hint once, never block on it. After a compaction it restates the run you were driving; on an off-policy session model it tells you to have the operator restart with `sdlc-run <n>`.
 - **PreToolUse (Bash)** denies hand-run GitHub mutations, GraphQL, `git worktree add` (except `--detach`), force-push and rebase, and limits each stage agent to its role's commands. A denial names the `python3 "$SDLC"` command to run instead — run it; never work around the guard.
-- **PreToolUse (Agent)** sets every `sdlc:*` agent's `model` from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (config `pipeline.models` / `pipeline.fanout` override it) and caps review fan-out. It denies an `sdlc:design-review` prompt lacking the header when the two review roles' models differ.
+- **PreToolUse (Agent)** sets every `sdlc:*` agent's `model` from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (config `pipeline.models` / `pipeline.fanout` override it), caps review fan-out, and lets only its `explore` roles launch a read-only `Explore` search. It denies an `sdlc:design-review` prompt lacking the header when the two review roles' models differ.
 - **SubagentStart** gives each `sdlc:*` agent `$SDLC`, `docRoot`, `requirementsDir`, the references path and the `SDLC-RESULT` format.
-- **SubagentStop** keeps an `sdlc:*` agent running until its final message ends with an `SDLC-RESULT` line. It and **SessionEnd** record each agent's tokens and cost (README, "Metrics").
+- **SubagentStop** keeps an `sdlc:*` agent running until its final message ends with an `SDLC-RESULT` line. It and **SessionEnd** record each agent's tokens, cost, tool calls and peak context (README, "Metrics"). Never record metrics yourself.
 
 ## Deterministic control plane
 
@@ -169,7 +169,7 @@ failure.
 
 | Command | Does → returns |
 |---|---|
-| `start-stage <n> --role <role> [--unit epic] [--base <ref>]` | `worktree-add` then `claim` (Step 2) → worktree result, claim result |
+| `start-stage <n> --role <role> [--unit epic] [--base <ref>]` | `worktree-add` then `claim` (Step 2) → worktree result, claim result. Refuses `development` on a unit with an open PR (`failed_step: check-claimable`): resume its agent instead (`references/rework.md`) |
 | `transition <n> --expect-stage <s> [--pr <pr>] [--repo-path <p>] [--base <ref>]` | After a subagent returns: `verify-exit` → `sync-branch` → `start-comment` when `<s>` is a review role → `ready`, `stopped_at`, per-step results (incl. `handoff_marker_present`, `conflict`) |
 | `cut-phase-tasks <epic> [--arch-body TEXT] [--lld-body TEXT] --repo-path <p>` | Create + stage both phase-Tasks, LLD blocked by Architecture, Architecture worktree; idempotent → `architecture_task`, `lld_task` |
 | `finish-lld <lld-task-n> --epic <e> --repo-path <p>` | `publish-doc --doc lld.md` → `create-lld-tasks` → `merge-lld-doc` → `close-issue` → `completed_steps`, `failed_step`, per-step results |
@@ -185,18 +185,18 @@ failure.
 | `next-action <epic> --run-id <id>` | The one unit to work (Step 1) |
 | `list-parallel-ready <epic> --repo-path <p> --run-id <id>` / `list-design-ready <epic> --repo-path <p>` / `list-ready-for-review <epic>` | Dev-lane / standing-epic design-lane / review pools |
 | `lld-section --epic <n> --task <m> --repo-path <p>` | Only Task #`<m>`'s subsection of `epic-<n>/lld.md` |
-| `worktree-add <n> [--unit epic] [--base <ref>]` | The only way to make a worktree: resumes from `origin/<branch>` (fast-forwards; refuses a diverged branch), else branches off the integration base |
+| `worktree-add <n> [--unit epic] [--base <ref>]` | The only way to make a worktree: resumes from `origin/<branch>` (fast-forwards; refuses a diverged branch), else branches off the integration base (recreates a stale local branch with no unique commits; refuses one with) |
 | `claim <n> --role <r>` / `start-comment <n> --role <r>` / `sync-branch <n> [--unit epic] [--base <ref>]` / `verify-exit <n> --expect-stage <s> [--pr <pr>]` | The steps inside `start-stage` / `transition` |
 | `set-stage <n> --stage <s>` / `add-blocked-by <n> --on <dep>` / `create-issue --parent <n> --type <T>` / `repair-issue <n> [--parent <p>] [--type <T>]` | Stage a unit / order units / the only issue-creation path / fill an existing issue's missing fields |
 | `publish-doc <n> --doc <d>` / `create-lld-tasks <epic> --repo-path <p>` / `merge-lld-doc <epic-n>` / `close-issue <n> [--repo-path <p>]` | The steps inside `finish-lld`; `close-issue` is the orchestrator's close (terminal fields + worktree release) |
 | `open-gate` / `check-gate` / `pass-gate` / `skip-gate` / `auto-pass-gate-a` | Gates (`references/gates.md`); on a phase-Task pass/skip close it instead of claiming a next stage |
 | `open-dev-pr` / `handoff-to-pr-review` / `record-pr-review` / `record-local-ci` / `record-design-review <n> --role <r> --outcome clean\|rework` | Stage-agent exit actions (their agent files own them) |
-| `pr-checks <pr>` / `merge-pr <pr> --issue <n>` | CI status / the only merge gate (refuses behind-base; reports `config_changed`) |
-| `mark-blocked` / `mark-needs-human` / `pause-for-epic-regate <n> --epic <e> --gate-pr <pr>` | Park a unit (first two release its worktree) |
-| `pairing-counts <n>` / `show-config` | Valve strike counts + thresholds / effective tunables (read once per invocation) |
-| `list-needs-human` / `check-epics-closeable` / `audit-issues [--epic <n>]` / `retro-check [--mark-done --count <n>]` | End-of-invocation sweeps; retro (Step 5) |
+| `pr-checks <pr>` / `merge-pr <pr> --issue <n>` | CI status / the only merge gate (refuses behind-base; reports `config_changed`; on an already-merged PR only finishes the bookkeeping, `recovered: true`) |
+| `mark-blocked` / `mark-needs-human` / `pause-for-epic-regate <n> --epic <e> --gate-pr <pr> [--found-by <stage>]` | Park a unit (first two release its worktree) |
+| `pairing-counts <n>` / `show-config` | Valve strike counts + thresholds / effective tunables and the running `plugin` version (read once per invocation) |
+| `list-needs-human` / `check-epics-closeable` / `audit-issues [--epic <n>]` | End-of-invocation sweeps |
 | `resolve-thread --thread-id <id> [--reply TEXT]` | Reply to and resolve a gate PR review thread (`references/gates.md`) |
-| `close-epic <n>` / `record-epic-verification <n> --kind e2e\|exploratory` / `provision-epic-stack <n>` / `teardown-epic-stack <n>` | Epic close (`references/epics.md`, "Epic closing"); per-epic stack, no-op unless `pipeline.stack.enabled` |
+| `close-epic <n>` / `record-epic-verification <n> --kind e2e\|exploratory` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
 | `check-initiative-closeable <n>` / `record-initiative-verification <n> --summary` / `close-initiative <n>` | "Closing an Initiative" |
 | `auto-pass-gate` / `mark-feedback-received` / `mark-feedback-addressed` / `mark-todo` / `mark-issue-closed` | CI-triggered paths only — never run them yourself |
 
@@ -411,7 +411,7 @@ handback is terse"). Route on `outcome`:
 
 | `outcome` | Do |
 |---|---|
-| `done` / `clean` | The next step per the agent file's routing; `transition` (below) before the next stage |
+| `done` / `clean` | The next step per the agent file's routing; `transition` (below) before the next stage. A `pr-review` `clean` → you run `merge-pr <pr> --issue <n>` (behind-base refusal: `references/parallelism.md`, "Git-conflict handling") |
 | `rework` | Route the finding (`references/rework.md`) |
 | `blocked` | Clear the named blocker: resume the stage that owns the question, `open-arch-revision` for a design that does not fit, `mark-blocked` for a cross-issue dependency |
 | `needs-human` | Ask the operator if present; else `mark-needs-human <n> --reason "..."`, park, Step 1 |
@@ -443,7 +443,8 @@ the stage just finished; `--pr` is required with `pr-review`.
 Each stage performs its own exit actions (`agents/<role>.md`; routing table in
 `references/stage-playbooks.md`, "Stage exit actions live in the agent files"). **Yours,
 after the agent returns:** opening a human-review gate, the review `start-comment` (via
-`transition`), and `finish-lld`.
+`transition`), `merge-pr` after a clean `pr-review`, the closing-verification records
+(`references/epics.md`, "Epic closing"), and `finish-lld`.
 
 Repeat Steps 2–3 until the unit is merged or closed, blocked, or needs a human.
 
@@ -474,25 +475,21 @@ current state. Above the fold:
 - Every merged PR and closed issue; every epic newly `epic:architected`.
 - Any epic `check-epics-closeable` newly notified; any `product_cap` deferral.
 - Every issue `audit-issues` flagged and whether you repaired it.
-- One cost line: `python3 "$(dirname "$SDLC")/sdlc_metrics.py" report --epic <n>` →
-  `totals` (est. USD, tokens) for this epic's agents so far.
+- One cost line: `python3 "$(dirname "$SDLC")/sdlc_metrics.py" report --run <run-id>` →
+  `totals` (est. USD, tokens, tool calls, peak context) for this run's agents.
 
-## Step 5 — Retrospective checkpoint (only after a merge closed an issue)
+## Step 5 — Retrospective (only when the operator asks)
 
-```bash
-python3 "$SDLC" retro-check
-```
+Never decide on your own that a retro is due. Between retros, note each friction finding
+as you see it — bouncing pairings (`pairing-counts`), docs too thin for the next stage,
+dead references, gates too strict or loose — with the plugin version it was seen on
+(`show-config` → `plugin`). The operator decides where parked findings live; never file
+them as issues unless told to.
 
-`run_retro` is true once `pipeline.retro.everyClosedIssues` (default 5) issues closed
-since the last retro. **Capture the `closed_count` it returns now** — that is what
-`--mark-done` stamps later. The watermark file (`pipeline.retro.watermarkFile`, default
-`<docRoot>/retro-watermark`) belongs to the **driven repo**; fixes go to the **plugin
-repo** (`snitesh91/sdlc-pipeline`).
-
-When true: grep recently merged units' handoff comments and docs for recurring friction
-— bouncing pairings (`pairing-counts`), docs too thin for the next stage, dead
-references, gates too strict or loose. **This file and its references are the primary
-fix target.** Present findings in chat and ask before editing. Once approved:
+When the operator runs the retro: sweep recently merged units' handoff comments and docs
+for that friction. Fixes go to the **plugin repo** (`snitesh91/sdlc-pipeline`); **this
+file and its references are the primary fix target.** Present findings in chat and ask
+before editing. Once approved:
 
 1. In a clone of the plugin repo: `git checkout -B retro/<date> origin/main`, edit
    `skills/run/SKILL.md` / `references/*` / `agents/*` / `hooks/*`, add a 1–2 line entry
@@ -503,12 +500,8 @@ fix target.** Present findings in chat and ask before editing. Once approved:
    control; run both against the pre-fix `sdlc_next.py` — the regression must go red,
    the control must not.
 2. In the driven repo: bump the plugin pin (the marketplace `ref` in
-   `.claude/settings.json`, and the `SDLC_PIPELINE_REF` Actions variable) to the new tag,
-   then `retro-check --mark-done --count <closed_count captured above>`, then commit the
-   watermark and the pin together, naming the retrospective. **Always pass `--count`** —
-   without it the live count is stamped, marking issues closed during the retro as
-   covered. `count_was_live_fallback: true` in the result means re-run with the right
-   `--count`.
+   `.claude/settings.json`, and the `SDLC_PIPELINE_REF` Actions variable) to the new tag
+   and commit it, naming the retrospective.
 
 **Bump the pin only when no run is live on the driven repo.** The new version loads in
 the next session (after `claude plugin marketplace update sdlc-pipeline`).

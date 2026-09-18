@@ -37,9 +37,11 @@ def _seconds(ts: str):
 
 def scan(path: str, main_thread: bool = False) -> dict:
     """Stream a transcript once: per-model tokens (one API message spans several lines with
-    the same id, so each id counts once), turns, first/last timestamp, the first prompt and
-    the final assistant turn's text. `main_thread` skips sidechain lines."""
+    the same id, so each id counts once), turns, tool calls, peak context (the largest
+    single request's input + cache tokens), first/last timestamp, the first prompt and the
+    final assistant turn's text. `main_thread` skips sidechain lines."""
     usage, models, first_ts, last_ts, prompt, final = {}, {}, None, None, None, []
+    tool_ids = set()
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             try:
@@ -59,7 +61,11 @@ def scan(path: str, main_thread: bool = False) -> dict:
                 if prompt is None:
                     prompt = message_text(msg.get("content"))
             elif msg.get("role") == "assistant":
-                final.append(message_text(msg.get("content")))
+                content = msg.get("content")
+                final.append(message_text(content))
+                if isinstance(content, list):
+                    tool_ids.update(b.get("id") for b in content if isinstance(b, dict)
+                                    and b.get("type") == "tool_use" and b.get("id"))
                 model, msg_id, used = msg.get("model"), msg.get("id"), msg.get("usage")
                 if not msg_id or not isinstance(used, dict) or model == "<synthetic>":
                     continue
@@ -75,7 +81,10 @@ def scan(path: str, main_thread: bool = False) -> dict:
         for name, value in counts.items():
             per_model[name] += value
     start, end = _seconds(first_ts), _seconds(last_ts)
-    return {"tokens": tokens, "turns": len(usage), "first_ts": first_ts, "last_ts": last_ts,
+    peak = max((c.get("input", 0) + c.get("cache_write", 0) + c.get("cache_read", 0)
+                for c in usage.values()), default=0)
+    return {"tokens": tokens, "turns": len(usage), "tool_calls": len(tool_ids),
+            "peak_context": peak, "first_ts": first_ts, "last_ts": last_ts,
             "duration_s": round(end - start, 1) if start is not None and end is not None else None,
             "prompt": prompt or "", "final_text": "\n".join(p for p in final if p)}
 
@@ -98,7 +107,8 @@ def build_record(scanned: dict, *, repo: str, session_id: str, agent_id: str, ag
               "role": header.get("role") or sdlc_role(agent_type) or agent_type,
               "models": sorted(tokens), "tokens": tokens,
               "est_cost_usd": round(sum(cost_usd(m, t) for m, t in tokens.items()), 4),
-              "duration_s": scanned["duration_s"], "turns": scanned["turns"]}
+              "duration_s": scanned["duration_s"], "turns": scanned["turns"],
+              "tool_calls": scanned["tool_calls"], "peak_context": scanned["peak_context"]}
     meta = meta or {}
     parent = {k: meta[m] for k, m in (("agent_id", "parentAgentId"), ("spawn_depth", "spawnDepth"),
                                       ("tool_use_id", "toolUseId")) if m in meta}
@@ -116,6 +126,10 @@ def build_record(scanned: dict, *, repo: str, session_id: str, agent_id: str, ag
         record["epic"] = states[0].get("epic")
     elif "issue" in record and epic_of(record["issue"], states) is not None:
         record["epic"] = epic_of(record["issue"], states)
+    run_id = next((s.get("run_id") for s in states
+                   if "epic" in record and s.get("epic") == record["epic"]), None)
+    if run_id:
+        record["run_id"] = run_id
     return record
 
 

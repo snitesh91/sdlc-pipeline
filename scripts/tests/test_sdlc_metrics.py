@@ -59,12 +59,31 @@ def test_report_since_and_by_epic():
     assert m.report([dict(r) for r in RECORDS], by="epic")["groups"]["10"]["runs"] == 1
 
 
+def test_report_sums_tool_calls_and_keeps_the_peak_context():
+    records = [_rec("d1", "development", 1.0, epic=9, tool_calls=30, peak_context=150_000),
+               _rec("d2", "development", 1.0, epic=9, tool_calls=12, peak_context=400_000),
+               _rec("d3", "development", 1.0, epic=9)]
+    dev = m.report(records, epic=9)["groups"]["development"]
+    assert (dev["tool_calls"], dev["peak_context"]) == (42, 400_000)
+
+
+def test_report_run_keeps_one_run_including_its_fanout_children():
+    records = [_rec("p1", "pr-review", 1.0, epic=9, run_id="r-1"),
+               {**_rec("c1", "general-purpose", 0.5), "parent": {"agent_id": "p1"}},
+               _rec("p2", "pr-review", 2.0, epic=9, run_id="r-2")]
+    out = m.report(records, run="r-1")
+    assert out["filters"]["run"] == "r-1" and out["totals"]["runs"] == 2
+    assert out["totals"]["est_cost_usd"] == 1.5
+
+
 def test_report_cli_reads_the_repo_store(store, capsys):
     store.mkdir(parents=True)
     (store / "o__r.jsonl").write_text("".join(json.dumps(r) + "\n" for r in RECORDS))
     assert m.main(["report", "--repo", "o/r", "--epic", "9", "--by", "issue"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["repo"] == "o/r" and out["groups"]["13"]["runs"] == 4
+    assert m.main(["report", "--repo", "o/r", "--run", "no-such-run"]) == 0
+    assert json.loads(capsys.readouterr().out)["totals"]["runs"] == 0
 
 
 def _line(**entry):
