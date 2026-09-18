@@ -106,6 +106,7 @@ The confidence marker does not substitute for this — post both. The orchestrat
 The orchestrator then routes:
 
 **`arch-review`**
+- **Clean, profile waives Gate B** (standing child) → `waive-gate <n> --stage architecture` (`gates.md`, "Waived gates"), straight into `development`.
 - **Clean, confidence > threshold** → `skip-gate` (`gates.md`, "Gate B confidence skip"). Standing child: straight into `development`. Architecture-phase or revision Task: `skip-gate --repo-path <p>` publishes `epic-<n>/architecture.md` and closes the Task.
 - **Clean, confidence ≤ threshold or marker missing** → orchestrator opens Gate B and parks the unit. Never set Stage to `Development` directly.
 - **Fixable design issue** → resume the `architecture` agent; re-review. Counts toward the `arch-review ↔ architecture` valve.

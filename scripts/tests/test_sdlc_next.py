@@ -278,11 +278,13 @@ def test_is_epic_reads_pipeline_classification_only():
     assert is_epic({"issueType": None, "parent": None, "labels": [{"name": "type:task"}]}) is False
 
 
-def test_default_stage_bug_type_fast_tracks_to_architecture():
+def test_default_stage_guesses_product_except_for_an_epics_child():
+    # No Bug fast-track: a standing child is routed at pickup, whatever its type.
     from sdlc_next import default_stage
-    assert default_stage({"issueType": {"name": "Bug"}}) == "architecture"
-    assert default_stage({"issueType": {"name": "Task"}}) == "product"
-    assert default_stage({"issueType": None}) == "product"
+    assert default_stage(None) == "product"
+    assert default_stage({"labels": [{"name": "type:initiative"}]}) == "product"
+    assert default_stage({"labels": [{"name": "type:epic"}, {"name": "epic:standing"}]}) is None
+    assert default_stage({"labels": [{"name": "type:epic"}]}) is None
 
 
 def test_find_gate_pr_reads_marker_from_comments():
@@ -615,17 +617,40 @@ def test_picks_highest_priority_then_oldest_among_eligible_within_one_epic():
     assert decide_next_action(gh, 90) == {"action": "delegate", "issue": 8, "unit": "issue", "stage": "product"}
 
 
-def test_unlabeled_issue_defaults_to_product_stage():
+@pytest.mark.parametrize("issue_type", [None, "Bug"])
+def test_a_fresh_standing_child_is_handed_out_for_routing_with_no_stage_written(issue_type):
+    # Regression: it was stamped `product` (a Bug `architecture`) before anyone read it.
     from sdlc_next import GitHub, decide_next_action
-    from tests.test_sdlc_next import ScriptedRunner
     epic_90 = _epic(90, labels=["epic:standing"])
-    issues = [epic_90, _issue(9, parent=90)]
+    issues = [epic_90, _issue(9, parent=90, issue_type=issue_type)]
     responses = {tuple(_list_argv()): _list_response(issues)}
     responses.update(_no_blockers_responses(9))
-    responses.update(_stage_assign_responses(9, "product"))
     runner = ScriptedRunner(responses)
-    gh = GitHub(runner=runner)
-    assert decide_next_action(gh, 90) == {"action": "delegate", "issue": 9, "unit": "issue", "stage": "product"}
+    assert decide_next_action(GitHub(runner=runner), 90) == {
+        "action": "route", "issue": 9, "unit": "issue"}
+    assert not any("updateIssueFieldValue" in c[-1] for c in runner.calls)
+
+
+def test_a_standing_child_with_a_stage_is_still_delegated_at_it():
+    # Positive control: an in-flight child (already staged) resumes its flow unchanged.
+    from sdlc_next import GitHub, decide_next_action
+    epic_90 = _epic(90, labels=["epic:standing"])
+    issues = [epic_90, _issue(9, parent=90, stage="architecture", issue_type="Bug")]
+    responses = {tuple(_list_argv()): _list_response(issues)}
+    responses.update(_no_blockers_responses(9))
+    assert decide_next_action(GitHub(runner=ScriptedRunner(responses)), 90) == {
+        "action": "delegate", "issue": 9, "unit": "issue", "stage": "architecture"}
+
+
+def test_a_fresh_standing_child_is_not_routed_while_blocked():
+    from sdlc_next import GitHub, decide_next_action, _BLOCKED_BY_QUERY
+    epic_90 = _epic(90, labels=["epic:standing"])
+    responses = {tuple(_list_argv()): _list_response([epic_90, _issue(9, parent=90)]),
+                 ("gh", "api", "graphql", "-f", f"query={_BLOCKED_BY_QUERY.format(n=9)}"):
+                     json.dumps({"data": {"repository": {"issue": {"blockedBy": {
+                         "nodes": [{"number": 7, "state": "OPEN"}]}}}}})}
+    assert decide_next_action(GitHub(runner=ScriptedRunner(responses)), 90) == {
+        "action": "none", "epic": 90}
 
 
 def test_nothing_actionable_returns_none():
@@ -2089,10 +2114,14 @@ def test_skip_gate_refuses_below_threshold(monkeypatch):
         assert "threshold" in str(e)
 
 
-def test_skip_gate_threshold_is_per_profile_standing_epic_child_clears_at_91():
-    # The standing profile's threshold (90 in the sample config) refuses confidence 90.
+def test_skip_gate_threshold_is_per_profile(monkeypatch):
+    # A profile's own threshold (90 here) refuses confidence 90.
+    import sdlc_next
     from sdlc_next import GitHub, GhError, cmd_skip_gate, _ISSUE_EPIC_CHECK_QUERY
     from tests.test_sdlc_next import ScriptedRunner
+    monkeypatch.setitem(sdlc_next.PIPELINE, "profiles", [
+        {"name": "strict", "match": {"label": "epic:strict"},
+         "gates": {"skipConfidenceThreshold": 90}}, *sdlc_next.PIPELINE["profiles"]])
 
     epic_check_9 = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=9)}")
     epic_check_94 = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=94)}")
@@ -2102,7 +2131,7 @@ def test_skip_gate_threshold_is_per_profile_standing_epic_child_clears_at_91():
             "labels": {"nodes": []}}}}}),
         epic_check_94: json.dumps({"data": {"repository": {"issue": {
             "issueType": {"name": "Feature"}, "parent": None,
-            "labels": {"nodes": [{"name": "epic:standing"}]}}}}}),
+            "labels": {"nodes": [{"name": "epic:strict"}]}}}}}),
     }
     # At 90 -> refused (90 <= 90); raises before any comment/claim.
     gh = GitHub(runner=ScriptedRunner(dict(responses)))
@@ -2134,35 +2163,6 @@ def test_is_epic_legacy_and_is_epic_architected_read_their_labels():
     assert is_epic_architected({"labels": []}) is False
 
 
-def test_default_stage_has_no_guess_for_a_non_standing_epics_child():
-    # A non-standing Epic's children are always staged explicitly, never guessed.
-    from sdlc_next import default_stage
-    epic = {"labels": [{"name": "type:epic"}]}
-    assert default_stage({"issueType": {"name": "Task"}}, epic) is None
-    assert default_stage({"issueType": {"name": "Bug"}}, epic) is None
-
-
-def test_default_stage_standing_child_and_parentless_issue_run_the_per_issue_flow():
-    from sdlc_next import default_stage
-    standing = {"labels": [{"name": "type:epic"}, {"name": "epic:standing"}]}
-    assert default_stage({"issueType": {"name": "Task"}}, standing) == "product"
-    assert default_stage({"issueType": {"name": "Bug"}}, standing) == "architecture"
-    assert default_stage({"issueType": {"name": "Task"}}, None) == "product"
-
-
-def test_default_stage_standing_epic_child_keeps_old_behavior():
-    from sdlc_next import default_stage
-    standing_epic = {"labels": [{"name": "epic:standing"}]}
-    assert default_stage({"issueType": {"name": "Task"}}, standing_epic) == "product"
-    assert default_stage({"issueType": {"name": "Bug"}}, standing_epic) == "architecture"
-
-
-def test_default_stage_no_parent_epic_keeps_old_behavior():
-    from sdlc_next import default_stage
-    assert default_stage({"issueType": {"name": "Task"}}, None) == "product"
-    assert default_stage({"issueType": {"name": "Bug"}}, None) == "architecture"
-
-
 def test_non_architected_epic_holds_its_stageless_tasks():
     # Before epic:architected, a Stage-less child waits on merge-lld-doc: not delegated or staged.
     from sdlc_next import GitHub, decide_next_action
@@ -2173,17 +2173,15 @@ def test_non_architected_epic_holds_its_stageless_tasks():
     assert decide_next_action(gh, 92) == {"action": "none", "epic": 92}
 
 
-def test_standing_epic_stages_and_delegates_a_fresh_child_without_being_architected():
-    # A standing epic's Stage-less child runs the per-issue flow from `product`.
+def test_standing_epic_hands_out_a_fresh_child_without_being_architected():
+    # A standing epic's Stage-less child is routed at pickup, not held for `epic:architected`.
     from sdlc_next import GitHub, decide_next_action
     epic_94 = _epic(94, labels=["epic:standing"])
     issues = [epic_94, _issue(101, parent=94)]
     responses = {tuple(_list_argv()): _list_response(issues)}
     responses.update(_no_blockers_responses(101))
-    responses.update(_stage_assign_responses(101, "product"))
     gh = GitHub(runner=ScriptedRunner(responses))
-    assert decide_next_action(gh, 94) == {"action": "delegate", "issue": 101, "unit": "issue",
-                                           "stage": "product"}
+    assert decide_next_action(gh, 94) == {"action": "route", "issue": 101, "unit": "issue"}
 
 
 def test_architected_epic_reports_a_late_stageless_child_as_unstaged():
@@ -4268,9 +4266,9 @@ def test_resolve_profile_matches_standing_label():
     assert "childEntryStage" not in p
     assert p["childrenNeedArchitectedEpic"] is False
     assert p["closes"] is False
-    # Sample config's standing profile lowers the bar + drops the human Gate A.
-    assert p["gates"]["skipConfidenceThreshold"] == 90
+    # Sample config's standing profile waives both human gates.
     assert p["gates"]["requiresHumanGateA"] is False
+    assert p["gates"]["requiresHumanGateB"] is False
 
 
 def test_resolve_profile_legacy_wins_over_standing_by_order():
@@ -4288,6 +4286,7 @@ def test_resolve_profile_falls_through_to_default_catch_all():
     assert "childEntryStage" not in p
     assert p["gates"]["skipConfidenceThreshold"] == 80
     assert p["gates"]["requiresHumanGateA"] is True
+    assert p["gates"]["requiresHumanGateB"] is True
 
 
 def test_resolve_profile_none_epic_is_default():
@@ -4317,58 +4316,6 @@ def _epic_check(n, parent=None, labels=()):
                 "parent": {"number": parent} if parent else None,
                 "labels": {"nodes": [{"name": l} for l in
                                      ([*labels, "type:epic"] if parent is None else labels)]}}}}}))
-
-
-def test_auto_pass_gate_a_refuses_non_product_stage():
-    from sdlc_next import GitHub, GhError, cmd_auto_pass_gate_a
-    from tests.test_sdlc_next import ScriptedRunner
-    gh = GitHub(runner=ScriptedRunner())
-    try:
-        cmd_auto_pass_gate_a(gh, issue=9, stage="architecture", summary="x")
-        assert False, "expected GhError"
-    except GhError as e:
-        assert "product gate" in str(e)
-
-
-def test_auto_pass_gate_a_refuses_when_profile_requires_human():
-    from sdlc_next import GitHub, GhError, cmd_auto_pass_gate_a
-    from tests.test_sdlc_next import ScriptedRunner
-    a9, r9 = _epic_check(9, parent=50)
-    a50, r50 = _epic_check(50)  # default profile -> requiresHumanGateA True
-    gh = GitHub(runner=ScriptedRunner({a9: r9, a50: r50}))
-    try:
-        cmd_auto_pass_gate_a(gh, issue=9, stage="product", summary="x")
-        assert False, "expected GhError"
-    except GhError as e:
-        assert "requiresHumanGateA" in str(e)
-
-
-def test_auto_pass_gate_a_advances_child_of_no_human_profile():
-    from sdlc_next import (GitHub, cmd_auto_pass_gate_a, _ISSUE_NODE_ID_QUERY,
-                            _SET_ISSUE_FIELD_MUTATION, STAGE_FIELD_ID, STAGE_OPTION_IDS,
-                            PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS)
-    from tests.test_sdlc_next import ScriptedRunner
-    a9, r9 = _epic_check(9, parent=94)
-    a94, r94 = _epic_check(94, labels=["epic:standing"])  # requiresHumanGateA False
-    node_id = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}")
-    stage_mut = ("gh", "api", "graphql", "-f",
-        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=STAGE_FIELD_ID, option_id=STAGE_OPTION_IDS['architecture'])}")
-    status_mut = ("gh", "api", "graphql", "-f",
-        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['in-progress'])}")
-    runner = ScriptedRunner({
-        a9: r9, a94: r94,
-        node_id: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
-        stage_mut: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
-        status_mut: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
-    })
-    runner.prefix_responses = {("gh", "issue", "comment", "9"): ""}
-    gh = GitHub(runner=runner)
-    result = cmd_auto_pass_gate_a(gh, issue=9, stage="product", summary="Clean.")
-    assert result == {"issue": 9, "unit": "issue", "next_stage": "architecture",
-                       "auto_passed": True, "profile": "standing"}
-    assert list(stage_mut) in runner.calls
-    comment_calls = [c for c in runner.calls if c[:3] == ["gh", "issue", "comment"]]
-    assert any("Gate A auto-passed" in c[-1] for c in comment_calls)
 
 
 # --- citations: byte-exact literal fragments; `cite-example` blocks are never resolved ---
@@ -6079,8 +6026,6 @@ def test_config_still_overrides_the_skip_confidence_threshold(tmp_path):
     effective = _show_config(tmp_path, lambda c: c["pipeline"].__setitem__(
         "gates", {"skipConfidenceThreshold": 95, "requiresHumanGateA": True}))
     assert effective["gates"]["skipConfidenceThreshold"] == 95
-    standing = next(p for p in effective["profiles"] if p["name"] == "standing")
-    assert standing["gates"]["skipConfidenceThreshold"] == 90
 
 
 # --- audit-issues ---

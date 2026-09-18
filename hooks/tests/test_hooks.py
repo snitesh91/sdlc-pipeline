@@ -236,6 +236,8 @@ ROLE_DENIED = [
     ("sdlc:pr-review", CP + "claim 5 --role pr-review", "orchestrator"),
     ("sdlc:exploratory", "echo $(" + CP + "close-epic 9)", "orchestrator"),
     ("sdlc:initiative-close", CP + "close-initiative 1", "orchestrator"),
+    ("sdlc:development", CP + "route 5 --to merge --reason r", "orchestrator"),
+    ("sdlc:design-review", CP + "waive-gate 5 --stage architecture --summary s", "orchestrator"),
     ("sdlc:pr-review", "git commit -am fix", "read-only on the branch"),
     ("sdlc:pr-review", "git push origin issue-5", "read-only on the branch"),
     ("sdlc:design-review", "git -C /w merge origin/main", "read-only on the branch"),
@@ -257,6 +259,7 @@ def test_role_allowlist_denies(sdlc_repo, agent_type, command, reason):
 @pytest.mark.parametrize("agent_type", [None, "general-purpose"])
 def test_orchestrator_and_other_agents_keep_every_command(sdlc_repo, agent_type):
     assert guard(CP + "set-stage 5 --stage development", sdlc_repo, agent_type) is None
+    assert guard(CP + "route 5 --to development --reason r", sdlc_repo, agent_type) is None
     assert guard("git commit -m x && git reset --hard", sdlc_repo, agent_type) is None
 
 
@@ -293,6 +296,8 @@ GOOD = 'HEAD: abc123 / PR #9\nDETAIL: https://x\nSDLC-RESULT: {"issue": 5, "stag
 @pytest.mark.parametrize("text", [
     GOOD,
     '`SDLC-RESULT: {"issue": 7, "stage": "pr-review", "outcome": "needs-human"}`',
+    'SDLC-RESULT: {"issue": 5, "stage": "development", "outcome": "done", "next": "merge", '
+    '"why": "pr-review not needed -- docs-only diff"}',
 ])
 def test_subagent_stop_passes(tmp_path, sdlc_repo, text):
     proc = stop(tmp_path, sdlc_repo, text)
@@ -305,6 +310,14 @@ def test_subagent_stop_passes(tmp_path, sdlc_repo, text):
     ('SDLC-RESULT: {"issue": 5, "stage": "development", "outcome": "finished"}', '"outcome"'),
     ('SDLC-RESULT: {"issue": 5, "outcome": "done"}', '"stage"'),
     ("SDLC-RESULT: {issue: 5}", "not valid JSON"),
+    ('SDLC-RESULT: {"issue": 5, "stage": "product", "outcome": "done", "next": "qa", "why": "x"}',
+     '"next"'),
+    ('SDLC-RESULT: {"issue": 5, "stage": "product", "outcome": "done", "why": "no next"}',
+     '"next"'),
+    ('SDLC-RESULT: {"issue": 5, "stage": "product", "outcome": "done", "next": "development"}',
+     '"why"'),
+    ('SDLC-RESULT: {"issue": 5, "stage": "product", "outcome": "done", "next": "development", '
+     '"why": "' + "x" * 121 + '"}', '"why"'),
 ])
 def test_subagent_stop_blocks(tmp_path, sdlc_repo, text, problem):
     proc = stop(tmp_path, sdlc_repo, text)

@@ -16,7 +16,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "hooks"))
 import _metrics  # noqa: E402
-from _common import load_json, repo_config  # noqa: E402
+from _common import STANDING_FLOW, load_json, repo_config  # noqa: E402
 
 TOKEN_KINDS = ("input", "output", "cache_write", "cache_read")
 
@@ -48,6 +48,17 @@ def attribute_children(records: list) -> list:
                 if key in parent:
                     r.setdefault(key, parent[key])
     return records
+
+
+def issue_routes(records: list) -> dict:
+    """issue -> the flow stages its agents reported, in order (`architecture>development`),
+    so a routed child's flow groups apart from a full one."""
+    ran: dict = {}
+    for r in records:
+        if r.get("issue") is not None and r.get("stage") in STANDING_FLOW:
+            ran.setdefault(r["issue"], set()).add(r["stage"])
+    return {issue: ">".join(s for s in STANDING_FLOW if s in stages)
+            for issue, stages in ran.items()}
 
 
 def _blank() -> dict:
@@ -89,6 +100,7 @@ def report(records: list, epic: int | None = None, since: str | None = None,
     if run:
         records = [r for r in records if r.get("run_id") == run]
     totals, groups = _blank(), {}
+    routes = issue_routes(records) if by == "route" else {}
     for r in records:
         per_model = r.get("tokens") or {}
         summed = {k: sum(t.get(k, 0) for t in per_model.values()) for k in TOKEN_KINDS}
@@ -98,7 +110,8 @@ def report(records: list, epic: int | None = None, since: str | None = None,
                 _add(groups.setdefault(model, _blank()), tokens,
                      _metrics.cost_usd(model, tokens), r)
         else:
-            key = str(r.get(by) or "unattributed")
+            key = (routes.get(r.get("issue")) if by == "route" else str(r.get(by) or "")) \
+                or "unattributed"
             _add(groups.setdefault(key, _blank()), summed, r.get("est_cost_usd", 0), r)
     return {"filters": {"epic": epic, "since": since, "by": by, "run": run},
             "totals": _finish(totals),
@@ -163,7 +176,7 @@ def main(argv: list | None = None) -> int:
     p.add_argument("--repo", default=None, help="owner/name (default: this repo, else all)")
     p.add_argument("--epic", type=int, default=None)
     p.add_argument("--since", default=None, help="YYYY-MM-DD")
-    p.add_argument("--by", default="role", choices=["role", "model", "issue", "epic"])
+    p.add_argument("--by", default="role", choices=["role", "model", "issue", "epic", "route"])
     p.add_argument("--run", default=None, help="One run's records (the run id next-action got)")
     p = sub.add_parser("backfill", help="Build records from existing transcripts")
     p.add_argument("--projects-dir", required=True,

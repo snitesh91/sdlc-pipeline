@@ -10,11 +10,10 @@ automatic code-PR merge (`references/operations.md`).
 - **Each gate is a small doc-only PR, always `issue-<n>` → `main`.** Merging it is the
   approval; any review comment on it is feedback to address before that merge.
 
+Whether a gate needs a human is the profile's call ("Waived gates"). A standing child
+routed past a stage (`route`) never reaches that stage's gate.
+
 **Gate A** — after a clean `product-review`, before `architecture`; gates `product.md`.
-Whether it needs a human is the profile's `gates.requiresHumanGateA` (default `true`) —
-see "Gate A configurability". A fast-tracked bug with no `product.md` has no Gate A
-(`references/epics.md`, "Bug fast-track"); if it later escalates to product, the new
-`product.md` runs `product-review` and Gate A per the profile.
 
 **Gate B** — after a clean `arch-review`, before the next stage; gates
 `architecture.md`. Skipped on a high-confidence clean verdict ("Gate B confidence skip").
@@ -144,6 +143,7 @@ python3 "$SDLC" pass-gate <n> \
 
 ## Gate B confidence skip
 
+Only where the profile needs a human at Gate B; otherwise waive it ("Waived gates").
 A clean `arch-review` reports `confidence` (0–100) in a
 `<!-- arch-review-confidence: N -->` marker. The threshold is the governing epic's
 profile `gates.skipConfidenceThreshold` (a child resolves via its parent epic), falling
@@ -163,18 +163,20 @@ a number — `skip-gate` reports the threshold it applied.
   missing marker counts as below threshold — never 0, never a guess.
 - Only Gate B can be skipped; `skip-gate --stage product` refuses.
 
-## Gate A configurability
+## Waived gates
 
-Gate A has no confidence skip. On a **clean `product-review`**, apply the profile:
+The profile's `gates.requiresHumanGateA` / `requiresHumanGateB` (default `true`; the
+shipped `standing` profile sets both `false`) decide whether a human reviews the gate.
+On a **clean `product-review`** (Gate A) or **clean `arch-review`** (Gate B):
 
-- `requiresHumanGateA: true` (default) → `open-gate ... --doc product.md --next-stage architecture`.
-- `requiresHumanGateA: false` (e.g. a standing/RTB profile) → auto-pass:
+- `true` → `open-gate` (Gate B: first try the confidence skip above).
+- `false` → no gate PR; waive it:
   ```bash
-  python3 "$SDLC" auto-pass-gate-a <n> --summary "<one sentence>"
+  python3 "$SDLC" waive-gate <n> --stage product|architecture --summary "<one sentence>"
   ```
-  It refuses if the resolved profile still requires a human. It advances `product →
-  architecture`, claims `architecture`, and leaves a
-  `<!-- gate-a-auto-passed: <profile> -->` marker as the audit trail.
+  It refuses when the profile still requires a human. It claims the next stage (a
+  phase-Task instead completes as `skip-gate` does) and leaves a
+  `<!-- gate-waived: <stage>:<profile> -->` marker as the audit trail.
 
 ## Edge cases
 

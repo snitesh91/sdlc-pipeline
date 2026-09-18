@@ -28,7 +28,7 @@ handoff loop is live at once — never that anything decides on its own.
 | `${CLAUDE_PLUGIN_ROOT}/references/design-doc-rules.md` | `product.md`/`architecture.md` content; scope alignment. Read by `product`, `product-review`, `architecture`, `design-review` |
 | `${CLAUDE_PLUGIN_ROOT}/references/verification-rules.md` | Proving a claim by running it. Read by `architecture`, `lld`, `development`, `pr-review`, `design-review` |
 | `${CLAUDE_PLUGIN_ROOT}/references/review-fanout.md` | Review fan-out. Read by `design-review` |
-| `${CLAUDE_PLUGIN_ROOT}/references/epics.md` | Profiles, phase-Tasks, footprints, deviation, bug fast-track, epic close, board status |
+| `${CLAUDE_PLUGIN_ROOT}/references/epics.md` | Profiles, phase-Tasks, footprints, deviation, epic close, board status |
 | `${CLAUDE_PLUGIN_ROOT}/references/operations.md` | Token/repo access, issue fields, auto-merge, local-CI attestation |
 | `${CLAUDE_PLUGIN_ROOT}/references/continuous-mode.md` | The operator asked for unattended looping |
 | `${CLAUDE_PLUGIN_ROOT}/references/history.md` | You want the incident behind a rule |
@@ -52,10 +52,10 @@ task:       development -> [pr-review] -> auto-merge -> CLOSED
   Initiative, no `product.md`; it starts at its Architecture-phase Task, and
   `architecture` returns its questions (`needs-human`) when scope is unclear. An Initiative may wrap
   such Epics for grouping only (no `product.md`; `architecture` reads the Epic's scope).
-- **Standing profile** (`epicLevelPhase: false`): no phase-Tasks, no epic branch; each
-  child runs `product -> [product-review] -> [Gate A] -> architecture -> [arch-review] ->
-  [Gate B] -> development -> [pr-review] -> CLOSED` and gates straight to `main` (a
-  **bug** starts at `architecture` — `references/epics.md`, "Bug fast-track").
+- **Standing profile** (`epicLevelPhase: false`): technical (RTB) tasks only; no
+  phase-Tasks, no epic branch, no human gate. Each child runs only the stages it needs of
+  `product -> [product-review] -> architecture -> [arch-review] -> development ->
+  [pr-review] -> CLOSED` ("Routing a standing child") and merges straight to `main`.
   **Legacy profile** (`driven: false`): skipped entirely, Tasks included.
 - **Every Epic has two standing Tasks** (Integration-test, e2e-test), specified by `lld`,
   running after every functional Task merges.
@@ -63,9 +63,9 @@ task:       development -> [pr-review] -> auto-merge -> CLOSED
   reconcile with `main` picked up nothing, the `record-epic-verification --kind e2e`
   record cites the e2e-test Task's local-CI attestation instead of a fresh run; if it
   picked up commits, run the suite. The exploratory pass always runs.
-- **`product-review` follows every `product`**: a blocker bounces `product`; clean goes
-  to Gate A (auto-passed when the profile sets `requiresHumanGateA: false` —
-  `references/gates.md`). Reviews have no Stage value of their own.
+- **`product-review` follows every `product`** unless a standing child is routed past it:
+  a blocker bounces `product`; clean goes to Gate A (waived when the profile sets
+  `requiresHumanGateA: false` — `references/gates.md`, "Waived gates"). Reviews have no Stage value of their own.
 - A non-standing Epic's Tasks are never eligible before it is `epic:architected` (set by
   `finish-lld`); the control plane enforces this.
 - **Route every `unstaged` child yourself** (listed in a `none` result, with
@@ -187,9 +187,10 @@ failure.
 | `lld-section --epic <n> --task <m> --repo-path <p>` | Only Task #`<m>`'s subsection of `epic-<n>/lld.md` |
 | `worktree-add <n> [--unit epic] [--base <ref>]` | The only way to make a worktree: resumes from `origin/<branch>` (fast-forwards; refuses a diverged branch), else branches off the integration base (recreates a stale local branch with no unique commits; refuses one with) |
 | `claim <n> --role <r>` / `start-comment <n> --role <r>` / `sync-branch <n> [--unit epic] [--base <ref>]` / `verify-exit <n> --expect-stage <s> [--pr <pr>]` | The steps inside `start-stage` / `transition` |
+| `route <n> --to product\|architecture\|development\|merge --reason "<one line>"` | Skip a standing child ahead ("Routing a standing child"); refuses (exit 0) anything but a forward move on a standing child |
 | `set-stage <n> --stage <s>` / `add-blocked-by <n> --on <dep>` / `create-issue --parent <n> --type <T>` / `repair-issue <n> [--parent <p>] [--type <T>]` | Stage a unit / order units / the only issue-creation path / fill an existing issue's missing fields |
 | `publish-doc <n> --doc <d>` / `create-lld-tasks <epic> --repo-path <p>` / `merge-lld-doc <epic-n>` / `close-issue <n> [--repo-path <p>]` | The steps inside `finish-lld`; `close-issue` is the orchestrator's close (terminal fields + worktree release) |
-| `open-gate` / `check-gate` / `pass-gate` / `skip-gate` / `auto-pass-gate-a` | Gates (`references/gates.md`); on a phase-Task pass/skip close it instead of claiming a next stage |
+| `open-gate` / `check-gate` / `pass-gate` / `skip-gate` / `waive-gate` | Gates (`references/gates.md`); on a phase-Task pass/skip close it instead of claiming a next stage |
 | `open-dev-pr` / `handoff-to-pr-review` / `record-pr-review` / `record-local-ci` / `record-design-review <n> --role <r> --outcome clean\|rework` | Stage-agent exit actions (their agent files own them) |
 | `pr-checks <pr>` / `merge-pr <pr> --issue <n>` | CI status / the only merge gate (refuses behind-base; reports `config_changed`; on an already-merged PR only finishes the bookkeeping, `recovered: true`) |
 | `mark-blocked` / `mark-needs-human` / `pause-for-epic-regate <n> --epic <e> --gate-pr <pr> [--found-by <stage>]` | Park a unit (first two release its worktree) |
@@ -266,6 +267,7 @@ Every result except `skip`/`none`/`stop-at-cap` carries `unit: "issue"`.
 | `action` | Meaning | What to do |
 |---|---|---|
 | `resume` | A claimed stage's session died | Resume at `stage` from comments + committed docs (Step 3) — unless you are driving that unit right now in this session: then skip it and survey again |
+| `route` | A fresh standing child | Pick its first stage and `route` it ("Routing a standing child"), then Step 1 again |
 | `delegate` | A child is ready | Step 2, then Step 3 |
 | `pass-gate` | A gate PR was merged | `references/gates.md`, "Passing a gate" — pass `issue`/`gate_pr`/`stage` verbatim |
 | `address-gate-feedback` | Gate PR has unresolved threads or new comments | `references/gates.md`, "Addressing gate feedback" |
@@ -406,8 +408,9 @@ instead of grepping and reading inline.
 ### After the subagent returns
 
 **Read its result.** The last line of its final message is `SDLC-RESULT: {"issue": <n>,
-"stage": "<stage>", "outcome": "<outcome>"}` (`references/stage-playbooks.md`, "The
-handback is terse"). Route on `outcome`:
+"stage": "<stage>", "outcome": "<outcome>"}`, on a standing child optionally with
+`"next"`/`"why"` (`references/stage-playbooks.md`, "The handback is terse"). Route on
+`outcome`:
 
 | `outcome` | Do |
 |---|---|
@@ -447,6 +450,28 @@ after the agent returns:** opening a human-review gate, the review `start-commen
 (`references/epics.md`, "Epic closing"), and `finish-lld`.
 
 Repeat Steps 2–3 until the unit is merged or closed, blocked, or needs a human.
+
+### Routing a standing child
+
+A standing child's flow is decided as it goes, never planned upfront: at pickup
+(`next-action` → `route`) and after every stage returns `done`/`clean`, pick the next stage
+from the issue and the last `SDLC-RESULT`'s `next`/`why`. Run a stage only when it earns
+its place:
+
+- `product` — only when a product or business decision is open.
+- `architecture` — only for a new component or interface, a data-model change, a
+  cross-module change, or an unclear approach.
+- `product-review` / `arch-review` — skip when the artifact before it is trivial.
+- `pr-review` — the strong default. Skip (`--to merge`) only for a trivially low-risk
+  change, saying why in `--reason`; never after `pr-review` bounced it.
+- Otherwise the default next stage.
+
+To skip ahead: `transition <n> --expect-stage <its Stage>` (at pickup, nothing to verify),
+then `route <n> --to <stage> --reason "<one line>"`, then Step 2 with `--role <stage>`. To skip
+`pr-review`: `verify-exit <n> --expect-stage pr-review --pr <pr>`, `route <n> --to merge`,
+then `merge-pr` (the route marker is its evidence). `route` only moves forward; when a
+later stage finds an open product decision, `set-stage <n> --stage product` and run a
+fresh `product`.
 
 ### Stop at the run cap — reset your context between batches
 

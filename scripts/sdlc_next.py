@@ -122,7 +122,8 @@ _PIPELINE_DEFAULTS = {
         "downCommand": "COMPOSE_PROJECT_NAME={project} docker compose "
                        "--env-file {envFile} down -v --remove-orphans",
     },
-    "gates": {"skipConfidenceThreshold": 80, "requiresHumanGateA": True},
+    "gates": {"skipConfidenceThreshold": 80, "requiresHumanGateA": True,
+              "requiresHumanGateB": True},
     # Repo-wide cap on units at Stage=Product with an open Gate A; at the cap no
     # fresh `product` delegation starts (resumes/rework are never gated). 0 disables.
     "productWip": {"maxGateAPending": 5},
@@ -146,7 +147,8 @@ _PIPELINE_DEFAULTS = {
     "profiles": [
         {"name": "legacy", "match": {"label": "epic:legacy"}, "driven": False},
         {"name": "standing", "match": {"label": "epic:standing"},
-         "epicLevelPhase": False, "childrenNeedArchitectedEpic": False, "closes": False},
+         "epicLevelPhase": False, "childrenNeedArchitectedEpic": False, "closes": False,
+         "gates": {"requiresHumanGateA": False, "requiresHumanGateB": False}},
         {"name": "default", "match": "*"},
     ],
 }
@@ -629,17 +631,10 @@ def is_epic_architected(issue: dict) -> bool:
     return has_label(issue, LABELS["architected"])
 
 
-def default_stage(issue: dict, parent_epic: Optional[dict] = None) -> Optional[str]:
-    """Stage an unstaged issue starts at, or None when there is no safe guess: an
-    Initiative's child -> product; a non-standing Epic's child -> None (those are
-    staged explicitly); otherwise a Bug -> architecture, anything else -> product."""
-    if parent_epic is not None and is_initiative(parent_epic):
-        return "product"
-    if parent_epic is not None and is_epic(parent_epic) and not is_epic_standing(parent_epic):
-        return None
-    if issue_type(issue) == "Bug":
-        return "architecture"
-    return "product"
+def default_stage(parent: Optional[dict]) -> Optional[str]:
+    """Stage an unstaged child of `parent` starts at: `product`, or None for an Epic's
+    child (a standing child is routed at pickup, a non-standing Epic's is staged explicitly)."""
+    return None if parent is not None and is_epic(parent) else "product"
 
 
 def product_gate_pending(all_issues: list) -> list:
@@ -677,6 +672,8 @@ _GATE_CUTOFF_MARKER = re.compile(r"<!--\s*gate-comments-processed:\s*([^\s]+)\s*
 _NEEDS_HUMAN_REASON = re.compile(r"🙋 Needs human input — (.+?)(?:\n\n<!--|\Z)", re.DOTALL)
 # `<!-- stage-transition: <from>-><to> @ <ISO8601> -->`; the timestamp is optional.
 _STAGE_TRANSITION_MARKER = re.compile(r"<!--\s*stage-transition:\s*(\S+?)->(\S+?)\s*(?:@[^>]*?)?-->")
+# `<!-- stage-route: <from>-><to> @ <ISO8601> -->`, posted by `route`.
+_STAGE_ROUTE_MARKER = re.compile(r"<!--\s*stage-route:\s*(\S+?)->(\S+?)\s*(?:@[^>]*?)?-->")
 # `<!-- pr-review-outcome: clean|rework:<pr> @ <ISO8601> -->`. Stage/status fields
 # can't tell "awaiting review" from "reviewed, in rework"; this marker can.
 _PR_REVIEW_OUTCOME_MARKER = re.compile(
@@ -884,12 +881,13 @@ def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
     return epic_branch(parent_number)
 
 
-def last_transition_to(comments: list, to_role: str) -> Optional[int]:
-    """Index of the latest comment with a stage-transition marker into `to_role`, or None.
-    Matches the destination only (last `->` segment): hand-written from-roles are unreliable."""
+def last_transition_to(comments: list, to_role: str,
+                       marker: re.Pattern = _STAGE_TRANSITION_MARKER) -> Optional[int]:
+    """Index of the latest comment with a `marker` (default stage-transition) into `to_role`,
+    or None. Matches the destination only (last `->` segment): hand-written from-roles are unreliable."""
     found = None
     for idx, c in enumerate(comments):
-        for m in _STAGE_TRANSITION_MARKER.finditer(c.get("body", "")):
+        for m in marker.finditer(c.get("body", "")):
             if m.group(2).rsplit("->", 1)[-1] == to_role:
                 found = idx
     return found
@@ -905,15 +903,27 @@ def last_pr_review_outcome(comments: list) -> Optional[tuple]:
     return found
 
 
+def routed_past_pr_review(comments: list) -> bool:
+    """Whether this round (since the latest `development->pr-review` handoff) was routed
+    straight to merge by `route --to merge`."""
+    handoff = last_transition_to(comments, "pr-review")
+    routed = last_transition_to(comments, "merge", _STAGE_ROUTE_MARKER)
+    return handoff is not None and routed is not None and routed > handoff
+
+
 def missing_pipeline_evidence(comments: list) -> list:
-    """Problems blocking merge: a missing pr-review handoff, or a pr-review outcome that
-    is missing, older than the latest handoff, or not `clean`. Empty = mergeable."""
+    """Problems blocking merge: a missing pr-review handoff, or a pr-review outcome that is
+    missing, older than the latest handoff, or not `clean` -- a round routed past `pr-review`
+    (`route --to merge`) needs no outcome: the recorded route is its evidence. Empty = mergeable."""
     problems = []
     handoff = last_transition_to(comments, "pr-review")
     if handoff is None:
         problems.append("no `development->pr-review` handoff marker (run "
                         "`handoff-to-pr-review <issue> --pr <pr> --summary ...`)")
     outcome = last_pr_review_outcome(comments)
+    reviewed = outcome is not None and handoff is not None and outcome[0] > handoff
+    if not reviewed and routed_past_pr_review(comments):
+        return problems
     if outcome is None:
         problems.append("no `pr-review` outcome recorded (run "
                         "`record-pr-review <issue> --pr <pr> --outcome clean|rework`)")
@@ -1230,8 +1240,8 @@ def record_terminal_unit(gh: WorkItemProvider, issue: int) -> Optional[dict]:
 
 
 def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> dict:
-    """Pick the next action among the named Epic's/Initiative's open non-Epic children:
-    `skip` | `resume` | `pass-gate` | `address-gate-feedback` | `delegate` | `stop-at-cap` | `none`.
+    """Pick the next action among the named Epic's/Initiative's open non-Epic children: `skip` |
+    `resume` | `pass-gate` | `address-gate-feedback` | `route` | `delegate` | `stop-at-cap` | `none`.
     Raises GhError when `epic` is not an Epic or Initiative. Caps gate only fresh work."""
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
@@ -1314,7 +1324,7 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
     if in_progress:
         target = in_progress[0]
         return {"action": "resume", "issue": target["number"], "unit": "issue",
-                "stage": current_stage(target) or default_stage(target, epic_issue)}
+                "stage": current_stage(target) or default_stage(epic_issue)}
 
     # Before the Epic is architected a Stage-less child is a Task awaiting
     # `merge-lld-doc`, which only advances Stage-less Tasks -- so leave it untouched.
@@ -1338,8 +1348,9 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
                         "unresolved_threads": gate["unresolved_threads"],
                         "new_comments": gate["new_comments"]}
             continue
-        stage = current_stage(issue) or default_stage(issue, epic_issue)
-        if stage is None:
+        stage = current_stage(issue) or default_stage(epic_issue)
+        pickup = stage is None and is_epic_standing(epic_issue)
+        if stage is None and not pickup:
             unstaged.append(issue["number"])
             continue
         if capped(stage):
@@ -1351,6 +1362,9 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
             continue
         if gh.blocked_by(issue["number"]):
             continue
+        if pickup:
+            # The orchestrator picks a standing child's first stage from the issue (`route`).
+            return {"action": "route", "issue": issue["number"], "unit": "issue"}
         if current_stage(issue) is None:
             # Stamp the Stage on first sight so the board never shows it blank.
             gh.set_stage_field(issue["number"], stage)
@@ -1366,7 +1380,8 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     run_id = getattr(args, "run_id", None)
     result = decide_next_action(gh, args.epic, run_id=run_id)
     if "issue" in result:
-        note_in_flight(args.epic, run_id, {result["issue"]: result.get("stage")})
+        note_in_flight(args.epic, run_id,
+                       {result["issue"]: result.get("stage") or result["action"]})
     return {**result, "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0}
 
 
@@ -1399,6 +1414,10 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
         if outcome is not None and outcome[0] > handoff:
             skipped.append({"issue": number, "reason": f"pr-review already recorded "
                                                         f"{outcome[1]!r} for this round"})
+            continue
+        if routed_past_pr_review(comments):
+            skipped.append({"issue": number, "reason": "routed past pr-review this round "
+                                                        "(`route --to merge`)"})
             continue
         branch = issue_branch(number)
         prs = gh.pr_list_for_branch(branch)
@@ -2043,8 +2062,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
         if branch in active_branches:
             skipped.append({"issue": number, "reason": "already active in its own worktree"})
             continue
-        # An unsurveyed child has no Stage yet; use what it would be assigned.
-        stage = current_stage(issue) or default_stage(issue, epic_issue)
+        stage = current_stage(issue)
         if stage not in ("development", "testing"):
             skipped.append({"issue": number, "reason": f"stage is {stage!r}, not development/testing"})
             continue
@@ -2126,8 +2144,10 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
         if branch in active_branches:
             skipped.append({"issue": number, "reason": "already active in its own worktree"})
             continue
-        # An unsurveyed child has no Stage yet; use what next-action would assign.
-        stage = current_stage(issue) or default_stage(issue, epic_issue)
+        stage = current_stage(issue)
+        if stage is None:
+            skipped.append({"issue": number, "reason": "no Stage yet -- `route` picks its first stage"})
+            continue
         if stage not in ("product", "architecture"):
             skipped.append({"issue": number, "reason": f"stage is {stage!r}, not product/architecture"})
             continue
@@ -2165,7 +2185,7 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
         if issue is None or issue["state"] != "OPEN":
             stale.append({"branch": branch, "reason": "issue is closed or not found"})
             continue
-        stage = current_stage(issue) or default_stage(issue, epic_issue)
+        stage = current_stage(issue)
         if stage not in ("product", "architecture"):
             continue
         status = pipeline_status(issue)
@@ -2342,6 +2362,77 @@ def cmd_set_stage(gh: GitHub, issue: int, stage: str) -> dict:
         raise GhError(f"unknown stage {stage!r} -- must be one of {sorted(STAGE_OPTION_IDS)}")
     gh.set_stage_field(issue, stage)
     return {"issue": issue, "stage": stage}
+
+
+# A standing child's full flow in order; `merge` means "skip pr-review". Only an authoring
+# stage (or `merge`) is a route target: a review always follows the stage it reviews.
+STANDING_FLOW = ("product", "product-review", "architecture", "arch-review",
+                 "development", "pr-review", "merge")
+ROUTE_TARGETS = ("product", "architecture", "development", "merge")
+ROUTE_REASON_CAP = 200
+
+
+def _flow_index(stage: Optional[str]) -> Optional[int]:
+    """Where a child at Stage `stage` sits in STANDING_FLOW: -1 before its first stage, and
+    `development` for Stage `pr-review` (development's exit sets it); None outside the flow."""
+    if stage is None:
+        return -1
+    owner = "development" if stage == "pr-review" else stage
+    return STANDING_FLOW.index(owner) if owner in STANDING_FLOW else None
+
+
+def route_refusal(parent: Optional[dict], stage: Optional[str], status: Optional[str],
+                  to: str, reason: str, pr_review_bounced: bool = False) -> Optional[str]:
+    """Why `route` must refuse moving a child of `parent` at `stage`/`status` to `to`, or None.
+    `pr_review_bounced`: a `pr-review` already asked for rework on this issue."""
+    if parent is None or not is_epic(parent) or not is_epic_standing(parent):
+        return "route is for a standing epic's child only -- stage anything else with set-stage"
+    if to not in ROUTE_TARGETS:
+        return (f"--to must be one of {', '.join(ROUTE_TARGETS)}"
+                + (" -- a review always follows its stage; route to the next authoring stage "
+                   "to skip it" if to in STANDING_FLOW else ""))
+    line = reason.strip()
+    if not line or "\n" in line:
+        return "--reason must be one non-empty line"
+    if status in GATE_PENDING_STATUSES:
+        return f"a gate PR is open (Pipeline Status {status!r}) -- the human decides; route after it passes"
+    at = _flow_index(stage)
+    if at is None:
+        return f"Stage {stage!r} is not in the standing flow ({', '.join(STANDING_FLOW[:-1])})"
+    if to == "merge" and stage != "pr-review":
+        return "merge (skipping pr-review) needs development's PR open -- Stage must be PR Review"
+    if to == "merge" and pr_review_bounced:
+        return "pr-review already asked for rework on this issue -- never skip it after a bounce"
+    if STANDING_FLOW.index(to) <= at:
+        return f"route only moves forward from {stage!r} -- use set-stage to go back"
+    return None
+
+
+def cmd_route(gh: GitHub, issue: int, to: str, reason: str) -> dict:
+    """Route a standing epic's child ahead to `to`, skipping the stages between: Stage `to`
+    and Pipeline Status `todo` (no claim; `merge` leaves both), plus a `stage-route` marker.
+    Refuses (`routed: False`, exit 0) per `route_refusal`."""
+    parent = gh.issue_epic_info(issue).get("parent")
+    parent_info = gh.issue_epic_info(parent["number"]) if parent else None
+    fields = gh.issue_fields(issue)
+    stage = STAGE_FIELD_NAMES.get(fields.get("Stage"))
+    bounced = to == "merge" and any(
+        m.group(1) == "rework" for c in gh.issue_view(issue).get("comments", [])
+        for m in _PR_REVIEW_OUTCOME_MARKER.finditer(c.get("body", "")))
+    refusal = route_refusal(parent_info, stage,
+                            PIPELINE_STATUS_FIELD_NAMES.get(fields.get("Pipeline Status")),
+                            to, reason, pr_review_bounced=bounced)
+    if refusal:
+        return {"issue": issue, "routed": False, "reason": refusal}
+    frm = stage or "pickup"
+    skipped = list(STANDING_FLOW[_flow_index(stage) + 1:STANDING_FLOW.index(to)])
+    if to != "merge":
+        gh.set_stage_field(issue, to)
+        gh.set_pipeline_status_field(issue, "todo")
+    skipping = f", skipping {', '.join(f'`{s}`' for s in skipped)}" if skipped else ""
+    gh.issue_comment(issue, f"🔀 Routed `{frm}` → `{to}`{skipping}: {reason.strip()}\n\n"
+                            f"<!-- stage-route: {frm}->{to} @ {_utc_now_marker()} -->")
+    return {"issue": issue, "routed": True, "from": frm, "to": to, "skipped": skipped}
 
 
 def cmd_start_comment(gh: GitHub, issue: int, role: str) -> dict:
@@ -2923,28 +3014,38 @@ def cmd_skip_gate(gh: GitHub, issue: int, stage: str, confidence: int, summary: 
     return {"issue": issue, "unit": "issue", "next_stage": next_stage, "skipped": True, "confidence": confidence}
 
 
-def cmd_auto_pass_gate_a(gh: GitHub, issue: int, stage: str, summary: str) -> dict:
-    """Pass Gate A without a human when the profile sets `requiresHumanGateA: false`;
-    claims `architecture`. Raises when the profile still requires a human."""
-    if stage != "product":
-        raise GhError(f"Gate A is the product gate; got stage={stage!r} -- "
-                       f"the architecture gate uses skip-gate, not auto-pass-gate-a")
+# The doc-stage a gate approves -> the profile `gates` toggle requiring a human there,
+# and the review that precedes that gate.
+HUMAN_GATE_TOGGLES = {"product": "requiresHumanGateA", "architecture": "requiresHumanGateB"}
+_GATE_REVIEW = {"product": "product-review", "architecture": "arch-review"}
+
+
+def cmd_waive_gate(gh: GitHub, issue: int, stage: str, summary: str,
+                   repo_path: Optional[str] = None, runner: Runner = _default_runner) -> dict:
+    """Pass `stage`'s gate without a human when the profile's `requiresHumanGateA|B` is
+    false: claims the next stage, or completes a phase-Task. Raises when a human is required."""
+    toggle = HUMAN_GATE_TOGGLES.get(stage)
+    if toggle is None:
+        raise GhError(f"stage must be one of {sorted(HUMAN_GATE_TOGGLES)} (the doc the gate "
+                      f"approves), got {stage!r}")
     profile = _profile_for_issue(gh, issue)
-    if profile["gates"]["requiresHumanGateA"]:
-        raise GhError(f"profile '{profile['name']}' requires a human at Gate A "
-                       f"(requiresHumanGateA: true) -- open a gate, do not auto-pass")
+    if profile["gates"][toggle]:
+        raise GhError(f"profile '{profile['name']}' requires a human at this gate "
+                      f"({toggle}: true) -- open a gate, do not waive it")
+    note = (f"⚡ Human review of `{stage}.md` waived — profile '{profile['name']}' sets "
+            f"{toggle}: false. {summary}")
+    marker = f"<!-- gate-waived: {stage}:{profile['name']} -->\n"
+    parent = phase_task_parent(gh, issue)
+    if parent is not None:
+        return _complete_phase_task(gh, repo_path, issue, stage, parent, note, runner,
+                                    markers=marker)
     next_stage = STAGE_AFTER_GATE[stage]
-    timestamp = _utc_now_marker()
-    gh.issue_comment(issue,
-        f"⚡ Gate A auto-passed — profile '{profile['name']}' needs no human review of "
-        f"`product.md` (requiresHumanGateA: false). {summary} Proceeding directly to "
-        f"`{next_stage}` per the profile's Gate A policy (see \"Gate A configurability\" "
-        f"in references/gates.md).\n\n"
-        f"<!-- gate-a-auto-passed: {profile['name']} -->\n"
-        f"<!-- stage-transition: product-review->{next_stage} @ {timestamp} -->")
+    gh.issue_comment(issue, f"{note} Proceeding to `{next_stage}`.\n\n{marker}"
+                            f"<!-- stage-transition: {_GATE_REVIEW[stage]}->{next_stage} "
+                            f"@ {_utc_now_marker()} -->")
     cmd_claim(gh, issue, next_stage)
-    return {"issue": issue, "unit": "issue", "next_stage": next_stage,
-            "auto_passed": True, "profile": profile["name"]}
+    return {"issue": issue, "unit": "issue", "next_stage": next_stage, "waived": True,
+            "profile": profile["name"]}
 
 
 _CLOSES_ISSUE_RE = re.compile(r"\bCloses #\d+", re.IGNORECASE)
@@ -4376,11 +4477,12 @@ COMMENT_CAPS = {
     "open-dev-pr": ("summary", HANDOFF_CAP),
     "open-gate": ("summary", HANDOFF_CAP),
     "skip-gate": ("summary", HANDOFF_CAP),
-    "auto-pass-gate-a": ("summary", HANDOFF_CAP),
+    "waive-gate": ("summary", HANDOFF_CAP),
     "record-epic-verification": ("summary", HANDOFF_CAP),
     "record-initiative-verification": ("summary", HANDOFF_CAP),
     "mark-needs-human": ("reason", HANDOFF_CAP),
     "resolve-thread": ("reply", HANDOFF_CAP),
+    "route": ("reason", ROUTE_REASON_CAP),
 }
 
 
@@ -4497,6 +4599,11 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--stage", required=True)
     p.set_defaults(func=lambda a: cmd_set_stage(get_work_item_provider(), a.issue, a.stage))
+    p = sub.add_parser("route", help="Route a standing epic's child ahead to a later stage")
+    p.add_argument("issue", type=int)
+    p.add_argument("--to", required=True, help=f"One of {', '.join(ROUTE_TARGETS)}")
+    p.add_argument("--reason", required=True, help=f"One line, <= {ROUTE_REASON_CAP} chars")
+    p.set_defaults(func=lambda a: cmd_route(get_work_item_provider(), a.issue, a.to, a.reason))
     p = sub.add_parser("start-comment")
     p.add_argument("issue", type=int)
     p.add_argument("--role", required=True,
@@ -4527,12 +4634,15 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--repo-path", default=None,
                     help="Any path inside the repository (Architecture-phase Tasks only)")
     p.set_defaults(func=lambda a: cmd_skip_gate(get_work_item_provider(), a.issue, a.stage, a.confidence, a.summary, repo_path=a.repo_path))
-    p = sub.add_parser("auto-pass-gate-a",
-                        help="Pass Gate A without a human when the profile allows it")
+    p = sub.add_parser("waive-gate",
+                        help="Pass a gate without a human when the profile waives it")
     p.add_argument("issue", type=int)
-    p.add_argument("--stage", default="product", choices=["product"])
+    p.add_argument("--stage", required=True, choices=sorted(HUMAN_GATE_TOGGLES))
     p.add_argument("--summary", required=True)
-    p.set_defaults(func=lambda a: cmd_auto_pass_gate_a(get_work_item_provider(), a.issue, a.stage, a.summary))
+    p.add_argument("--repo-path", default=None,
+                    help="Any path inside the repository (phase-Tasks only)")
+    p.set_defaults(func=lambda a: cmd_waive_gate(get_work_item_provider(), a.issue, a.stage,
+                                                 a.summary, repo_path=a.repo_path))
     p = sub.add_parser("auto-pass-gate")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--repo-path", default=".")

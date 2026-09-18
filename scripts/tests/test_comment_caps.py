@@ -17,13 +17,14 @@ ARGV = {
                   "--next-stage", "architecture", "--summary", "{text}"],
     "skip-gate": ["skip-gate", "5", "--stage", "architecture", "--confidence", "90",
                   "--summary", "{text}"],
-    "auto-pass-gate-a": ["auto-pass-gate-a", "5", "--summary", "{text}"],
+    "waive-gate": ["waive-gate", "5", "--stage", "product", "--summary", "{text}"],
     "record-epic-verification": ["record-epic-verification", "9", "--kind", "e2e",
                                  "--summary", "{text}"],
     "record-initiative-verification": ["record-initiative-verification", "1",
                                        "--summary", "{text}"],
     "mark-needs-human": ["mark-needs-human", "5", "--reason", "{text}"],
     "resolve-thread": ["resolve-thread", "--thread-id", "T", "--reply", "{text}"],
+    "route": ["route", "5", "--to", "development", "--reason", "{text}"],
 }
 
 

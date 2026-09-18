@@ -32,8 +32,8 @@ docs reach `main` with its squash-merge.
 
 | File | Written by | Required? |
 |---|---|---|
-| `product.md` | `product` — an Initiative's Product-Roadmap Task, or a standing-epic child | Yes, except a standing child's bug fast-track where `architecture` found no product input needed. **Never for an Epic's Task** — its requirements are the Initiative's `product.md` (or the Epic's issue body, engineering-driven). |
-| `architecture.md` | `architecture` — an Epic's Architecture-phase (or revision) Task, or a standing-epic child | Always |
+| `product.md` | `product` — an Initiative's Product-Roadmap Task, or a standing-epic child | Yes, except a standing child routed past `product`. **Never for an Epic's Task** — its requirements are the Initiative's `product.md` (or the Epic's issue body, engineering-driven). |
+| `architecture.md` | `architecture` — an Epic's Architecture-phase (or revision) Task, or a standing-epic child | Yes, except a standing child routed past `architecture` |
 | `lld.md` | `lld` — an Epic's LLD-phase Task only | Always; one `## Task` subsection per Task the Epic will run |
 
 - `development`, `arch-review`/`lld-review` and `pr-review` write no doc file. Review
@@ -113,6 +113,10 @@ the PR description, issue comment, or committed doc. Send these fields and nothi
   Send the link, not the evidence.
 - **Last line, always:** `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "<outcome>"}`
   — `<n>` your unit's number, `<stage>` your role (`product`, `arch-review`, …).
+- **Standing-epic child only, optional:** when you judge the default next stage
+  unnecessary, add `"next": "<stage>"` (a later stage, or `merge` to skip `pr-review`) and
+  `"why": "<≤ 120 chars>"` — e.g. `"next": "development", "why": "no new interface"`. A
+  recommendation; the orchestrator decides.
 
 | `outcome` | Meaning |
 |---|---|

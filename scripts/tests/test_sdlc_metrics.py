@@ -67,6 +67,25 @@ def test_report_sums_tool_calls_and_keeps_the_peak_context():
     assert (dev["tool_calls"], dev["peak_context"]) == (42, 400_000)
 
 
+def test_report_by_route_groups_each_issue_under_the_stages_it_ran():
+    # A child routed past design (#21) compares against a full-flow child (#20).
+    full = [_rec(f"f{i}", stage, 1.0, issue=20, epic=90, stage=stage, outcome=outcome)
+            for i, (stage, outcome) in enumerate([
+                ("product", "done"), ("product-review", "clean"), ("architecture", "done"),
+                ("arch-review", "clean"), ("development", "done"), ("pr-review", "rework"),
+                ("development", "done"), ("pr-review", "clean")])]
+    routed = [_rec("r1", "development", 2.0, issue=21, epic=90, stage="development",
+                   outcome="done"),
+              _rec("r2", "pr-review", 1.0, issue=21, epic=90, stage="pr-review", outcome="clean")]
+    groups = m.report(full + routed + [_rec("o1", "orchestrator", 3.0, epic=90)],
+                      epic=90, by="route")["groups"]
+    assert set(groups) == {"product>product-review>architecture>arch-review>development"
+                           ">pr-review", "development>pr-review", "unattributed"}
+    assert groups["development>pr-review"]["rework_rate"] == 0.0
+    assert groups["product>product-review>architecture>arch-review>development>pr-review"][
+        "rework_rate"] == 0.25
+
+
 def test_report_run_keeps_one_run_including_its_fanout_children():
     records = [_rec("p1", "pr-review", 1.0, epic=9, run_id="r-1"),
                {**_rec("c1", "general-purpose", 0.5), "parent": {"agent_id": "p1"}},

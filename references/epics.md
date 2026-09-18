@@ -24,11 +24,12 @@ A profile is a label-matched bundle of toggles in `pipeline.profiles`; the first
 | `childrenNeedArchitectedEpic` | `true` | `false` = children dev-lane eligible without `epic:architected` |
 | `closes` | `true` | `false` = never closes, no integration branch |
 | `gates.skipConfidenceThreshold` | `80` (global) | per-profile Gate B skip bar |
-| `gates.requiresHumanGateA` | `true` (global) | `false` = Gate A auto-passed |
+| `gates.requiresHumanGateA` / `gates.requiresHumanGateB` | `true` (global) | `false` = that gate is waived (`references/gates.md`, "Waived gates") |
 
 Shipped: `legacy` (`driven:false`), `standing` (`epicLevelPhase`,
-`childrenNeedArchitectedEpic`, `closes` all `false`), `default` (`"*"`). `product-review`
-runs after `product` in **every** profile.
+`childrenNeedArchitectedEpic`, `closes`, both `requiresHumanGate*` all `false`), `default`
+(`"*"`). `product-review` runs after every `product` unless a standing child is routed
+past it.
 
 ## How a non-standing Epic runs
 
@@ -80,15 +81,18 @@ covers the fix, else an Architecture revision Task.
 Stage options: `Product` / `Architecture` / `Development` / `Testing` / `PR Review` /
 `LLD` (the LLD-phase Task is staged `lld`).
 
-- Initiative's child (Product-Roadmap Task) → `product`.
-- Standing epic's child or parentless issue → `product`; a `Bug` → `architecture`.
+- Initiative's child (Product-Roadmap Task) or parentless issue → `product`.
+- Standing epic's child → none: `next-action` returns `route` and you pick its first
+  stage (SKILL.md, "Routing a standing child").
 - Non-standing Epic's child → no guess (staged explicitly, or `unstaged`).
 
 ## Which epics are exempt
 
 - **Standing** (`epicLevelPhase: false`, shipped matching `epic:standing`) — a permanent
-  bug-intake umbrella; the label is applied by hand. Each child runs `product` → `product-review` → `architecture` →
-  `development` (bug fast-track included); their design stages may fan out via
+  umbrella for technical (RTB) tasks only; the label is applied by hand. Each child runs
+  only the stages it needs of `product` → `product-review` → `architecture` →
+  `arch-review` → `development` → `pr-review`, chosen as it goes (SKILL.md, "Routing a
+  standing child"), with no human gate. Its design stages may fan out via
   `list-design-ready` when `parallelism.designLane` > 1 (default 1)
   (`references/parallelism.md`, "Design lane"). A non-standing Epic never fans out design.
 - **Legacy** (`driven: false`, shipped matching `epic:legacy`) — never run, in any flow.
@@ -205,24 +209,6 @@ Task in `development`, a review) first decides whether its work fits it:
      replacement architect for rounds 4–6; the sixth → `mark-needs-human` **on the Epic**.
 
 All other rework follows `references/rework.md`.
-
-## Bug fast-track — architecture first (standing-epic children only)
-
-A `Bug` under a **standing** epic (or parentless) skips `product` and starts at
-`architecture` on a fresh `issue-<n>` branch that `architecture` creates. A bug under a
-non-standing Epic is routed by hand (`unstaged`).
-
-On that first `architecture` pass with no `product.md`, decide explicitly whether a
-product decision is needed:
-
-- **No** (root cause known, fix scoped, no business tradeoff) → cite the issue body as
-  requirements and state "bug fast-track — no product.md". **Gate A is skipped**; Gate B
-  is the only human checkpoint.
-- **Yes** → don't guess. Spawn a **fresh** `sdlc:product` agent (Opus) with the question
-  and full context; its `product.md` gets `product-review` and Gate A (per profile)
-  before architecture continues.
-
-Only that first pass is affected; later rework follows the normal paths.
 
 ## The epic integration branch
 

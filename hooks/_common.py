@@ -11,6 +11,12 @@ OUTCOMES = ("done", "clean", "rework", "blocked", "needs-human", "failed")
 RESULT_PREFIX = "SDLC-RESULT:"
 RESULT_FORMAT = (RESULT_PREFIX + ' {"issue": <n>, "stage": "<stage>", "outcome": "'
                  + "|".join(OUTCOMES) + '"}')
+# A standing child's flow; an optional `"next"` recommends one of these (or `merge`,
+# skipping pr-review) with a `"why"` of at most WHY_CAP chars.
+STANDING_FLOW = ("product", "product-review", "architecture", "arch-review", "development",
+                 "pr-review")
+NEXT_STAGES = STANDING_FLOW + ("merge",)
+WHY_CAP = 120
 
 
 def read_input() -> dict:
@@ -151,6 +157,12 @@ def sdlc_result(text: str):
         return None, '"stage" must be a non-empty string'
     if result.get("outcome") not in OUTCOMES:
         return None, f'"outcome" must be one of {", ".join(OUTCOMES)}'
+    if "next" in result or "why" in result:
+        if result.get("next") not in NEXT_STAGES:
+            return None, f'"next" must be one of {", ".join(NEXT_STAGES)}, with a "why"'
+        why = result.get("why")
+        if not isinstance(why, str) or not why.strip() or len(why) > WHY_CAP:
+            return None, f'"why" must be a non-empty string of at most {WHY_CAP} chars'
     return result, None
 
 

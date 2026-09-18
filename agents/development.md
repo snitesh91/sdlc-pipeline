@@ -20,7 +20,7 @@ orchestrator named.
 |---|---|---|
 | **Normal functional Task** (child of a non-standing Epic) | Only your own `## Task #<n>` subsection: `python3 "$SDLC" lld-section --epic <parent-n> --task <n> --repo-path <worktree>`. Never read the whole `epic-<n>/lld.md`. Read the Epic's `architecture.md` only where your subsection points you at a specific part. | **Unit tests only.** No integration or e2e tests, no integration suite run — deferred by design to the Epic's standing Integration-test and e2e-test Tasks. Not a gap. |
 | **Standing Integration-test / e2e-test Task** of an Epic | Same `lld-section` call. | Run the full integration (or e2e) suite once every functional Task has merged; write the missing coverage; fix every failure found. Every integration/e2e rule below applies in full. |
-| **Standing-epic child** | Your own `<docRoot>/issue-<n>/architecture.md` (with its `product.md`), in full. | No Integration-test Task behind you: every integration rule below applies in full. |
+| **Standing-epic child** | Your own `<docRoot>/issue-<n>/architecture.md` (with its `product.md`), in full; routed past both, the issue body. Recommend `"next": "merge"` only for a trivially low-risk diff (`stage-playbooks.md`, "The handback is terse"). | No Integration-test Task behind you: every integration rule below applies in full. |
 
 ## Working discipline — for the whole stage
 
