@@ -1,0 +1,10 @@
+#!/bin/sh
+# Start /sdlc:run on the policy's orchestrator model: sdlc-run <n> [extra claude args...]
+set -eu
+[ $# -ge 1 ] || { echo "usage: sdlc-run <initiative-or-epic-number> [claude args...]" >&2; exit 2; }
+n=$1
+shift
+policy="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/hooks/model_policy.json"
+model=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["orchestrator"]["model"])' \
+  "$policy" 2>/dev/null) || model=sonnet
+exec claude --model "$model" "/sdlc:run $n" "$@"

@@ -1,0 +1,14 @@
+{
+  "name": "sdlc-pipeline",
+  "description": "The sdlc plugin: an agent-driven SDLC pipeline over GitHub Issues.",
+  "owner": {
+    "name": "Nitesh Singla"
+  },
+  "plugins": [
+    {
+      "name": "sdlc",
+      "source": "./",
+      "description": "Agent-driven SDLC over GitHub Issues: /sdlc:run <epic> drives an Initiative or Epic to merge."
+    }
+  ]
+}

@@ -11,8 +11,8 @@ Fill every section in order. A section with genuinely nothing in it is dropped, 
 as a placeholder -- except Open Questions, which stays as "None" so a reader knows the
 question was asked.
 
-What this document is NOT (see "Document altitude" in
-.claude/skills/sdlc-next/references/stage-playbooks.md):
+What this document is NOT (see "Document altitude" in the sdlc plugin's
+references/design-doc-rules.md):
   - not a report on the pipeline -- no stage names, no gate references, no field names,
     no "this document creates no children", no notes on what the product stage did or did
     not do. A reader must not be able to tell from the prose that an automated pipeline
