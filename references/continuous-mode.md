@@ -1,53 +1,34 @@
 # Continuous mode — unattended looping over one epic
 
-Referenced from `SKILL.md`. Only enter this mode when the operator explicitly asks
-(e.g. "keep this running on epic 110", "work until epic 110's backlog is done").
-Default behavior already loops across an epic's units within one invocation; this
-mode adds surviving *real time passing unattended*: `ScheduleWakeup` pacing, and a
-fresh top-level agent per unit so context doesn't grow unbounded.
+Enter only when the operator explicitly asks (e.g. "keep this running on epic 110"). It
+adds survival across unattended real time: `ScheduleWakeup` pacing and a fresh agent per
+unit so context stays bounded.
 
-**Scoped to one epic, like every invocation.** If the operator didn't name the epic,
-clarify first — never default or infer. Driving several epics continuously is
-several loops, one per epic, each its own `ScheduleWakeup` chain — safe, since every
-branch (child and epic branch) is worktree-isolated (`references/parallelism.md`).
+- **One epic per loop.** If the operator didn't name the epic, ask — never infer.
+  Several epics = several loops, one `ScheduleWakeup` chain each.
+- **Mechanism:** the `loop` skill in dynamic (self-paced) mode; `ScheduleWakeup`
+  re-fires the same prompt, epic number included, until stopped.
 
-**Mechanism**: the `loop` skill in dynamic (self-paced) mode — `ScheduleWakeup`
-re-fires the same prompt (including the epic number) until stopped.
+On **every** wakeup:
 
-**Context discipline**: pipeline state lives in GitHub fields/comments plus the
-committed docs, so nothing needs to survive in the orchestrator's conversation
-between units. On **every** wakeup:
-
-1. Spawn a fresh agent (`general-purpose` or `claude`, **not** a fork) whose prompt
-   is self-contained and names the target epic: it re-derives everything from GitHub
-   and the repo, following Steps 1-4 of `SKILL.md` exactly as a cold read would
-   (`next-action <epic>`, drive the unit stage by stage — including within-unit
-   agent tracking and resume-based rework — report back). Zero memory of prior units
-   by design. Because tracked-agent bounce counters don't survive between cycle
-   agents, each cycle agent runs `sdlc_next.py pairing-counts <issue>` on the unit
-   it picks up and counts the returned marker-derived strikes toward the escalation
-   valve's thresholds (`thresholds` in its output; default 3 → context-reset replacement agent, 6 → `needs-human`),
-   rather than starting every pairing at zero. A count of 3 or more on a marker-backed
-   pairing also means the replacement swap has *already* happened — never re-run it.
-2. Wait for that agent's completion notification. Note tersely which unit ran and
-   its outcome (merged / `epic:architected` / blocked / needs-human) — no growing
-   narrative.
-3. Decide whether to continue:
-   - **Stop** (`ScheduleWakeup stop:true`) when the epic-scoped survey finds nothing
-     actionable — every open child is closed, blocked, needs-human, or gate-pending
-     with nothing to address. A `none` carrying `unstaged` children is not a stop:
-     route them first (`SKILL.md`, "The lifecycle model").
-   - **Surface loudly but keep looping** when a cycle ends blocked/needs-human/
-     gate-pending — that unit is paused; others may remain.
-   - **Otherwise spawn the next cycle agent immediately** once the notification
-     arrives and backlog remains, **then** `ScheduleWakeup` with a long fallback
-     delay (1200s+) purely as a hang safety net.
-4. **Cycle cap — pause every `pipeline.continuous.cycleCap` (default 8) issues fully driven to a merge.** No tool access to
-   usage-limit state, so this is the proxy safeguard. After the cap is hit:
-   `ScheduleWakeup stop:true`, checkpoint summary, wait for the operator's
+1. Spawn a fresh agent (`general-purpose` or `claude`, **not** a fork) with a
+   self-contained prompt naming the epic and telling it to run the `sdlc:run` skill. It
+   follows `SKILL.md` Steps 1–4 from a cold read (`next-action <epic>`, drive the unit stage by stage with resume-based rework,
+   report back) and remembers nothing of prior units. On the unit it picks up it runs
+   `pairing-counts <issue>` and counts those strikes toward the escalation valve's
+   `thresholds` instead of starting at zero; a count ≥ 3 on a marker-backed pairing
+   means the replacement swap already happened — never repeat it. If it merged a PR,
+   it runs `retro-check` (`SKILL.md`, Step 5) before finishing.
+2. Wait for its completion notification. Note in one or two lines which unit ran and
+   its outcome (merged / `epic:architected` / blocked / needs-human).
+3. Decide:
+   - **Stop** (`ScheduleWakeup stop:true`) when the epic survey finds nothing actionable
+     — every open child closed, blocked, needs-human, or gate-pending with nothing to
+     address. A `none` with `unstaged` children is not a stop: route them first
+     (`SKILL.md`, "The lifecycle model").
+   - **Blocked / needs-human / gate-pending** → surface it loudly, keep looping.
+   - **Otherwise** spawn the next cycle agent immediately, **then** `ScheduleWakeup`
+     with a long fallback delay (1200s+) as a hang safety net only.
+4. **Cycle cap:** after every `pipeline.continuous.cycleCap` (default 8) issues merged,
+   `ScheduleWakeup stop:true`, post a checkpoint summary, wait for the operator's
    "continue", reset the counter.
-5. Each wakeup report stays terse: a couple lines on the unit driven and its
-   outcome.
-
-Retrospective checkpoints (`SKILL.md`, Step 5) still apply — a cycle agent that just
-merged a feature's PR runs `retro-check` itself before finishing.

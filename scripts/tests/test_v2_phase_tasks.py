@@ -1,13 +1,7 @@
-"""V2 phase-Task lifecycle against a real git origin and an in-memory work-item
-provider.
-
-Every test here reproduces a defect found on 2026-09-15 by driving the redesigned
-phase-Task flow live against a throwaway GitHub repo. None of them showed up in
-`test_sdlc_next.py`, whose `ScriptedRunner` answers every `git` call with whatever
-the test scripted -- so a command sequence git itself rejects (a pathspec commit
-of an index-only path) or leaves dirty (a committed path never written to the
-working tree) passed there unchanged. Git is real here; only GitHub is faked.
-"""
+"""Phase-Task lifecycle against a real git origin and an in-memory work-item provider.
+Git is real here (unlike `ScriptedRunner`), so sequences git itself rejects or that
+leave a dirty tree fail; only GitHub is faked."""
+import argparse
 import json
 import subprocess
 from pathlib import Path
@@ -27,8 +21,7 @@ def _git(*args, cwd=None) -> str:
 
 class FakeGh:
     """The subset of `WorkItemProvider` these flows touch, backed by a dict.
-    An unimplemented method raises AttributeError, so a flow reaching for
-    something new fails loudly instead of silently no-op'ing."""
+    Unimplemented methods raise AttributeError, so new calls fail loudly."""
 
     def __init__(self, issues: list):
         self.issues = {}
@@ -37,7 +30,8 @@ class FakeGh:
             self.issues[i["number"]] = {
                 "title": f"issue {i['number']}", "state": "OPEN", "labels": [],
                 "parent": None, "stage": None, "status": None, "comments": [],
-                "issue_type": None, "created": "2026-08-01T00:00:00Z", "body": "", **i}
+                "issue_type": None, "priority": None, "effort": None,
+                "created": "2026-08-01T00:00:00Z", "body": "", **i}
 
     def _node(self, n: int) -> dict:
         i = self.issues[n]
@@ -46,6 +40,7 @@ class FakeGh:
             fields["Stage"] = _STAGE_TITLE_CASE[i["stage"]]
         if i["status"]:
             fields["Pipeline Status"] = _STATUS_TITLE_CASE[i["status"]]
+        fields.update({k.title(): i[k] for k in ("priority", "effort") if i.get(k)})
         return {"number": n, "title": i["title"], "state": i["state"], "body": i.get("body", ""),
                 "createdAt": i["created"],
                 "issueType": {"name": i["issue_type"]} if i["issue_type"] else None,
@@ -86,9 +81,6 @@ class FakeGh:
     def set_pipeline_status_field(self, n, status):
         self.issues[n]["status"] = status
 
-    def clear_pipeline_status_field(self, n):
-        self.issues[n]["status"] = None
-
     def clear_stage_and_status_fields(self, n):
         self.issues[n]["stage"] = self.issues[n]["status"] = None
 
@@ -105,11 +97,17 @@ class FakeGh:
         self.issues[number] = {
             "title": title, "state": "OPEN", "labels": list(labels), "parent": None,
             "stage": None, "status": None, "comments": [], "issue_type": None,
-            "created": "2026-09-16T00:00:00Z", "body": body}
+            "priority": None, "effort": None, "created": "2026-09-16T00:00:00Z", "body": body}
         return number
 
     def set_issue_type(self, n, type_name):
         self.issues[n]["issue_type"] = type_name
+
+    def set_priority_field(self, n, priority):
+        self.issues[n]["priority"] = priority
+
+    def set_effort_field(self, n, effort):
+        self.issues[n]["effort"] = effort
 
     def add_sub_issue(self, parent_number, child_number):
         self.issues[child_number]["parent"] = parent_number
@@ -123,8 +121,8 @@ class FakeGh:
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
-    """A clone of a bare origin carrying one commit on `main`; worktrees (live
-    and ephemeral) land under tmp_path, never the configured /tmp root."""
+    """A clone of a bare origin with one commit on `main`; worktrees land under
+    tmp_path, never the configured /tmp root."""
     for key, value in {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
                        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}.items():
         monkeypatch.setenv(key, value)
@@ -144,7 +142,7 @@ def repo(tmp_path, monkeypatch):
 
 def _push_doc_branch(clone, branch: str, path: str, text: str, merge_to_main: bool = False):
     """Push `branch` = origin/main + one doc commit, leaving the clone on `main`
-    (a branch held by the main checkout is refused by every write command)."""
+    (write commands refuse a branch held by the main checkout)."""
     _git("fetch", "-q", "origin", cwd=clone)
     _git("checkout", "-q", "-B", branch, "origin/main", cwd=clone)
     target = clone / path
@@ -171,7 +169,7 @@ def _v2_tree(*extra):
     ])
 
 
-# --- bugs 3 + 4: the epic branch must exist on origin -------------------------
+# --- the epic branch must exist on origin -----------------------------------
 
 def test_publish_doc_creates_the_epic_branch_on_origin_when_nothing_has(repo):
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9})
@@ -202,7 +200,7 @@ def test_worktree_add_for_a_fresh_epic_pushes_the_epic_branch(repo):
     assert _git("ls-remote", "--heads", "origin", "epic-9", cwd=repo).strip()
 
 
-# --- bugs 5 + 6: cross-path publish commits, and leaves the tree clean --------
+# --- cross-path publish commits and leaves the tree clean --------------------
 
 def test_publish_doc_publishes_two_cross_path_docs_through_a_live_epic_worktree(repo, tmp_path):
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9},
@@ -238,7 +236,7 @@ def test_epic_announces_lld_md_once_across_publish_doc_and_merge_lld_doc(repo):
     assert len(announcements) == 1
 
 
-# --- bugs 1 + 2: a phase-Task's gate finishes the Task ------------------------
+# --- a phase-Task's gate finishes the Task -----------------------------------
 
 def test_close_issue_closes_the_issue_and_marks_it_done(repo):
     gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9,
@@ -310,7 +308,7 @@ def test_skip_gate_on_an_architecture_phase_task_publishes_then_closes(repo):
     assert gh.issues[10]["status"] == "done"
 
 
-# --- bug 7: a V2 Epic is surfaced for closing ---------------------------------
+# --- an Epic is surfaced for closing -----------------------------------------
 
 def test_check_epics_closeable_surfaces_a_v2_epic_and_checks_its_own_docs():
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"},
@@ -325,7 +323,7 @@ def test_check_epics_closeable_surfaces_a_v2_epic_and_checks_its_own_docs():
         f"{DOC}/epic-9/lld.md"]
 
 
-# --- bug 8: a V2 Epic's Tasks wait for its lld.md ------------------------------
+# --- an Epic's Tasks wait for its lld.md ------------------------------------
 
 def test_next_action_never_hands_out_an_unstaged_task_before_the_v2_epic_is_architected():
     gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "state": "CLOSED"},
@@ -360,11 +358,11 @@ def test_next_action_hands_out_advanced_tasks_once_the_v2_epic_is_architected():
         "action": "delegate", "issue": 13, "unit": "issue", "stage": "development"}
 
 
-# --- Round 2: defects from an independent live run (Initiative #28), 2026-09-15 ---
+# --- task headings, doc merges, closing and worktree release -----------------
 
 def _worktree_with_doc(gh, repo, number: int, path: str, text: str) -> str:
-    """Stand up a phase-Task's worktree the CLI's way, commit a doc there and
-    push it -- the state a real stage agent leaves behind."""
+    """Stand up a phase-Task's worktree the CLI's way, commit and push a doc
+    there -- the state a stage agent leaves behind."""
     wt = s.cmd_worktree_add(gh, number, repo_path=str(repo), base="origin/main")["path"]
     target = Path(wt) / path
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -375,12 +373,11 @@ def _worktree_with_doc(gh, repo, number: int, path: str, text: str) -> str:
     return wt
 
 
-# D1: a Task heading the docs never pinned down silently dropped the Task.
-
 @pytest.mark.parametrize("heading", [
     "## Task #35: greet endpoint", "## Task 35 — greet endpoint",
     "### Task #35", "### Task 35: greet endpoint"])
 def test_parse_task_footprint_accepts_the_task_heading_variants(heading):
+    """Every Task heading variant resolves its footprint instead of dropping the Task."""
     doc = (f"# lld\n\n{heading}\n\n## Footprint\n- `src/a.js`\n\n"
            f"## Task #36: other\n\n## Footprint\n- `src/b.js`\n")
 
@@ -388,6 +385,7 @@ def test_parse_task_footprint_accepts_the_task_heading_variants(heading):
 
 
 def test_list_parallel_ready_names_the_task_heading_it_could_not_find(repo):
+    """An unfindable Task heading is skipped with a reason naming the expected heading."""
     gh = FakeGh([
         {"number": 6, "labels": ["type:initiative"]},
         {"number": 9, "labels": ["type:epic", s.LABELS["architected"]], "parent": 6},
@@ -402,9 +400,8 @@ def test_list_parallel_ready_names_the_task_heading_it_could_not_find(repo):
     assert "## Task #13" in skip["reason"]
 
 
-# D2: the Epic comment cited a blob SHA as a commit; a no-op re-run said merged.
-
 def test_merge_lld_doc_cites_the_epic_branch_commit_and_a_rerun_is_not_merged(repo):
+    """The Epic comment cites the epic-branch commit; a no-op re-run reports not merged."""
     gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"},
                   {"number": 13, "labels": ["type:task"], "parent": 9})
     _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", "# lld\n")
@@ -422,9 +419,8 @@ def test_merge_lld_doc_cites_the_epic_branch_commit_and_a_rerun_is_not_merged(re
     assert rerun["advanced_tasks"] == []
 
 
-# D3: gates.md now allows squash-merging a phase-Task's gate; prove pass-gate copes.
-
 def test_pass_gate_on_an_architecture_phase_task_after_a_squash_merged_gate(repo):
+    """pass-gate still publishes when the phase-Task's gate PR was squash-merged."""
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "architecture",
                    "status": "awaiting-human-review",
                    "comments": ["<!-- gate-pr: architecture:12 -->"]})
@@ -442,9 +438,8 @@ def test_pass_gate_on_an_architecture_phase_task_after_a_squash_merged_gate(repo
     assert _origin_file(repo, "epic-9", f"{DOC}/epic-9/architecture.md") == "# arch\n"
 
 
-# D4: the closing checklist said "merged" for children that were only closed.
-
 def test_check_epics_closeable_checklist_counts_closed_children_not_merged():
+    """The closing checklist counts children as closed, not merged."""
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
     gh.path_on_ref = lambda path, ref="main": True
 
@@ -455,16 +450,13 @@ def test_check_epics_closeable_checklist_counts_closed_children_not_merged():
     assert "merged\n" not in checklist.splitlines()[0] + "\n"
 
 
-# D5: mark-issue-closed called a V2 Epic and an Initiative "not an epic".
-
 def test_mark_issue_closed_classifies_v2_epics_and_initiatives():
+    """mark-issue-closed recognises label-classified Epics and Initiatives."""
     gh = _v2_tree()
 
     assert s.cmd_mark_issue_closed(gh, 9)["is_epic"] is True
     assert s.cmd_mark_issue_closed(gh, 6)["is_initiative"] is True
 
-
-# D6: next-action on an Initiative gave no reason when fresh, a stale one when closed.
 
 def test_next_action_on_a_fresh_initiative_says_to_cut_its_roadmap_task():
     gh = FakeGh([{"number": 6, "labels": ["type:initiative"]}])
@@ -487,9 +479,8 @@ def test_next_action_on_a_closed_initiative_says_it_is_closed():
     assert "ready for initiative-close" not in result["reason"]
 
 
-# D7: close-initiative left Pipeline Status unset until a CI job ran.
-
 def test_close_initiative_sets_the_terminal_fields_itself():
+    """close-initiative sets Pipeline Status to done itself."""
     gh = FakeGh([
         {"number": 6, "labels": ["type:initiative"], "status": "in-progress",
          "comments": ["<!-- initiative-verification: requirements:6 @ 2026-09-15T00:00:00Z -->"]},
@@ -501,9 +492,8 @@ def test_close_initiative_sets_the_terminal_fields_itself():
     assert gh.issues[6]["status"] == "done"
 
 
-# D8: a finished phase-Task's worktree was left behind as a stale lane slot.
-
 def test_pass_gate_on_a_phase_task_releases_its_worktree(repo):
+    """A finished phase-Task's worktree is removed so it frees its lane slot."""
     gh = FakeGh([
         {"number": 6, "labels": ["type:initiative"]},
         {"number": 7, "labels": ["type:task"], "parent": 6, "stage": "product",
@@ -549,21 +539,10 @@ def test_close_epic_sets_the_terminal_fields_when_it_merges():
     assert gh.issues[9]["status"] == "done"
 
 
-# =============================================================================
-# 2026-09-16 retro. Real git, faked tracker -- the same split as the rest of
-# this file, for the same reason: the defects below are about ref state and
-# on-disk trees, which a scripted runner answers however the test asked.
-#
-# Each fix pairs a REGRESSION test with a POSITIVE CONTROL that is green both
-# before and after the fix.
-# =============================================================================
-
-
-# --- Fix 3: a resumed worktree is brought up to origin -----------------------
+# --- a resumed worktree is brought up to origin -------------------------------
 
 def _live_epic_worktree(repo, tmp_path, epic=9):
-    """Push `epic-<n>` and check it out in its own live worktree at the path the
-    pipeline uses -- the state a run already in flight leaves behind."""
+    """Push `epic-<n>` and check it out in a live worktree at the pipeline's path."""
     _git("push", "-q", "origin", f"main:refs/heads/epic-{epic}", cwd=repo)
     _git("fetch", "-q", "origin", cwd=repo)
     wt = tmp_path / "wt" / f"sdlc-epic-{epic}"
@@ -572,8 +551,7 @@ def _live_epic_worktree(repo, tmp_path, epic=9):
 
 
 def _advance_origin(repo, branch, path, text):
-    """Land a commit on `origin/<branch>` from outside the worktree -- what a
-    sibling PR merging into the epic branch looks like to a tree already open."""
+    """Land a commit on `origin/<branch>` from outside the worktree, like a sibling PR merge."""
     _git("fetch", "-q", "origin", cwd=repo)
     _git("checkout", "-q", "-B", f"advance-{branch}", f"origin/{branch}", cwd=repo)
     target = repo / path
@@ -586,9 +564,7 @@ def _advance_origin(repo, branch, path, text):
 
 
 def test_worktree_add_fast_forwards_a_resumed_worktree_to_origin(repo, tmp_path):
-    # epic-53, live: the worktree existed, four PRs had merged into
-    # origin/epic-53 since it was opened, and worktree-add handed the stale tree
-    # straight back with nothing in the result saying how old it was.
+    """A live worktree behind origin is fast-forwarded and reports how far behind it was."""
     gh = _v2_tree()
     wt = _live_epic_worktree(repo, tmp_path)
     _advance_origin(repo, "epic-9", "merged.txt", "from a merged PR\n")
@@ -602,9 +578,7 @@ def test_worktree_add_fast_forwards_a_resumed_worktree_to_origin(repo, tmp_path)
 
 
 def test_worktree_add_refuses_to_force_a_diverged_resumed_worktree(repo, tmp_path):
-    # Fast-forward only. A branch with commits on both sides carries unpushed
-    # work, and discarding a commit to make a resume look clean is the one
-    # outcome this must never have.
+    """A diverged worktree carries unpushed work: reported, never reset or merged."""
     gh = _v2_tree()
     wt = _live_epic_worktree(repo, tmp_path)
     (wt / "local.txt").write_text("unpushed work\n")
@@ -622,10 +596,7 @@ def test_worktree_add_refuses_to_force_a_diverged_resumed_worktree(repo, tmp_pat
 
 
 def test_worktree_add_leaves_a_current_worktree_and_its_wip_alone(repo, tmp_path):
-    """POSITIVE CONTROL: resuming a tree already at origin's tip must not touch
-    it -- in particular it must not reset away uncommitted work. Green before
-    the sync fix and after it, so a "fix" that force-resets every resume fails
-    here."""
+    """Resuming a tree already at origin's tip leaves it and its uncommitted work alone."""
     gh = _v2_tree()
     wt = _live_epic_worktree(repo, tmp_path)
     (wt / "wip.txt").write_text("uncommitted\n")
@@ -637,12 +608,11 @@ def test_worktree_add_leaves_a_current_worktree_and_its_wip_alone(repo, tmp_path
     assert (wt / "wip.txt").read_text() == "uncommitted\n"
 
 
-# --- Fix 5: maxTasksPerRun is enforced, not merely reported ------------------
+# --- maxTasksPerRun is enforced -----------------------------------------------
 
 @pytest.fixture
 def run_state(tmp_path, monkeypatch):
-    """Point the run-state files at this test's own directory and give the cap a
-    real value -- the sample config ships 0, which means unlimited."""
+    """Isolate run-state files in tmp_path and set a real cap (the sample ships 0 = unlimited)."""
     d = tmp_path / "runs"
     d.mkdir()
     monkeypatch.setenv("SDLC_RUNS_DIR", str(d))
@@ -672,14 +642,13 @@ def test_next_action_stops_at_the_run_cap_instead_of_handing_out_new_work(run_st
     assert result["action"] == "stop-at-cap"
     assert result["cap"] == 2
     assert result["completed"] == [11, 12]
-    # A deferred unit must come away with no side effects at all.
+    # A deferred unit has no side effects.
     assert gh.issues[13]["stage"] == "development"
     assert gh.issues[13]["status"] is None
 
 
 def test_next_action_never_caps_a_resume(run_state):
-    # Resumes finish work already in flight. Capping one would strand a unit
-    # mid-pipeline rather than bound anything.
+    """Resumes are never capped: capping one would strand a unit mid-pipeline."""
     gh = _architected_epic(status="in-progress")
     _write_run(run_state, [11, 12])
 
@@ -704,8 +673,7 @@ def test_next_action_never_caps_a_gate_action(run_state):
 
 
 def test_list_parallel_ready_hands_out_nothing_at_the_run_cap(run_state, repo):
-    # Capping next-action alone would just push the overflow into the other
-    # lane that hands out fresh work.
+    """The dev lane honours the cap too, so overflow can't leak through it."""
     gh = _architected_epic()
     _write_run(run_state, [11, 12])
 
@@ -724,7 +692,26 @@ def test_a_new_run_id_resets_the_cap(run_state):
 
     assert result["action"] == "delegate" and result["issue"] == 13
     assert json.loads((run_state / "epic-9.json").read_text()) == {
-        "run_id": "run-2", "terminal": []}
+        "run_id": "run-2", "terminal": [], "epic": 9}
+
+
+def test_run_state_tracks_units_in_flight_and_the_session(run_state, monkeypatch):
+    """Compaction recovery reads this: what the session's run handed out and has not finished."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-1")
+    gh = _architected_epic()
+    result = s.cmd_next_action(gh, argparse.Namespace(epic=9, run_id="run-1"))
+    state = json.loads((run_state / "epic-9.json").read_text())
+    assert result["issue"] == 13
+    assert state == {"run_id": "run-1", "terminal": [], "epic": 9, "session_id": "sess-1",
+                     "in_flight": {"13": "development"}}
+    s.record_terminal_unit(gh, 13)
+    state = json.loads((run_state / "epic-9.json").read_text())
+    assert state["terminal"] == [13] and state["in_flight"] == {}
+
+
+def test_next_action_without_a_run_id_writes_no_run_state(run_state):
+    s.cmd_next_action(_architected_epic(), argparse.Namespace(epic=9, run_id=None))
+    assert list(run_state.iterdir()) == []
 
 
 def test_next_action_below_the_cap_still_delegates(run_state):
@@ -765,17 +752,14 @@ def test_merge_pr_counts_the_merged_unit_against_the_run(run_state, repo):
 
 
 def test_run_cap_is_opt_in_and_ignored_without_a_run_id(run_state):
-    """POSITIVE CONTROL: with no --run-id the cap is off, so a run-state file
-    already AT the cap changes nothing and work is still handed out. Green
-    before enforcement existed and after it -- a cap that fired unconditionally
-    would fail here."""
+    """With no --run-id the cap is off, even when a run-state file is already at it."""
     gh = _architected_epic()
     _write_run(run_state, [11, 12])
 
     assert s.decide_next_action(gh, 9)["action"] == "delegate"
 
 
-# --- Fix 7: Task issues are created after the carving is approved ------------
+# --- Task issues are created after the carving is approved --------------------
 
 _CARVED_LLD = (
     "# lld for epic 9\n\n"
@@ -783,7 +767,9 @@ _CARVED_LLD = (
     "Design for the health endpoint.\n\n"
     "## Footprint\n- `src/health.js`\n\n"
     "## Task greet-endpoint: Add /greet endpoint\n"
-    "Depends on: skeleton-health\n\n"
+    "Depends on: skeleton-health\n"
+    "Priority: High\n"
+    "- **Effort:** low\n\n"
     "## Footprint\n- `src/greet.js`\n")
 
 
@@ -799,6 +785,10 @@ def test_create_lld_tasks_creates_numbers_and_wires_the_carving(repo):
     # Parented to the Epic, typed, and classifiable as Tasks.
     assert gh.issues[health]["parent"] == 9 and gh.issues[greet]["parent"] == 9
     assert s.classify_unit_from_issue(gh.issue_epic_info(health)) == "task"
+    assert gh.issues[health]["issue_type"] == gh.issues[greet]["issue_type"] == "Task"
+    # Declared Priority/Effort pass through; an undeclared one takes the default.
+    assert (gh.issues[greet]["priority"], gh.issues[greet]["effort"]) == ("High", "Low")
+    assert (gh.issues[health]["priority"], gh.issues[health]["effort"]) == ("Medium", "Medium")
     # `Depends on:` became the native edge, in the right direction.
     assert result["blocked_by"] == [{"issue": greet, "on": health}]
     assert gh.blocked_by(greet) == [health]
@@ -829,10 +819,7 @@ def test_create_lld_tasks_is_idempotent_on_a_rerun(repo):
 
 
 def test_create_lld_tasks_repairs_a_crash_between_create_and_push(repo):
-    # The crash window: the issue was created but the rewritten doc never
-    # reached origin, so the heading is still keyed. The task-key marker in the
-    # issue body is what lets a re-run adopt it instead of creating a second
-    # issue for the same section.
+    """A re-run adopts an issue created before a crash (by its task-key marker), not a duplicate."""
     gh = _v2_tree()
     _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", _CARVED_LLD)
     orphan = gh.issue_create("Add /health endpoint",
@@ -847,6 +834,16 @@ def test_create_lld_tasks_repairs_a_crash_between_create_and_push(repo):
     assert f"## Task #{orphan}: Add /health endpoint" in published
 
 
+def test_create_lld_tasks_refuses_an_invalid_priority_before_creating_any_task(repo):
+    gh = _v2_tree()
+    doc = _CARVED_LLD.replace("Priority: High", "Priority: Critical")
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", doc)
+    before = set(gh.issues)
+    with pytest.raises(s.GhError, match="Priority 'Critical' is not a configured option"):
+        s.cmd_create_lld_tasks(gh, 9, repo_path=str(repo))
+    assert set(gh.issues) == before
+
+
 def test_create_lld_tasks_refuses_when_the_epic_lld_is_not_published(repo):
     gh = _v2_tree()
     with pytest.raises(s.GhError, match="publish the Epic's lld.md first"):
@@ -854,9 +851,7 @@ def test_create_lld_tasks_refuses_when_the_epic_lld_is_not_published(repo):
 
 
 def test_merge_lld_doc_epic_still_advances_the_tasks_it_finds(repo):
-    """POSITIVE CONTROL for moving Task creation out of `lld`: `merge-lld-doc
-    --unit epic` keeps its current behaviour, advancing every Stage-less Task
-    under the Epic. Green before the change and after it."""
+    """merge-lld-doc still advances every Stage-less Task under the Epic."""
     gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"},
                   {"number": 13, "labels": ["type:task"], "parent": 9})
     _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", "# lld\n")

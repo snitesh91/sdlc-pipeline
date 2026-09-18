@@ -5,14 +5,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sdlc_next import GitHub, GhError, REPO
 
 
 def test_config_drives_repo_docroot_and_graphql_owner_for_an_arbitrary_repo(tmp_path):
-    """The whole suite runs against the neutral sample config; this proves the
-    genericity directly -- a *different* config propagates to REPO, DOC_ROOT, the
-    schema ids, and the inline GraphQL repo selector, with no code edit."""
+    """A different config propagates to REPO, DOC_ROOT, schema ids and the GraphQL repo selector."""
     cfg = json.loads((Path(__file__).resolve().parents[2] / "sdlc.config.sample.json").read_text())
     cfg["repo"] = "acme/rocket"
     cfg["docRoot"] = "design/pipeline"
@@ -31,9 +31,8 @@ def test_config_drives_repo_docroot_and_graphql_owner_for_an_arbitrary_repo(tmp_
 
 
 class ScriptedRunner:
-    """Test double for the Runner protocol: returns canned stdout for an exact argv
-    match, raises AssertionError on any unscripted call, and records every call made
-    so a test can assert exactly what was invoked."""
+    """Runner double: canned stdout per exact argv (or prefix), GhError for `fail_on`,
+    AssertionError on any unscripted call; records every call."""
 
     def __init__(self, responses: dict[tuple, str] | None = None):
         self.responses = dict(responses or {})
@@ -60,9 +59,8 @@ _NO_WORKTREE_RESULT = {"released": False, "reason": "no worktree"}
 
 
 def _live_wt(branch: str, path: str = "/repo", main: str = "/main") -> dict:
-    """Scripted `git worktree list --porcelain` (read from `path`) showing the main
-    checkout on `main` and a separate live worktree at `path` holding `branch` --
-    the state every write command expects to find (`BranchWorkspace`)."""
+    """Scripted `git worktree list` showing main checkout on `main` and a live worktree
+    at `path` holding `branch`."""
     return {("git", "-C", path, "worktree", "list", "--porcelain"):
             f"worktree {main}\nHEAD aaa\nbranch refs/heads/main\n\n"
             f"worktree {path}\nHEAD bbb\nbranch refs/heads/{branch}\n"}
@@ -163,16 +161,7 @@ def test_pr_checks_reraises_other_gh_errors():
 
 
 def test_pr_files_uses_gh_api_paginate_pulls_files():
-    # `gh pr view --json files` truncates at 100 files with no pagination (confirmed
-    # against the gh 2.76.1 binary directly). `gh pr diff --name-only` was tried next
-    # but has its OWN cap: the diff itself 406s past 20,000 lines (confirmed against
-    # `gh pr diff 128276 --repo kubernetes/kubernetes --name-only`) -- reachable here,
-    # since backend/package-lock.json alone is ~12k lines. `gh api --paginate
-    # repos/{repo}/pulls/{n}/files` walks the REST files endpoint page by page and has
-    # no line-count or fixed-entry cap -- confirmed to return all 187/187 files on a
-    # PR where both prior approaches failed. It also sidesteps `gh pr diff`'s diff-header
-    # parsing, which can silently mis-parse C-quoted non-ASCII paths and rename-source
-    # paths.
+    # The paginated REST files endpoint has no file-count or diff-size cap.
     from sdlc_next import GitHub
     argv = ("gh", "api", "--paginate", f"repos/{REPO}/pulls/42/files", "--jq", ".[].filename")
     runner = ScriptedRunner({argv: "backend/src/a.ts\nfrontend/src/b.tsx\n"})
@@ -184,9 +173,7 @@ def test_pr_files_uses_gh_api_paginate_pulls_files():
 def test_pr_files_drops_blank_lines_but_keeps_every_real_path():
     from sdlc_next import GitHub
     argv = ("gh", "api", "--paginate", f"repos/{REPO}/pulls/42/files", "--jq", ".[].filename")
-    # 150 distinct paths -- well past the old 100-file JSON cap, and enough lines that
-    # a diff-based approach would meaningfully approach its own 20,000-line cap on a
-    # real PR -- to demonstrate the newline-based parser drops nothing.
+    # 150 paths: past the 100-file cap of `gh pr view --json files`.
     paths = [f"backend/src/file{i}.ts" for i in range(150)]
     runner = ScriptedRunner({argv: "\n".join(paths) + "\n"})
     gh = GitHub(runner=runner)
@@ -454,10 +441,6 @@ _STATUS_TITLE_CASE = {v: k for k, v in {
     "Todo": "todo", "In Progress": "in-progress",
     "Awaiting Human Review": "awaiting-human-review", "Needs Human": "needs-human",
     "Feedback Received": "feedback-received",
-    # `Done` is a real option in PIPELINE_STATUS_FIELD_NAMES and always has
-    # been; it was missing here only because nothing read an issue back AFTER
-    # closing it. `close-issue` now does (it counts the unit against the run),
-    # so the double has to model the terminal value too.
     "Done": "done",
 }.items()}
 
@@ -479,8 +462,7 @@ def _issue(number, stage=None, status=None, priority=None, created="2026-08-01T0
 
 def _epic(number, priority=None, created="2026-08-01T00:00:00Z", labels=None, stage=None, status=None,
           parent=None):
-    """An Epic as `pipeline.classification` recognises it in the sample config:
-    the `type:epic` label, plus any profile label (`epic:standing`, ...)."""
+    """An Epic per the sample config's classification: `type:epic` plus any profile labels."""
     return _issue(number, priority=priority, created=created,
                   labels=["type:epic", *(labels or [])], stage=stage, status=status, parent=parent)
 
@@ -500,9 +482,7 @@ def _list_response(issues):
 
 
 def _clean_pipeline_comments(pr=42):
-    """The two pre-merge evidence markers `missing_pipeline_evidence` requires,
-    in order (handoff before a clean outcome): a thread that proves the pipeline
-    ran through `pr-review` with a clean verdict."""
+    """The handoff + clean pr-review markers `missing_pipeline_evidence` requires, in order."""
     return [
         {"body": f"<!-- stage-transition: testing->pr-review @ 2026-08-19T00:00:00Z -->"},
         {"body": f"<!-- pr-review-outcome: clean:{pr} @ 2026-08-19T01:00:00Z -->"},
@@ -519,9 +499,7 @@ def _no_blockers_responses(*numbers):
 
 
 def _stage_assign_responses(number, stage):
-    """Mocks the node-id lookup + Stage-field write that decide_next_action now
-    issues, best-effort, the first time it sees an eligible issue with no Stage
-    value set yet (operator instruction -- see decide_next_action's docstring)."""
+    """Node-id lookup + Stage-field write decide_next_action issues for an unstaged eligible issue."""
     from sdlc_next import _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, STAGE_FIELD_ID, STAGE_OPTION_IDS
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=number)}")
     mutation_argv = ("gh", "api", "graphql", "-f",
@@ -563,10 +541,7 @@ def test_stale_in_progress_alongside_awaiting_review_is_not_crash_recovery():
 
 
 def test_feedback_received_status_still_recognized_as_gate_pending():
-    # Once mark-feedback-received has flipped Pipeline Status forward, next-action
-    # must still recognize the issue as gate-pending (not fall through to treating it
-    # as fresh, unclaimed work) -- same pass-gate/address-gate-feedback detection as
-    # awaiting-human-review, just re-derived from the PR's live state either way.
+    # feedback-received is gate-pending exactly like awaiting-human-review.
     from sdlc_next import GitHub, decide_next_action
     from tests.test_sdlc_next import ScriptedRunner
     epic_90 = _epic(90, labels=["epic:standing"])
@@ -596,10 +571,7 @@ def test_needs_human_is_excluded():
 
 
 def test_blocked_issue_excluded_but_its_open_dependency_is_worked():
-    # #5 is blocked on #6 (native blockedBy), so #5 itself is skipped — but #6 is
-    # exactly what unblocks #5 once it merges, so #6 must fall through to eligible
-    # and get delegated rather than being excluded. Excluding it would deadlock the
-    # chain: nothing would ever work on #6, so #5 would stay blocked forever.
+    # Excluding the dependency too would deadlock the chain.
     from sdlc_next import GitHub, decide_next_action, _BLOCKED_BY_QUERY
     from tests.test_sdlc_next import ScriptedRunner
     epic_90 = _epic(90, labels=["epic:standing"])
@@ -620,9 +592,7 @@ def test_blocked_issue_whose_dependency_closed_is_available():
     epic_90 = _epic(90, labels=["epic:standing"])
     blocked = _issue(5, stage="development", parent=90)
     responses = {tuple(_list_argv()): _list_response([epic_90, blocked])}
-    # #6 has closed, so gh.blocked_by(5) -- which filters to state == OPEN -- returns
-    # nothing, and #5 falls straight through to eligible with no separate
-    # "dependency-cleared" step to run.
+    # blocked_by filters to OPEN blockers, so a closed dependency reads as none.
     responses.update(_no_blockers_responses(5))
     runner = ScriptedRunner(responses)
     gh = GitHub(runner=runner)
@@ -668,10 +638,7 @@ def test_nothing_actionable_returns_none():
 
 
 def test_unknown_epic_number_raises():
-    # Epic number is now a required, validated input (see "Epic number is
-    # mandatory" in SKILL.md) -- passing a number that isn't actually an open
-    # top-level Feature issue is a caller mistake, not a legitimate "nothing to
-    # do" outcome.
+    # A number that isn't an open epic is a caller error, not "nothing to do".
     from sdlc_next import GitHub, GhError, decide_next_action
     from tests.test_sdlc_next import ScriptedRunner
     runner = ScriptedRunner({tuple(_list_argv()): _list_response([])})
@@ -698,11 +665,7 @@ def test_child_issue_number_passed_as_epic_raises():
 
 
 def test_epic_legacy_skips_entirely_even_over_crash_recovery():
-    # A legacy epic is excluded before anything else -- including an
-    # in-progress child that would otherwise trigger crash-recovery. No
-    # blocked_by or gate calls should fire either -- the ScriptedRunner would
-    # raise on any unscripted call, so a bare _list_response is sufficient
-    # proof nothing else was touched.
+    # Only the issue list is scripted, so any further call would fail the test.
     from sdlc_next import GitHub, decide_next_action
     from tests.test_sdlc_next import ScriptedRunner
     epic_90 = _epic(90, labels=["epic:legacy"])
@@ -731,8 +694,7 @@ def test_check_epics_closeable_posts_checklist_flags_open_dependents_and_assigns
         {"data": {"repository": {"issue": {"blocking": {"nodes": [{"number": 21, "state": "OPEN"}]}}}}})
     responses[tuple(["gh", "api", "graphql", "-f", f"query={_BLOCKING_QUERY.format(n=11)}"])] = json.dumps(
         {"data": {"repository": {"issue": {"blocking": {"nodes": []}}}}})
-    # Both epic docs already on the epic branch (publish-doc put them there;
-    # nothing is expected on `main` until close-epic) -- the happy path.
+    # Both epic docs already on the epic branch (they reach main only at close-epic).
     for name in ("architecture.md", "lld.md"):
         responses[("gh", "api", f"repos/{REPO}/contents/docs/sdlc/epic-94/{name}?ref=epic-94",
                    "--jq", ".sha")] = "abc123\n"
@@ -755,9 +717,7 @@ def test_check_epics_closeable_posts_checklist_flags_open_dependents_and_assigns
 
 
 def test_touches_pipeline_config_detects_config_changes_and_ignores_product_code():
-    """The skill lives outside the repo it drives; only its config file ships
-    through this repo's merges, so a mid-invocation change to it must be surfaced
-    (matched by basename, wherever in the repo the config is kept)."""
+    """The config file is matched by basename wherever it lives; nothing else counts."""
     from sdlc_next import touches_pipeline_config, CONFIG_FILENAME
     assert touches_pipeline_config([CONFIG_FILENAME])
     assert touches_pipeline_config([f".claude/{CONFIG_FILENAME}"])
@@ -768,11 +728,7 @@ def test_touches_pipeline_config_detects_config_changes_and_ignores_product_code
 
 
 def test_check_epics_closeable_flags_an_epic_doc_that_never_reached_the_epic_branch():
-    """An epic doc that never reached `epic-<n>` is reachable only by SHA, and a SHA
-    quoted from an old comment can resolve to a superseded draft -- the #209
-    pr-review incident. `publish-doc` lands the docs on `epic-<n>` (not `main`), so
-    that is the branch the closing checklist verifies against; close-epic's own
-    merge is what takes the docs to `main`."""
+    """The closing checklist verifies epic docs on `epic-<n>` and flags any that are missing."""
     from sdlc_next import GitHub, cmd_check_epics_closeable, _BLOCKING_QUERY, HUMAN_ASSIGNEE, REPO
     from tests.test_sdlc_next import ScriptedRunner
     issues = [_epic(94), _issue(10, parent=94, state="CLOSED")]
@@ -820,9 +776,7 @@ def test_check_epics_closeable_skips_standing_epic_and_already_notified_epic():
     runner = ScriptedRunner(responses)
     gh = GitHub(runner=runner)
     result = cmd_check_epics_closeable(gh)
-    # Standing epic (#95) never even gets an issue_view call -- excluded before that
-    # point entirely, per "Epic closing" in references/epics.md -- and #96 is reported as
-    # already notified, with no new comment/edit calls made for either.
+    # The standing epic is excluded before any issue_view; #96 posts nothing new.
     assert result == {"closeable_epics": [
         {"epic": 96, "title": "issue 96", "already_notified": True}
     ]}
@@ -913,8 +867,7 @@ def test_mark_issue_closed_clears_stage_and_sets_done_for_non_epic():
         set_done_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 183}}}}),
     })
     gh = GitHub(runner=runner)
-    # No project-item/board-status call is scripted -- proves the non-epic path
-    # never reaches a board write.
+    # No board-status call is scripted, so the non-epic path must not make one.
     assert cmd_mark_issue_closed(gh, 183) == {"issue": 183, "is_epic": False, "is_initiative": False,
                                               "marked_done": True}
 
@@ -947,10 +900,7 @@ def test_start_comment_posts_marker_with_no_label_mutation():
 
 
 def test_handoff_to_pr_review_posts_marker_without_referencing_a_stage_doc():
-    """`development` writes no doc file -- what was built and why lives in the PR
-    description, and the run evidence in the `record-local-ci` attestations. The
-    marker must be the canonical `development->pr-review` one, and the body must
-    not point at a file that is never written."""
+    """The handoff posts the development->pr-review marker and points at no stage doc."""
     from sdlc_next import GitHub, cmd_handoff_to_pr_review
     from tests.test_sdlc_next import ScriptedRunner
     runner = ScriptedRunner()
@@ -1015,7 +965,7 @@ def test_open_gate_creates_pr_sets_status_field_and_posts_marked_comment():
         "⏸️ Awaiting human review — see #40. Merge it to approve and continue to `architecture`, "
         "or leave review comments on it for anything that needs to change (leave it unmerged — "
         "the pipeline picks up your comments and revises the doc automatically). Run "
-        "`/sdlc-pipeline` again once you've merged it, or any time after leaving comments if you'd "
+        "`/sdlc:run` again once you've merged it, or any time after leaving comments if you'd "
         "like the revision done sooner.\n\n"
         "<!-- gate-pr: product:40 -->\n"
     )
@@ -1068,11 +1018,7 @@ def test_mark_blocked_adds_native_relationship_and_comment():
 
 
 def test_mark_blocked_resets_pipeline_status_so_it_does_not_read_as_a_crashed_run():
-    """A blocked unit left at `in-progress` with no worktree is indistinguishable from
-    a crashed run to decide_next_action and list_parallel_ready, which share that
-    heuristic -- #310 sat blocked for a whole session while next-action kept offering
-    it as a `resume`. Blocked-ness comes from the native relationship; the field just
-    has to stop lying."""
+    """A blocked unit left `in-progress` with no worktree would read as a crashed run."""
     from sdlc_next import (GitHub, cmd_mark_blocked, _ISSUE_NODE_ID_QUERY, _ADD_BLOCKED_BY_MUTATION,
                             _SET_ISSUE_FIELD_MUTATION, PIPELINE_STATUS_FIELD_ID,
                             PIPELINE_STATUS_OPTION_IDS)
@@ -1093,7 +1039,6 @@ def test_mark_blocked_resets_pipeline_status_so_it_does_not_read_as_a_crashed_ru
     runner.prefix_responses = {("gh", "issue", "comment", "9"): ""}
     cmd_mark_blocked(GitHub(runner=runner), 9, dep=6)
     assert list(status_argv) in runner.calls, "mark-blocked must reset Pipeline Status to todo"
-    # and it must not be set to in-progress or needs-human by any other path
     for wrong in ("in-progress", "needs-human"):
         bad = ("gh", "api", "graphql", "-f",
             f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS[wrong])}")
@@ -1240,10 +1185,7 @@ _SEARCH_COUNT_ARGV = ("gh", "api",
 
 
 def test_retro_watermark_default_is_formatted_with_the_config_doc_root(tmp_path):
-    """`pipeline.retro.watermarkFile` defaults to `{docRoot}/retro-watermark`, resolved
-    against the config's own `docRoot` at load time -- so the watermark lives with the
-    driven repo's committed docs, not inside the skill checkout (where a leaked client
-    value once sat at the skill root)."""
+    """The watermark default resolves against the driven repo's `docRoot` at load time."""
     from sdlc_next import RETRO_WATERMARK_FILE, _PIPELINE_DEFAULTS, DOC_ROOT
     assert _PIPELINE_DEFAULTS["retro"]["watermarkFile"] == "{docRoot}/retro-watermark"
     assert RETRO_WATERMARK_FILE == f"{DOC_ROOT}/retro-watermark" == "docs/sdlc/retro-watermark"
@@ -1287,10 +1229,7 @@ def test_retro_check_false_when_fewer_than_five_since_watermark(tmp_path):
 
 
 def test_retro_check_missing_watermark_reads_as_zero(tmp_path):
-    # No watermark file yet = 0, so run_retro fires at the fifth-ever close --
-    # and, unlike the old `count % 5 == 0` trigger, keeps firing until a retro
-    # actually records --mark-done, instead of skipping when two issues close
-    # between checks.
+    # No watermark = 0, and run_retro keeps firing until --mark-done records one.
     from sdlc_next import GitHub, cmd_retro_check
     gh = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "7\n"}))
     assert cmd_retro_check(gh, str(tmp_path)) == {"closed_count": 7, "watermark": 0,
@@ -1298,8 +1237,7 @@ def test_retro_check_missing_watermark_reads_as_zero(tmp_path):
 
 
 def test_retro_check_mark_done_without_count_falls_back_to_live_count(tmp_path):
-    # Backward-compatible default when the caller omits --count -- flagged in the
-    # result so it's visible, not silent.
+    # Omitting --count stamps the live count, flagged in the result.
     from sdlc_next import GitHub, cmd_retro_check, RETRO_WATERMARK_FILE
     wm = tmp_path / RETRO_WATERMARK_FILE
     wm.parent.mkdir(parents=True)
@@ -1313,12 +1251,7 @@ def test_retro_check_mark_done_without_count_falls_back_to_live_count(tmp_path):
 
 
 def test_retro_check_mark_done_with_count_stamps_the_captured_trigger_count(tmp_path):
-    # Positive control for the 2026-09-14 fix: the retro was triggered when the
-    # live count was 120 (captured by the caller); by the time --mark-done runs,
-    # 10 more issues closed (live count 130) during the fix work. The watermark
-    # must land on the captured 120, not the now-live 130, so those 10 issues stay
-    # in scope for the next retro's evidence sweep instead of being silently
-    # absorbed as reviewed.
+    # The watermark lands on the captured trigger count, so issues closed during the retro stay in scope.
     from sdlc_next import GitHub, cmd_retro_check, RETRO_WATERMARK_FILE
     wm = tmp_path / RETRO_WATERMARK_FILE
     wm.parent.mkdir(parents=True)
@@ -1328,15 +1261,12 @@ def test_retro_check_mark_done_with_count_stamps_the_captured_trigger_count(tmp_
     assert result == {"closed_count": 130, "watermark": 120, "marked_done": True,
                        "count_was_live_fallback": False}
     assert wm.read_text().strip() == "120"
-    # The 10 issues closed between trigger and mark-done (121-130) are still
-    # in scope -- five more (135) fires the next retro, not ten more (140).
     gh2 = GitHub(runner=ScriptedRunner({_SEARCH_COUNT_ARGV: "125\n"}))
     assert cmd_retro_check(gh2, str(tmp_path))["run_retro"] is True
 
 
 def test_retro_check_mark_done_rejects_a_count_behind_the_existing_watermark(tmp_path):
-    # Negative control: a stale/wrong --count that would move the watermark
-    # backwards must be refused, not silently applied.
+    # A --count that would move the watermark backwards is refused.
     from sdlc_next import GitHub, GhError, cmd_retro_check, RETRO_WATERMARK_FILE
     wm = tmp_path / RETRO_WATERMARK_FILE
     wm.parent.mkdir(parents=True)
@@ -1349,8 +1279,7 @@ def test_retro_check_mark_done_rejects_a_count_behind_the_existing_watermark(tmp
 
 
 def test_retro_check_mark_done_rejects_a_count_ahead_of_the_live_count(tmp_path):
-    # Negative control: a --count claiming more closes than have actually
-    # happened must be refused, not silently applied.
+    # A --count ahead of the live closed count is refused.
     from sdlc_next import GitHub, GhError, cmd_retro_check, RETRO_WATERMARK_FILE
     wm = tmp_path / RETRO_WATERMARK_FILE
     wm.parent.mkdir(parents=True)
@@ -1400,12 +1329,7 @@ def test_pairing_counts_derives_bounces_from_markers():
 
 
 def test_pairing_counts_tracks_design_reviews_per_role():
-    """The `lld-review <-> lld` pairing tripped the valve's context-reset
-    replacement on three of epic #98's four children while having no mechanical
-    counter at all -- the strike count lived only in one orchestrator's head, so a
-    crashed session would have resumed it at zero. Roles are counted separately
-    because a unit can bounce on both and the valve treats them as distinct
-    pairings."""
+    """Design-review bounces are counted from markers, keyed per review role."""
     from sdlc_next import GitHub, cmd_pairing_counts, REPO
     comments = [
         {"body": "r\n<!-- design-review-outcome: rework:lld-review @ 2026-08-28T00:00:00Z -->"},
@@ -1420,25 +1344,19 @@ def test_pairing_counts_tracks_design_reviews_per_role():
             json.dumps({"comments": comments}),
     })
     result = cmd_pairing_counts(GitHub(runner=runner), 9)
-    # Three lld-review bounces with no clean between them -- this is the shape the
-    # valve escalates on, and the count a fresh session must be able to recover.
     assert result["design_review"]["lld-review"] == {
         "rework_since_last_clean": 3, "total_rework": 3, "total_clean": 0,
         "same_class_recurrence_count": 0}
-    # arch-review's clean verdict resets its own counter and does not touch
-    # lld-review's -- the whole reason roles are keyed separately.
+    # arch-review's clean verdict resets only its own counter.
     assert result["design_review"]["arch-review"] == {
         "rework_since_last_clean": 0, "total_rework": 1, "total_clean": 1,
         "same_class_recurrence_count": 0}
-    # A review that never ran on this unit has no key at all, rather than a
-    # zeroed entry that reads like "ran and found nothing".
+    # A review that never ran has no key, not a zeroed entry.
     assert "pr-review" not in result["design_review"]
 
 
 def test_record_design_review_refuses_an_unknown_role():
-    """`record-pr-review` refuses an unknown outcome loudly; the design twin
-    refuses an unknown role the same way. A typo'd role would silently create a
-    third pairing whose count nothing ever reads."""
+    """A typo'd role would create a pairing nothing ever reads, so it is refused."""
     import pytest
     from sdlc_next import GitHub, GhError, cmd_record_design_review
     with pytest.raises(GhError, match="role must be one of"):
@@ -1447,8 +1365,7 @@ def test_record_design_review_refuses_an_unknown_role():
 
 
 def test_record_design_review_refuses_same_class_recurrence_on_a_clean_verdict():
-    # Negative control: a clean verdict has no defect class to recur -- the flag
-    # only makes sense paired with outcome="rework".
+    # same_class_recurrence is only valid with outcome="rework".
     import pytest
     from sdlc_next import GitHub, GhError, cmd_record_design_review
     with pytest.raises(GhError, match="only makes sense on outcome='rework'"):
@@ -1457,10 +1374,7 @@ def test_record_design_review_refuses_same_class_recurrence_on_a_clean_verdict()
 
 
 def test_record_design_review_embeds_the_same_class_marker_and_pairing_counts_reads_it_back():
-    # Positive control for the 2026-09-14 fix: #157's #504 had a reviewer write
-    # "escalate on the pattern" in verdict prose at two separate rounds and
-    # nothing acted on it. same_class_recurrence=True must produce a marker
-    # cmd_pairing_counts actually counts, not just a headline sentence.
+    # same_class_recurrence=True must produce a marker cmd_pairing_counts counts.
     from sdlc_next import GitHub, cmd_record_design_review, cmd_pairing_counts, REPO
     posted = {}
 
@@ -1485,8 +1399,7 @@ def test_record_design_review_embeds_the_same_class_marker_and_pairing_counts_re
 
 
 def test_record_design_review_without_the_flag_leaves_same_class_count_at_zero():
-    # Negative control: an ordinary rework (no same-class flag) must not be
-    # miscounted as a same-class recurrence.
+    # An ordinary rework is not counted as a same-class recurrence.
     from sdlc_next import GitHub, cmd_record_design_review, cmd_pairing_counts, REPO
     posted = {}
 
@@ -1578,12 +1491,7 @@ def test_merge_pr_refuses_when_checks_not_passed():
 
 
 def test_merge_pr_merges_and_confirms_issue_closed_when_checks_pass():
-    # merge-pr no longer touches Stage/Pipeline Status itself when this closes the
-    # issue -- that's cmd_mark_issue_closed's job now, fired in real time by
-    # gate-auto-advance.yml's `issues: closed` trigger (see "Epic board Status" /
-    # "Issue taxonomy" in references/operations.md). Confirmed here by *not* scripting either
-    # field-mutation call: ScriptedRunner raises on any unscripted call, so this
-    # test itself proves cmd_merge_pr never attempts one.
+    # No field-mutation call is scripted: merge-pr must not touch Stage/Pipeline Status.
     from sdlc_next import GitHub, cmd_merge_pr
     from tests.test_sdlc_next import ScriptedRunner
     import json
@@ -1651,21 +1559,13 @@ def test_merge_gate_status_returns_pending_verbatim_when_required_workflow_itsel
         ["backend/src/x.ts"],
         [{"workflow": "Backend CI", "bucket": "pending"}],
     )
-    # status is the retryable "pending", not "missing-checks" -- the required workflow
-    # DID trigger, it just hasn't posted a pass yet. It also shows up in `missing` per
-    # missing_required_workflows' own contract ("reported a passing check ... and
-    # didn't" -- true of a still-running check too), which is fine: pr-review only
-    # escalates off `status`, never off `missing` alone (see SKILL.md's routing).
+    # Retryable "pending", not "missing-checks"; a still-running check also counts as missing.
     assert status == "pending"
     assert missing == ["Backend CI"]
 
 
 def test_merge_gate_status_surfaces_missing_workflow_even_when_status_is_pending():
-    # Regression: a PR touching both trees where backend passed but frontend's
-    # workflow never reported at all, and some unrelated check (e.g. the gate
-    # auto-advance workflow) is still mid-run. Overall status resolves to
-    # "pending" from the unrelated check -- but the missing frontend workflow
-    # must still surface, not get discarded because status != "passed".
+    # A never-reported workflow still surfaces while an unrelated check is pending.
     from sdlc_next import merge_gate_status
     status, missing = merge_gate_status(
         ["backend/src/x.ts", "frontend/src/y.tsx"],
@@ -1679,20 +1579,13 @@ def test_merge_gate_status_surfaces_missing_workflow_even_when_status_is_pending
 
 
 def test_merge_gate_status_surfaces_missing_workflow_even_when_status_is_failed():
-    # Regression: backend genuinely failed a test (a real code problem -- route to
-    # development for a test fix) while frontend's required workflow never reported
-    # at all (a config defect -- needs mark-needs-human, not a test fix). Both facts
-    # must be visible together, or the routing sends "CI failed" to development,
-    # which goes hunting for a frontend test failure that doesn't exist.
+    # A failed suite and a never-reported workflow must surface together.
     from sdlc_next import merge_gate_status
     status, missing = merge_gate_status(
         ["backend/src/x.ts", "frontend/src/y.tsx"],
         [{"workflow": "Backend CI", "bucket": "fail"}],
     )
     assert status == "failed"
-    # Both are in `missing` here: backend genuinely failed (never posted a pass), and
-    # frontend never reported at all. `status` alone can't distinguish them -- a
-    # caller inspecting `missing` (e.g. mark-needs-human's reason text) sees both.
     assert set(missing) == {"Backend CI", "Frontend CI"}
 
 
@@ -1706,11 +1599,10 @@ def test_merge_gate_status_missing_checks_when_required_workflow_absent():
     assert missing == ["Backend CI"]
 
 
-# ── Local-CI attestation (main-only GHA CI, 2026-09-04) ──────────────────────
+# ── Local-CI attestation ──────────────────────────────────────────────────────
 
 def test_local_ci_attestation_satisfies_required_backend_when_sha_matches():
-    # Backend went main-only: no GHA check on a child PR. A fresh local-ci
-    # attestation for the current head stands in for it.
+    # A local-ci attestation for the current head stands in for a missing GHA check.
     from sdlc_next import missing_required_workflows
     comments = [{"body": "🧪 <!-- local-ci: backend:42 @ abc1234def5678 -->"}]
     missing = missing_required_workflows(
@@ -1719,8 +1611,7 @@ def test_local_ci_attestation_satisfies_required_backend_when_sha_matches():
 
 
 def test_local_ci_attestation_ignored_when_sha_is_stale():
-    # A local run against an OLD commit must not satisfy the gate after a new push
-    # (same freshness principle as the behind-base gate).
+    # An attestation for an older commit does not satisfy the gate.
     from sdlc_next import missing_required_workflows
     comments = [{"body": "<!-- local-ci: backend:42 @ deadbeef0000 -->"}]
     missing = missing_required_workflows(
@@ -1754,7 +1645,7 @@ def test_local_ci_no_head_sha_trusts_nothing():
 
 
 def test_missing_required_workflows_two_arg_calls_unchanged_by_local_ci():
-    # Back-compat: the GHA-only 2-arg signature still behaves as before.
+    # The 2-arg GHA-only form still works.
     from sdlc_next import missing_required_workflows
     assert missing_required_workflows(
         ["backend/src/x.ts"],
@@ -1784,9 +1675,7 @@ def test_record_local_ci_posts_attestation_marker_on_the_pr(tmp_path):
 
 
 def test_record_local_ci_embeds_the_runs_own_output_not_a_summary(tmp_path):
-    """Option B's whole protection: since `development` now writes and runs its own
-    tests, the merge gate's only defence is that the attestation carries the
-    runner's words, pinned to a sha. The captured output must reach the comment."""
+    """The attestation carries the run's captured output, not a summary."""
     from sdlc_next import GitHub, cmd_record_local_ci
     from tests.test_sdlc_next import ScriptedRunner
     runner = ScriptedRunner({})
@@ -1818,7 +1707,7 @@ def test_record_local_ci_trims_a_long_run_to_its_tail(tmp_path):
 
 
 def test_record_local_ci_refuses_an_empty_output_file(tmp_path):
-    """An empty capture is the claim-without-evidence the attestation replaced."""
+    """An empty output capture is refused."""
     from sdlc_next import GitHub, GhError, cmd_record_local_ci
     from tests.test_sdlc_next import ScriptedRunner
     import pytest
@@ -1953,9 +1842,7 @@ def test_merge_pr_allows_docs_only_pr_with_no_checks():
 
 
 def test_merge_pr_reports_config_changed_when_the_merged_pr_touched_the_pipeline_config():
-    """The pipeline merges to main continuously and its config lives in the driven
-    repo. A merge that changes the config mid-invocation can change how later
-    commands behave, silently -- merge-pr knows what the PR touched, so it says so."""
+    """merge-pr flags a merge that changed the pipeline config file."""
     from sdlc_next import GitHub, cmd_merge_pr, CONFIG_FILENAME
     from tests.test_sdlc_next import ScriptedRunner
     import json
@@ -1990,18 +1877,12 @@ def test_merge_pr_reports_config_changed_when_the_merged_pr_touched_the_pipeline
 
 
 def test_merge_pr_refuses_as_structured_result_when_branch_behind_main():
-    # Green CI on a stale base proves nothing about the combined state -- with
-    # the parallel dev lane, two sibling PRs can each be green independently and
-    # still break `main` together. A behind-main branch is a valid, actionable
-    # outcome (sync-branch, wait for fresh CI, re-merge), not an operational
-    # failure -- so exit-0 structured result, and no checks/ready/merge calls
-    # at all.
+    # Behind-main is a structured exit-0 refusal with no checks/ready/merge calls.
     from sdlc_next import GitHub, cmd_merge_pr
     from tests.test_sdlc_next import ScriptedRunner
     runner = ScriptedRunner({
         ("gh", "api", "repos/owner/repo/compare/main...issue-9", "--jq", ".behind_by"): "2\n",
-        # the base delta touches a suite-covered tree, so the stale-base risk is
-        # real and the refusal stands (C1 only carries forward a docs-only delta)
+        # A suite-covered base delta, so the attestation is not carried forward.
         ("gh", "api", "repos/owner/repo/compare/issue-9...main", "--jq", ".files[]?.filename"):
             "backend/src/x.ts\n",
         tuple(_list_argv()): _list_response([_issue(9)]),
@@ -2070,8 +1951,7 @@ def test_pr_checks_reports_missing_required_workflows():
 
 
 def test_pr_checks_local_ci_attestation_clears_missing_required_workflow():
-    # The mirror case: a frontend-touching child PR with no GHA check but a fresh
-    # local-ci attestation for the current head reads as passed, not missing-checks.
+    # A fresh local-ci attestation for the head reads as passed, not missing-checks.
     from sdlc_next import GitHub, cmd_pr_checks
     from tests.test_sdlc_next import ScriptedRunner
     import json
@@ -2117,16 +1997,14 @@ def test_open_dev_pr_creates_draft_pr_with_closes_and_sets_stage_field_to_pr_rev
                               summary="Implemented per architecture.md.")
     assert result == {"issue": 9, "pr": 42, "created": True}
     body = next(c for c in runner.calls if c[:3] == ["gh", "issue", "comment"])[-1]
-    # The retired `testing` stage owned the queue marker; `open-dev-pr` must not
-    # post one itself, or a PR would be reviewable before its suites were attested.
+    # No queue marker: the PR must not be reviewable before its suites are attested.
     assert "development.md" not in body
     assert "stage-transition" not in body
     assert "record-local-ci" in body
 
 
 def test_open_dev_pr_reuses_an_already_open_pr_instead_of_opening_a_duplicate():
-    """A resumed development agent -- or a concurrent session that got there first --
-    must not open a second PR on the same branch, splitting review history in two."""
+    """A second open-dev-pr on the same branch reuses the open PR."""
     from sdlc_next import GitHub, cmd_open_dev_pr
     from tests.test_sdlc_next import ScriptedRunner
     runner = ScriptedRunner({
@@ -2140,7 +2018,6 @@ def test_open_dev_pr_reuses_an_already_open_pr_instead_of_opening_a_duplicate():
                               summary="Implemented per architecture.md.")
     assert result["pr"] == 41
     assert result["created"] is False
-    # No PR was created, no Stage field written, no comment posted.
     assert not any(c[:3] == ["gh", "pr", "create"] for c in runner.calls)
     assert not any(c[:3] == ["gh", "issue", "comment"] for c in runner.calls)
 
@@ -2189,10 +2066,7 @@ def test_pass_gate_reconciles_comments_and_reclaims_next_stage():
 
 
 def test_pass_gate_refuses_when_stage_arg_does_not_match_gate_pr_marker():
-    # Regression test: passing the wrong --stage (the gate's owning doc-stage is not
-    # a value to guess -- it must come from next-action's own 'stage' field) used to
-    # silently relabel the issue to the wrong stage and post a wrong confirmation
-    # comment. The script must now catch this itself instead of trusting the caller.
+    # A --stage that disagrees with the gate-pr marker is refused, not trusted.
     from sdlc_next import GitHub, GhError, cmd_pass_gate
     from tests.test_sdlc_next import ScriptedRunner
     import json
@@ -2239,8 +2113,7 @@ def test_skip_gate_sets_fields_comments_and_reclaims_next_stage():
     status_mutation_argv = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['in-progress'])}")
     epic_check_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=9)}")
-    # cmd_skip_gate resolves the Gate B confidence threshold from the child's parent
-    # epic profile -- so it also fetches the parent (#92) to read its labels.
+    # The threshold comes from the parent epic's profile, so the parent is fetched too.
     epic_check_argv_92 = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=92)}")
     gh_runner = ScriptedRunner({
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
@@ -2273,10 +2146,13 @@ def test_skip_gate_sets_fields_comments_and_reclaims_next_stage():
         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z -->$", body)
 
 
-def test_skip_gate_refuses_below_threshold():
+def test_skip_gate_refuses_below_threshold(monkeypatch):
+    import sdlc_next
     from sdlc_next import GitHub, GhError, cmd_skip_gate, _ISSUE_EPIC_CHECK_QUERY
     from tests.test_sdlc_next import ScriptedRunner
-    # Default-profile epic -> threshold 95; confidence 95 does not clear it.
+    # Default-profile epic at threshold 95; confidence 95 does not clear it.
+    monkeypatch.setitem(sdlc_next.PIPELINE, "gates",
+                        {"skipConfidenceThreshold": 95, "requiresHumanGateA": True})
     epic_check_9 = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=9)}")
     epic_check_92 = ("gh", "api", "graphql", "-f", f"query={_ISSUE_EPIC_CHECK_QUERY.format(n=92)}")
     gh = GitHub(runner=ScriptedRunner({
@@ -2293,8 +2169,7 @@ def test_skip_gate_refuses_below_threshold():
 
 
 def test_skip_gate_threshold_is_per_profile_standing_epic_child_clears_at_91():
-    # A standing/RTB profile lowers skipConfidenceThreshold to 90 (sample config);
-    # a child of that epic clears Gate B at 91 but not at 90.
+    # The standing profile's threshold (90 in the sample config) refuses confidence 90.
     from sdlc_next import GitHub, GhError, cmd_skip_gate, _ISSUE_EPIC_CHECK_QUERY
     from tests.test_sdlc_next import ScriptedRunner
 
@@ -2328,8 +2203,7 @@ def test_skip_gate_refuses_for_product_stage():
         assert "architecture" in str(e)
 
 
-# --- Epic-level stages (epic-level Product/Architecture, `lld` at child level) ---
-# See "Epic-level stages" in references/epics.md.
+# --- Epic-level stages ---
 
 def test_is_epic_legacy_and_is_epic_architected_read_their_labels():
     from sdlc_next import is_epic_legacy, is_epic_architected
@@ -2340,8 +2214,7 @@ def test_is_epic_legacy_and_is_epic_architected_read_their_labels():
 
 
 def test_default_stage_has_no_guess_for_a_non_standing_epics_child():
-    # Every child a non-standing Epic is meant to have is staged explicitly
-    # (set-stage for phase-Tasks, merge-lld-doc for functional Tasks).
+    # A non-standing Epic's children are always staged explicitly, never guessed.
     from sdlc_next import default_stage
     epic = {"labels": [{"name": "type:epic"}]}
     assert default_stage({"issueType": {"name": "Task"}}, epic) is None
@@ -2370,8 +2243,7 @@ def test_default_stage_no_parent_epic_keeps_old_behavior():
 
 
 def test_non_architected_epic_holds_its_stageless_tasks():
-    # Epic 92 isn't epic:architected yet -- a Stage-less child is a Task waiting on
-    # merge-lld-doc, so it is neither delegated nor staged.
+    # Before epic:architected, a Stage-less child waits on merge-lld-doc: not delegated or staged.
     from sdlc_next import GitHub, decide_next_action
     epic_92 = _epic(92, priority="Urgent")
     issues = [epic_92, _issue(101, parent=92)]
@@ -2381,9 +2253,7 @@ def test_non_architected_epic_holds_its_stageless_tasks():
 
 
 def test_standing_epic_stages_and_delegates_a_fresh_child_without_being_architected():
-    # A standing epic is never architected and has no LLD phase -- its Stage-less
-    # child is not held as a design-pending Task; it runs the per-issue flow
-    # from `product`.
+    # A standing epic's Stage-less child runs the per-issue flow from `product`.
     from sdlc_next import GitHub, decide_next_action
     epic_94 = _epic(94, labels=["epic:standing"])
     issues = [epic_94, _issue(101, parent=94)]
@@ -2396,9 +2266,7 @@ def test_standing_epic_stages_and_delegates_a_fresh_child_without_being_architec
 
 
 def test_architected_epic_reports_a_late_stageless_child_as_unstaged():
-    # Once the Epic is architected, a Stage-less child was filed after the LLD
-    # phase (e.g. a closing-verification Blocker). No stage is guessed and no
-    # field is written -- the orchestrator routes it.
+    # A late Stage-less child of an architected Epic is reported, never staged.
     from sdlc_next import GitHub, decide_next_action
     epic_92 = _epic(92, priority="Urgent", labels=["epic:architected"])
     issues = [epic_92, _issue(101, parent=92)]
@@ -2412,9 +2280,7 @@ def test_architected_epic_reports_a_late_stageless_child_as_unstaged():
 
 
 def test_epic_mid_second_gate_round_is_still_checked_even_though_architected():
-    # A deviation found mid-`lld` reopens a second Product/Architecture gate round
-    # on an already-`epic:architected` epic (see "Epic-level deviation escalation"
-    # in SKILL.md) -- the pending-gate check must still fire for it.
+    # An architected epic with a reopened gate round still gets its pending-gate check.
     from sdlc_next import GitHub, decide_next_action
     epic_92 = _epic(92, priority="Urgent", labels=["epic:architected"],
                      stage="architecture", status="awaiting-human-review")
@@ -2439,12 +2305,7 @@ def test_epic_mid_second_gate_round_is_still_checked_even_though_architected():
 
 
 def test_open_gate_unit_issue_phase_task_opens_its_own_branch_against_main():
-    # V2's Product-Roadmap/Architecture-phase/LLD-phase Tasks are plain
-    # `unit="issue"` children -- their `product.md`/`architecture.md` is
-    # committed straight onto their own `issue-<n>`, which is itself the Gate
-    # PR opened against `main` directly, same shape a standing child already
-    # has. No new code path -- this documents that the existing generic
-    # "issue" shape is what a phase-Task's gate actually uses.
+    # A phase-Task's gate is a plain `unit="issue"` gate: issue-<n> -> main.
     from sdlc_next import GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, \
         PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
     git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): "",
@@ -2497,15 +2358,16 @@ def test_open_gate_targets_main_from_issue_branch():
     assert result["base"] == "main"
 
 
-def test_pause_for_epic_regate_clears_only_pipeline_status():
+def test_pause_for_epic_regate_parks_the_unit_at_todo_without_touching_stage():
     from sdlc_next import GitHub, cmd_pause_for_epic_regate, _ISSUE_NODE_ID_QUERY, \
-        _DELETE_ISSUE_FIELD_VALUE_MUTATION, PIPELINE_STATUS_FIELD_ID
+        _SET_ISSUE_FIELD_MUTATION, PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=101)}")
-    del_status_argv = ("gh", "api", "graphql", "-f",
-        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_101', field_id=PIPELINE_STATUS_FIELD_ID)}")
+    set_status_argv = ("gh", "api", "graphql", "-f", "query=" + _SET_ISSUE_FIELD_MUTATION.format(
+        issue_id="ISSUE_101", field_id=PIPELINE_STATUS_FIELD_ID,
+        option_id=PIPELINE_STATUS_OPTION_IDS["todo"]))
     gh_runner = ScriptedRunner({
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_101"}}}}),
-        del_status_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 101}}}}),
+        set_status_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 101}}}}),
     })
     gh_runner.prefix_responses = {("gh", "issue", "comment", "101"): ""}
     gh = GitHub(runner=gh_runner)
@@ -2516,14 +2378,10 @@ def test_pause_for_epic_regate_clears_only_pipeline_status():
     assert "#92" in body and "#141" in body
 
 
-# --- auto-pass-gate (real-time gate-auto-advance webhook backstop) ---
-# See "Add a new CLI subcommand" / gate-auto-advance.yml, and "Checking a gate" /
-# "Passing a gate" in references/gates.md.
+# --- auto-pass-gate (gate-auto-advance webhook) ---
 
 def test_auto_pass_gate_skips_still_open_pr():
-    # A PR the workflow was somehow invoked against while still open (defensive --
-    # the real trigger only ever fires on `closed`) is neither the merged nor the
-    # closed-without-merge branch; must be a clean skip, not a crash or a guess.
+    # A still-open PR is a clean skip.
     from sdlc_next import GitHub, cmd_auto_pass_gate, REPO
     gh_runner = ScriptedRunner({
         ("gh", "pr", "view", "40", "--repo", REPO,
@@ -2552,8 +2410,7 @@ def test_auto_pass_gate_skips_non_main_base():
 
 
 def test_auto_pass_gate_skips_non_gate_branch():
-    # `issue-<n>` is the only gate branch shape; anything else is ordinary
-    # non-gate traffic and skips cleanly.
+    # Only `issue-<n>` heads are gates; anything else skips.
     from sdlc_next import GitHub, cmd_auto_pass_gate, REPO
     gh_runner = ScriptedRunner({
         ("gh", "pr", "view", "40", "--repo", REPO,
@@ -2568,8 +2425,7 @@ def test_auto_pass_gate_skips_non_gate_branch():
 
 
 def test_auto_pass_gate_skips_bare_epic_branch_head_which_is_the_integration_pr():
-    # A merged `epic-<n>` -> `main` PR is close-epic's integration merge, not a
-    # gate. It must skip cleanly on the head shape alone, before any issue lookup.
+    # An `epic-<n>` head is close-epic's integration merge: skip before any issue lookup.
     from sdlc_next import GitHub, cmd_auto_pass_gate, REPO
     gh_runner = ScriptedRunner({
         ("gh", "pr", "view", "40", "--repo", REPO,
@@ -2585,9 +2441,7 @@ def test_auto_pass_gate_skips_bare_epic_branch_head_which_is_the_integration_pr(
 
 
 def test_auto_pass_gate_skips_dev_pr_carrying_closes_hash():
-    # A PR body containing "Closes #<n>" is the pipeline's own development PR
-    # (auto-merged by pr-review already), never a human-merged gate PR -- must be a
-    # clean no-op, not an error, since this fires on every merged PR in the repo.
+    # A "Closes #<n>" body marks a dev PR, not a gate: clean skip.
     from sdlc_next import GitHub, cmd_auto_pass_gate, REPO
     gh_runner = ScriptedRunner({
         ("gh", "pr", "view", "42", "--repo", REPO,
@@ -2647,10 +2501,7 @@ def test_auto_pass_gate_skips_when_no_gate_marker():
 
 
 def test_auto_pass_gate_skips_when_marker_points_at_a_different_pr():
-    # The marker always reflects the *current* open gate (find_gate_pr returns the
-    # last one seen) -- if it doesn't match this webhook's PR number, this PR isn't
-    # the issue's currently open gate (stale/superseded), so this must be a clean
-    # skip, not a mutation against the wrong PR.
+    # A marker naming a different PR means this gate is superseded: skip, don't mutate.
     from sdlc_next import GitHub, cmd_auto_pass_gate, _ISSUE_FIELDS_QUERY, REPO
     fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
     gh_runner = ScriptedRunner({
@@ -2673,13 +2524,10 @@ def test_auto_pass_gate_skips_when_marker_points_at_a_different_pr():
 
 
 def test_auto_pass_gate_dispatches_to_pass_gate_for_matching_open_gate():
-    # live=False: CI advances the Stage field but must NOT claim in-progress or post
-    # a start comment -- no agent is actually about to run this stage in real time,
-    # only the next live `/sdlc-pipeline` invocation claims it for real. See
-    # cmd_pass_gate's `live` docstring.
+    # CI advances the Stage but does not claim or post a start comment (live=False).
     from sdlc_next import (GitHub, cmd_auto_pass_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
-                            _DELETE_ISSUE_FIELD_VALUE_MUTATION, _ISSUE_FIELDS_QUERY, STAGE_FIELD_ID,
-                            STAGE_OPTION_IDS, PIPELINE_STATUS_FIELD_ID, REPO)
+                            _ISSUE_FIELDS_QUERY, STAGE_FIELD_ID, STAGE_OPTION_IDS,
+                            PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS, REPO)
     git_runner = ScriptedRunner({
         **_live_wt("issue-9"),
         ("git", "-C", "/repo", "fetch", "origin"): "",
@@ -2690,8 +2538,8 @@ def test_auto_pass_gate_dispatches_to_pass_gate_for_matching_open_gate():
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}")
     stage_mutation_argv = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=STAGE_FIELD_ID, option_id=STAGE_OPTION_IDS['architecture'])}")
-    status_delete_argv = ("gh", "api", "graphql", "-f",
-        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID)}")
+    status_todo_argv = ("gh", "api", "graphql", "-f",
+        f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id='ISSUE_9', field_id=PIPELINE_STATUS_FIELD_ID, option_id=PIPELINE_STATUS_OPTION_IDS['todo'])}")
     fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
     gh_runner = ScriptedRunner({
         ("gh", "pr", "view", "40", "--repo", REPO,
@@ -2708,8 +2556,8 @@ def test_auto_pass_gate_dispatches_to_pass_gate_for_matching_open_gate():
         ]}}}}}),
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
         stage_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
-        status_delete_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": 9}}}}),
-        # No parent, so #9 is not a V2 phase-Task and advances to its next stage.
+        status_todo_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
+        # No parent: not a phase-Task, so it advances to its next stage.
         **dict([_epic_check(9)]),
     })
     gh_runner.prefix_responses = {("gh", "issue", "comment", "9"): ""}
@@ -2721,10 +2569,7 @@ def test_auto_pass_gate_dispatches_to_pass_gate_for_matching_open_gate():
 
 
 def test_auto_pass_gate_marks_needs_human_when_matching_gate_pr_closed_without_merging():
-    # See "Edge cases" under "Human-review gates" in references/gates.md: a human closing a gate
-    # PR without merging is exactly as deterministic as merging it -- no judgment
-    # needed, just status:needs-human + a comment, so this dispatches to the same
-    # cmd_mark_needs_human logic a manual /sdlc-pipeline run would use.
+    # A gate PR closed without merging parks the issue needs-human with a comment.
     from sdlc_next import (GitHub, cmd_auto_pass_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
                             _ISSUE_FIELDS_QUERY, PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS, REPO)
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}")
@@ -2760,10 +2605,7 @@ def test_auto_pass_gate_marks_needs_human_when_matching_gate_pr_closed_without_m
 
 
 def test_auto_pass_gate_closed_without_merge_still_skips_cleanly_on_no_match():
-    # The closed-without-merge branch reuses the exact same _match_open_gate skip
-    # logic as the merged branch -- one representative case (marker mismatch) proves
-    # the sharing works; the merged-branch tests above already cover every other skip
-    # condition (base, head branch, Closes #, status) via the same shared helper.
+    # The closed-without-merge path shares _match_open_gate's skips (marker mismatch shown).
     from sdlc_next import GitHub, cmd_auto_pass_gate, _ISSUE_FIELDS_QUERY, REPO
     fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
     gh_runner = ScriptedRunner({
@@ -2798,10 +2640,7 @@ def test_auto_pass_gate_reports_ok_false_on_genuine_gh_failure():
 
 
 def test_main_exits_nonzero_when_auto_pass_gate_reports_ok_false(monkeypatch):
-    # main()'s generic dispatch honors an explicit "ok": False in a subcommand's own
-    # result (rather than only ever exiting 1 via a raised GhError) -- this is the
-    # convention auto-pass-gate uses so the workflow shows a real failure, not a
-    # silently-green run, on a genuine operational error.
+    # main() exits 1 on an explicit "ok": False result, not only on a raised GhError.
     import sdlc_next
     monkeypatch.setenv("GITHUB_TOKEN", "x")
     monkeypatch.setattr(sdlc_next, "cmd_auto_pass_gate",
@@ -2810,9 +2649,7 @@ def test_main_exits_nonzero_when_auto_pass_gate_reports_ok_false(monkeypatch):
     assert exit_code == 1
 
 
-# --- mark-feedback-received (real-time review/comment webhook -- flip-forward) ---
-# See "New/extended GitHub Action" / gate-auto-advance.yml, and "Human-review gates"
-# in SKILL.md.
+# --- mark-feedback-received (review/comment webhook) ---
 
 def test_mark_feedback_received_skips_bot_author():
     from sdlc_next import GitHub, cmd_mark_feedback_received
@@ -2822,8 +2659,7 @@ def test_mark_feedback_received_skips_bot_author():
 
 
 def test_mark_feedback_received_skips_empty_body():
-    # An approval-with-no-comment review (or, defensively, an empty comment) carries
-    # no actual feedback -- must not flip the field.
+    # An empty body carries no feedback and must not flip the field.
     from sdlc_next import GitHub, cmd_mark_feedback_received
     gh = GitHub(runner=ScriptedRunner({}))
     result = cmd_mark_feedback_received(gh, 40, author="maintainer", body="   ")
@@ -2832,10 +2668,7 @@ def test_mark_feedback_received_skips_empty_body():
 
 
 def test_mark_feedback_received_skips_when_not_a_tracked_gate():
-    # Reuses _match_open_gate -- one representative non-match (a head branch
-    # that is not issue-<n>) proves the sharing works; every
-    # other skip condition it checks is already covered by the auto-pass-gate
-    # tests above.
+    # Shares _match_open_gate's skips (non-issue head shown).
     from sdlc_next import GitHub, cmd_mark_feedback_received, REPO
     gh_runner = ScriptedRunner({
         ("gh", "pr", "view", "40", "--repo", REPO,
@@ -2850,8 +2683,7 @@ def test_mark_feedback_received_skips_when_not_a_tracked_gate():
 
 
 def test_mark_feedback_received_skips_when_already_feedback_received():
-    # A second comment while already Feedback Received must be a clean no-op, not an
-    # error and not a second issue comment.
+    # Already Feedback Received: clean no-op, no second comment.
     from sdlc_next import GitHub, cmd_mark_feedback_received, _ISSUE_FIELDS_QUERY, REPO
     fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
     gh_runner = ScriptedRunner({
@@ -2875,8 +2707,7 @@ def test_mark_feedback_received_skips_when_already_feedback_received():
 
 
 def test_mark_feedback_received_skips_when_needs_human():
-    # Must never clobber needs-human -- _match_open_gate itself won't even match a
-    # PR whose issue is at a status outside GATE_PENDING_STATUSES.
+    # Never clobbers needs-human.
     from sdlc_next import GitHub, cmd_mark_feedback_received, _ISSUE_FIELDS_QUERY, REPO
     fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
     gh_runner = ScriptedRunner({
@@ -2959,8 +2790,7 @@ def test_main_dispatches_mark_feedback_received_with_parsed_args(monkeypatch):
     assert captured == {"pr": 40, "author": "maintainer", "body": "fix the typo"}
 
 
-# --- mark-feedback-addressed (flip-back, run by the fixing agent's last step) ---
-# See "Addressing gate feedback" in references/gates.md.
+# --- mark-feedback-addressed ---
 
 def test_mark_feedback_addressed_sets_status_back_to_awaiting_human_review():
     from sdlc_next import (GitHub, cmd_mark_feedback_addressed, _ISSUE_NODE_ID_QUERY,
@@ -2979,8 +2809,7 @@ def test_mark_feedback_addressed_sets_status_back_to_awaiting_human_review():
     assert not any(c[:3] == ["gh", "issue", "comment"] for c in gh_runner.calls)
 
 
-# --- mark-todo (init-todo-status Action, `issues: opened`) ---
-# See "Issue taxonomy" -> Pipeline Status row in references/operations.md.
+# --- mark-todo ---
 
 def test_mark_todo_sets_status_when_none_set():
     from sdlc_next import (GitHub, cmd_mark_todo, _ISSUE_FIELDS_QUERY, _ISSUE_NODE_ID_QUERY,
@@ -3011,7 +2840,6 @@ def test_mark_todo_skips_cleanly_when_status_already_set():
     gh = GitHub(runner=gh_runner)
     result = cmd_mark_todo(gh, 9)
     assert result == {"issue": 9, "skipped": "Pipeline Status already 'in-progress'"}
-    # No mutation attempted -- the scripted runner would raise on any unscripted call.
 
 
 def test_cli_mark_todo_dispatches(monkeypatch):
@@ -3091,8 +2919,7 @@ def test_git_reconcile_branch_raises_merge_conflict_and_aborts_on_real_conflict(
         ("git", "-C", "/repo", "diff", "--name-only", "--diff-filter=U"): "src/a.ts\nsrc/b.ts\n",
         ("git", "-C", "/repo", "merge", "--abort"): "",
     })
-    runner.fail_on = {("git", "-C", "/repo", "merge", "origin/main"),
-                      ("git", "-C", "/repo", "ls-files", "--error-unmatch", ".github/sdlc-pipeline")}
+    runner.fail_on = {("git", "-C", "/repo", "merge", "origin/main")}
     try:
         git_reconcile_branch("/repo", "issue-9", runner=runner)
         assert False, "expected MergeConflict"
@@ -3121,10 +2948,7 @@ def test_git_reconcile_branch_reraises_plain_ghererror_when_no_unmerged_paths():
 
 
 def test_sync_branch_returns_conflict_result_without_raising_and_posts_marker():
-    # The conflict is also persisted as an issue comment carrying the
-    # sync-conflict marker -- the JSON result alone doesn't survive a crashed
-    # session, and pairing-counts reads the marker back for the three-strike
-    # valve.
+    # A conflict is an exit-0 result and is persisted as a sync-conflict marker comment.
     from sdlc_next import GitHub, cmd_sync_branch
     runner = ScriptedRunner({
         **_live_wt("issue-9"),
@@ -3156,7 +2980,6 @@ def test_sync_branch_success_posts_no_comment():
         ("git", "-C", "/repo", "merge", "origin/main"): "",
         ("git", "-C", "/repo", "push", "origin", "issue-9"): "",
     })
-    runner.fail_on = {("git", "-C", "/repo", "ls-files", "--error-unmatch", ".github/sdlc-pipeline")}
     gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([_issue(9)])})
     gh = GitHub(runner=gh_runner)
     result = cmd_sync_branch(gh, "/repo", 9, runner=runner)
@@ -3165,10 +2988,7 @@ def test_sync_branch_success_posts_no_comment():
 
 
 def test_sync_branch_auto_resolves_worktree_when_repo_path_omitted():
-    # --repo-path omitted (None): the command resolves the branch's own live
-    # worktree from `git worktree list` instead of defaulting to the shared
-    # checkout -- the old default of "." silently targeted the wrong repo when
-    # the caller forgot the flag.
+    # Without --repo-path, the branch's own live worktree is used.
     from sdlc_next import GitHub, cmd_sync_branch
     porcelain = (
         "worktree /repo\nHEAD abc\nbranch refs/heads/main\n\n"
@@ -3183,7 +3003,6 @@ def test_sync_branch_auto_resolves_worktree_when_repo_path_omitted():
         ("git", "-C", "/tmp/sdlc-dev-9", "merge", "origin/main"): "",
         ("git", "-C", "/tmp/sdlc-dev-9", "push", "origin", "issue-9"): "",
     })
-    runner.fail_on = {("git", "-C", "/tmp/sdlc-dev-9", "ls-files", "--error-unmatch", ".github/sdlc-pipeline")}
     gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([_issue(9)])}))
     result = cmd_sync_branch(gh, None, 9, runner=runner)
     assert result["synced"] is True
@@ -3198,11 +3017,7 @@ def test_resolve_repo_path_explicit_wins_and_falls_back_to_dot():
     assert resolve_repo_path(None, "issue-9", runner=runner) == "."
 
 
-# --- _publish_doc: the reconcile loop behind publish-doc ---
-#
-# Since 2026-09-12 every decision is made against origin/<epic>, never the local
-# tree, and `merged: true` is only reported after a post-push fetch confirms the
-# blob is on origin (memory `sdlc_merge_lld_doc_branch_steal_bug`).
+# --- _publish_doc: decisions read origin/<epic>; merged only after a post-push fetch confirms ---
 
 _SRC_DOC = "docs/sdlc/issue-185/lld.md"
 _DEST_DOC = "docs/sdlc/epic-110/lld.md"
@@ -3210,10 +3025,8 @@ _DEST_DOC = "docs/sdlc/epic-110/lld.md"
 
 def _publish_git(commit_sha="deadbeef", origin_blob_before="blobOLD", origin_blob_after="blobNEW",
                  src_blob="blobNEW", path="/epic-110"):
-    """Scripted git for a `_publish_doc` run in the epic worktree at `path`:
-    fetch, compare blobs on origin, reset to origin tip, stage the source blob at
-    the Epic-scoped path, commit, push, then the post-push verification fetch +
-    blob read."""
+    """Scripted git for one `_publish_doc` run in the epic worktree at `path`,
+    including the post-push verification fetch and blob read."""
     r = ScriptedRunner({
         ("git", "-C", path, "fetch", "origin"): "",
         ("git", "-C", path, "rev-parse", "--verify", "--quiet", f"origin/issue-185:{_SRC_DOC}"):
@@ -3228,6 +3041,8 @@ def _publish_git(commit_sha="deadbeef", origin_blob_before="blobOLD", origin_blo
         ("git", "-C", path, "rev-parse", "HEAD"): commit_sha + "\n",
         ("git", "-C", path, "push", "origin", "epic-110"): "",
     })
+    # Blob texts without numbered Task headings: the origin doc is never a numbered copy.
+    r.prefix_responses[("git", "-C", path, "cat-file", "blob")] = "# lld\n"
     # The origin blob is read twice: before (decide) and after the push (verify).
     blobs = iter([origin_blob_before, origin_blob_after, origin_blob_after])
     key = ("git", "-C", path, "rev-parse", "--verify", "--quiet", f"origin/epic-110:{_DEST_DOC}")
@@ -3253,24 +3068,22 @@ class _Dispatch:
 
 
 def _advance_to_development_responses(number):
-    """The advance-not-claim field writes `merge-lld-doc` issues once the doc is
-    verified on origin: node-id lookup, Stage -> Development, Pipeline Status
-    deleted. Returns (responses, stage_argv, delete_argv) so a test can assert
-    order and absence."""
-    from sdlc_next import (_ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
-                            _DELETE_ISSUE_FIELD_VALUE_MUTATION, STAGE_FIELD_ID, STAGE_OPTION_IDS,
-                            PIPELINE_STATUS_FIELD_ID)
+    """Scripted field writes `merge-lld-doc` makes once the doc is on origin (Stage ->
+    Development, Pipeline Status Todo). Returns (responses, stage_argv, status_argv)."""
+    from sdlc_next import (_ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, STAGE_FIELD_ID,
+                            STAGE_OPTION_IDS, PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS)
     node_id_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=number)}")
     stage_argv = ("gh", "api", "graphql", "-f",
         f"query={_SET_ISSUE_FIELD_MUTATION.format(issue_id=f'ISSUE_{number}', field_id=STAGE_FIELD_ID, option_id=STAGE_OPTION_IDS['development'])}")
-    delete_argv = ("gh", "api", "graphql", "-f",
-        f"query={_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id=f'ISSUE_{number}', field_id=PIPELINE_STATUS_FIELD_ID)}")
+    status_argv = ("gh", "api", "graphql", "-f", "query=" + _SET_ISSUE_FIELD_MUTATION.format(
+        issue_id=f"ISSUE_{number}", field_id=PIPELINE_STATUS_FIELD_ID,
+        option_id=PIPELINE_STATUS_OPTION_IDS["todo"]))
     responses = {
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": f"ISSUE_{number}"}}}}),
         stage_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": number}}}}),
-        delete_argv: json.dumps({"data": {"deleteIssueFieldValue": {"issue": {"number": number}}}}),
+        status_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": number}}}}),
     }
-    return responses, stage_argv, delete_argv
+    return responses, stage_argv, status_argv
 
 
 def _publish(runner, gh=None):
@@ -3303,11 +3116,7 @@ def test_publish_doc_loop_idempotent_noop_when_origin_already_has_the_doc():
 
 
 def test_publish_doc_loop_regression_local_tree_holding_the_doc_is_not_up_to_date():
-    # THE 2026-09-12 defect: a prior attempt committed the doc on a stale local
-    # base and its push was rejected. The local tree now holds the doc, but
-    # origin/epic-110 does not. The old code compared the working tree to itself
-    # and said "up-to-date"; the fix compares blobs on origin, replays the doc
-    # from origin's tip, pushes, and verifies.
+    # A local tree holding the doc (from a rejected push) is not "up-to-date": blobs are compared on origin.
     inner = _publish_git(commit_sha="c0ffee")
     # The stale local doc-only commit shows up as an unpushed diff on exactly the doc path.
     inner.responses[("git", "-C", "/epic-110", "diff", "--name-only",
@@ -3331,9 +3140,7 @@ def test_publish_doc_loop_refuses_to_reset_unpushed_non_doc_work_on_the_epic_bra
 
 
 def test_publish_doc_loop_push_rejected_twice_reports_conflict_never_success():
-    # Epic branch keeps advancing -> push refused on the first attempt AND on the
-    # replay from the new tip. Structured conflict at exit 0 that says the doc is
-    # NOT on origin; no false success.
+    # Push refused on both attempts: a structured conflict saying the doc is NOT on origin.
     from sdlc_next import GhError
     inner = _publish_git()
     push_argv = ("git", "-C", "/epic-110", "push", "origin", "epic-110")
@@ -3358,8 +3165,7 @@ def test_publish_doc_loop_push_rejected_twice_reports_conflict_never_success():
 
 
 def test_publish_doc_loop_push_accepted_but_origin_lacks_blob_is_not_reported_merged():
-    # Belt and braces: even a push that returned 0 is not success until origin
-    # shows the blob.
+    # A push that exits 0 is not success until origin shows the blob.
     runner = _Dispatch(_publish_git(origin_blob_after="blobSOMETHINGELSE"))
     result = _publish(runner)
     assert result["merged"] is False and result["conflict"] is True
@@ -3377,8 +3183,7 @@ def test_publish_doc_loop_noop_when_no_doc_on_source_branch():
 
 
 def test_publish_doc_noop_for_standing_epic_child():
-    # A standing epic's children integrate into main, not an epic branch -- no-op,
-    # no git touched at all.
+    # A standing epic's child integrates into main: no-op, no git touched.
     from sdlc_next import GitHub, cmd_publish_doc
     epic = _epic(94, labels=["epic:standing"])
     child = _issue(300, stage="architecture", parent=94)
@@ -3401,9 +3206,7 @@ def test_publish_doc_noop_for_parentless_issue():
 
 
 def test_next_action_picks_a_development_task_by_sort_key():
-    # The persisted state merge-lld-doc leaves (Stage=development, Pipeline Status
-    # unset) is a plain delegate/development for next-action -- not a resume --
-    # and Tasks rank against each other by the ordinary sort_key.
+    # Stage=development with no Pipeline Status is a plain delegate, ranked by sort_key.
     from sdlc_next import GitHub, decide_next_action
     epic = _epic(110, labels=["epic:architected"])
     newer = _issue(185, stage="development", parent=110, created="2026-08-02T00:00:00Z")
@@ -3416,8 +3219,7 @@ def test_next_action_picks_a_development_task_by_sort_key():
 
 
 def test_next_action_resumes_development_after_a_crash_between_the_two_advance_writes():
-    # Crash after Stage=development but before the status clear: in-progress at
-    # development -> resume/development. Never a fresh lld.
+    # A crash between the Stage write and the status clear resumes development, never a fresh lld.
     from sdlc_next import GitHub, decide_next_action
     epic = _epic(110, labels=["epic:architected"])
     child = _issue(185, stage="development", status="in-progress", parent=110)
@@ -3514,9 +3316,7 @@ def test_branch_workspace_refuses_when_local_ref_has_unpushed_commits_and_no_wor
 
 
 def test_sync_branch_with_no_live_worktree_runs_in_an_ephemeral_one():
-    # The epic-branch case that used to borrow the main checkout: nothing holds
-    # epic-92, so sync-branch stands up an ephemeral worktree, reconciles there,
-    # and removes it. The main checkout sees no checkout/merge/push at all.
+    # Nothing holds epic-92: reconcile in an ephemeral worktree; the main checkout is never touched.
     from sdlc_next import GitHub, cmd_sync_branch
     import os
     path = f"/tmp/sdlc-tmp-epic-92-{os.getpid()}"
@@ -3645,7 +3445,9 @@ def test_teardown_epic_stack_keeps_files_when_down_fails(monkeypatch, tmp_path):
 
 # --- Parallel implementation lane: list-parallel-ready ---
 
-def test_list_parallel_ready_happy_path_selects_disjoint_children():
+def test_list_parallel_ready_happy_path_selects_disjoint_children(monkeypatch):
+    import sdlc_next
+    monkeypatch.setattr(sdlc_next, "DEV_LANE_PARALLELISM", 3)  # a cap above the sequential default
     from sdlc_next import GitHub, cmd_list_parallel_ready
     epic = _epic(110, labels=["epic:architected"])
     c185 = _issue(185, stage="development", parent=110)
@@ -3725,8 +3527,7 @@ def test_list_parallel_ready_respects_limit_and_reports_eligible_total():
 
 
 def test_list_parallel_ready_skips_a_child_missing_footprint():
-    # No parseable ## Footprint anywhere -- "cannot verify non-overlap", never
-    # "no footprint declared, so no risk".
+    # No parseable ## Footprint means non-overlap cannot be verified, so the child is skipped.
     from sdlc_next import GitHub, cmd_list_parallel_ready
     epic = _epic(110, labels=["epic:architected"])
     c201 = _issue(201, stage="development", parent=110)
@@ -3749,9 +3550,7 @@ def test_list_parallel_ready_skips_a_child_missing_footprint():
 
 
 def test_list_parallel_ready_returns_empty_for_non_architected_epic():
-    # Same guard as decide_next_action's children loop: a normal epic's
-    # children are not implementation-lane work before the epic itself is
-    # epic:architected.
+    # A normal epic's children are not lane work until the epic is epic:architected.
     from sdlc_next import GitHub, cmd_list_parallel_ready
     epic = _epic(110)
     c201 = _issue(201, stage="lld", parent=110)
@@ -3779,13 +3578,11 @@ def test_cli_list_parallel_ready_dispatches(monkeypatch):
     assert captured == {"repo_path": "/repo", "epic": 110, "limit": 2, "run_id": "run-7"}
 
 
-# --- design lane: a standing epic's product/architecture children fan out ---
-# The dev lane (list-parallel-ready) only ever proposes lld/development/testing
-# children, so product/architecture ran one-at-a-time. `list-design-ready` adds a
-# second pool for standing-profile children still in product/architecture, capped
-# at DESIGN_LANE_PARALLELISM (default 2, below devLane=3 because these run opus).
+# --- Design lane: a standing epic's product/architecture children (cap default 1) ---
 
-def test_list_design_ready_fans_out_standing_children_up_to_the_cap():
+def test_list_design_ready_fans_out_standing_children_up_to_the_cap(monkeypatch):
+    import sdlc_next
+    monkeypatch.setattr(sdlc_next, "DESIGN_LANE_PARALLELISM", 2)  # a cap above the sequential default
     from sdlc_next import GitHub, cmd_list_design_ready
     epic = _epic(90, labels=["epic:standing"])
     c1 = _issue(1, stage="product", parent=90, created="2026-08-01T00:00:00Z")
@@ -3810,12 +3607,7 @@ def test_list_design_ready_fans_out_standing_children_up_to_the_cap():
     assert result["skipped"] == []
 
 
-# --- Product-stage WIP cap: at most N units awaiting Gate A, repo-wide ---
-#
-# Operator, 2026-08-16: epic #92 produced five parallel Gate A PRs a human could
-# not keep up with. `pipeline.productWip.maxGateAPending` (default 5) bounds the
-# Gate A queue; next-action and list-design-ready stop starting FRESH product
-# delegations at the cap and move on to other actionable units.
+# --- Product-stage WIP cap: at most `productWip.maxGateAPending` units awaiting Gate A ---
 
 def _gate_a_queue(epic_number, count, start=900):
     """`count` children of `epic_number` parked at Stage=Product, Gate A open."""
@@ -3828,10 +3620,8 @@ _HUMAN_GATE_A_STANDING = "standing-human"
 
 
 def _with_human_gate_a_standing_profile(monkeypatch):
-    """The shipped sample's `standing` profile auto-passes Gate A
-    (`requiresHumanGateA: false`), which the cap deliberately exempts. These
-    tests need a per-child-product profile whose Gate A IS human, so prepend one
-    matched by the `standing-human` label."""
+    """Prepend a per-child-product profile whose Gate A is human (the sample's
+    `standing` profile auto-passes Gate A, which the cap exempts)."""
     import sdlc_next
     profile = {"name": _HUMAN_GATE_A_STANDING, "match": {"label": _HUMAN_GATE_A_STANDING},
                "epicLevelPhase": False,
@@ -3859,8 +3649,7 @@ def test_next_action_defers_a_fresh_product_child_when_the_gate_a_queue_is_full(
     epic_91 = _epic(91, labels=["epic:standing"])
     fresh = _issue(9, stage="product", parent=90)
     issues = [epic_90, epic_91, fresh, *_gate_a_queue(91, 5)]
-    # No blockedBy lookup and no Stage write are scripted: a capped unit must get
-    # no side effects at all.
+    # Nothing beyond the issue list is scripted: a capped unit gets no side effects.
     gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response(issues)}))
     result = decide_next_action(gh, 90)
     assert result["action"] == "none" and result["epic"] == 90
@@ -3881,9 +3670,7 @@ def test_next_action_starts_product_while_the_gate_a_queue_has_headroom(monkeypa
 
 
 def test_next_action_at_cap_loops_to_a_sibling_past_product(monkeypatch):
-    # The cap skips the fresh product unit and keeps walking: an architecture-
-    # stage sibling (already past Gate A) is delegated instead, with no
-    # product_cap annotation on a delegate result.
+    # At the cap the fresh product unit is skipped and an architecture sibling is delegated.
     from sdlc_next import GitHub, decide_next_action
     _with_human_gate_a_standing_profile(monkeypatch)
     epic_90 = _epic(90, labels=[_HUMAN_GATE_A_STANDING])
@@ -3899,9 +3686,7 @@ def test_next_action_at_cap_loops_to_a_sibling_past_product(monkeypatch):
 
 
 def test_next_action_cap_never_gates_a_resume_or_a_gate_action(monkeypatch):
-    # A crashed product run is resumed regardless of the queue (it is already
-    # counted or about to be), and a satisfied Gate A is passed -- passing is
-    # what drains the queue.
+    # The cap never blocks a resume or a gate pass (passing is what drains the queue).
     from sdlc_next import GitHub, decide_next_action
     _with_human_gate_a_standing_profile(monkeypatch)
     epic_90 = _epic(90, labels=[_HUMAN_GATE_A_STANDING])
@@ -3925,9 +3710,7 @@ def test_next_action_cap_never_gates_a_resume_or_a_gate_action(monkeypatch):
 
 
 def test_next_action_cap_does_not_gate_a_profile_whose_gate_a_auto_passes():
-    # The sample's `standing` profile has requiresHumanGateA: false -> its units
-    # never enter the human's queue, so deferring them would restrict nothing
-    # the cap exists to protect. Same repo-wide queue as the deferring tests.
+    # A profile whose Gate A auto-passes never feeds the human queue, so the cap ignores it.
     from sdlc_next import GitHub, decide_next_action
     epic_90 = _epic(90, labels=["epic:standing"])
     epic_91 = _epic(91, labels=["epic:standing"])
@@ -3977,9 +3760,9 @@ def test_list_design_ready_skips_product_candidates_at_the_cap_but_not_architect
 
 
 def test_list_design_ready_one_fan_out_cannot_overshoot_the_cap(monkeypatch):
-    # Four already pending, two fresh product candidates, lane cap 2: only ONE
-    # product candidate is proposed (headroom 1); the second is skipped with the
-    # cap reason even though a lane slot is free.
+    import sdlc_next
+    monkeypatch.setattr(sdlc_next, "DESIGN_LANE_PARALLELISM", 2)  # a cap above the sequential default
+    # WIP headroom 1, two fresh product candidates: only one is proposed despite a free lane slot.
     from sdlc_next import GitHub, cmd_list_design_ready
     _with_human_gate_a_standing_profile(monkeypatch)
     epic = _epic(90, labels=[_HUMAN_GATE_A_STANDING])
@@ -4002,9 +3785,7 @@ def test_list_design_ready_one_fan_out_cannot_overshoot_the_cap(monkeypatch):
 
 
 def test_list_design_ready_returns_empty_for_a_non_standing_epic():
-    # A non-standing Epic's design is its Architecture-phase and LLD-phase Tasks,
-    # driven by next-action -- there is nothing to fan out. Gated on the resolved
-    # profile, not the hardcoded standing label.
+    # A non-standing Epic's design runs through its phase-Tasks, so nothing fans out.
     from sdlc_next import GitHub, cmd_list_design_ready
     epic = _epic(110)   # no epic:standing label -> default profile
     c1 = _issue(1, stage="product", parent=110)
@@ -4017,7 +3798,9 @@ def test_list_design_ready_returns_empty_for_a_non_standing_epic():
     assert "not a standing epic" in result["note"]
 
 
-def test_list_design_ready_skips_parked_blocked_gate_pending_and_active():
+def test_list_design_ready_skips_parked_blocked_gate_pending_and_active(monkeypatch):
+    import sdlc_next
+    monkeypatch.setattr(sdlc_next, "DESIGN_LANE_PARALLELISM", 2)  # a cap above the sequential default
     from sdlc_next import GitHub, cmd_list_design_ready
     epic = _epic(90, labels=["epic:standing"])
     c1 = _issue(1, stage="product", status="needs-human", parent=90)
@@ -4048,8 +3831,7 @@ def test_list_design_ready_skips_parked_blocked_gate_pending_and_active():
 
 
 def test_list_design_ready_dev_lane_worktree_does_not_consume_a_design_slot():
-    # A standing child that has already moved to development holds a worktree, but
-    # it is dev-lane work -- it must not count against the design-lane cap.
+    # A standing child's dev-lane worktree does not count against the design-lane cap.
     from sdlc_next import GitHub, cmd_list_design_ready
     epic = _epic(90, labels=["epic:standing"])
     c1 = _issue(1, stage="development", parent=90)   # dev lane, active in a worktree
@@ -4093,20 +3875,38 @@ def test_cli_list_design_ready_dispatches(monkeypatch):
     assert captured == {"repo_path": "/repo", "epic": 90, "limit": 2}
 
 
-def test_design_lane_parallelism_defaults_to_two():
-    from sdlc_next import DESIGN_LANE_PARALLELISM
-    assert DESIGN_LANE_PARALLELISM == 2
+def test_lane_caps_follow_the_sample_config():
+    from sdlc_next import DESIGN_LANE_PARALLELISM, DEV_LANE_PARALLELISM, PR_REVIEW_PARALLELISM
+    assert (DEV_LANE_PARALLELISM, PR_REVIEW_PARALLELISM, DESIGN_LANE_PARALLELISM) == (1, 1, 1)
 
 
-def test_show_config_includes_design_lane_default(tmp_path):
+def test_show_config_lane_caps_default_to_one_when_absent(tmp_path):
     cfg = json.loads((Path(__file__).resolve().parents[2] / "sdlc.config.sample.json").read_text())
+    for key in ("devLane", "prReview", "designLane"):
+        cfg["parallelism"].pop(key)
     cfg_path = tmp_path / "sdlc-pipeline.config.json"
     cfg_path.write_text(json.dumps(cfg))
     script = str(Path(__file__).resolve().parents[1] / "sdlc_next.py")
     out = subprocess.check_output(
         [sys.executable, script, "show-config"],
         env={**os.environ, "SDLC_CONFIG": str(cfg_path), "GITHUB_TOKEN": "x"}, text=True)
-    assert json.loads(out)["parallelism"]["designLane"] == 2
+    lanes = json.loads(out)["parallelism"]
+    assert (lanes["devLane"], lanes["prReview"], lanes["designLane"]) == (1, 1, 1)
+
+
+def test_config_is_found_from_cwd_not_from_the_script_location(tmp_path):
+    """CI runs the script from a plugin checkout; config comes from the driven repo's cwd."""
+    cfg = json.loads((Path(__file__).resolve().parents[2] / "sdlc.config.sample.json").read_text())
+    cfg["repo"] = "driven/repo"
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "sdlc-pipeline.config.json").write_text(json.dumps(cfg))
+    (tmp_path / "sub").mkdir()
+    script = str(Path(__file__).resolve().parents[1] / "sdlc_next.py")
+    env = {k: v for k, v in os.environ.items() if k != "SDLC_CONFIG"}
+    env["GITHUB_TOKEN"] = "x"
+    out = subprocess.check_output([sys.executable, script, "show-config"],
+                                  cwd=tmp_path / "sub", env=env, text=True)
+    assert json.loads(out)["repo"] == "driven/repo"
 
 
 def test_show_config_honours_a_design_lane_override(tmp_path):
@@ -4145,10 +3945,7 @@ def test_show_config_honours_a_max_tasks_per_run_override(tmp_path):
     assert json.loads(out)["parallelism"]["maxTasksPerRun"] == 10
 
 
-# --- worktree release: a parked or merged unit stops holding a dev-lane slot ---
-# Regression cover for the 2026-08-20 incident: #186 was parked `needs-human` but
-# its worktree was left on disk, so `list-parallel-ready` read the lane as full
-# (3/3) and silently proposed nothing for the rest of the invocation.
+# --- Worktree release: a parked or merged unit stops holding a dev-lane slot ---
 
 def _worktree_list(*entries):
     """Porcelain `git worktree list` output: (path, branch) pairs, branch None = detached."""
@@ -4239,9 +4036,10 @@ def test_mark_needs_human_releases_the_units_worktree():
     assert result["worktree"] == {"released": True, "path": "/tmp/sdlc-dev-186", "branch": "issue-186"}
 
 
-def test_list_parallel_ready_does_not_count_a_parked_issues_leftover_worktree():
-    """The incident itself: #186 parked needs-human with its worktree still on disk
-    must not consume a slot, and the next child must still be proposed."""
+def test_list_parallel_ready_does_not_count_a_parked_issues_leftover_worktree(monkeypatch):
+    """A needs-human unit's leftover worktree consumes no slot; the next child is still proposed."""
+    import sdlc_next
+    monkeypatch.setattr(sdlc_next, "DEV_LANE_PARALLELISM", 3)  # a cap above the sequential default
     from sdlc_next import GitHub, cmd_list_parallel_ready
     epic = _epic(110, labels=["epic:architected"])
     c186 = _issue(186, stage="development", status="needs-human", parent=110)
@@ -4297,7 +4095,7 @@ def _wt_list_main(repo="."):
 def test_worktree_add_first_touch_child_branches_off_epic_branch():
     from sdlc_next import GitHub, cmd_worktree_add
     epic = _epic(110, labels=["epic:architected"])
-    child = _issue(185, stage="lld", parent=110)
+    child = _issue(185, stage="development", parent=110)
     gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])}))
     runner = ScriptedRunner({
         **_wt_list_main(),
@@ -4306,12 +4104,10 @@ def test_worktree_add_first_touch_child_branches_off_epic_branch():
         ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-dev-185", "-b", "issue-185",
          "origin/epic-110"): "",
     })
-    runner.fail_on = {("git", "-C", "/tmp/sdlc-dev-185", "ls-files", "--error-unmatch", ".github/sdlc-pipeline")}
     result = cmd_worktree_add(gh, 185, runner=runner)
     assert {k: result[k] for k in ("created", "path", "branch", "base", "resumed")} == {
         "created": True, "path": "/tmp/sdlc-dev-185", "branch": "issue-185",
         "base": "origin/epic-110", "resumed": False}
-    assert result["skill_dir"] is None  # no skill submodule tracked in this tree
 
 
 def test_worktree_add_resume_uses_pushed_branch_never_main():
@@ -4324,7 +4120,6 @@ def test_worktree_add_resume_uses_pushed_branch_never_main():
         ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-dev-185", "-B", "issue-185",
          "origin/issue-185"): "",
     })
-    runner.fail_on = {("git", "-C", "/tmp/sdlc-dev-185", "ls-files", "--error-unmatch", ".github/sdlc-pipeline")}
     result = cmd_worktree_add(gh, 185, runner=runner)
     assert result["resumed"] is True and result["base"] == "origin/issue-185"
     assert not any("origin/main" in c for c in runner.calls)
@@ -4341,16 +4136,11 @@ def test_worktree_add_epic_unit_branches_off_main_into_epic_path():
          "origin/main"): "",
         ("git", "-C", ".", "push", "origin", "refs/heads/epic-110:refs/heads/epic-110"): "",
     })
-    runner.fail_on = {("git", "-C", "/tmp/sdlc-epic-110", "ls-files", "--error-unmatch", ".github/sdlc-pipeline")}
     assert cmd_worktree_add(gh, 110, unit="epic", runner=runner)["path"] == "/tmp/sdlc-epic-110"
 
 
 def test_worktree_add_explicit_base_override_skips_auto_detection():
-    # V2: a phase-Task (Product-Roadmap, Architecture-phase, LLD-phase) is a
-    # plain child whose auto-detected integration base would be wrong (see
-    # `integration_base`'s own docstring) -- the orchestrator passes
-    # `--base origin/main` explicitly instead, and this must be honored
-    # without ever calling `integration_base`/`gh.issue_list()` at all.
+    # An explicit base is honoured without ever consulting integration_base.
     from sdlc_next import GitHub, cmd_worktree_add
     gh = GitHub(runner=ScriptedRunner({}))  # would raise on any call -- proves no auto-detection ran
     runner = ScriptedRunner({
@@ -4360,8 +4150,6 @@ def test_worktree_add_explicit_base_override_skips_auto_detection():
         ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-dev-40", "-b", "issue-40",
          "origin/main"): "",
     })
-    runner.fail_on = {("git", "-C", "/tmp/sdlc-dev-40", "ls-files", "--error-unmatch",
-                        ".github/sdlc-pipeline")}
     result = cmd_worktree_add(gh, 40, unit="issue", runner=runner, base="origin/main")
     assert result["path"] == "/tmp/sdlc-dev-40"
     assert result["branch"] == "issue-40"
@@ -4369,10 +4157,7 @@ def test_worktree_add_explicit_base_override_skips_auto_detection():
 
 
 def test_worktree_add_noop_when_branch_already_checked_out():
-    # Still a no-op in the sense that matters -- no `worktree add`, the existing
-    # tree is handed straight back. It is no longer a no-op on the *branch*: the
-    # tree is checked against origin first (`_resume_live_worktree`). Here it is
-    # already current, so nothing is fast-forwarded and behind_before is 0.
+    # The live tree is handed back (no `worktree add`); already current, so no fast-forward.
     from sdlc_next import GitHub, cmd_worktree_add
     gh = GitHub(runner=ScriptedRunner({}))
     wt = "/tmp/sdlc-dev-185"
@@ -4393,161 +4178,9 @@ def test_worktree_add_noop_when_branch_already_checked_out():
     assert not any(c[3:5] == ["worktree", "add"] for c in runner.calls)
     assert not any("merge" in c for c in runner.calls)
 
-def test_worktree_add_inits_the_skill_submodule_and_reports_the_per_unit_skill_dir():
-    # A linked worktree's submodule dir is empty until `submodule update --init`
-    # runs *in that worktree*; the result's `skill_dir` is the per-epic $SDLC_DIR
-    # stage agents read. The post-init check asserts the gitdir is per-worktree.
-    from sdlc_next import GitHub, cmd_worktree_add
-    gh = GitHub(runner=ScriptedRunner({}))
-    wt, sub = "/tmp/sdlc-epic-110", "/tmp/sdlc-epic-110/.github/sdlc-pipeline"
-    runner = ScriptedRunner({
-        **_wt_list_main(),
-        ("git", "-C", ".", "fetch", "origin"): "",
-        ("git", "-C", ".", "branch", "-r", "--list", "origin/epic-110"): "  origin/epic-110\n",
-        ("git", "-C", ".", "worktree", "add", wt, "-B", "epic-110", "origin/epic-110"): "",
-        ("git", "-C", wt, "ls-files", "--error-unmatch", ".github/sdlc-pipeline"): ".github/sdlc-pipeline\n",
-        ("git", "-C", wt, "submodule", "update", "--init", "--", ".github/sdlc-pipeline"): "",
-        ("git", "-C", sub, "rev-parse", "--absolute-git-dir"):
-            "/repo/.git/worktrees/sdlc-epic-110/modules/.github/sdlc-pipeline\n",
-        ("git", "-C", sub, "ls-files", "--error-unmatch", "SKILL.md"): "SKILL.md\n",
-        ("git", "-C", sub, "rev-parse", "HEAD"): "7d03993\n",
-    })
-    result = cmd_worktree_add(gh, 110, unit="epic", runner=runner)
-    assert result["skill_dir"] == sub and result["skill_commit"] == "7d03993"
-    add_i = runner.calls.index(["git", "-C", ".", "worktree", "add", wt, "-B", "epic-110", "origin/epic-110"])
-    assert ["git", "-C", wt, "submodule", "update", "--init", "--", ".github/sdlc-pipeline"] in runner.calls[add_i:]
-
-
-def test_init_skill_submodule_refuses_a_shared_non_per_worktree_gitdir():
-    from sdlc_next import init_skill_submodule, GhError
-    import pytest
-    wt, sub = "/tmp/sdlc-epic-110", "/tmp/sdlc-epic-110/.github/sdlc-pipeline"
-    runner = ScriptedRunner({
-        ("git", "-C", wt, "ls-files", "--error-unmatch", ".github/sdlc-pipeline"): ".github/sdlc-pipeline\n",
-        ("git", "-C", wt, "submodule", "update", "--init", "--", ".github/sdlc-pipeline"): "",
-        ("git", "-C", sub, "rev-parse", "--absolute-git-dir"): "/repo/.git/modules/.github/sdlc-pipeline\n",
-    })
-    with pytest.raises(GhError) as exc:
-        init_skill_submodule(wt, runner=runner)
-    assert "not per-worktree" in str(exc.value)
-
-
-class _CountingRunner:
-    """Like ScriptedRunner, but a rev-parse HEAD called twice (before and after a
-    checkout) needs to return two different shas -- a plain argv->str dict can't
-    express that, since both calls share the identical key."""
-
-    def __init__(self, checkout_argv, shas, extra: dict | None = None):
-        self.checkout_argv = list(checkout_argv)
-        self.shas = list(shas)
-        self.extra = dict(extra or {})
-        self.calls: list[list[str]] = []
-        self._rev_parse_calls = 0
-
-    def __call__(self, argv):
-        self.calls.append(argv)
-        key = tuple(argv)
-        if key[-2:] == ("rev-parse", "HEAD"):
-            sha = self.shas[self._rev_parse_calls]
-            self._rev_parse_calls += 1
-            return sha + "\n"
-        if argv == self.checkout_argv or key in self.extra:
-            return self.extra.get(key, "")
-        raise AssertionError(f"unexpected invocation: {argv}")
-
-
-def test_sync_skill_bumps_submodule_and_vendors_agents(tmp_path):
-    from sdlc_next import cmd_sync_skill, PIPELINE
-    sub = PIPELINE["skill"]["submodulePath"]
-    skill_dir = tmp_path / sub
-    (skill_dir / "agents").mkdir(parents=True)
-    (skill_dir / "agents" / "sdlc-product.md").write_text(
-        "Read <requirements-dir>/IRD-*.md, write <docRoot>/epic-<n>/product.md, "
-        "token at <your-token-file>.\n")
-    (skill_dir / "agents" / "sdlc-development.md").write_text("Nothing to substitute.\n")
-
-    runner = _CountingRunner(
-        checkout_argv=["git", "-C", str(skill_dir), "checkout", "--detach", "v2"],
-        shas=["old111", "new222"],
-        extra={("git", "-C", str(skill_dir), "fetch", "origin"): "",
-               ("git", "-C", str(tmp_path), "add", "--", sub): "",
-               ("git", "-C", str(tmp_path), "add", "--", ".claude/agents"): ""})
-
-    result = cmd_sync_skill(str(tmp_path), ref="v2", runner=runner)
-
-    assert result["old_sha"] == "old111"
-    assert result["new_sha"] == "new222"
-    assert result["changed"] is True
-    assert set(result["agents_vendored"]) == {"sdlc-product.md", "sdlc-development.md"}
-    vendored = (tmp_path / ".claude" / "agents" / "sdlc-product.md").read_text()
-    assert "<requirements-dir>" not in vendored
-    assert "<docRoot>" not in vendored
-    assert "<your-token-file>" not in vendored
-    assert runner.checkout_argv in runner.calls
-    assert ["git", "-C", str(tmp_path), "add", "--", sub] in runner.calls
-    assert ["git", "-C", str(tmp_path), "add", "--", ".claude/agents"] in runner.calls
-
-
-def test_sync_skill_raises_on_an_unconfigured_placeholder(tmp_path):
-    # Negative control: a template placeholder with no configured value must not
-    # vendor a literal `<requirements-dir>` into a driven repo's agent file --
-    # simulated by monkeypatching REQUIREMENTS_DIR to None (an older config that
-    # predates the key).
-    import sdlc_next
-    from sdlc_next import cmd_sync_skill, GhError, PIPELINE
-    import pytest
-    sub = PIPELINE["skill"]["submodulePath"]
-    skill_dir = tmp_path / sub
-    (skill_dir / "agents").mkdir(parents=True)
-    (skill_dir / "agents" / "sdlc-product.md").write_text("Needs <requirements-dir>.\n")
-    runner = _CountingRunner(
-        checkout_argv=["git", "-C", str(skill_dir), "checkout", "--detach", "origin/main"],
-        shas=["old111", "old111"],
-        extra={("git", "-C", str(skill_dir), "fetch", "origin"): "",
-               ("git", "-C", str(tmp_path), "add", "--", sub): ""})
-    original = sdlc_next.REQUIREMENTS_DIR
-    sdlc_next.REQUIREMENTS_DIR = None
-    try:
-        with pytest.raises(GhError, match="requirements-dir"):
-            cmd_sync_skill(str(tmp_path), runner=runner)
-    finally:
-        sdlc_next.REQUIREMENTS_DIR = original
-    assert not (tmp_path / ".claude" / "agents" / "sdlc-product.md").exists()
-
-
-def test_sync_branch_reinits_the_skill_submodule_after_the_merge_in_a_live_worktree():
-    # The merge can move the submodule gitlink; only `submodule update --init`
-    # moves the working files to the new pin. Runs after the merge, in the live
-    # worktree, and reports the per-unit skill_dir.
-    from sdlc_next import GitHub, cmd_sync_branch
-    wt, sub = "/tmp/sdlc-dev-9", "/tmp/sdlc-dev-9/.github/sdlc-pipeline"
-    runner = ScriptedRunner({
-        **_live_wt("issue-9", path=wt),
-        ("git", "-C", wt, "fetch", "origin"): "",
-        ("git", "-C", wt, "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"): "",
-        ("git", "-C", wt, "checkout", "issue-9"): "",
-        ("git", "-C", wt, "merge", "origin/main"): "",
-        ("git", "-C", wt, "push", "origin", "issue-9"): "",
-        ("git", "-C", wt, "ls-files", "--error-unmatch", ".github/sdlc-pipeline"): ".github/sdlc-pipeline\n",
-        ("git", "-C", wt, "submodule", "update", "--init", "--", ".github/sdlc-pipeline"): "",
-        ("git", "-C", sub, "rev-parse", "--absolute-git-dir"):
-            "/repo/.git/worktrees/sdlc-dev-9/modules/.github/sdlc-pipeline\n",
-        ("git", "-C", sub, "ls-files", "--error-unmatch", "SKILL.md"): "SKILL.md\n",
-        ("git", "-C", sub, "rev-parse", "HEAD"): "abc123\n",
-    })
-    gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([_issue(9)])}))
-    result = cmd_sync_branch(gh, wt, 9, runner=runner)
-    assert result["synced"] is True and result["skill_dir"] == sub and result["skill_commit"] == "abc123"
-    merge_i = runner.calls.index(["git", "-C", wt, "merge", "origin/main"])
-    assert ["git", "-C", wt, "submodule", "update", "--init", "--", ".github/sdlc-pipeline"] in runner.calls[merge_i:]
-
-
 
 def test_merge_pr_closes_child_explicitly_when_merged_into_epic_branch():
-    # Merging a child PR into its epic branch does NOT fire the PR's `Closes #<n>`
-    # -- GitHub only auto-closes on the default branch -- so merge-pr must close the
-    # child itself, or it lingers open: phantom-resuming next-action and blocking the
-    # epic's all-children-closed gate. Regression test for the 2026-09-06 retro fix.
+    # `Closes #<n>` only fires on the default branch, so merge-pr closes the child itself.
     from sdlc_next import GitHub, cmd_merge_pr
     from tests.test_sdlc_next import ScriptedRunner
     import json
@@ -4581,10 +4214,7 @@ def test_merge_pr_closes_child_explicitly_when_merged_into_epic_branch():
 
 
 def test_merge_pr_does_not_close_the_issue_itself_when_the_base_is_main():
-    # The mirror of the test above: merging to the default branch DOES fire
-    # `Closes #<n>`, so merge-pr must not also issue a close of its own --
-    # ScriptedRunner raises on any unscripted call, so the absence of a scripted
-    # `gh issue close` is what proves it.
+    # Merging to main fires `Closes #<n>` itself; no scripted `gh issue close` proves none is issued.
     from sdlc_next import GitHub, cmd_merge_pr
     from tests.test_sdlc_next import ScriptedRunner
     import json
@@ -4612,9 +4242,7 @@ def test_merge_pr_does_not_close_the_issue_itself_when_the_base_is_main():
 
 
 def test_open_gate_unit_issue_does_not_consult_the_gate_branch_guard():
-    # The guard is epic-only: a standing-epic child's gate is `issue-<n>` -> `main`,
-    # where the doc genuinely is committed on the head branch. ScriptedRunner raises
-    # on any unscripted call, so the absence of a scripted compare proves it.
+    # The gate-branch guard is epic-only; no scripted compare proves it is skipped.
     from sdlc_next import GitHub, cmd_open_gate, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, \
         PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS
     git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): "",
@@ -4665,7 +4293,7 @@ def test_resolve_profile_falls_through_to_default_catch_all():
     assert p["name"] == "default"
     assert p["epicLevelPhase"] is True
     assert "childEntryStage" not in p
-    assert p["gates"]["skipConfidenceThreshold"] == 95
+    assert p["gates"]["skipConfidenceThreshold"] == 80
     assert p["gates"]["requiresHumanGateA"] is True
 
 
@@ -4750,10 +4378,7 @@ def test_auto_pass_gate_a_advances_child_of_no_human_profile():
     assert any("Gate A auto-passed" in c[-1] for c in comment_calls)
 
 
-# --- citations (cite / verify-citations / verify-exit citations_ok) ---
-# See architecture.md for issue #194: a citation block's authority is a
-# byte-exact fragment copied from the real file, matched literally; an
-# `cite-example` block is illustrative and never resolved or counted.
+# --- citations: byte-exact literal fragments; `cite-example` blocks are never resolved ---
 
 def test_parse_cite_blocks_distinguishes_asserted_from_illustrative():
     from sdlc_next import parse_cite_blocks
@@ -4900,8 +4525,7 @@ def cmd_verify_citations_text_helper(text, repo_path, runner):
 
 def test_verify_citations_unpinned_citation_does_not_resolve_against_superseded_value(tmp_path):
     from sdlc_next import cmd_verify_citations
-    # current working tree no longer has the unconditional value -- it was
-    # superseded by a conditional guard.
+    # The working tree no longer holds the cited value.
     (tmp_path / "ci.yml").write_text("cancel-in-progress: ${{ true }}\n")
     doc = tmp_path / "doc.md"
     doc.write_text("```cite path=ci.yml\ncancel-in-progress: true\n```\n")
@@ -4925,8 +4549,7 @@ def test_verify_citations_multiline_block_is_byte_exact_paraphrase_fails(tmp_pat
 
 def test_verify_citations_skips_cite_example_blocks_entirely(tmp_path):
     from sdlc_next import cmd_verify_citations
-    # the fragment below is not present anywhere -- if this were an asserted
-    # `cite` block it would fail to resolve; as `cite-example` it must not.
+    # The fragment exists nowhere; as `cite-example` it must not be resolved.
     doc = tmp_path / "spec.md"
     doc.write_text("```cite-example path=nonexistent.yml\nthis is illustrative only\n```\n")
     result = cmd_verify_citations(["spec.md"], repo_path=str(tmp_path))
@@ -4951,8 +4574,7 @@ def test_verify_citations_multiple_docs_wraps_and_aggregates(tmp_path):
 
 
 def test_verify_exit_citations_ok_true_when_stage_record_all_resolve(tmp_path):
-    """`lld.md` is a stage record; `development` writes no doc at all since the
-    2026-09-12 merge of `testing` into it, so it is absent from the map."""
+    """A stage record whose citations all resolve yields citations_ok True."""
     from sdlc_next import GitHub, cmd_verify_exit, _ISSUE_FIELDS_QUERY
     docs_dir = tmp_path / "docs" / "sdlc" / "issue-9"
     docs_dir.mkdir(parents=True)
@@ -5011,8 +4633,7 @@ def test_verify_exit_citations_scoped_to_own_record_ignores_other_docs(tmp_path)
     docs_dir = tmp_path / "docs" / "sdlc" / "issue-9"
     docs_dir.mkdir(parents=True)
     (tmp_path / "target.yml").write_text("hello world\n")
-    # An older, already-merged doc with a rotted citation -- must not affect
-    # a later stage's own exit check (AC14).
+    # A rotted citation in an earlier stage's doc must not affect this stage's exit check.
     (docs_dir / "product.md").write_text("```cite path=target.yml\nlong gone content\n```\n")
     (docs_dir / "lld.md").write_text("```cite path=target.yml\nhello world\n```\n")
     fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
@@ -5032,9 +4653,7 @@ def test_verify_exit_citations_scoped_to_own_record_ignores_other_docs(tmp_path)
 
 
 def test_verify_exit_omits_citations_ok_when_stage_has_no_canonical_record(tmp_path):
-    """`development` writes no doc file at all (its record is the PR description
-    and its evidence the `record-local-ci` attestations) -- there is nothing to
-    re-check, so the citation gate must not fire, and must not crash, for it."""
+    """`development` has no doc record, so the citation gate neither fires nor crashes."""
     from sdlc_next import GitHub, cmd_verify_exit, _ISSUE_FIELDS_QUERY
     fields_argv = ("gh", "api", "graphql", "-f", f"query={_ISSUE_FIELDS_QUERY.format(n=9)}")
     gh_runner = ScriptedRunner({
@@ -5053,10 +4672,7 @@ def test_verify_exit_omits_citations_ok_when_stage_has_no_canonical_record(tmp_p
 
 
 def test_resolve_citation_reports_every_matching_line_as_a_hint_on_ambiguity(tmp_path):
-    """architecture.md's Failure modes: 'Body appears multiple times in the
-    file -- ... Report all matching lines as hints'. A unique fragment still
-    resolves with a single line_hint and no match_count; ambiguity is a
-    hint-only report, never a resolve failure."""
+    """An ambiguous fragment still resolves, reporting every matching line as a hint."""
     from sdlc_next import resolve_citation
     (tmp_path / "dup.yml").write_text("dup: 1\nother: x\ndup: 1\n")
     unique = resolve_citation("dup.yml", "other: x", repo_path=str(tmp_path))
@@ -5070,9 +4686,7 @@ def test_resolve_citation_reports_every_matching_line_as_a_hint_on_ambiguity(tmp
 
 
 def test_verify_exit_omits_citations_ok_when_stage_record_file_is_absent(tmp_path):
-    """An architecture-stage exit whose architecture.md is not yet on disk must
-    not be flipped to a citation failure -- that gap is `docs_present`'s job,
-    not this one's."""
+    """A missing stage record is `docs_present`'s concern, not a citation failure."""
     from sdlc_next import GitHub, cmd_verify_exit, _ISSUE_FIELDS_QUERY
     docs_dir = tmp_path / "docs" / "sdlc" / "issue-92"
     docs_dir.mkdir(parents=True)
@@ -5093,14 +4707,7 @@ def test_verify_exit_omits_citations_ok_when_stage_record_file_is_absent(tmp_pat
 
 
 def test_list_parallel_ready_ignores_a_parked_worktrees_footprint_for_collisions():
-    """A parked worktree cannot collide with anything, for the same reason it is
-    not a slot: nothing is going to write in it.
-
-    Regression for 2026-09-13, epic #365: #494 was skipped as "footprint overlaps
-    active/eligible #323" where #323 was another epic's worktree, blocked on an
-    open dependency and already excluded from the slot count. Collisions were
-    derived from every live worktree while slots were derived from the pruned
-    set, so the two disagreed."""
+    """A parked worktree's footprint never collides, just as it never holds a slot."""
     from sdlc_next import GitHub, cmd_list_parallel_ready
     epic = _epic(110, labels=["epic:architected"])
     parked = _issue(323, stage="development", status="needs-human", parent=110)
@@ -5117,9 +4724,7 @@ def test_list_parallel_ready_ignores_a_parked_worktrees_footprint_for_collisions
     responses.update(_no_blockers_responses(494))
     runner = ScriptedRunner(responses)
     result = cmd_list_parallel_ready(GitHub(runner=runner), "/repo", 110, runner=runner)
-    # Identical footprints, and the candidate is still proposed.
     assert [c["issue"] for c in result["parallel_ready"]] == [494]
-    # #323 is skipped only for holding its own worktree, never for a collision.
     assert result["skipped"] == [
         {"issue": 323, "reason": "already active in its own worktree"}]
     assert result["active_count"] == 0
@@ -5128,9 +4733,7 @@ def test_list_parallel_ready_ignores_a_parked_worktrees_footprint_for_collisions
 
 
 def test_list_parallel_ready_still_collides_with_a_live_worktrees_footprint():
-    """Positive control for the test above: the same overlap, with the sibling
-    actually being worked in, must still be refused. A fix that simply stopped
-    checking footprints would pass the parked-worktree test."""
+    """Positive control: the same overlap against a live sibling is still refused."""
     from sdlc_next import GitHub, cmd_list_parallel_ready
     epic = _epic(110, labels=["epic:architected"])
     live = _issue(323, stage="development", parent=110)
@@ -5170,13 +4773,7 @@ def _verify_exit_runners(tmp_path, stage_field_value):
 
 
 def test_verify_exit_accepts_pr_review_because_it_is_a_real_stage_value(tmp_path):
-    """`open-dev-pr` sets Stage to `PR Review` as `development`'s own exit action,
-    so `pr-review` is the only correct value to verify that handoff with.
-
-    Regression for 2026-09-13: the misuse guard refused every `REVIEW_ROLES`
-    member, which left the `development` handoff with no accepted
-    `--expect-stage` at all -- `development` failed because the field had already
-    moved on, `pr-review` failed as misuse."""
+    """`pr-review` is a real Stage value (set by open-dev-pr), so it is not misuse."""
     from sdlc_next import GitHub, cmd_verify_exit
     gh_runner, git_runner = _verify_exit_runners(tmp_path, "PR Review")
     result = cmd_verify_exit(GitHub(runner=gh_runner), str(tmp_path), 9,
@@ -5188,8 +4785,7 @@ def test_verify_exit_accepts_pr_review_because_it_is_a_real_stage_value(tmp_path
 
 
 def test_verify_exit_still_refuses_review_roles_with_no_stage_value(tmp_path):
-    """Positive control: the three reviews that genuinely have no Stage value of
-    their own are still reported as misuse, not as a pipeline failure."""
+    """Review roles with no Stage value of their own are still reported as misuse."""
     from sdlc_next import GitHub, cmd_verify_exit
     for role in ("product-review", "arch-review", "lld-review"):
         gh_runner, git_runner = _verify_exit_runners(tmp_path, "LLD")
@@ -5218,8 +4814,7 @@ def test_get_work_item_provider_honours_a_configured_github_type():
 
 
 def test_get_work_item_provider_refuses_an_unimplemented_type():
-    # Negative control: an unknown/unbuilt provider must not silently fall back
-    # to GitHub -- that would run against the wrong tracker with no warning.
+    # An unbuilt provider must refuse, never silently fall back to GitHub.
     import sdlc_next
     from sdlc_next import GhError, get_work_item_provider
     import pytest
@@ -5233,9 +4828,7 @@ def test_get_work_item_provider_refuses_an_unimplemented_type():
 
 
 def test_github_satisfies_the_work_item_provider_protocol():
-    # Structural check: GitHub actually matches the documented contract, not
-    # just by convention -- WorkItemProvider is runtime_checkable specifically
-    # so this is enforceable.
+    # GitHub structurally satisfies the runtime_checkable WorkItemProvider protocol.
     from sdlc_next import GitHub, WorkItemProvider
     assert isinstance(GitHub(runner=ScriptedRunner({})), WorkItemProvider)
 
@@ -5299,8 +4892,7 @@ def test_classify_unit_matches_a_configured_label_rule():
 
 
 def test_classify_unit_returns_other_when_rules_exist_but_none_match():
-    # Negative control: configured rules that don't match this issue must not
-    # produce a false-positive classification.
+    # Configured rules that don't match must not produce a false positive.
     import sdlc_next
     from sdlc_next import GitHub, REPO
     original = dict(sdlc_next.PIPELINE.get("classification", {}))
@@ -5319,132 +4911,17 @@ def test_classify_unit_returns_other_when_rules_exist_but_none_match():
         sdlc_next.PIPELINE["classification"] = original
 
 
-def test_cmd_create_issue_defaults_to_task_type():
-    # Every caller that passes no type_name gets Task.
-    from sdlc_next import cmd_create_issue
-
-    calls = []
-
-    class FakeGH:
-        def issue_create(self, title, body, labels):
-            calls.append(("issue_create", title, body, labels))
-            return 42
-
-        def set_issue_type(self, number, type_name):
-            calls.append(("set_issue_type", number, type_name))
-
-        def add_sub_issue(self, parent_number, child_number):
-            calls.append(("add_sub_issue", parent_number, child_number))
-
-    result = cmd_create_issue(FakeGH(), "title", "body", 9, [])
-    assert result == {"issue": 42, "parent": 9, "type": "Task"}
-    assert ("set_issue_type", 42, "Task") in calls
-
-
-def test_cmd_create_issue_v2_type_reaches_set_issue_type_when_natively_provisioned():
-    # Positive control for the 2026-09-14 fix: before it, every issue created
-    # here was hardcoded Task regardless of caller intent, so an Epic created
-    # by the V2 orchestrator would misclassify as a Task. type_name must reach
-    # set_issue_type unchanged when it IS a provisioned native Issue Type
-    # (e.g. an org repo that provisioned Epic -- see ISSUE_TYPE_IDS).
-    from sdlc_next import cmd_create_issue
-
-    calls = []
-
-    class FakeGH:
-        def issue_create(self, title, body, labels):
-            return 42
-
-        def set_issue_type(self, number, type_name):
-            calls.append(type_name)
-
-        def add_sub_issue(self, parent_number, child_number):
-            pass
-
-    result = cmd_create_issue(FakeGH(), "title", "body", 9, ["priority:high"], type_name="Task")
-    assert result == {"issue": 42, "parent": 9, "type": "Task"}
-    assert calls == ["Task"]
-
-
-def test_cmd_create_issue_skips_native_type_when_classification_falls_back_to_a_label():
-    # A personal (non-org) repo can never provision "Epic"/"Initiative" as a
-    # native GitHub Issue Type -- custom Issue Types are org-level only, at any
-    # plan tier. The sample config's classification.epic rule is label-based
-    # for exactly this reason, so cutting an Epic there must not fail just
-    # because "Epic" isn't (and can never be) in projectFields.issueTypeIds --
-    # the label the caller already passed is the real classification signal.
-    from sdlc_next import cmd_create_issue
-
-    calls = []
-
-    class FakeGH:
-        def issue_create(self, title, body, labels):
-            return 43
-
-        def set_issue_type(self, number, type_name):
-            calls.append(type_name)  # must NOT be reached
-
-        def add_sub_issue(self, parent_number, child_number):
-            pass
-
-    result = cmd_create_issue(FakeGH(), "title", "body", 40, ["type:epic"], type_name="Epic")
-    assert result == {"issue": 43, "parent": 40, "type": "Epic"}
-    assert calls == []
-
-
-def test_cmd_create_issue_refuses_before_creating_when_label_fallback_forgot_the_label():
-    # opus-review finding: the label-fallback guard above only checked that a
-    # NATIVE type wasn't required -- it never checked the caller actually put
-    # the classifying label in `labels`. Omitting it used to sail through and
-    # create a permanently unclassifiable issue, only noticed on read-back
-    # (exactly the "uncreated-in-vain" failure SKILL.md warns about). Must
-    # refuse BEFORE `issue_create` runs -- no orphan issue left behind.
-    from sdlc_next import GhError, cmd_create_issue
-
-    class FakeGH:
-        def issue_create(self, title, body, labels):
-            raise AssertionError("must not create an issue that can never be classified")
-
-        def set_issue_type(self, number, type_name):
-            raise AssertionError("unreachable")
-
-        def add_sub_issue(self, parent_number, child_number):
-            raise AssertionError("unreachable")
-
-    try:
-        cmd_create_issue(FakeGH(), "title", "body", 40, [], type_name="Epic")
-        assert False, "expected GhError"
-    except GhError as e:
-        assert "type:epic" in str(e) and "isn't in labels" in str(e)
-
-
-def test_cmd_create_issue_still_fails_loudly_when_type_has_no_native_or_label_fallback():
-    # Negative control: a kind with NEITHER a provisioned native Issue Type NOR
-    # a label-based classification rule configured can never be classified
-    # later -- this must still surface set_issue_type's clear error, not create
-    # an unclassifiable issue silently.
-    from sdlc_next import GitHub, GhError, cmd_create_issue
-    import pytest
-    create_argv = ("gh", "api", "repos/owner/repo/issues", "-f", "title=title", "-f", "body=body")
-    gh = GitHub(runner=ScriptedRunner({create_argv: json.dumps({"number": 44})}))
-    with pytest.raises(GhError, match="not in projectFields.issueTypeIds"):
-        cmd_create_issue(gh, "title", "body", 9, [], type_name="Bogus")
-
-
 def test_set_issue_type_refuses_an_unconfigured_type_with_a_clear_error():
-    # Negative control: V2's Epic/Initiative types aren't provisioned as real
-    # GitHub Issue Types in most repos yet -- this must not surface as a bare
-    # KeyError with no context.
+    # An unprovisioned type raises a clear GhError, not a bare KeyError.
     from sdlc_next import GitHub, GhError
     import pytest
     gh = GitHub(runner=ScriptedRunner({}))
     with pytest.raises(GhError, match="not in projectFields.issueTypeIds"):
-        gh.set_issue_type(9, "Epic")
+        gh.set_issue_type(9, "Story")
 
 
 def test_set_issue_type_still_works_for_a_configured_type():
-    # Positive control: an already-provisioned type (Task) is unaffected by the
-    # new guard.
+    # A provisioned type (Task) passes the guard.
     from sdlc_next import GitHub
     runner = ScriptedRunner({})
     runner.prefix_responses[("gh", "api", "graphql")] = json.dumps(
@@ -5454,8 +4931,7 @@ def test_set_issue_type_still_works_for_a_configured_type():
 
 
 def test_merge_epic_lld_doc_not_merged_when_doc_not_yet_on_origin():
-    # V2: epic-level lld pushes epic-<n>/lld.md directly onto origin/epic-<n>
-    # itself -- if it's not there, nothing to advance, and no fields are touched.
+    # No lld.md on origin/epic-<n> means nothing to merge and no fields touched.
     from sdlc_next import GitHub, cmd_merge_lld_doc
     path = "/epic-110"
     doc = "docs/sdlc/epic-110/lld.md"
@@ -5472,11 +4948,7 @@ def test_merge_epic_lld_doc_not_merged_when_doc_not_yet_on_origin():
 
 
 def test_merge_epic_lld_doc_advances_every_freshly_created_task_and_skips_already_advanced():
-    # Positive control: two freshly-created Tasks (no Stage at all -- lld just
-    # created them) both get advanced. Negative control in the same run: a third
-    # Task that already has Stage=development (an earlier partial run, or a
-    # sibling that was somehow already touched) is left untouched -- idempotent,
-    # not double-advanced or re-commented.
+    # Fresh Tasks advance; one already at development is left untouched (idempotent).
     from sdlc_next import GitHub, cmd_merge_lld_doc
     path = "/epic-110"
     doc = "docs/sdlc/epic-110/lld.md"
@@ -5508,11 +4980,9 @@ def test_merge_epic_lld_doc_advances_every_freshly_created_task_and_skips_alread
     result = cmd_merge_lld_doc(gh, path, 110, runner=git_runner)
     assert result["merged"] is True
     assert sorted(result["advanced_tasks"]) == [501, 502]
-    # Already epic:architected (mocked above) -- the idempotency check must
-    # skip re-clearing fields / re-adding the label, not just skip erroring.
+    # Already epic:architected: no re-clearing fields or re-adding the label.
     assert not any(c[:3] == ["gh", "issue", "edit"] for c in gh_runner.calls)
 
-    # The already-advanced Task got no field write and no new comment at all.
     graphql_calls = [c for c in gh_runner.calls if c[:3] == ["gh", "api", "graphql"]]
     for c in graphql_calls:
         assert "ISSUE_503" not in c[-1] or "updateIssueFieldValue" not in c[-1]
@@ -5521,12 +4991,7 @@ def test_merge_epic_lld_doc_advances_every_freshly_created_task_and_skips_alread
 
 
 def test_merge_epic_lld_doc_completes_the_epics_own_design_phase():
-    # Live-testing finding (2026-09-14): before this, a V2 epic's architecture
-    # gate claims `lld` instead of marking done (see `_complete_epic_architecture`),
-    # so nothing ever set `epic:architected` for a V2 epic at all --
-    # list-parallel-ready refused every Task forever with "epic is not
-    # epic:architected yet". merge-lld-doc is the only place left to do it,
-    # once the epic's one lld pass is confirmed on origin.
+    # merge-lld-doc labels the epic epic:architected and posts the lld.md link on its thread.
     from sdlc_next import (GitHub, cmd_merge_lld_doc, _ISSUE_NODE_ID_QUERY,
                             _DELETE_ISSUE_FIELD_VALUE_MUTATION, STAGE_FIELD_ID,
                             PIPELINE_STATUS_FIELD_ID)
@@ -5563,9 +5028,6 @@ def test_merge_epic_lld_doc_completes_the_epics_own_design_phase():
     assert result["merged"] is True
     edit_call = next(c for c in gh_runner.calls if c[:3] == ["gh", "issue", "edit"])
     assert "epic:architected" in edit_call
-    # Live-testing finding (2026-09-14): a real epic's thread had zero mentions
-    # of its own lld.md at all -- open-gate posts the architecture.md link,
-    # but lld has no gate to post from, and nothing else ever did either.
     epic_comment = next(c for c in gh_runner.calls
                          if c[:3] == ["gh", "issue", "comment"] and c[3] == "120")
     body = epic_comment[epic_comment.index("--body") + 1]
@@ -5574,38 +5036,28 @@ def test_merge_epic_lld_doc_completes_the_epics_own_design_phase():
 
 
 def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
-    """Wiring smoke test for the phase-Task shape (2026-09-15, replacing the old
-    Initiative/epic-level-lld branch machinery): every phase (an Initiative's
-    Product-Roadmap Task, an Epic's Architecture-phase/LLD-phase Tasks) is a
-    PLAIN child using the per-issue mechanics -- create-issue, set-stage,
-    add-blocked-by, worktree-add --base, and
-    publish-doc (generalizing `_publish_lld_doc`) are the only genuinely new
-    pieces. This chains them against one shared mocked GitHub to catch wiring
-    gaps a function-isolated test would miss:
-
-    1. create-issue cuts an Epic under an Initiative -> classify_unit "epic"
-    2. create-issue cuts the Epic's Architecture-phase Task; set-stage
-       (architecture) and worktree-add --base origin/main (explicit, since
-       integration_base's auto-detection is wrong for a phase-Task)
-    3. create-issue cuts the Epic's LLD-phase Task; add-blocked-by orders it
-       after the Architecture-phase Task
-    4. The Architecture-phase Task's architecture.md is published from its own
-       issue-<n> branch onto the epic branch, at the epic-scoped path
-    5. `lld`'s own functional Task is created as a sibling; merge-lld-doc
-       advances it to development
-    """
+    """Wiring smoke test: cut an Epic and its phase-Tasks, publish, merge-lld-doc against one mocked GitHub."""
     from sdlc_next import (GitHub, cmd_worktree_add, cmd_create_issue, cmd_set_stage,
                             cmd_add_blocked_by, cmd_publish_doc, cmd_merge_lld_doc,
                             ISSUE_TYPE_IDS, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
                             _SET_ISSUE_TYPE_MUTATION, _ADD_SUB_ISSUE_MUTATION,
                             _ADD_BLOCKED_BY_MUTATION, _DELETE_ISSUE_FIELD_VALUE_MUTATION,
-                            STAGE_FIELD_ID, STAGE_OPTION_IDS, PIPELINE_STATUS_FIELD_ID)
+                            STAGE_FIELD_ID, STAGE_OPTION_IDS, PIPELINE_STATUS_FIELD_ID,
+                            PIPELINE_STATUS_OPTION_IDS, PRIORITY_FIELD_ID, PRIORITY_OPTION_IDS,
+                            EFFORT_FIELD_ID, EFFORT_OPTION_IDS)
 
     def node_id(n):
         return (("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=n)}"),
                 json.dumps({"data": {"repository": {"issue": {"id": f"ISSUE_{n}"}}}}))
 
     gh_responses = {}
+    # create-issue's Pipeline Status / Priority / Effort writes for every issue it cuts.
+    for n in (41, 43, 44, 45):
+        for field_id, option_id in ((PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS["todo"]),
+                                    (PRIORITY_FIELD_ID, PRIORITY_OPTION_IDS["Medium"]),
+                                    (EFFORT_FIELD_ID, EFFORT_OPTION_IDS["Medium"])):
+            gh_responses[("gh", "api", "graphql", "-f", "query=" + _SET_ISSUE_FIELD_MUTATION.format(
+                issue_id=f"ISSUE_{n}", field_id=field_id, option_id=option_id))] = "{\"data\": {}}"
     gh_prefixes = {("gh", "issue", "comment"): "", ("gh", "issue", "edit"): ""}
 
     # 1. Cut Epic #41 under Initiative #40.
@@ -5617,13 +5069,15 @@ def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
     gh_responses[a40] = r40
     gh_responses[a41] = r41
     gh_responses[("gh", "api", "graphql", "-f",
+        f"query={_SET_ISSUE_TYPE_MUTATION.format(issue_id='ISSUE_41', type_id=ISSUE_TYPE_IDS['Epic'])}")] = \
+        json.dumps({"data": {"updateIssueIssueType": {"issue": {"number": 41}}}})
+    gh_responses[("gh", "api", "graphql", "-f",
         f"query={_ADD_SUB_ISSUE_MUTATION.format(parent_id='ISSUE_40', child_id='ISSUE_41')}")] = \
         json.dumps({"data": {"addSubIssue": {"subIssue": {"number": 41}}}})
     a41c, r41c = _epic_check(41, parent=40, labels=["type:epic"])
     gh_responses[a41c] = r41c
 
-    # 2. Cut the Architecture-phase Task #43, set-stage it, then worktree-add
-    # with an explicit base (integration_base's auto-detection would be wrong).
+    # 2. Cut the Architecture-phase Task #43 (worktree-add needs an explicit base).
     gh_responses[("gh", "api", "repos/owner/repo/issues", "-f", "title=Architecture phase",
                   "-f", "body=Epic #41's architecture.md.", "-f", "labels[]=type:task")] = \
         json.dumps({"number": 43})
@@ -5692,12 +5146,12 @@ def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
 
     epic_result = cmd_create_issue(gh, "Epic: WhatsApp booklist lookup", "Slice of Initiative #40.",
                                     parent=40, labels=["type:epic"], type_name="Epic")
-    assert epic_result == {"issue": 41, "parent": 40, "type": "Epic"}
+    assert epic_result == {"issue": 41, "parent": 40, "type": "Epic", **_CREATED_FIELDS}
     assert gh.classify_unit(41) == "epic"
 
     arch_task_result = cmd_create_issue(gh, "Architecture phase", "Epic #41's architecture.md.",
                                         parent=41, labels=["type:task"], type_name="Task")
-    assert arch_task_result == {"issue": 43, "parent": 41, "type": "Task"}
+    assert arch_task_result == {"issue": 43, "parent": 41, "type": "Task", **_CREATED_FIELDS}
     assert cmd_set_stage(gh, 43, "architecture") == {"issue": 43, "stage": "architecture"}
 
     arch_wt_runner = ScriptedRunner({
@@ -5707,21 +5161,16 @@ def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
         ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-dev-43", "-b", "issue-43",
          "origin/main"): "",
     })
-    arch_wt_runner.fail_on = {("git", "-C", "/tmp/sdlc-dev-43", "ls-files", "--error-unmatch",
-                                ".github/sdlc-pipeline")}
     arch_wt_result = cmd_worktree_add(gh, 43, unit="issue", runner=arch_wt_runner, base="origin/main")
     assert arch_wt_result["path"] == "/tmp/sdlc-dev-43"
     assert arch_wt_result["base"] == "origin/main"
 
     lld_task_result = cmd_create_issue(gh, "LLD phase", "Epic #41's lld.md.",
                                        parent=41, labels=["type:task"], type_name="Task")
-    assert lld_task_result == {"issue": 44, "parent": 41, "type": "Task"}
+    assert lld_task_result == {"issue": 44, "parent": 41, "type": "Task", **_CREATED_FIELDS}
     assert cmd_add_blocked_by(gh, 44, 43) == {"issue": 44, "blocked_on": 43, "added": True}
 
-    # 4. Publish architecture.md from issue-43 onto epic-41, at the epic-scoped
-    # path -- the origin blob at the DEST path is read twice (before: not
-    # there yet; after the push: verify), so it needs the same stateful
-    # dispatch the `_publish_doc` loop tests use for the identical shape.
+    # 4. Publish architecture.md onto epic-41; the dest blob is read twice (absent, then verified).
     publish_git_runner = ScriptedRunner({
         **_live_wt("epic-41", path="/epic-41"),
         ("git", "-C", "/epic-41", "fetch", "origin"): "",
@@ -5759,7 +5208,7 @@ def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
 
     task_result = cmd_create_issue(gh, "Task: parse WhatsApp payload", "Carved by epic-41's lld.",
                                     parent=41, labels=["type:task"], type_name="Task")
-    assert task_result == {"issue": 45, "parent": 41, "type": "Task"}
+    assert task_result == {"issue": 45, "parent": 41, "type": "Task", **_CREATED_FIELDS}
     assert gh.classify_unit(45) == "task"
 
     doc_path = "docs/sdlc/epic-41/lld.md"
@@ -5775,15 +5224,10 @@ def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
     assert merge_result["advanced_tasks"] == [45]
 
 
-# --- opus review blocker fixes (2026-09-14): classify_unit wired into the
-# routing layer, and Task footprints readable from an Epic's own lld.md -- see
-# SKILL.md for the mechanics these make actually reachable end to end. ---
+# --- classify_unit routing and Task footprints from an Epic's lld.md ---
 
 def _labeled(issue: dict) -> dict:
-    """`_issue()`'s `labels` are raw strings, meant to flow through
-    `_list_response`'s own `{"name": n}` wrapping. A test that hands the dict
-    straight to a pure classifier function (bypassing `_list_response`) needs
-    that wrapping done here instead."""
+    """Wrap `_issue()`'s raw label strings as `{"name": n}` for direct classifier calls."""
     return {**issue, "labels": [{"name": n} for n in issue.get("labels", [])]}
 
 
@@ -5801,9 +5245,7 @@ def test_is_epic_and_is_initiative_follow_classification():
 
 
 def test_decide_next_action_accepts_an_epic_with_an_initiative_parent():
-    # An Epic runs no stage of its own -- there is nothing here to delegate to
-    # the epic issue itself; a fresh one (its Architecture-phase Task not cut
-    # yet) is simply "none", waiting on the orchestrator's own cutting step.
+    # A fresh Epic (no phase-Tasks cut yet) has nothing to delegate.
     from sdlc_next import GitHub, decide_next_action
     v2_epic = _epic(41, parent=40)
     runner = ScriptedRunner({tuple(_list_argv()): _list_response([v2_epic])})
@@ -5813,9 +5255,7 @@ def test_decide_next_action_accepts_an_epic_with_an_initiative_parent():
 
 
 def test_decide_next_action_v2_epic_delegates_its_architecture_phase_task():
-    # The Architecture-phase Task was explicitly staged at creation (via
-    # `set-stage`) -- decide_next_action delegates it as an ordinary child, no
-    # epic-level special-casing needed.
+    # A staged Architecture-phase Task is delegated as an ordinary child.
     from sdlc_next import GitHub, decide_next_action
     v2_epic = _epic(41, parent=40)
     arch_task = _issue(43, parent=41, stage="architecture")
@@ -5827,7 +5267,7 @@ def test_decide_next_action_v2_epic_delegates_its_architecture_phase_task():
 
 
 def test_decide_next_action_rejects_a_plain_child_issue_number():
-    # A child/Task number (not an epic, not an initiative) must raise.
+    # A Task number (not an epic or initiative) raises.
     from sdlc_next import GitHub, GhError, decide_next_action
     task = _issue(42, parent=41, labels=["type:task"])
     runner = ScriptedRunner({tuple(_list_argv()): _list_response([task])})
@@ -5858,10 +5298,7 @@ def test_parse_task_footprint_slices_correct_task_subsection():
 
 
 def test_list_parallel_ready_reads_v2_task_footprint_from_epic_level_lld_doc():
-    # Blocker #2 (opus review): a V2 Task has no `issue-<n>/lld.md` of its own
-    # -- before the fix, `read_footprint` never looked at the Epic's own
-    # `epic-<n>/lld.md`, so `list-parallel-ready` always reported "no ##
-    # Footprint section found" and skipped every real V2 Task.
+    # A Task's footprint is read from the Epic's own `epic-<n>/lld.md`.
     from sdlc_next import GitHub, cmd_list_parallel_ready
     epic = _epic(110, labels=["type:epic", "epic:architected"])
     epic["parent"] = {"number": 40}
@@ -5893,10 +5330,7 @@ def test_list_parallel_ready_reads_v2_task_footprint_from_epic_level_lld_doc():
 # --- decide_next_action's Initiative branch (_decide_initiative_next_action) ---
 
 def test_decide_next_action_initiative_with_no_children_is_none():
-    # A genuinely fresh Initiative (Product-Roadmap Task not created yet) has
-    # nothing for next-action to do -- creating that Task is the orchestrator's
-    # own manual step (SKILL.md, "Cutting Epics from an approved Initiative"),
-    # not something this function starts on its own.
+    # A fresh Initiative waits for the orchestrator to create its Product-Roadmap Task.
     from sdlc_next import GitHub, decide_next_action
     initiative = _issue(40, labels=["type:initiative"])
     runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative])})
@@ -5907,9 +5341,7 @@ def test_decide_next_action_initiative_with_no_children_is_none():
 
 
 def test_decide_next_action_initiative_delegates_its_roadmap_task():
-    # An Initiative runs no stage of its own -- its "product" work is its
-    # Product-Roadmap Task, a plain child. Fresh (no Stage yet), it defaults to
-    # "product" (see `default_stage`'s Initiative-parent case).
+    # An Initiative's unstaged Product-Roadmap Task defaults to `product`.
     from sdlc_next import GitHub, decide_next_action
     initiative = _issue(40, labels=["type:initiative"])
     roadmap_task = _issue(41, parent=40)
@@ -5977,7 +5409,7 @@ def test_decide_next_action_initiative_gate_a_passed_all_epics_closed():
     assert "initiative-close" in result["reason"]
 
 
-# --- closing an Initiative (V2) ---
+# --- closing an Initiative ---
 
 def test_check_initiative_closeable_true_when_all_cut_epics_closed():
     from sdlc_next import GitHub, cmd_check_initiative_closeable
@@ -6079,7 +5511,6 @@ def test_close_initiative_closes_when_clean():
     initiative = _issue(40, labels=["type:initiative"])
     e1 = _issue(41, parent=40, labels=["type:epic"], state="CLOSED")
     runner = ScriptedRunner({
-        # Terminal fields, set by close-initiative itself.
         **dict([_epic_check(40, labels=["type:initiative"])]),
         ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=40)}"):
             json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_40"}}}}),
@@ -6104,7 +5535,7 @@ def test_close_initiative_closes_when_clean():
     assert close_call[:6] == ["gh", "issue", "close", "40", "--repo", "owner/repo"]
 
 
-# --- V2 B1: dev/pr-review read only their own Task subsection, not the whole Epic lld ---
+# --- dev/pr-review read only their own Task subsection of the Epic lld ---
 
 def test_slice_task_subsection_returns_only_that_task():
     from sdlc_next import slice_task_subsection
@@ -6120,7 +5551,6 @@ def test_slice_task_subsection_returns_only_that_task():
     s501 = slice_task_subsection(doc, 501)
     assert s501.startswith("## Task #501: parse payload")
     assert "Design for 501." in s501
-    # the neighbouring Task's content must not leak into the slice
     assert "Task #502" not in s501
     assert "Design for 502." not in s501
     assert slice_task_subsection(doc, 999) is None
@@ -6162,7 +5592,7 @@ def test_cmd_lld_section_raises_when_epic_lld_missing():
         cmd_lld_section("/repo", 430, 501, runner=runner)
 
 
-# --- C1: docs-only base delta carries the attestation forward instead of re-attesting ---
+# --- a docs-only base delta carries the attestation forward ---
 
 def test_base_delta_needs_reattest_classifies_deltas():
     from sdlc_next import base_delta_needs_reattest, CONFIG_FILENAME
@@ -6226,23 +5656,10 @@ def test_merge_pr_carries_attestation_forward_when_behind_base_is_docs_only():
     assert any(call[:3] == ["gh", "pr", "merge"] for call in runner.calls)  # merged, no re-sync demanded
 
 
-# =============================================================================
-# 2026-09-16 retro: control-plane fixes.
-#
-# Every fix below pairs a REGRESSION test (red against the pre-fix code) with a
-# POSITIVE CONTROL that is green both before and after -- so a "fix" that
-# deletes the behaviour rather than correcting it cannot pass the pair.
-# =============================================================================
-
-
-# --- Fix 1: sync-branch --base, and a base that is not on origin -------------
+# --- sync-branch --base, and a base that is not on origin ---
 
 def test_sync_branch_base_override_never_consults_integration_base():
-    # A V2 Architecture-/LLD-phase Task gates against `main`, but
-    # `integration_base` resolves it to `origin/epic-<n>` and has no way to tell
-    # it apart from an ordinary functional Task under the same Epic. With
-    # --base the auto-detection must not run at all: this `gh` raises on any
-    # call, so reaching `integration_base` fails the test outright.
+    # With --base, integration_base is never consulted (this `gh` raises on any call).
     from sdlc_next import GitHub, cmd_sync_branch
     runner = ScriptedRunner({
         **_live_wt("issue-43"),
@@ -6253,8 +5670,6 @@ def test_sync_branch_base_override_never_consults_integration_base():
         ("git", "-C", "/repo", "merge", "origin/main"): "",
         ("git", "-C", "/repo", "push", "origin", "issue-43"): "",
     })
-    runner.fail_on = {("git", "-C", "/repo", "ls-files", "--error-unmatch",
-                        ".github/sdlc-pipeline")}
     gh = GitHub(runner=ScriptedRunner({}))
     result = cmd_sync_branch(gh, "/repo", 43, runner=runner, base="origin/main")
     assert result["synced"] is True
@@ -6262,9 +5677,7 @@ def test_sync_branch_base_override_never_consults_integration_base():
 
 
 def test_sync_branch_reports_a_missing_base_as_a_structured_result_not_a_crash():
-    # `origin/epic-53` not existing yet is a legitimate state for a phase-Task
-    # cut before its Epic's branch was pushed. It used to exit 1, which reads to
-    # the orchestrator as "this command is broken" rather than "nothing to sync".
+    # A base missing on origin is a structured `base_missing` result, not a crash.
     from sdlc_next import GitHub, cmd_sync_branch
     runner = ScriptedRunner({
         **_live_wt("issue-43"),
@@ -6281,10 +5694,7 @@ def test_sync_branch_reports_a_missing_base_as_a_structured_result_not_a_crash()
 
 
 def test_sync_branch_without_base_still_auto_detects_the_integration_base():
-    """POSITIVE CONTROL for --base: with no override the base is still resolved
-    from the issue's own parent epic, and the branch is still merged and pushed.
-    Green before the fix and after it -- an override that quietly replaced the
-    auto-detection would fail here."""
+    """Without --base, the base is resolved from the parent epic and the branch merged and pushed."""
     from sdlc_next import GitHub, cmd_sync_branch
     epic = _epic(110, labels=["epic:architected"])
     child = _issue(185, stage="development", parent=110)
@@ -6297,83 +5707,205 @@ def test_sync_branch_without_base_still_auto_detects_the_integration_base():
         ("git", "-C", "/repo", "merge", "origin/epic-110"): "",
         ("git", "-C", "/repo", "push", "origin", "issue-185"): "",
     })
-    runner.fail_on = {("git", "-C", "/repo", "ls-files", "--error-unmatch",
-                        ".github/sdlc-pipeline")}
     gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])}))
     result = cmd_sync_branch(gh, "/repo", 185, runner=runner)
     assert result["base"] == "epic-110" and result["synced"] is True
 
 
-# --- Fix 2: create-issue is atomic -------------------------------------------
+# --- configured branch prefixes ---
 
-def test_create_issue_refuses_an_unmappable_type_before_creating_anything():
-    # Issue #52, live: `set_issue_type` discovered the missing issueTypeIds
-    # entry AFTER `issue_create` had run, stranding an orphan with no type and
-    # no parent that no later read could find.
-    import pytest
-    from sdlc_next import GhError, cmd_create_issue
-
-    class FakeGH:
-        def issue_create(self, title, body, labels):
-            raise AssertionError("must refuse BEFORE creating anything")
-
-        def set_issue_type(self, number, type_name):
-            raise AssertionError("unreachable")
-
-        def add_sub_issue(self, parent_number, child_number):
-            raise AssertionError("unreachable")
-
-    with pytest.raises(GhError, match="not in projectFields.issueTypeIds"):
-        cmd_create_issue(FakeGH(), "t", "b", 9, [], type_name="Bogus")
+@pytest.fixture
+def custom_prefixes(monkeypatch):
+    import sdlc_next
+    monkeypatch.setattr(sdlc_next, "ISSUE_BRANCH_PREFIX", "feat/")
+    monkeypatch.setattr(sdlc_next, "EPIC_BRANCH_PREFIX", "integ/")
 
 
-def test_create_issue_reports_a_failed_parent_link_with_the_created_number():
-    # The step that CAN still fail after the create is reported, not raised: a
-    # bare exception says only "create-issue failed", and the natural response
-    # to that -- retry -- creates a second issue for the same work.
-    from sdlc_next import GhError, cmd_create_issue
+@pytest.mark.parametrize("unit,branch", [("issue", "feat/43"), ("epic", "integ/43")])
+def test_sync_branch_uses_the_configured_branch_prefix(custom_prefixes, unit, branch):
+    from sdlc_next import GitHub, cmd_sync_branch
+    runner = ScriptedRunner({
+        **_live_wt(branch),
+        ("git", "-C", "/repo", "fetch", "origin"): "",
+        ("git", "-C", "/repo", "show-ref", "--verify", "--quiet",
+         "refs/remotes/origin/main"): "",
+        ("git", "-C", "/repo", "checkout", branch): "",
+        ("git", "-C", "/repo", "merge", "origin/main"): "",
+        ("git", "-C", "/repo", "push", "origin", branch): "",
+    })
+    result = cmd_sync_branch(GitHub(runner=ScriptedRunner({})), "/repo", 43, unit=unit,
+                             runner=runner, base="main")
+    assert result["branch"] == branch and result["synced"] is True
 
-    class FakeGH:
-        def issue_create(self, title, body, labels):
-            return 52
 
-        def set_issue_type(self, number, type_name):
+def test_open_gate_uses_the_configured_branch_prefix_but_keeps_the_doc_dir(custom_prefixes):
+    from sdlc_next import GitHub, cmd_open_gate
+    git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): "",
+                                 ("git", "-C", "/repo", "rev-parse", "origin/feat/9"): "abc1234\n"})
+
+    class FakeGitHub(GitHub):
+        def pr_create(self, base, head, title, body, draft):
+            self.head = head
+            return 40
+
+        def set_pipeline_status_field(self, issue, status):
             pass
 
-        def add_sub_issue(self, parent_number, child_number):
-            raise GhError("addSubIssue: upstream failure")
+        def issue_comment(self, issue, body):
+            self.comment = body
 
-    result = cmd_create_issue(FakeGH(), "t", "b", 9, [], type_name="Task")
-    assert result["issue"] == 52
-    assert result["failed_step"] == "add_sub_issue"
-    assert result["ok"] is False
-    assert "do not re-run" in result["reason"].lower()
+    gh = FakeGitHub(runner=ScriptedRunner({}))
+    result = cmd_open_gate(gh, "/repo", issue=9, title="Add widget", doc="product.md",
+                           next_stage="architecture", summary="", runner=git_runner)
+    assert result["head"] == gh.head == "feat/9"
+    assert "`docs/sdlc/issue-9/product.md`" in gh.comment
 
 
-def test_create_issue_happy_path_still_types_and_links_in_one_call():
-    """POSITIVE CONTROL for the atomicity work: hoisting the checks must not
-    cost the command either of its two post-create steps, nor reorder them.
-    Green before and after."""
+def test_claim_maps_the_retired_testing_role_to_development():
+    import sdlc_next
+    gh = _RecordingGh()
+    gh.set_stage_field = lambda n, stage: gh.calls.append(("set_stage", n, stage))
+    gh.issue_comment = lambda n, body: None
+    assert sdlc_next.cmd_claim(gh, 9, "testing") == {"issue": 9, "claimed": True}
+    assert gh.calls == [("set_stage", 9, "development"), ("set_pipeline_status", 9, "in-progress")]
+
+
+def test_start_comment_rejects_the_retired_testing_role(monkeypatch):
+    import sdlc_next
+    monkeypatch.setenv("GITHUB_TOKEN", "x")
+    with pytest.raises(SystemExit):
+        sdlc_next.main(["start-comment", "9", "--role", "testing"])
+
+
+# --- create-issue: native type mandatory, every field set, atomic ---
+
+class _RecordingGh:
+    """create-issue's write surface, recording calls; raises GhError on the step named `fail`."""
+
+    def __init__(self, number=42, fail=None):
+        self.number, self.fail, self.calls = number, fail, []
+
+    def _rec(self, step, *args):
+        if step == self.fail:
+            raise GhError(f"{step}: simulated failure")
+        self.calls.append((step, *args))
+
+    def issue_create(self, title, body, labels):
+        self._rec("issue_create", title, list(labels))
+        return self.number
+
+    def set_issue_type(self, n, type_name):
+        self._rec("set_issue_type", n, type_name)
+
+    def add_sub_issue(self, parent, child):
+        self._rec("add_sub_issue", parent, child)
+
+    def set_pipeline_status_field(self, n, status):
+        self._rec("set_pipeline_status", n, status)
+
+    def set_priority_field(self, n, value):
+        self._rec("set_priority", n, value)
+
+    def set_effort_field(self, n, value):
+        self._rec("set_effort", n, value)
+
+
+_CREATED_FIELDS = {"pipeline_status": "todo", "priority": "Medium", "effort": "Medium"}
+
+
+def test_create_issue_types_links_and_sets_every_field_in_order():
     from sdlc_next import cmd_create_issue
-    calls = []
-
-    class FakeGH:
-        def issue_create(self, title, body, labels):
-            calls.append(("create", title, list(labels)))
-            return 42
-
-        def set_issue_type(self, number, type_name):
-            calls.append(("type", number, type_name))
-
-        def add_sub_issue(self, parent_number, child_number):
-            calls.append(("link", parent_number, child_number))
-
-    result = cmd_create_issue(FakeGH(), "t", "b", 9, [])
-    assert result == {"issue": 42, "parent": 9, "type": "Task"}
-    assert calls == [("create", "t", []), ("type", 42, "Task"), ("link", 9, 42)]
+    gh = _RecordingGh()
+    result = cmd_create_issue(gh, "t", "b", 9, [])
+    assert result == {"issue": 42, "parent": 9, "type": "Task", **_CREATED_FIELDS}
+    assert gh.calls == [("issue_create", "t", ["type:task"]), ("add_sub_issue", 9, 42),
+                        ("set_issue_type", 42, "Task"), ("set_pipeline_status", 42, "todo"),
+                        ("set_priority", 42, "Medium"), ("set_effort", 42, "Medium")]
 
 
-# --- Fix 4: verify-exit checks the development->pr-review handoff marker ------
+def test_create_issue_label_classified_epic_still_gets_its_native_type():
+    from sdlc_next import cmd_create_issue
+    gh = _RecordingGh(number=43)
+    result = cmd_create_issue(gh, "t", "b", 40, [], type_name="Epic")
+    assert result["type"] == "Epic" and "ok" not in result
+    assert ("issue_create", "t", ["type:epic"]) in gh.calls
+    assert ("set_issue_type", 43, "Epic") in gh.calls
+
+
+def test_create_issue_bug_gets_the_bug_type_not_task():
+    from sdlc_next import cmd_create_issue
+    gh = _RecordingGh()
+    cmd_create_issue(gh, "t", "b", 9, [], type_name="Bug")
+    assert ("set_issue_type", 42, "Bug") in gh.calls
+    assert ("issue_create", "t", []) in gh.calls
+
+
+def test_create_issue_refuses_an_unprovisioned_type_before_creating(monkeypatch):
+    import sdlc_next
+    monkeypatch.setattr(sdlc_next, "ISSUE_TYPE_IDS", {"Task": "IT_TASK_ID"})
+    gh = _RecordingGh()
+    with pytest.raises(GhError, match="'Epic' is not provisioned"):
+        sdlc_next.cmd_create_issue(gh, "t", "b", 40, ["type:epic"], type_name="Epic")
+    assert gh.calls == []
+
+
+def test_create_issue_refuses_an_unknown_type_before_creating():
+    from sdlc_next import cmd_create_issue
+    gh = _RecordingGh()
+    with pytest.raises(GhError, match="not an issue type"):
+        cmd_create_issue(gh, "t", "b", 9, [], type_name="Bogus")
+    assert gh.calls == []
+
+
+def test_create_issue_priority_and_effort_flags_win_over_defaults():
+    from sdlc_next import cmd_create_issue
+    gh = _RecordingGh()
+    result = cmd_create_issue(gh, "t", "b", 9, [], priority="high", effort="Low")
+    assert (result["priority"], result["effort"]) == ("High", "Low")
+    assert ("set_priority", 42, "High") in gh.calls and ("set_effort", 42, "Low") in gh.calls
+
+
+def test_create_issue_defaults_come_from_pipeline_issue_defaults(monkeypatch):
+    import sdlc_next
+    monkeypatch.setitem(sdlc_next.PIPELINE, "issueDefaults", {"priority": "Low", "effort": "High"})
+    result = sdlc_next.cmd_create_issue(_RecordingGh(), "t", "b", 9, [])
+    assert (result["priority"], result["effort"]) == ("Low", "High")
+
+
+@pytest.mark.parametrize("kwargs", [{"priority": "Critical"}, {"effort": "Huge"}])
+def test_create_issue_refuses_an_invalid_priority_or_effort_before_creating(kwargs):
+    from sdlc_next import cmd_create_issue
+    gh = _RecordingGh()
+    with pytest.raises(GhError, match="not a configured option"):
+        cmd_create_issue(gh, "t", "b", 9, [], **kwargs)
+    assert gh.calls == []
+
+
+def test_create_issue_skips_priority_and_effort_when_unconfigured(monkeypatch):
+    import sdlc_next
+    monkeypatch.setattr(sdlc_next, "PRIORITY_FIELD_ID", None)
+    monkeypatch.setattr(sdlc_next, "EFFORT_FIELD_ID", None)
+    gh = _RecordingGh()
+    result = sdlc_next.cmd_create_issue(gh, "t", "b", 9, [], priority="Critical")
+    assert "priority" not in result and "effort" not in result
+    assert [c[0] for c in gh.calls][-1] == "set_pipeline_status"
+
+
+@pytest.mark.parametrize("step", ["set_issue_type", "add_sub_issue", "set_pipeline_status",
+                                  "set_priority", "set_effort"])
+def test_create_issue_reports_a_post_create_failure_and_never_recreates(step):
+    from sdlc_next import cmd_create_issue
+    gh = _RecordingGh(number=52, fail=step)
+    result = cmd_create_issue(gh, "t", "b", 9, [])
+    assert (result["ok"], result["issue"], result["failed_step"]) == (False, 52, step)
+    assert "do not re-run" in result["reason"].lower() and "#52" in result["reason"]
+    assert [c[0] for c in gh.calls].count("issue_create") == 1
+    assert step in result["reason"]
+    assert ("repair-issue 52 --parent 9 --type Task --priority Medium --effort Medium"
+            in result["reason"])
+
+
+# --- verify-exit checks the development->pr-review handoff marker ---
 
 def _verify_exit_pr_runners(tmp_path, comments, stage_field_value="PR Review", pr=42):
     from sdlc_next import _ISSUE_FIELDS_QUERY
@@ -6395,10 +5927,7 @@ def _verify_exit_pr_runners(tmp_path, comments, stage_field_value="PR Review", p
 
 
 def test_verify_exit_flags_a_missing_development_to_pr_review_handoff_marker(tmp_path):
-    # `open-dev-pr` moves the Stage field; `handoff-to-pr-review` posts the
-    # marker. Only the first was checked, so an agent that skipped the second
-    # verified clean here and the miss surfaced much later at `merge-pr` as
-    # missing_pipeline_evidence -- after the PR had already been reviewed.
+    # A pr-review exit without the handoff marker fails verification (reported, not repaired).
     from sdlc_next import GitHub, cmd_verify_exit
     gh_runner, git_runner = _verify_exit_pr_runners(tmp_path, comments=[])
     result = cmd_verify_exit(GitHub(runner=gh_runner), str(tmp_path), 9,
@@ -6406,14 +5935,11 @@ def test_verify_exit_flags_a_missing_development_to_pr_review_handoff_marker(tmp
     assert result["handoff_marker_present"] is False
     assert result["ok"] is False
     assert any("handoff-to-pr-review" in p for p in result["problems"])
-    # Reported, never repaired -- this must not post the marker it checks for.
     assert not any(c[:3] == ["gh", "issue", "comment"] for c in gh_runner.calls)
 
 
 def test_verify_exit_passes_when_the_handoff_marker_is_present(tmp_path):
-    """POSITIVE CONTROL: a handoff that DID run its exit action still verifies
-    clean. Green before the fix and after it, so a check that simply always
-    failed `pr-review` could not pass this."""
+    """A pr-review exit with the handoff marker verifies clean."""
     from sdlc_next import GitHub, cmd_verify_exit
     comments = [{"body": "<!-- stage-transition: development->pr-review "
                           "@ 2026-09-16T00:00:00Z -->"}]
@@ -6425,9 +5951,7 @@ def test_verify_exit_passes_when_the_handoff_marker_is_present(tmp_path):
 
 
 def test_verify_exit_does_not_require_a_handoff_marker_for_other_stages(tmp_path):
-    """POSITIVE CONTROL: the marker gate is scoped to the one handoff it
-    governs. An `lld` exit with an empty thread still passes. Green either
-    way."""
+    """The handoff-marker check applies only to pr-review; an `lld` exit passes without it."""
     from sdlc_next import GitHub, cmd_verify_exit
     gh_runner, git_runner = _verify_exit_pr_runners(tmp_path, comments=[],
                                                      stage_field_value="LLD")
@@ -6437,14 +5961,10 @@ def test_verify_exit_does_not_require_a_handoff_marker_for_other_stages(tmp_path
     assert "handoff_marker_present" not in result
 
 
-# --- Fix 6: carry-forward is a positive docs-only test -----------------------
+# --- carry-forward is a positive docs-only test ---
 
 def test_base_delta_reattests_code_when_no_required_workflows_are_configured(monkeypatch):
-    # Proven live: the old negative test asked "does the delta touch a suite
-    # tree?", so with `requiredWorkflows: []` -- the default, and every repo
-    # that has not wired CI yet -- nothing could ever match and EVERY non-config
-    # delta carried its attestation forward. A pom.xml + test-class delta was
-    # carried forward exactly like a docs bump.
+    # With no required workflows configured, a non-doc delta still re-attests.
     import sdlc_next
     monkeypatch.setattr(sdlc_next, "REQUIRED_WORKFLOWS", ())
     assert sdlc_next.base_delta_needs_reattest(
@@ -6454,9 +5974,7 @@ def test_base_delta_reattests_code_when_no_required_workflows_are_configured(mon
 
 
 def test_base_delta_docs_only_still_carries_forward_without_workflows(monkeypatch):
-    """POSITIVE CONTROL: inverting the test must not switch the carry-forward
-    off altogether -- a genuinely docs-only delta still merges without a forced
-    re-sync + re-CI + re-attest. Green before the fix and after it."""
+    """A docs-only (or empty) delta still carries forward with no workflows configured."""
     import sdlc_next
     monkeypatch.setattr(sdlc_next, "REQUIRED_WORKFLOWS", ())
     assert sdlc_next.base_delta_needs_reattest(["docs/sdlc/epic-1/lld.md"]) is False
@@ -6465,14 +5983,12 @@ def test_base_delta_docs_only_still_carries_forward_without_workflows(monkeypatc
 
 
 def test_base_delta_suite_tree_forces_reattest_even_when_every_file_is_markdown():
-    """POSITIVE CONTROL: where requiredWorkflows IS configured, a delta touching
-    a suite's tree re-attests even though every file in it is a `.md` -- the
-    suite runs over that tree and the suite is what decides. Green either way."""
+    """A `.md` inside a configured suite's tree still forces re-attest."""
     from sdlc_next import base_delta_needs_reattest
     assert base_delta_needs_reattest(["backend/README.md"]) is True
 
 
-# --- Fix 7 (parsing half): both Task heading forms ---------------------------
+# --- both Task heading forms (numbered and keyed) ---
 
 def test_parse_task_headings_reads_numbered_and_keyed_forms_and_ignores_prose():
     from sdlc_next import parse_task_headings
@@ -6491,9 +6007,7 @@ def test_parse_task_headings_reads_numbered_and_keyed_forms_and_ignores_prose():
 
 
 def test_slice_task_subsection_stops_at_a_still_keyed_neighbour():
-    # The half-rewritten window `create-lld-tasks` opens: with only numbered
-    # headings as boundaries, #51's slice would swallow the keyed section after
-    # it and hand another Task's design to #51's developer.
+    # A keyed heading bounds a numbered Task's slice (mid-rewrite docs mix both forms).
     from sdlc_next import slice_task_subsection
     doc = ("## Task #51: parse\nDesign 51.\n\n"
            "## Task skeleton-health: health\nDesign health.\n")
@@ -6517,9 +6031,16 @@ def test_parse_task_depends_on_reads_declared_keys():
     assert parse_task_depends_on("no dependencies declared here\n") == []
 
 
+def test_parse_task_field_reads_priority_and_effort_lines():
+    from sdlc_next import _EFFORT_LINE, _PRIORITY_LINE, parse_task_field
+    section = "Design.\n- **Priority:** High\nEffort: `low`.\n"
+    assert parse_task_field(section, _PRIORITY_LINE) == "High"
+    assert parse_task_field(section, _EFFORT_LINE) == "low"
+    assert parse_task_field("no fields here\n", _PRIORITY_LINE) is None
+
+
 def test_lld_section_still_resolves_a_numbered_heading(capsys):
-    """POSITIVE CONTROL for accepting both heading forms: an in-flight epic's
-    numbered doc keeps working exactly as it did. Green either way."""
+    """An all-numbered lld.md still resolves a Task section."""
     from sdlc_next import cmd_lld_section
     argv = ("git", "-C", "/repo", "show", "origin/epic-430:docs/sdlc/epic-430/lld.md")
     doc = ("# lld.md\n\n## Task #501: parse\nDesign 501.\n\n## Footprint\n- `a.ts`\n\n"
@@ -6531,7 +6052,7 @@ def test_lld_section_still_resolves_a_numbered_heading(capsys):
     assert result["ok"] is True
 
 
-# --- Fix 8: the default Gate B confidence bar is 80 --------------------------
+# --- the default Gate B confidence bar is 80 ---
 
 def _show_config(tmp_path, mutate):
     cfg = json.loads((Path(__file__).resolve().parents[2] / "sdlc.config.sample.json").read_text())
@@ -6545,20 +6066,159 @@ def _show_config(tmp_path, mutate):
 
 
 def test_default_skip_confidence_threshold_is_80(tmp_path):
-    # Operator instruction, 2026-09-16. At 95 the Gate B confidence skip almost
-    # never fired, so a clean arch-review still queued a human gate that was
-    # passed unread. Read through a config that does NOT pin the bar, which is
-    # the only way to observe the shipped default.
+    # Read through a config that doesn't pin the bar, to observe the shipped default.
     effective = _show_config(tmp_path, lambda c: c["pipeline"].pop("gates", None))
     assert effective["gates"]["skipConfidenceThreshold"] == 80
 
 
 def test_config_still_overrides_the_skip_confidence_threshold(tmp_path):
-    """POSITIVE CONTROL: the default moved; config overrides did not. A repo
-    that pins 95 still gets 95, and a profile that pins its own bar still wins.
-    Green before the change and after it."""
+    """Config and profile overrides of the confidence bar still win."""
     effective = _show_config(tmp_path, lambda c: c["pipeline"].__setitem__(
         "gates", {"skipConfidenceThreshold": 95, "requiresHumanGateA": True}))
     assert effective["gates"]["skipConfidenceThreshold"] == 95
     standing = next(p for p in effective["profiles"] if p["name"] == "standing")
     assert standing["gates"]["skipConfidenceThreshold"] == 90
+
+
+# --- audit-issues ---
+
+def _full(number, **kw):
+    """An issue carrying every create-issue field (Priority, Effort, Pipeline Status todo)."""
+    issue = _issue(number, priority="Medium", status=kw.pop("status", "todo"), **kw)
+    issue["fields"]["Effort"] = "Medium"
+    return issue
+
+
+class _ListGh:
+    def __init__(self, issues):
+        self.issues = [{**i, "labels": [{"name": l} for l in i["labels"]]} for i in issues]
+
+    def issue_list(self):
+        return self.issues
+
+
+def _audit_tree():
+    return _ListGh([
+        _full(1, issue_type="Initiative", labels=["type:initiative"], status=None),
+        _full(2, issue_type="Epic", labels=["type:epic"], parent=1, status=None),
+        _full(3, issue_type="Task", labels=["type:task"], parent=2),
+        _issue(4, labels=["type:task"], parent=2),
+        _full(5, issue_type="Task"),
+        _issue(6, state="CLOSED"),
+        _full(7, issue_type="Epic", labels=["type:epic"], status=None),
+        _full(8, labels=["type:task"], parent=7),
+        _full(10, issue_type="Feature"),
+        _issue(11, parent=10),
+    ])
+
+
+def test_audit_issues_lists_open_pipeline_issues_missing_fields():
+    from sdlc_next import cmd_audit_issues
+    result = cmd_audit_issues(_audit_tree())
+    assert result["issues"][0] == {"issue": 4, "title": "issue 4", "missing": [
+        "issueType", "Priority", "Effort", "Pipeline Status"], "repair": "repair-issue 4"}
+    # 6 is closed; 11 hangs under a non-pipeline parent; 1/2/7 need no parent or status.
+    flagged = {i["issue"]: i["missing"] for i in result["issues"]}
+    assert flagged == {4: ["issueType", "Priority", "Effort", "Pipeline Status"],
+                       5: ["parent"], 8: ["issueType"], 10: ["parent"]}
+    assert result["count"] == 4
+
+
+def test_audit_issues_never_flags_a_parentless_epic_or_initiative_but_flags_a_task():
+    from sdlc_next import cmd_audit_issues
+    tree = _ListGh([_full(1, issue_type="Initiative", labels=["type:initiative"], status=None),
+                    _full(7, issue_type="Epic", labels=["type:epic"], status=None),
+                    _full(12, issue_type="Task", labels=["type:task"]),
+                    _full(13, issue_type="Bug")])
+    flagged = {i["issue"]: i["missing"] for i in cmd_audit_issues(tree)["issues"]}
+    assert flagged == {12: ["parent"], 13: ["parent"]}
+
+
+def test_audit_issues_repair_hint_asks_only_for_what_cannot_be_inferred():
+    from sdlc_next import cmd_audit_issues
+    tree = _ListGh([_issue(20, priority="Medium", status="todo"),
+                    _issue(21, labels=["type:task"], priority="Medium", status="todo")])
+    hints = {i["issue"]: i["repair"] for i in cmd_audit_issues(tree)["issues"]}
+    assert hints == {20: "repair-issue 20 --parent <P> --type <T>",
+                     21: "repair-issue 21 --parent <P>"}
+
+
+def test_audit_issues_epic_scope_is_that_tree_plus_parentless_issues():
+    from sdlc_next import cmd_audit_issues
+    flagged = {i["issue"] for i in cmd_audit_issues(_audit_tree(), epic=2)["issues"]}
+    assert flagged == {4, 5, 10}
+
+
+def test_audit_issues_skips_unconfigured_priority_and_effort(monkeypatch):
+    import sdlc_next
+    monkeypatch.setattr(sdlc_next, "PRIORITY_FIELD_ID", None)
+    monkeypatch.setattr(sdlc_next, "EFFORT_FIELD_ID", None)
+    flagged = {i["issue"]: i["missing"] for i in sdlc_next.cmd_audit_issues(_audit_tree())["issues"]}
+    assert flagged[4] == ["issueType", "Pipeline Status"]
+
+
+# --- resolve-thread ---
+
+def _thread_argv(query, **variables):
+    argv = ["gh", "api", "graphql", "-f", f"query={query}"]
+    for name, value in variables.items():
+        argv += ["-f", f"{name}={value}"]
+    return tuple(argv)
+
+
+def test_resolve_thread_replies_then_resolves():
+    from sdlc_next import (_REPLY_REVIEW_THREAD_MUTATION, _RESOLVE_REVIEW_THREAD_MUTATION,
+                           cmd_resolve_thread)
+    reply = _thread_argv(_REPLY_REVIEW_THREAD_MUTATION, threadId="PRRT_1", body='Fixed "x".')
+    resolve = _thread_argv(_RESOLVE_REVIEW_THREAD_MUTATION, threadId="PRRT_1")
+    runner = ScriptedRunner({reply: '{"data": {}}', resolve: '{"data": {}}'})
+    result = cmd_resolve_thread(GitHub(runner=runner), "PRRT_1", 'Fixed "x".')
+    assert result == {"thread": "PRRT_1", "replied": True, "resolved": True}
+    assert [tuple(c) for c in runner.calls] == [reply, resolve]
+
+
+def test_resolve_thread_without_reply_only_resolves():
+    from sdlc_next import _RESOLVE_REVIEW_THREAD_MUTATION, cmd_resolve_thread
+    resolve = _thread_argv(_RESOLVE_REVIEW_THREAD_MUTATION, threadId="PRRT_1")
+    runner = ScriptedRunner({resolve: '{"data": {}}'})
+    assert cmd_resolve_thread(GitHub(runner=runner), "PRRT_1")["replied"] is False
+    assert len(runner.calls) == 1
+
+
+def test_resolve_thread_reports_a_failed_resolve_after_replying():
+    from sdlc_next import (_REPLY_REVIEW_THREAD_MUTATION, _RESOLVE_REVIEW_THREAD_MUTATION,
+                           cmd_resolve_thread)
+    reply = _thread_argv(_REPLY_REVIEW_THREAD_MUTATION, threadId="PRRT_1", body="done")
+    resolve = _thread_argv(_RESOLVE_REVIEW_THREAD_MUTATION, threadId="PRRT_1")
+    runner = ScriptedRunner({reply: '{"data": {}}', resolve: '{"data": {}}'})
+    runner.fail_on.add(resolve)
+    result = cmd_resolve_thread(GitHub(runner=runner), "PRRT_1", "done")
+    assert (result["ok"], result["replied"], result["resolved"]) == (False, True, False)
+    assert "without --reply" in result["reason"]
+
+
+# --- CLI wiring for the create-issue flags and the new commands ---
+
+@pytest.mark.parametrize("argv, fn, expected", [
+    (["create-issue", "--title", "t", "--body", "b", "--parent", "9", "--type", "Bug",
+      "--priority", "High", "--effort", "Low"], "cmd_create_issue",
+     ("t", "b", 9, [], "Bug", "High", "Low")),
+    (["audit-issues", "--epic", "7"], "cmd_audit_issues", (7,)),
+    (["resolve-thread", "--thread-id", "PRRT_1", "--reply", "ok"], "cmd_resolve_thread",
+     ("PRRT_1", "ok")),
+])
+def test_cli_passes_new_flags_through(monkeypatch, capsys, argv, fn, expected):
+    import sdlc_next
+    seen = []
+    monkeypatch.setenv("GITHUB_TOKEN", "x")
+    monkeypatch.setattr(sdlc_next, "get_work_item_provider", lambda: "GH")
+    monkeypatch.setattr(sdlc_next, fn, lambda gh, *args: seen.append((gh, *args)) or {})
+    assert sdlc_next.main(argv) == 0
+    assert seen == [("GH", *expected)]
+
+
+def test_missing_token_error_names_the_session_start_hook(monkeypatch, capsys):
+    import sdlc_next
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert sdlc_next.main(["list-needs-human"]) == 1
+    assert "SessionStart hook" in json.loads(capsys.readouterr().out)["error"]

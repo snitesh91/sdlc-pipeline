@@ -2,19 +2,14 @@
 # /// script
 # requires-python = ">=3.10"
 # ///
-"""sdlc_next.py — deterministic control plane for the sdlc-pipeline skill.
+"""sdlc_next.py — deterministic control plane for the sdlc plugin.
 
-Owns every mechanical GitHub read/decision/mutation described in the skill's
-`SKILL.md` so the orchestrating agent never hand-executes
-`gh`/GraphQL sequences from prose. The agent's job is calling this CLI, acting on
-its JSON verdict, and making the small set of genuine judgment calls (defect
-attribution, escalation-to-human, subagent prompt content, doc/PR prose) that
-cannot be scripted — see "Deterministic control plane" in SKILL.md.
+Owns every mechanical GitHub/git read, decision and mutation so the orchestrating
+agent calls this CLI and acts on its JSON verdict instead of hand-running gh/git.
 
-Exit codes: 0 = command completed with a valid result (including legitimate
-"nothing to do" outcomes). 1 = an operational failure (a gh/git call actually
-failed, a required marker was missing). Every command prints one JSON object to
-stdout regardless of exit code.
+Exit codes: 0 = a valid result (including "nothing to do"); 1 = an operational
+failure (a gh/git call failed, a required marker was missing). Every command
+prints one JSON object to stdout regardless of exit code.
 """
 from __future__ import annotations
 
@@ -37,18 +32,8 @@ CONFIG_FILENAME = "sdlc-pipeline.config.json"
 
 
 def _find_config() -> Optional[str]:
-    """Locate the consuming repo's config. This skill is generic and lives outside
-    the repo it drives (often symlinked in); every project-specific value lives in
-    the repo, never here. Resolution order:
-
-      1. `SDLC_CONFIG` -- an explicit path (used by the test suite for its sample).
-      2. Walking up from the current directory for `<CONFIG_FILENAME>` at the repo
-         root, or under `.config/` or `.claude/` -- the pipeline is invoked from
-         the repo root, and the file is harness-agnostic (root by default).
-
-    `sdlc.config.sample.json` ships beside this skill as a template to copy into a
-    new repo; it is never loaded automatically, so a missing config is a loud setup
-    error rather than a silent run against placeholder ids."""
+    """Path to the driven repo's config: `$SDLC_CONFIG`, else the first
+    `<CONFIG_FILENAME>` at `./`, `.config/` or `.claude/` walking up from cwd."""
     env = os.environ.get("SDLC_CONFIG")
     if env:
         return os.path.expanduser(env)
@@ -82,86 +67,27 @@ CONFIG = _load_config()
 _PF = CONFIG["projectFields"]
 
 REPO = CONFIG["repo"]
-# Repo owner/name split out for the GraphQL query templates, which name the
-# repository inline (gh's `--repo` flag doesn't reach `api graphql`).
+# GraphQL templates name the repository inline (gh's `--repo` doesn't reach `api graphql`).
 _OWNER, _NAME = REPO.split("/", 1)
-# Root folder (under the repo) for the committed per-issue/-epic source-of-record
-# docs -- `<DOC_ROOT>/issue-<n>/` and `<DOC_ROOT>/epic-<n>/`.
 DOC_ROOT = CONFIG["docRoot"]
-# Where the classic-PAT GitHub token is read from; surfaced only in the runnable
-# command strings this CLI hands back to the orchestrator.
 TOKEN_PATH = CONFIG["tokenPath"]
-# Where this repo's requirements documents live, e.g. `<requirements-dir>/IRD-*.md`
-# in `agents/sdlc-product.md`. Optional -- only `sync-skill`'s agent re-vendor needs
-# it, and only when a template actually references the placeholder, so an existing
-# config that predates this key keeps loading.
-REQUIREMENTS_DIR = CONFIG.get("requirementsDir")
 STAGE_AFTER_GATE = {"product": "architecture", "architecture": "development"}
 
-# How many finished PRs (within the one epic the operator named -- see "Epic
-# number is mandatory" in SKILL.md) may be reviewed concurrently, one git
-# worktree each --
-# the cap `list-ready-for-review` returns by default. Reviews have zero
-# dependency on each other, so this is tuned purely against **Docker resource
-# contention** (each review agent independently re-runs the real test suite; the
-# backend suite alone has already produced OOM kills and flaky runs on its own --
-# issues #109/#111), not against any structural/dependency concern. Lower it if
-# concurrent reviews start reporting resource-starvation failures rather than
-# real defects. See "Parallel PR review" in references/parallelism.md.
-PR_REVIEW_PARALLELISM = CONFIG["parallelism"]["prReview"]
+# Lane caps: how many units of one epic run concurrently, one worktree each.
+# Every lane defaults to 1 (sequential); raise per repo in `parallelism`.
+_PARALLELISM = CONFIG.get("parallelism") or {}
+PR_REVIEW_PARALLELISM = _PARALLELISM.get("prReview", 1)
+DEV_LANE_PARALLELISM = _PARALLELISM.get("devLane", 1)
+DESIGN_LANE_PARALLELISM = _PARALLELISM.get("designLane", 1)
+# Units one orchestrator run drives to a terminal state before a resumable stop,
+# bounding the orchestrator's own context growth. 0 = unlimited.
+MAX_TASKS_PER_RUN = _PARALLELISM.get("maxTasksPerRun", 0)
 
-# How many `lld`/`development`/`testing` children of one epic may run
-# concurrently, one git worktree each -- the cap `list-parallel-ready` returns
-# by default. Unlike PR_REVIEW_PARALLELISM, this tier has real cross-child
-# dependency risk (one child's code can genuinely need another's), so
-# `list-parallel-ready` only ever proposes children that pass both a native
-# `blockedBy` check and a footprint-overlap check against every other
-# currently-active/eligible child -- see "Parallel implementation lane" in
-# SKILL.md. Matches PR_REVIEW_PARALLELISM's value; raised to 3 from an initial
-# 2 per operator instruction once the first two concurrent children --
-# #185/#187 under epic #110 -- ran clean. Also tuned against the same Docker
-# test-suite resource pressure noted above `PR_REVIEW_PARALLELISM` --
-# `development`/`testing` each run the real suite, same cost as a review --
-# lower it again if concurrent runs start reporting resource starvation rather
-# than real defects.
-DEV_LANE_PARALLELISM = CONFIG["parallelism"]["devLane"]
-
-# How many *standing*-profile children of one epic may run their `product`/
-# `architecture` stages concurrently, one git worktree each -- the cap
-# `list-design-ready` returns by default. A standing epic has no epic-level
-# design phase (see `is_epic_standing`); every child runs its OWN
-# product->architecture->development flow, so without a pool query
-# for the design stages the orchestrator could only run one child's product/
-# architecture at a time. Deliberately lower than DEV_LANE_PARALLELISM (2 vs 3):
-# both stages run the `opus` model (see `pipeline.models`) and cost more per unit
-# than the dev lane's sonnet stages. Read via `.get` with a default so a config
-# predating this key (or any repo with no standing epic to fan design out)
-# still loads. A non-standing Epic's design is its own Architecture-phase/LLD-phase
-# Tasks -- `list-design-ready` returns empty for it regardless of this cap.
-# See "Design lane" in references/parallelism.md.
-DESIGN_LANE_PARALLELISM = CONFIG["parallelism"].get("designLane", 2)
-
-# How many units (Tasks/children) one orchestrator run may drive to a terminal
-# state (merged, or an Epic's Tasks architected) before it stops with a
-# resumable checkpoint instead of picking the next. This is NOT a concurrency
-# cap like the lanes above and NOT a task-carving target -- carving stays
-# footprint-driven (`sdlc-lld.md`, "How you carve tasks"). It exists only to
-# bound the *orchestrator's own* context growth: the orchestrator session
-# accumulates context for the whole run and is re-read every turn, so a run that
-# never stops grows without limit. Stopping at the cap lets the next run resume
-# from the pipeline's already-crash-safe persisted state with a fresh, small
-# context. `0` (the default, and the value for a config predating this key)
-# means unlimited -- the historical behaviour, no cap. Read via `.get` so older
-# configs still load. Enforced by the orchestrator in SKILL.md, not by a script
-# loop; surfaced in `show-config` so the orchestrator reads it rather than
-# assuming a number.
-MAX_TASKS_PER_RUN = CONFIG["parallelism"].get("maxTasksPerRun", 0)
-
-# Only used by check_epics_closeable's one-time "ready to close" notification --
-# mark_needs_human/open_gate no longer touch the assignee (operator instruction:
-# the Pipeline Status field is the tracking mechanism on its own). See "Assignee
-# convention" in references/operations.md.
 HUMAN_ASSIGNEE = CONFIG["humanAssignee"]
+
+with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "hooks", "model_policy.json")) as _f:
+    _MODEL_POLICY = json.load(_f)
 
 # Everything below is tunable per repo via the optional `pipeline` block in the
 # config; every key has the default shown here so an older config keeps working.
@@ -169,29 +95,14 @@ _PIPELINE_DEFAULTS = {
     "labels": {"standing": "epic:standing", "legacy": "epic:legacy",
                "architected": "epic:architected"},
     "branches": {"issuePrefix": "issue-", "epicPrefix": "epic-"},
-    # `ephemeralPrefix` names the throwaway worktree a branch-touching command
-    # stands up when no live worktree holds its target branch -- the main checkout
-    # is never a git-write target (see `branch_workspace`). No `initiativePrefix`
-    # here -- an Initiative has no branch of its own; its Product-Roadmap Task
-    # is a plain child (`devPrefix`), same as any other issue.
+    # `ephemeralPrefix`: throwaway tree for a branch no live worktree holds, since
+    # the main checkout is never a git-write target.
     "worktrees": {"root": "/tmp", "devPrefix": "sdlc-dev-", "epicPrefix": "sdlc-epic-",
                   "reviewPrefix": "sdlc-review-", "ephemeralPrefix": "sdlc-tmp-"},
-    # Per-branch flock so two sessions (or two lanes of one session) never run a
-    # branch-touching command on the same branch concurrently. `dir` may use
-    # `{worktreesRoot}`; `SDLC_LOCK_DIR` in the environment overrides it (tests).
+    # Per-branch flock; `SDLC_LOCK_DIR` in the environment overrides `dir`.
     "locks": {"dir": "{worktreesRoot}/.sdlc-locks", "waitSeconds": 600},
-    # Where the driven repo vendors this skill as a git submodule. `worktree-add`
-    # and `sync-branch` run `git submodule update --init` on it inside the unit's
-    # worktree, so each epic's stage agents read the playbook/persona files at
-    # the skill version *its own branch* pins (`<worktree>/<submodulePath>`), not
-    # the shared main checkout's copy. `probeFile` must exist after init or the
-    # init is reported failed. Empty `submodulePath` disables the whole feature.
-    "skill": {"submodulePath": ".github/sdlc-pipeline", "probeFile": "SKILL.md"},
-    # Per-epic isolated runtime stack (`provision-epic-stack` / `teardown-epic-stack`).
-    # Config-only isolation: the driven repo's compose must already honour the env
-    # keys listed under `ports` plus `COMPOSE_PROJECT_NAME` and `dataDirKey`. Every
-    # `{...}` placeholder is formatted with profile/project/envFile/secretsFile/
-    # dataDir/workspaceRoot. `enabled: false` makes both commands structured no-ops.
+    # Per-epic runtime stack. The driven repo's compose must honour the `ports`
+    # keys, `COMPOSE_PROJECT_NAME` and `dataDirKey`; disabled = structured no-ops.
     "stack": {
         "enabled": False,
         "workspaceRoot": ".",
@@ -210,57 +121,29 @@ _PIPELINE_DEFAULTS = {
         "downCommand": "COMPOSE_PROJECT_NAME={project} docker compose "
                        "--env-file {envFile} down -v --remove-orphans",
     },
-    # `skipConfidenceThreshold` lowered 95 -> 80 on 2026-09-16, per operator
-    # instruction: at 95 the Gate B confidence skip almost never fired, so a
-    # clean arch-review still queued a human gate that was passed unread, which
-    # is a worse signal than no gate at all. A repo that wants the old bar sets
-    # `pipeline.gates.skipConfidenceThreshold` (or a profile's own `gates`)
-    # explicitly -- config overrides are unchanged and still win outright.
     "gates": {"skipConfidenceThreshold": 80, "requiresHumanGateA": True},
-    # Product-stage WIP cap (operator, 2026-08-16; epic #92 produced five parallel
-    # Gate A PRs a human could not keep up with). At most `maxGateAPending` open
-    # units repo-wide may sit at Stage=Product with an open Gate A (Pipeline Status
-    # awaiting-human-review / feedback-received) before `next-action` and
-    # `list-design-ready` stop starting *fresh* `product` delegations and loop to
-    # other actionable units instead. Resumes, rework rounds, and gate actions
-    # (`pass-gate` / `address-gate-feedback`) are never gated. `0` disables.
+    # Repo-wide cap on units at Stage=Product with an open Gate A; at the cap no
+    # fresh `product` delegation starts (resumes/rework are never gated). 0 disables.
     "productWip": {"maxGateAPending": 5},
     "escalation": {"replaceAt": 3, "needsHumanAt": 6},
-    # `{docRoot}` is formatted with the config's `docRoot` at load time, so the
-    # default lands next to the committed docs of the driven repo (e.g.
-    # `docs/sdlc/retro-watermark`) rather than inside the skill checkout.
     "retro": {"everyClosedIssues": 5,
               "watermarkFile": "{docRoot}/retro-watermark"},
     "continuous": {"cycleCap": 8},
-    # `auto: true` lets the orchestrator invoke the second `close-epic` call itself
-    # once the epic is closeable and both closing verifications are clean -- no human
-    # trigger. Default `false` keeps the historical human-makes-the-call gate. The
-    # mechanical refusals in `cmd_close_epic` (open children, missing/ stale
-    # verification, failing checks) are the safety net either way: a Blocker delta
-    # filed as an epic child re-trips `open_children`, so auto-close cannot fire over
-    # one. See "Epic closing" in references/epics.md.
+    # `auto`: the orchestrator runs the final `close-epic` itself; close-epic's own
+    # refusals (open children, stale verification, failing checks) still apply.
     "epicClose": {"auto": False},
-    "models": {"product": "opus", "product-review": "opus", "architecture": "opus",
-               "arch-review": "opus", "lld": "sonnet", "lld-review": "opus",
-               "development": "sonnet", "pr-review": "opus"},
-    # How GitHub.classify_unit tells an Initiative from an Epic
-    # from a Task. Empty by default -- classify_unit returns "other" rather than
-    # guessing until a client provisions real Issue Types (or labels) and lists
-    # them here, e.g. {"initiative": {"field": "issueType", "value": "Initiative"},
-    # "epic": {"field": "issueType", "value": "Epic"}, "task": {"field":
-    # "issueType", "value": "Task"}}. See WorkItemProvider.classify_unit.
+    # Priority / Effort `create-issue` sets when no flag names one (fields configured only).
+    "issueDefaults": {"priority": "Medium", "effort": "Medium"},
+    # Stage models and fan-out: one home, hooks/model_policy.json (agent_guard enforces it).
+    "models": _MODEL_POLICY.get("models", {}),
+    "fanout": _MODEL_POLICY.get("fanout", {}),
+    # {"initiative"|"epic"|"task": {"field": "issueType"|"label", "value": ...}};
+    # empty means every issue classifies as "other" rather than a guess.
     "classification": {},
-    # Which WorkItemProvider implementation get_work_item_provider()
-    # returns. Only "github" exists -- Jira is a documented seam (README.md,
-    # "Initiative-driven lifecycle"), not built. Naming anything else is a refusal, not a fallback.
     "workItemProvider": {"type": "github"},
     "docTemplates": "_templates",
-    # Behavioural profiles, matched to an epic by label (ordered; first hit wins,
-    # `"*"` is the terminal catch-all). Each profile is a bundle of toggles that
-    # used to be hardcoded to the `epic:standing`/`epic:legacy` labels; the client
-    # now owns the label->behaviour mapping. See "Epic profiles" in references/epics.md
-    # and `resolve_profile`. Missing toggles inherit `_PROFILE_TOGGLE_DEFAULTS`; a
-    # profile's `gates` inherit the global `pipeline.gates`.
+    # Ordered; the first profile whose `match` label is on the epic wins, "*" is
+    # the catch-all. See `resolve_profile`.
     "profiles": [
         {"name": "legacy", "match": {"label": "epic:legacy"}, "driven": False},
         {"name": "standing", "match": {"label": "epic:standing"},
@@ -269,9 +152,7 @@ _PIPELINE_DEFAULTS = {
     ],
 }
 
-# Per-toggle fallbacks a matched profile inherits when it omits a key. `gates`
-# inherit the effective global `pipeline.gates` (resolved in `resolve_profile`),
-# not this dict, so an epic with no explicit profile gates keeps the global bar.
+# Fallbacks for toggles a matched profile omits (its `gates` fall back to `pipeline.gates`).
 _PROFILE_TOGGLE_DEFAULTS = {
     "driven": True,               # False = legacy: pipeline ignores the epic + children
     "epicLevelPhase": True,       # False = standing: each child runs its own full flow
@@ -298,8 +179,7 @@ LABELS = PIPELINE["labels"]
 ISSUE_BRANCH_PREFIX = PIPELINE["branches"]["issuePrefix"]
 EPIC_BRANCH_PREFIX = PIPELINE["branches"]["epicPrefix"]
 ESCALATION = PIPELINE["escalation"]
-# Read at call time by `product_wip_headroom` (never captured at import into a
-# default arg) so a test or a one-off run can override it on the module.
+# Read at call time (never bound as a default arg) so it can be overridden on the module.
 PRODUCT_WIP_CAP = PIPELINE["productWip"]["maxGateAPending"]
 
 
@@ -315,53 +195,33 @@ def issue_number_from_branch(branch: str) -> Optional[int]:
     rest = branch[len(ISSUE_BRANCH_PREFIX):]
     return int(rest) if rest.isdigit() else None
 
-# Native GitHub Issue Types (Task/Bug/Feature) and the org-provisioned "Priority"
-# issue field replace the old epic/bug/type:bug/priority:pX labels -- see
-# "Issue taxonomy" in references/operations.md. IDs looked up once via GraphQL introspection
-# against this repo and hardcoded here: they're schema-level IDs for this
-# specific repo's provisioned types/fields, not per-issue data, so there's
-# nothing to look up dynamically.
+
+# Schema-level GraphQL ids for the repo's provisioned Issue Types and fields.
 ISSUE_TYPE_IDS = _PF["issueTypeIds"]
-PRIORITY_FIELD_ID = _PF["priorityFieldId"]
-PRIORITY_OPTION_IDS = _PF["priorityOptionIds"]
-# Priority rank for sort_key/epic ranking -- lower sorts first, matching the old
-# p0(highest)..p3(lowest) convention. No native field value = rank 2 (Medium),
-# same default the old "no priority label = p2" rule used.
+# Types `create-issue --type` accepts; each still needs its id in `issueTypeIds`.
+KNOWN_ISSUE_TYPES = ("Task", "Bug", "Feature", "Epic", "Initiative")
+# Optional fields: unset when the org has not provisioned them.
+PRIORITY_FIELD_ID = _PF.get("priorityFieldId")
+PRIORITY_OPTION_IDS = _PF.get("priorityOptionIds") or {}
+EFFORT_FIELD_ID = _PF.get("effortFieldId")
+EFFORT_OPTION_IDS = _PF.get("effortOptionIds") or {}
+# Lower sorts first; an issue with no Priority value ranks as Medium.
 PRIORITY_RANK = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
-EFFORT_FIELD_ID = _PF["effortFieldId"]
-EFFORT_OPTION_IDS = _PF["effortOptionIds"]
-# Native "Stage" and "Pipeline Status" issue fields (operator-provisioned) are the
-# SOLE source of truth for stage/status -- see "Issue taxonomy" in references/operations.md. The old
-# stage:*/status:* labels have been removed from the repo entirely (retired
-# 2026-08-16, per operator instruction) -- `epic:standing` is the one label this
-# pipeline still reads/writes. Because these fields are now load-bearing (not a
-# best-effort board mirror), a write failure here must raise, never be swallowed.
-#
-# "LLD" was added as its own real option 2026-08-20, per operator instruction --
-# before then `lld` reused "Architecture" and relied on prose to tell the two
-# apart. It is the Stage an Epic's LLD-phase Task is cut at (`set-stage`), and
-# every place that reads/writes the Stage field treats it as an ordinary
-# distinct value, same as any other stage.
+# The native Stage / Pipeline Status fields are the sole source of truth for
+# stage and status, so a failed write must raise, never be swallowed.
 STAGE_FIELD_ID = _PF["stageFieldId"]
 STAGE_OPTION_IDS = _PF["stageOptionIds"]
 STAGE_FIELD_NAMES = {
     "Product": "product", "Architecture": "architecture", "Development": "development",
     "PR Review": "pr-review", "LLD": "lld",
-    # `Testing` is a RETIRED stage -- it was merged into `development` on
-    # 2026-09-12 (the implementer writes and runs its own tests; `pr-review` judges
-    # whether they are any good). Nothing writes this value any more. The read
-    # mapping stays so an issue stranded at the old value by an in-flight epic
-    # still resolves to a stage the dev lane will pick up instead of reading as
-    # "no stage at all".
+    # Retired: nothing writes it; still read so an issue left at it is picked up.
     "Testing": "testing",
 }
 
-# Stages a child can be sitting at when its draft PR is waiting for `pr-review`.
-# `pr-review` is what `open-dev-pr` now sets; `testing` is the retired value an
-# epic already in flight may have stamped before this change, kept so those
-# children still surface in `list-ready-for-review` instead of silently vanishing
-# from the queue.
+# Stages a child with a draft PR awaiting `pr-review` can be at (`testing` is retired).
 REVIEW_ENTRY_STAGES = ("pr-review", "testing")
+# Retired role -> the live role that claims a child stranded at it.
+RETIRED_ROLES = {"testing": "development"}
 PIPELINE_STATUS_FIELD_ID = _PF["pipelineStatusFieldId"]
 PIPELINE_STATUS_OPTION_IDS = _PF["pipelineStatusOptionIds"]
 PIPELINE_STATUS_FIELD_NAMES = {
@@ -369,13 +229,8 @@ PIPELINE_STATUS_FIELD_NAMES = {
     "Awaiting Human Review": "awaiting-human-review", "Needs Human": "needs-human",
     "Feedback Received": "feedback-received", "Done": "done",
 }
-# A gate PR is still "currently open" for an issue at either of these two Pipeline
-# Status values -- `Feedback Received` is purely a visibility flip on top of
-# `Awaiting Human Review` (see `cmd_mark_feedback_received` / "Human-review gates" in
-# SKILL.md), never a second, independent gate state. Every place that used to check
-# `pipeline_status(x) == "awaiting-human-review"` to mean "this unit has an open gate"
-# must check membership in this tuple instead, or it stops recognizing a
-# `feedback-received` issue as gate-pending at all.
+# Statuses meaning "a gate PR is open"; `feedback-received` is only a visibility
+# flip on top of `awaiting-human-review`, so test membership, never equality.
 GATE_PENDING_STATUSES = ("awaiting-human-review", "feedback-received")
 
 Runner = Callable[[list], str]
@@ -386,9 +241,7 @@ class GhError(RuntimeError):
 
 
 def _utc_now_marker() -> str:
-    """The one timestamp format every stage-transition marker comment uses. A single
-    call site means a format change (e.g. adding milliseconds) is a one-line edit
-    instead of a find-and-fix across every marker-writing command."""
+    """UTC timestamp in the format every marker comment uses."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -401,20 +254,9 @@ def _default_runner(argv: list) -> str:
 
 @runtime_checkable
 class WorkItemProvider(Protocol):
-    """The work-item-tracker contract every `cmd_*` function is written against.
-    `GitHub` is the only implementation today (2026-09-14) -- this Protocol exists
-    so a second one (Jira, see README.md's "Initiative-driven lifecycle" section) can be dropped in
-    without changing a single `cmd_*` function, not because a second one is built
-    yet. Deliberately narrow: **issue/work-item management only.** PR/branch/CI
-    methods (`pr_*`, `branch_*_by`, `path_on_ref`, `graphql`) are Code-Host concerns,
-    scoped out of this contract on purpose -- this was a deliberate decision: git-protocol
-    operations only, PR/merge/CI mechanics staying hardcoded to github.com, so
-    there is deliberately no `CodeHostProvider` seam here to match.
-
-    A structural (`Protocol`) contract, not an ABC: nothing has to inherit from
-    this to satisfy it, duck typing already does -- `GitHub` was never changed to
-    conform, it already did. This documents the contract explicitly instead of
-    leaving it implicit in whatever `GitHub` happens to expose."""
+    """Work-item-tracker contract every `cmd_*` function is written against;
+    `GitHub` is the only implementation. Issue management only -- PR/branch/CI
+    mechanics are deliberately out of scope."""
 
     def issue_list(self) -> list: ...
     def issue_view(self, number: int) -> dict: ...
@@ -433,19 +275,14 @@ class WorkItemProvider(Protocol):
     def set_issue_type(self, number: int, type_name: str) -> None: ...
     def set_stage_field(self, number: int, stage: str) -> None: ...
     def set_pipeline_status_field(self, number: int, status: str) -> None: ...
+    def set_priority_field(self, number: int, priority: str) -> None: ...
+    def set_effort_field(self, number: int, effort: str) -> None: ...
     def clear_stage_and_status_fields(self, number: int) -> None: ...
     def clear_stage_field(self, number: int) -> None: ...
-    def clear_pipeline_status_field(self, number: int) -> None: ...
     def add_sub_issue(self, parent_number: int, child_number: int) -> None: ...
 
     def classify_unit(self, number: int) -> str:
-        """Is `number` an "initiative", "epic", "task", or "other"? The hierarchy
-        needs this answerable per-issue rather than only ever caller-asserted.
-        Each provider implements its own signal --
-        GitHub's below reads `pipeline.classification` config; Jira would read its
-        native Initiative/Epic/Story hierarchy level instead. Part of the
-        `WorkItemProvider` contract every provider implements, not an
-        afterthought bolted onto GitHub's alone."""
+        """"initiative", "epic", "task" or "other" for `number`."""
         ...
 
 
@@ -457,12 +294,8 @@ class GitHub:
         self._run = runner
 
     def issue_list(self) -> list:
-        """All issues (open AND closed) with the fields the picker needs, including
-        `issueType`/`parent` -- `gh issue list --json` (porcelain) does not expose
-        either field, so this goes straight to GraphQL. Returns both states (not
-        just open) because epic-started detection needs to see closed children too;
-        callers that want only open issues filter on `issue["state"] == "OPEN"`
-        themselves (see decide_next_action, cmd_list_needs_human)."""
+        """Every issue, open and closed, with labels, fields, `issueType` and `parent`
+        flattened. GraphQL because `gh issue list --json` exposes neither of the last two."""
         issues = []
         after = "null"
         while True:
@@ -507,50 +340,25 @@ class GitHub:
         return data["repository"]["issue"]["id"]
 
     def issue_fields(self, number: int) -> dict:
-        """Single-issue native-field read (name -> value), e.g. {"Stage": "Testing"}.
-        Same shape as the per-issue "fields" dict issue_list() builds in bulk, for a
-        caller (verify_exit, ad-hoc checks) that only needs one issue."""
+        """One issue's single-select field values, name -> value (e.g. {"Stage": "LLD"})."""
         data = self.graphql(_ISSUE_FIELDS_QUERY.format(n=number))
         nodes = data["repository"]["issue"]["issueFieldValues"]["nodes"]
         return {n["field"]["name"]: n["name"] for n in nodes if n["__typename"] == "IssueFieldSingleSelectValue"}
 
     def issue_epic_info(self, number: int) -> dict:
-        """Minimal single-issue fetch (issueType/parent/labels) for is_epic() and
-        friends -- cheaper than issue_list()'s full paginated bulk fetch when a
-        caller (cmd_claim, cmd_mark_issue_closed) only needs to classify one issue."""
+        """One issue's issueType/parent/labels (labels flattened), for classification."""
         data = self.graphql(_ISSUE_EPIC_CHECK_QUERY.format(n=number))
         node = data["repository"]["issue"]
         node["labels"] = node["labels"]["nodes"]
         return node
 
     def classify_unit(self, number: int) -> str:
-        """GitHub's implementation of the `WorkItemProvider.classify_unit` contract
-        (see there for why this exists). Reads `pipeline.classification` from
-        config -- a dict keyed `"initiative"|"epic"|"task"`, each value
-        `{"field": "issueType"|"label", "value": "<name>"}`. A client without
-        native GitHub Issue Types provisioned for these can classify by label
-        instead, with no code change here.
-
-        `is_epic`/`is_initiative` are the per-dict helpers most callers
-        actually want.
-
-        Returns "other" when no configured rule matches, never a guessed default
-        -- a repo that hasn't provisioned this classification yet gets an honest
-        "don't know" (`references/history.md` is full of what a wrong guess
-        costs), not a silent misroute into the wrong stage's lifecycle.
-
-        This single-issue fetch is for a caller that only has one issue number in
-        hand. A bulk caller that already has every issue's `issueType`/`labels`
-        from `issue_list()` (the picker) must use `classify_unit_from_issue`
-        directly on that dict instead -- re-fetching per issue here would be an
-        N+1 GraphQL call per pass."""
+        """Classify one issue by number. A caller already holding `issue_list()` dicts
+        uses `classify_unit_from_issue` directly to avoid a fetch per issue."""
         return classify_unit_from_issue(self.issue_epic_info(number))
 
     def blocked_by(self, number: int) -> list:
-        """Open issue numbers blocking `number`, via the native blockedBy relationship
-        -- replaces the old body-text '## Dependencies' section parsing. Closed
-        blockers are omitted, so an empty result means "not blocked right now",
-        never requiring a separate dependency-cleared step (see decide_next_action)."""
+        """Open issue numbers blocking `number` (native blockedBy); closed ones are omitted."""
         data = self.graphql(_BLOCKED_BY_QUERY.format(n=number))
         nodes = data["repository"]["issue"]["blockedBy"]["nodes"]
         return [n["number"] for n in nodes if n["state"] == "OPEN"]
@@ -561,9 +369,7 @@ class GitHub:
         self.graphql(_ADD_BLOCKED_BY_MUTATION.format(issue_id=issue_id, blocking_id=blocking_id))
 
     def blocking(self, number: int) -> list:
-        """Open issue numbers that `number` itself blocks -- the reverse of
-        blocked_by. Used to check whether closing an epic's child left some other
-        still-open issue waiting on it (see cmd_check_epics_closeable)."""
+        """Open issue numbers that `number` blocks (the reverse of `blocked_by`)."""
         data = self.graphql(_BLOCKING_QUERY.format(n=number))
         nodes = data["repository"]["issue"]["blocking"]["nodes"]
         return [n["number"] for n in nodes if n["state"] == "OPEN"]
@@ -580,57 +386,36 @@ class GitHub:
         type_id = ISSUE_TYPE_IDS[type_name]
         self.graphql(_SET_ISSUE_TYPE_MUTATION.format(issue_id=issue_id, type_id=type_id))
 
-    def set_stage_field(self, number: int, stage: str):
-        """Writes the native "Stage" issue field -- the sole source of truth
-        current_stage() reads back (stage:* labels retired 2026-08-16). Unlike the
-        old best-effort mirror, a failure here must propagate: an unset field is
-        indistinguishable from a fresh issue (default_stage() would silently
-        misclassify a mid-pipeline issue), so this deliberately does NOT swallow
-        GhError."""
+    def _set_single_select(self, number: int, field_id: str, option_id: str):
         issue_id = self.issue_node_id(number)
-        option_id = STAGE_OPTION_IDS[stage]
         self.graphql(_SET_ISSUE_FIELD_MUTATION.format(
-            issue_id=issue_id, field_id=STAGE_FIELD_ID, option_id=option_id))
+            issue_id=issue_id, field_id=field_id, option_id=option_id))
+
+    def set_stage_field(self, number: int, stage: str):
+        """Write the Stage field. Never swallows GhError: an unset Stage reads as a fresh issue."""
+        self._set_single_select(number, STAGE_FIELD_ID, STAGE_OPTION_IDS[stage])
 
     def set_pipeline_status_field(self, number: int, status: str):
-        """Writes the native "Pipeline Status" issue field -- the sole source of
-        truth pipeline_status() reads back (status:* labels retired 2026-08-16).
-        `status` is the label-style suffix (e.g. "in-progress"). Does not swallow
-        GhError, for the same reason as set_stage_field above."""
-        issue_id = self.issue_node_id(number)
-        option_id = PIPELINE_STATUS_OPTION_IDS[status]
-        self.graphql(_SET_ISSUE_FIELD_MUTATION.format(
-            issue_id=issue_id, field_id=PIPELINE_STATUS_FIELD_ID, option_id=option_id))
+        """Write the Pipeline Status field (`status` like "in-progress"); never swallows GhError."""
+        self._set_single_select(number, PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS[status])
+
+    def set_priority_field(self, number: int, priority: str):
+        self._set_single_select(number, PRIORITY_FIELD_ID, PRIORITY_OPTION_IDS[priority])
+
+    def set_effort_field(self, number: int, effort: str):
+        self._set_single_select(number, EFFORT_FIELD_ID, EFFORT_OPTION_IDS[effort])
 
     def clear_stage_and_status_fields(self, number: int):
-        """Deletes both native field values -- called once an Epic completes its
-        design phase and hands off to its Tasks (`cmd_merge_lld_doc`). The epic
-        stays open with children still
-        pending, so this is deliberately a blank/deleted state, not `Done` --
-        it has no "current stage" of its own anymore, but it isn't finished
-        either. See `cmd_mark_issue_closed` for the genuinely-closed case, which
-        sets Pipeline Status to `Done` instead of deleting it."""
+        """Delete both Stage and Pipeline Status: an Epic handing off to its Tasks has no
+        stage of its own but is not `Done` either."""
         issue_id = self.issue_node_id(number)
         self.graphql(_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id=issue_id, field_id=STAGE_FIELD_ID))
         self.graphql(_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id=issue_id, field_id=PIPELINE_STATUS_FIELD_ID))
 
     def clear_stage_field(self, number: int):
-        """Deletes only the Stage value, leaving Pipeline Status untouched --
-        used when an issue closes (`cmd_mark_issue_closed`): "current stage" is
-        meaningless once closed, but Pipeline Status gets set to `Done` right
-        after this call, not deleted."""
+        """Delete only the Stage value (Pipeline Status untouched)."""
         issue_id = self.issue_node_id(number)
         self.graphql(_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id=issue_id, field_id=STAGE_FIELD_ID))
-
-    def clear_pipeline_status_field(self, number: int):
-        """Deletes only the Pipeline Status value, leaving Stage untouched -- used
-        to park a task issue whose LLD found an architecture deviation and is
-        waiting on the owning epic's re-gate (see "Epic-level deviation escalation"
-        in SKILL.md). Unlike clear_stage_and_status_fields, the task isn't done --
-        its Stage (still `lld`) must survive so the normal per-child eligibility
-        loop picks it back up once the epic's re-gate merges."""
-        issue_id = self.issue_node_id(number)
-        self.graphql(_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id=issue_id, field_id=PIPELINE_STATUS_FIELD_ID))
 
     def add_sub_issue(self, parent_number: int, child_number: int):
         parent_id = self.issue_node_id(parent_number)
@@ -648,10 +433,7 @@ class GitHub:
         self._run(["gh", "pr", "comment", str(number), "--repo", self.repo, "--body", body])
 
     def closed_issue_count(self) -> int:
-        """Exact repo-wide closed-issue count via the search API's total_count --
-        replaces a `gh issue list --limit 200` length check, which silently
-        pegged at 200 once the repo outgrew the cap (making any modulo-based
-        retro trigger fire forever)."""
+        """Exact repo-wide closed-issue count (search API `total_count`, uncapped)."""
         out = self._run(["gh", "api",
                           f"search/issues?q=repo:{self.repo}+type:issue+state:closed&per_page=1",
                           "--jq", ".total_count"])
@@ -669,18 +451,7 @@ class GitHub:
         return json.loads(out)
 
     def path_on_ref(self, path: str, ref: str = "main") -> bool:
-        """Whether `path` exists on branch `ref`, checked GitHub-side so it is
-        correct regardless of what any local checkout or worktree currently holds.
-
-        Backs the "docs are on the epic branch" item in `cmd_check_epics_closeable`
-        (`ref=epic-<n>`). An epic's `architecture.md` that never merged off its
-        gate sub-branch is reachable only by SHA, and a SHA quoted from an old
-        comment can resolve to a superseded draft -- which is exactly how #209's
-        `pr-review` raised a citation finding against an unreachable commit that
-        `development` then had to disprove twice (2026-08-20, see
-        references/history.md). Since 2026-09-06 the epic branch, not `main`, is
-        where a merged epic gate lands the doc, so that is the ref checked for an
-        open epic; `close-epic`'s final merge is what carries it to `main`."""
+        """Whether `path` exists on `ref`, checked GitHub-side (independent of any local checkout)."""
         try:
             self._run(["gh", "api", f"repos/{self.repo}/contents/{path}?ref={ref}",
                        "--jq", ".sha"])
@@ -689,11 +460,7 @@ class GitHub:
             return False
 
     def pr_list_for_branch(self, branch: str, state: str = "open") -> list:
-        """Open PRs whose head branch is `branch` -- how `cmd_list_ready_for_review`
-        finds an issue's development PR without parsing it out of a comment's
-        prose. `gh pr list --head` is exact-match on the branch name, so this is
-        at most one PR in this pipeline's convention (one `issue-<n>` branch, one
-        dev PR)."""
+        """PRs (default open) whose head branch is exactly `branch`."""
         out = self._run(["gh", "pr", "list", "--repo", self.repo, "--head", branch,
                           "--state", state, "--json", "number,isDraft,headRefName,title,url"])
         return json.loads(out)
@@ -712,63 +479,30 @@ class GitHub:
             out = self._run(["gh", "pr", "checks", str(number), "--repo", self.repo,
                               "--json", "name,state,bucket,link,workflow"])
         except GhError as e:
-            # `gh pr checks` errors out (rather than returning `[]`) when nothing has ever
-            # reported against this PR's head SHA at all -- e.g. a docs-only PR where every
-            # workflow's `paths:` filter genuinely excludes every changed file. Treat that
-            # specific case as zero checks, same as checks_status() already does; a
-            # code-touching PR that lands here because its required workflow never
-            # triggered is caught downstream by merge_gate_status()'s missing-checks path,
-            # not by this branch.
+            # gh errors instead of returning [] when no check ever reported; a required
+            # workflow that never ran is caught later as missing-checks.
             if "no checks reported" in str(e):
                 return []
             raise
         return json.loads(out)
 
     def pr_files(self, number: int) -> list:
-        """Changed paths for a PR, via the paginated REST `pulls/{n}/files` endpoint.
-        Two other approaches were tried and rejected, each with its own cap:
-        `gh pr view --json files` is backed by a GraphQL connection capped at 100
-        entries with no pagination (confirmed against the gh 2.76.1 binary) -- a
-        >100-file PR silently drops paths past the cap. `gh pr diff --name-only` has
-        no entry-count cap, but the diff itself 406s past 20,000 lines (confirmed:
-        `gh pr diff 128276 --repo kubernetes/kubernetes --name-only` -> `HTTP 406:
-        ... diff exceeded the maximum number of lines (20000)`) -- reachable here,
-        since a backend package-lock.json alone can be ~12k lines, so a single
-        lockfile regen in a PR would trip it. `gh api --paginate` walks the REST
-        endpoint page by page and has no line-count or fixed-entry cap of its own
-        (practically unbounded for a repo this size) -- confirmed to return all
-        187/187 files on a PR where both prior approaches failed. It also sidesteps
-        `gh pr diff`'s diff-header parsing, which can silently mis-parse C-quoted
-        non-ASCII paths and rename-source paths.
-
-        Since this feeds merge_gate_status() -- the sole merge gate in this repo,
-        GitHub branch protection being unavailable -- an incomplete file list here
-        means a code-touching PR could read as untouched and merge with no CI at
-        all."""
+        """Every changed path of a PR, via paginated REST `pulls/{n}/files`. `gh pr view
+        --json files` caps at 100 and `gh pr diff` 406s past 20k lines; this feeds the
+        merge gate, so a truncated list could let code merge without CI."""
         out = self._run(["gh", "api", "--paginate", f"repos/{self.repo}/pulls/{number}/files",
                           "--jq", ".[].filename"])
         return [line for line in out.splitlines() if line.strip()]
 
     def branch_behind_by(self, head: str, base: str = "main") -> int:
-        """How many commits `base` has that `head` lacks, via the REST compare
-        endpoint -- the mergeability freshness check `cmd_merge_pr` runs before
-        squash-merging. GitHub-side (no local git needed), so it's correct
-        regardless of which worktree/checkout state any local repo is in."""
+        """Commits `base` has that `head` lacks (REST compare, GitHub-side)."""
         out = self._run(["gh", "api", f"repos/{self.repo}/compare/{base}...{head}",
                           "--jq", ".behind_by"])
         return int(out.strip())
 
     def base_delta_files(self, head: str, base: str = "main") -> list:
-        """The files `base` changed that `head` does not have -- the diff from
-        merge-base(head, base) to base -- via the same REST compare endpoint as
-        `branch_behind_by`, reading `.files[].filename`. `cmd_merge_pr` uses it to
-        decide whether a behind-base PR's stale-base risk is real: a base delta
-        that touches no required-workflow path cannot have changed suite-covered
-        behaviour, so the PR's existing CI/attestation still describes the merged
-        result and no re-sync/re-CI/re-attest is needed. GitHub's compare API
-        returns at most 300 files; `base_delta_needs_reattest` treats a delta at
-        that cap conservatively, so a truncated read never yields the docs-only
-        fast path."""
+        """Files `base` changed since its merge-base with `head` (REST compare). GitHub
+        returns at most 300 files; callers treat a delta at that cap as truncated."""
         out = self._run(["gh", "api", f"repos/{self.repo}/compare/{head}...{base}",
                           "--jq", ".files[]?.filename"])
         return [line for line in out.splitlines() if line.strip()]
@@ -779,19 +513,22 @@ class GitHub:
     def pr_merge(self, number: int):
         self._run(["gh", "pr", "merge", str(number), "--repo", self.repo, "--squash", "--delete-branch"])
 
-    def graphql(self, query: str) -> dict:
-        out = self._run(["gh", "api", "graphql", "-f", f"query={query}"])
-        return json.loads(out)["data"]
+    def reply_review_thread(self, thread_id: str, body: str):
+        self.graphql(_REPLY_REVIEW_THREAD_MUTATION, threadId=thread_id, body=body)
+
+    def resolve_review_thread(self, thread_id: str):
+        self.graphql(_RESOLVE_REVIEW_THREAD_MUTATION, threadId=thread_id)
+
+    def graphql(self, query: str, **variables: str) -> dict:
+        """Run `query`; `variables` pass as GraphQL string variables (no escaping needed)."""
+        argv = ["gh", "api", "graphql", "-f", f"query={query}"]
+        for name, value in variables.items():
+            argv += ["-f", f"{name}={value}"]
+        return json.loads(self._run(argv))["data"]
 
 
 def get_work_item_provider(runner: Runner = _default_runner) -> WorkItemProvider:
-    """The one place a `WorkItemProvider` gets instantiated -- every CLI command
-    calls this instead of `GitHub()` directly, so `pipeline.workItemProvider.type`
-    decides which provider runs without touching a single `cmd_*` function. Only
-    `"github"` is implemented (2026-09-14) -- Jira is a documented seam
-    (README.md, "Initiative-driven lifecycle"), not built. Naming anything else is a clear
-    refusal, not a silent fallback to GitHub -- that would run against the wrong
-    tracker without anyone noticing."""
+    """The configured `pipeline.workItemProvider`; only "github" exists, anything else raises."""
     provider = PIPELINE.get("workItemProvider", {}).get("type", "github")
     if provider == "github":
         return GitHub(runner=runner)
@@ -808,17 +545,12 @@ def has_label(issue: dict, name: str) -> bool:
 
 
 def current_stage(issue: dict) -> Optional[str]:
-    """Reads the native "Stage" issue field -- stage:* labels were retired
-    2026-08-16; this field is now the sole source of truth. `issue["fields"]` is
-    populated by issue_list()/issue_fields() from the same generic
-    IssueFieldSingleSelectValue shape Priority/Effort already use."""
+    """The issue's Stage field as a stage name, or None."""
     return STAGE_FIELD_NAMES.get(issue.get("fields", {}).get("Stage"))
 
 
 def pipeline_status(issue: dict) -> Optional[str]:
-    """Reads the native "Pipeline Status" issue field -- replaces the old
-    status:in-progress/needs-human/awaiting-human-review labels (retired
-    2026-08-16). None means no status set (e.g. a fresh, unclaimed issue)."""
+    """The issue's Pipeline Status as a slug (e.g. "in-progress"), or None when unset."""
     return PIPELINE_STATUS_FIELD_NAMES.get(issue.get("fields", {}).get("Pipeline Status"))
 
 
@@ -828,15 +560,8 @@ def issue_type(issue: dict) -> Optional[str]:
 
 
 def classify_unit_from_issue(issue: dict) -> str:
-    """Pure classification core shared by `GitHub.classify_unit` (fresh
-    single-issue fetch via `issue_epic_info`) and every bulk picker
-    (`decide_next_action`, `cmd_list_parallel_ready`, `cmd_list_design_ready`),
-    which already has every issue's `issueType`/`labels` from one `issue_list()`
-    call and must not re-fetch per issue just to classify it. Both callers'
-    issue dicts share the same flattened shape (`labels` a plain list, not a
-    `{"nodes": [...]}` wrapper) -- `issue_list()` flattens it itself,
-    `issue_epic_info()` flattens it before returning. See `GitHub.classify_unit`
-    for what the config-driven rules mean."""
+    """"initiative"/"epic"/"task"/"other" for an issue dict with flattened `labels`,
+    per `pipeline.classification`; "other" when no rule matches."""
     rules = PIPELINE.get("classification", {})
     if not rules:
         return "other"
@@ -852,32 +577,18 @@ def classify_unit_from_issue(issue: dict) -> str:
 
 
 def is_epic(issue: dict) -> bool:
-    """An Epic: classified "epic" by `pipeline.classification` (a configured
-    issueType or label). Has an Initiative parent (Initiative-driven) or was cut
-    directly as a bare engineering-driven Epic. A standing or legacy epic is an
-    Epic too -- its profile label rides on top of the classification."""
+    """Classified "epic" (standing and legacy epics included)."""
     return classify_unit_from_issue(issue) == "epic"
 
 
 def is_initiative(issue: dict) -> bool:
-    """Is `issue` an Initiative? Only ever matches
-    when `pipeline.classification.initiative` is configured and the issue
-    carries that native type/label."""
+    """Classified "initiative"."""
     return classify_unit_from_issue(issue) == "initiative"
 
 
 def resolve_profile(epic_issue: Optional[dict]) -> dict:
-    """Resolve an epic's behavioural profile from `pipeline.profiles`.
-
-    Profiles are an ordered list; the first whose `match` holds against the epic's
-    labels wins, and the `"*"` entry is the terminal catch-all. Toggles the matched
-    profile omits inherit `_PROFILE_TOGGLE_DEFAULTS`; its `gates` inherit the global
-    `pipeline.gates`. The returned dict always carries every toggle plus `name` and a
-    complete `gates` block, so callers never have to guess a default.
-
-    This replaced the old hardcoded `epic:standing`/`epic:legacy` label checks: the
-    client now owns the label->behaviour mapping (it may use `epic:standing`, `RTB`,
-    or any label it likes). See "Epic profiles" in references/epics.md."""
+    """The epic's first matching `pipeline.profiles` entry, with every toggle, `name`
+    and a complete `gates` block filled in from the defaults."""
     labels = label_names(epic_issue) if epic_issue else set()
     chosen: dict = {}
     for prof in PIPELINE["profiles"]:
@@ -896,57 +607,31 @@ def resolve_profile(epic_issue: Optional[dict]) -> dict:
 
 
 def effective_gates(epic_issue: Optional[dict]) -> dict:
-    """The resolved `gates` block (skipConfidenceThreshold, requiresHumanGateA) for
-    the epic's profile -- convenience over `resolve_profile(...)["gates"]`."""
+    """The epic profile's resolved `gates` block."""
     return resolve_profile(epic_issue)["gates"]
 
 
 def is_epic_standing(issue: dict) -> bool:
-    """True for a standing epic (a permanent backlog umbrella): no Architecture-/
-    LLD-phase Tasks, each child runs its own full per-issue flow and integrates
-    straight into `main`. A thin read of the epic's profile (`epicLevelPhase ==
-    False`); the behaviour bundle lives in `pipeline.profiles`, not in this label
-    check. See "Epic profiles" in references/epics.md."""
+    """Standing epic (profile `epicLevelPhase` false): no phase-Tasks; each child runs
+    its own full flow and integrates into `main`."""
     return not resolve_profile(issue)["epicLevelPhase"]
 
 
 def is_epic_legacy(issue: dict) -> bool:
-    """True for an epic this pipeline no longer drives at all (profile `driven ==
-    False`). `decide_next_action` checks this first and returns `action: "skip"` for
-    the epic and every child -- no flow at all. The label->this-behaviour mapping is
-    a client profile now, not a hardcoded `epic:legacy` check."""
+    """Epic the pipeline does not drive at all (profile `driven` false)."""
     return not resolve_profile(issue)["driven"]
 
 
 def is_epic_architected(issue: dict) -> bool:
-    """True once an Epic's design phase (Architecture-phase Task, then LLD-phase
-    Task) has completed -- set by `merge-lld-doc`, and only then are its Tasks
-    eligible for `development`. Marked with the `epic:architected` label rather
-    than a comment marker so `next-action` can read it straight off the bulk
-    `issue_list()` fetch (which includes labels) instead of an extra per-epic
-    `issue_view` call."""
+    """Whether the Epic's design phase is done (label set by `merge-lld-doc`). A label, not
+    a marker, so it is readable from the bulk `issue_list()` fetch."""
     return has_label(issue, LABELS["architected"])
 
 
 def default_stage(issue: dict, parent_epic: Optional[dict] = None) -> Optional[str]:
-    """Stage an unstaged issue starts at, or None when there is no safe guess.
-
-    * **An Initiative's child** (its Product-Roadmap Task) starts at `product`.
-    * **A child of a non-standing Epic** gets None. Every child such an Epic is
-      meant to have is staged explicitly: its phase-Tasks by `set-stage` when
-      cut, its functional Tasks by `merge-lld-doc`. A Stage-less child is
-      therefore either one of those Tasks waiting on `merge-lld-doc`, or
-      something filed late (e.g. a closing-verification Blocker) that the
-      orchestrator has to route by hand -- `next-action` reports it as
-      `unstaged` rather than guessing.
-    * **A standing epic's child, or a parentless issue**, runs the per-issue
-      flow: a bug fast-tracks straight to `architecture` (skipping `product`
-      unless `architecture` itself escalates back to it -- see "Bug
-      fast-track"), every other issue starts at `product`.
-
-    Never called with an `epic:legacy` parent in practice -- `decide_next_action`
-    skips a legacy epic and every one of its children before any Stage is
-    assigned (see `is_epic_legacy`)."""
+    """Stage an unstaged issue starts at, or None when there is no safe guess: an
+    Initiative's child -> product; a non-standing Epic's child -> None (those are
+    staged explicitly); otherwise a Bug -> architecture, anything else -> product."""
     if parent_epic is not None and is_initiative(parent_epic):
         return "product"
     if parent_epic is not None and is_epic(parent_epic) and not is_epic_standing(parent_epic):
@@ -957,22 +642,16 @@ def default_stage(issue: dict, parent_epic: Optional[dict] = None) -> Optional[s
 
 
 def product_gate_pending(all_issues: list) -> list:
-    """Open issues, repo-wide, sitting at Stage=Product with an open Gate A --
-    Pipeline Status in `GATE_PENDING_STATUSES` (`feedback-received` is a
-    visibility flip on top of `awaiting-human-review`, still the same open gate).
-    This is the human's product-review queue; `PRODUCT_WIP_CAP` bounds it.
-    Repo-wide on purpose: the human reviewing Gate A PRs is one person across
-    every epic, so an epic-scoped count would let N invocations each open five."""
+    """Sorted numbers of open issues, repo-wide, at Stage=Product with an open Gate A.
+    Repo-wide on purpose: one human reviews Gate A across every epic."""
     return sorted(i["number"] for i in all_issues
                   if i["state"] == "OPEN" and current_stage(i) == "product"
                   and pipeline_status(i) in GATE_PENDING_STATUSES)
 
 
 def product_wip_headroom(all_issues: list) -> Optional[int]:
-    """How many *fresh* `product` delegations may start before the Gate A queue
-    hits `PRODUCT_WIP_CAP`; `None` when the cap is disabled (`<= 0`). Callers that
-    start several units in one call (`list-design-ready`) decrement it per unit
-    selected, so a single fan-out cannot overshoot the cap either."""
+    """Fresh `product` delegations allowed before the Gate A queue hits
+    `PRODUCT_WIP_CAP`; None when the cap is disabled."""
     cap = PRODUCT_WIP_CAP
     if not cap or cap <= 0:
         return None
@@ -980,9 +659,7 @@ def product_wip_headroom(all_issues: list) -> Optional[int]:
 
 
 def priority_rank(issue: dict) -> int:
-    """Reads the native GitHub "Priority" issue field (Urgent/High/Medium/Low) --
-    replaces the old priority:pX label. No value set = rank 2 (Medium), same
-    default the old "no priority label = p2" rule used."""
+    """Rank from the native "Priority" field (lower first); unset ranks as Medium."""
     return PRIORITY_RANK.get(issue.get("fields", {}).get("Priority"), 2)
 
 
@@ -994,90 +671,42 @@ def sort_key(issue: dict) -> tuple:
     return (priority_rank(issue), parse_created_at(issue))
 
 
-
-
 _GATE_PR_MARKER = re.compile(r"<!--\s*gate-pr:\s*(\w+):(\d+)\s*-->")
 _GATE_CUTOFF_MARKER = re.compile(r"<!--\s*gate-comments-processed:\s*([^\s]+)\s*-->")
 _NEEDS_HUMAN_REASON = re.compile(r"🙋 Needs human input — (.+?)(?:\n\n<!--|\Z)", re.DOTALL)
-# The generic per-stage handoff marker every stage's exit comment ends with (see
-# "Stage-specific exit actions" in references/stage-playbooks.md): `<!-- stage-transition: <from>-><to>
-# @ <ISO8601> -->`. The timestamp is optional here purely for robustness -- every
-# writer emits one today.
+# `<!-- stage-transition: <from>-><to> @ <ISO8601> -->`; the timestamp is optional.
 _STAGE_TRANSITION_MARKER = re.compile(r"<!--\s*stage-transition:\s*(\S+?)->(\S+?)\s*(?:@[^>]*?)?-->")
-# Records that a `pr-review` pass actually ran and what it concluded --
-# `<!-- pr-review-outcome: clean|rework:<pr> @ <ISO8601> -->`, posted by
-# `record-pr-review`. Same comment-marker convention as `gate-pr` above. This is
-# what stops `list-ready-for-review` from handing the same PR to a second review
-# agent: an issue sits at Stage = Testing / Pipeline Status = In Progress both
-# before *and* during rework, so neither field can distinguish "awaiting review"
-# from "already reviewed, dev is fixing it". See "Parallel PR review" in references/parallelism.md.
+# `<!-- pr-review-outcome: clean|rework:<pr> @ <ISO8601> -->`. Stage/status fields
+# can't tell "awaiting review" from "reviewed, in rework"; this marker can.
 _PR_REVIEW_OUTCOME_MARKER = re.compile(
     r"<!--\s*pr-review-outcome:\s*(\w+):(\d+)(?:\s+same-class:(true|false))?"
     r"\s*(?:@[^>]*?)?-->")
-# Posted by `cmd_sync_branch` when reconciling with origin/main hit real unmerged
-# paths -- persists the sync-branch-conflict <-> development escalation-valve
-# pairing on the issue thread so `cmd_pairing_counts` (and a fresh session) can
-# reconstruct the strike count instead of it living only in one session's memory.
-# Closing-verification evidence, posted by the two closing runs on an epic:
-# `<!-- epic-verification: e2e|exploratory:<epic> @ <ISO8601> -->`. `close-epic`
-# refuses to merge the integration branch until both are present *and* newer than
-# the last `origin/main` reconcile of the epic branch -- evidence gathered before
-# the final merge proves nothing about the tree that actually ships.
+# `<!-- epic-verification: e2e|exploratory:<epic> @ <ISO8601> -->`; must be newer
+# than the last `epic-reconciled` marker to count.
 _EPIC_VERIFICATION_MARKER = re.compile(r"<!--\s*epic-verification:\s*(\w+):(\d+)\s*(?:@[^>]*?)?-->")
 
 _EPIC_RECONCILED_MARKER = re.compile(r"<!--\s*epic-reconciled:\s*(\d+)\s*(?:@[^>]*?)?-->")
 
+# Persists sync-branch conflicts so `cmd_pairing_counts` can rebuild the strike count.
 _SYNC_CONFLICT_MARKER = re.compile(r"<!--\s*sync-conflict:\s*(\S+)\s*(?:@[^>]*?)?-->")
 
-# Records that a design review ran and what it concluded --
-# `<!-- design-review-outcome: clean|rework:<role> @ <ISO8601> -->`, posted by
-# `record-design-review`. Added 2026-08-28 out of epic #98's retrospective: the
-# `lld-review <-> lld` pairing consumed roughly nine tenths of that epic's review
-# rounds and tripped the valve's context-reset replacement on three of four
-# children -- while being the one high-traffic pairing with **no** mechanical
-# counter, since `pairing-counts` covered only `pr-review` and sync conflicts. The
-# strike count lived solely in one orchestrator's head, so a crashed session (or
-# any continuous-mode agent, which has no memory of prior units by design) would
-# have resumed with it silently reset to zero, leaving the valve unenforceable
-# exactly where it fires most.
+# `<!-- design-review-outcome: clean|rework:<role> @ <ISO8601> -->`; lets the
+# design-review escalation valve be counted from the thread, not session memory.
 _DESIGN_REVIEW_OUTCOME_MARKER = re.compile(
     r"<!--\s*design-review-outcome:\s*(\w+):(\S+?)(?:\s+same-class:(true|false))?"
     r"\s*(?:@[^>]*?)?-->")
 
-# Local-CI attestation, added 2026-09-04 with the main-only-CI cost cut. The
-# backend/frontend suites no longer run on child PRs in GitHub Actions (they run
-# only on push to `main`; see each workflow's `on:` block) -- but they remain
-# MANDATORY for a child PR to merge. The proof just moves from a GHA check to the
-# suite the `development` stage runs locally, attested here as
-# `<!-- local-ci: <suite>:<pr> @ <sha> -->` by `record-local-ci`, and consumed by
-# `missing_required_workflows`. `<sha>` is the exact commit the suite ran against
-# (the development worktree's HEAD). `merge-pr` accepts the attestation ONLY when that
-# sha matches the PR's current head: an attestation from before the last push
-# describes a different tree, so it is treated as absent -- the same freshness
-# principle as the behind-base merge gate and every ordering check in this file. A
-# rework round that adds a commit therefore invalidates the old attestation and
-# forces `development` to re-run and re-attest, which is exactly the intent.
-# The attestation carries the run's own captured output, not a reported number:
-# `development` both writes and validates its own tests since the `testing` stage
-# was merged into it (2026-09-12), so the only thing standing between a claim and
-# the merge gate is that the evidence is machine-produced and sha-pinned.
+# `<!-- local-ci: <suite>:<pr> @ <sha> -->`: a locally run required suite. Counts
+# only when <sha> matches the PR head, so any later push invalidates it.
 _LOCAL_CI_MARKER = re.compile(
     r"<!--\s*local-ci:\s*(\w+):(\d+)\s*@\s*([0-9a-fA-F]{7,40})\s*-->")
 
-# Suite keys a `local-ci` attestation may carry, one per required GHA workflow that
-# went main-only. Kept in step with the `suite` field on REQUIRED_WORKFLOWS below.
 LOCAL_CI_SUITES = tuple(dict.fromkeys(w["suite"] for w in CONFIG["requiredWorkflows"]))
 
 
 def local_ci_suites_attested(comments: list, head_sha: str) -> set:
-    """Suite keys (subset of LOCAL_CI_SUITES) whose thread carries a `local-ci`
-    attestation whose sha matches `head_sha`.
-
-    Empty when `head_sha` is falsy (unknown head -> trust nothing) or no marker
-    matches it. Matching is prefix-tolerant in both directions so a short-sha
-    attestation (`git rev-parse --short`) still matches a full 40-char head, and
-    vice versa -- but a *different* commit never matches, which is the whole
-    point: a stale local run must not satisfy the gate."""
+    """Set of suite keys with a `local-ci` attestation matching `head_sha`.
+    Prefix match either way (short vs full sha); an unknown head trusts nothing."""
     if not head_sha:
         return set()
     head = head_sha.lower()
@@ -1178,10 +807,17 @@ _ADD_SUB_ISSUE_MUTATION = """mutation {{
   }}
 }}"""
 
-# gh's `api graphql` names the repository inline (no `--repo` flag), so the query
-# templates above carry `__OWNER__`/`__NAME__` sentinels that resolve here, once,
-# from the configured repo -- keeping the templates literal-free while the later
-# `.format(n=...)` placeholders are left untouched.
+_REPLY_REVIEW_THREAD_MUTATION = """mutation($threadId: ID!, $body: String!) {
+  addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $threadId, body: $body}) {
+    comment { id }
+  }
+}"""
+
+_RESOLVE_REVIEW_THREAD_MUTATION = """mutation($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) { thread { id isResolved } }
+}"""
+
+# Resolve the repo sentinels once; `.format(...)` placeholders are left for call time.
 for _qname, _qval in list(globals().items()):
     if isinstance(_qval, str) and "__OWNER__" in _qval:
         globals()[_qname] = _qval.replace("__OWNER__", _OWNER).replace("__NAME__", _NAME)
@@ -1200,55 +836,27 @@ REVIEW_ROLES = frozenset({"product-review", "arch-review", "lld-review", "pr-rev
 
 
 def epic_branch(epic: int) -> str:
-    """The long-lived integration branch for a non-standing Epic.
-
-    Created on origin from `main` the first time `publish-doc` lands a phase-Task's
-    doc on it, and never committed to directly otherwise -- it receives the
-    published `architecture.md`/`lld.md`, then each Task's `issue-<n>`. At epic
-    close it takes one merge *from* `origin/main`, gets verified as a whole, and
-    is merged to `main` as a single integration."""
+    """The long-lived integration branch for a non-standing Epic (default `epic-<n>`)."""
     return f"{EPIC_BRANCH_PREFIX}{epic}"
 
 
+def unit_branch(unit: str, number: int) -> str:
+    """The branch for an `issue` or `epic` unit, using the configured prefixes."""
+    return epic_branch(number) if unit == "epic" else issue_branch(number)
+
+
+# Stages only a non-standing Epic's phase-Tasks (Architecture-phase, Architecture
+# revision, LLD-phase) sit at; functional Tasks enter at `development`.
+PHASE_TASK_STAGES = frozenset({"architecture", "arch-review", "lld", "lld-review"})
+
+
 def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
-    """Which branch this unit's work integrates into.
-
-    A child of a non-standing Epic integrates into that Epic's branch, so sibling
-    conflicts surface once, at epic close, against a tree where every sibling is
-    already present -- rather than N times against a moving `main`.
-
-    Cases that integrate straight into `main` instead, none a compatibility hedge:
-
-    * **A standing epic's children** (`epic:standing`, e.g. a standing backlog epic). A standing
-      epic never closes, so its integration branch would never merge and would
-      diverge from `main` without bound.
-    * **A top-level issue with no parent epic.** Nothing to integrate into.
-    * **An Initiative's own child** (its Product-Roadmap Task) -- an Initiative
-      has no branch of its own to integrate into; its Gate A doc merges
-      straight to `main`, same shape as a standing child.
-
-    An epic's *own* unit resolves to `main`: the epic branch is what merges
-    there at close.
-
-    **An Epic's Architecture-phase and LLD-phase Tasks are a real gap in this
-    auto-detection**: they need `main` too (their Gate targets `main`, same as
-    a standing child), but they are plain children of a *non-standing* Epic, so
-    this function has no way to tell them apart from an ordinary functional
-    Task under that same Epic without inventing a new classification this
-    project deliberately avoided (title convention is enough for a human/the
-    orchestrator; it is not something this function can read). The orchestrator
-    MUST pass `worktree-add --base origin/main` explicitly when cutting these
-    two -- see "Cutting an Epic" in SKILL.md. This function's own default for
-    them (falling through to `epic_branch(parent_number)`) is wrong and relies
-    on that explicit override always being used."""
+    """Branch this unit integrates into: `epic-<parent>` for a functional Task of a
+    non-standing Epic, else `main` (epics, parentless issues, standing/Initiative
+    children, phase-Tasks)."""
     if unit == "epic":
         return "main"
-    # `parent` comes from `issue_list`'s GraphQL, never from `issue_view` -- `gh
-    # issue view --json` has no such field, and asking for one is a hard error.
-    # The first cut of this resolver read `issue_view(...).get("parent")`, which
-    # is always absent, so every child silently resolved to `main` -- a failure
-    # in the direction that looks correct, caught only by running it against real
-    # issues whose parent was known.
+    # `parent` exists only in `issue_list`'s GraphQL; `gh issue view --json` has no such field.
     issues = {i["number"]: i for i in gh.issue_list()}
     entry = issues.get(issue)
     if entry is None:
@@ -1260,23 +868,14 @@ def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
     parent_entry = issues.get(parent_number)
     if parent_entry is not None and (is_epic_standing(parent_entry) or is_initiative(parent_entry)):
         return "main"
+    if parent_entry is not None and is_epic(parent_entry) and current_stage(entry) in PHASE_TASK_STAGES:
+        return "main"
     return epic_branch(parent_number)
 
 
 def last_transition_to(comments: list, to_role: str) -> Optional[int]:
-    """Index (in `comments`, which GitHub returns oldest-first) of the most recent
-    comment carrying a `<!-- stage-transition: ...-><to_role> ... -->` marker, or
-    None if that handoff never happened. Index rather than timestamp because the
-    only question asked of it is ordering *within one issue's own thread* -- see
-    `cmd_list_ready_for_review`.
-
-    Matched on the **destination role only**, and on the last `->`-separated
-    segment of it. `handoff-to-pr-review` writes the canonical
-    `development->pr-review` form, but this marker line has historically been
-    hand-written by each stage's own agent, and the real thread history shows the
-    from-role is not reliable: issue #115 posted `development->pr-review` and
-    #111 posted a mangled `pr-review->development->pr-review` for the same
-    handoff. Keying on the destination is what those all genuinely agree on."""
+    """Index of the latest comment with a stage-transition marker into `to_role`, or None.
+    Matches the destination only (last `->` segment): hand-written from-roles are unreliable."""
     found = None
     for idx, c in enumerate(comments):
         for m in _STAGE_TRANSITION_MARKER.finditer(c.get("body", "")):
@@ -1286,9 +885,7 @@ def last_transition_to(comments: list, to_role: str) -> Optional[int]:
 
 
 def last_pr_review_outcome(comments: list) -> Optional[tuple]:
-    """`(comment_index, outcome, pr_number)` for the most recent recorded
-    `pr-review` outcome on this issue, or None if no review has ever been
-    recorded. See `_PR_REVIEW_OUTCOME_MARKER` / `cmd_record_pr_review`."""
+    """`(comment_index, outcome, pr_number)` of the latest pr-review outcome, or None."""
     found = None
     for idx, c in enumerate(comments):
         m = _PR_REVIEW_OUTCOME_MARKER.search(c.get("body", ""))
@@ -1298,35 +895,8 @@ def last_pr_review_outcome(comments: list) -> Optional[tuple]:
 
 
 def missing_pipeline_evidence(comments: list) -> list:
-    """Which of the two mandatory pre-merge markers this issue's thread is missing.
-
-    Empty list means the thread proves the pipeline actually ran. This is the
-    **only** hard gate on stage evidence, and it sits at `merge-pr` deliberately:
-    merge is the single irreversible act, so a refusal here cannot be routed
-    around by prompt wording, by an agent that skipped its exit action, or by an
-    orchestrator that read past a warning. Everything upstream is recoverable.
-
-    Both failure modes it catches are real and have happened:
-
-    * A stage agent returned its verdict to the orchestrator instead of posting
-      it, because a dispatch prompt ended with "Return PASS or REJECT" and the
-      agent obeyed the more recent instruction over its own definition. Issues
-      #237 and #254 reached `pr-review` this way (from the since-retired
-      `testing` stage). `verify-exit` had already reported
-      `expected_stage_present: false` and was read past -- which is exactly why
-      advisory output is not enough here.
-    * A `pr-review` that never recorded an outcome leaves no evidence the last
-      gate before auto-merge ever ran.
-    * A recorded outcome of `rework` means the last gate said *do not merge*.
-      The first draft of this very function checked only that an outcome
-      *existed* and reported MERGE ALLOWED for an issue whose review had just
-      returned REWORK -- modelling the rule instead of running it, which is the
-      exact defect class this epic's retro is about.
-
-    Ordering matters as much as presence: an outcome recorded *before* the latest
-    `development->pr-review` handoff belongs to a previous round, and a rework
-    round that re-handed-off without a fresh review would otherwise merge on a
-    stale clean verdict. Same index-ordering rule `cmd_list_ready_for_review` uses."""
+    """Problems blocking merge: a missing pr-review handoff, or a pr-review outcome that
+    is missing, older than the latest handoff, or not `clean`. Empty = mergeable."""
     problems = []
     handoff = last_transition_to(comments, "pr-review")
     if handoff is None:
@@ -1348,19 +918,8 @@ def missing_pipeline_evidence(comments: list) -> list:
 
 
 def missing_epic_verification(comments: list) -> list:
-    """Which closing-verification evidence an epic's thread is still missing.
-
-    Two runs are required and they are deliberately different in kind: the full
-    **e2e** suite, and an **exploratory** pass that goes looking for what a
-    scripted suite cannot -- both run against the integration branch *after*
-    `origin/main` has been merged into it. Per-child `testing` only ever proved
-    the surfaces that child moved; nothing before this point has exercised every
-    sibling together against the tree that actually ships.
-
-    Ordering is the substance of the check, not bookkeeping. Evidence posted
-    *before* the last `origin/main` reconcile describes a different tree, so it
-    is treated as absent. This is the same trap `missing_pipeline_evidence`
-    guards at the child level, one altitude up."""
+    """Problems with an epic's e2e + exploratory closing evidence; evidence older than
+    the last `origin/main` reconcile counts as missing. Empty = complete."""
     problems = []
     reconciled = None
     for idx, c in enumerate(comments):
@@ -1382,11 +941,7 @@ def missing_epic_verification(comments: list) -> list:
 
 
 def cmd_record_epic_verification(gh: GitHub, epic: int, kind: str, summary: str) -> dict:
-    """Post one half of an epic's closing verification as durable thread evidence.
-
-    Never hand-type the marker -- `close-epic` reads it back, and an evidence
-    line that lives only in a session's memory reads to the next session as a
-    run that never happened."""
+    """Post one half (`e2e` | `exploratory`) of an epic's closing verification marker."""
     timestamp = _utc_now_marker()
     label = "Full e2e suite" if kind == "e2e" else "Exploratory pass"
     gh.issue_comment(epic,
@@ -1397,14 +952,9 @@ def cmd_record_epic_verification(gh: GitHub, epic: int, kind: str, summary: str)
 
 def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                     runner: Runner = _default_runner) -> dict:
-    """Reconcile the epic's integration branch with `main`, then merge it -- the
-    single integration point the whole branching model exists for.
-
-    Deliberately two calls, not one. The first run reconciles and stops, because
-    verification has to happen *after* the merge from `main` and *before* the
-    merge to `main`; the second run merges once the evidence is on the thread.
-    Every refusal is a structured exit-0 result, never an exception -- "not ready
-    yet" is the normal state, not an operational failure."""
+    """Reconcile the epic branch with `main` (first call, then stop), or merge it once
+    closing evidence is recorded (second call). Returns `merged`; refusals carry `reason`.
+    Two calls because verification must run between the two merges."""
     detail = gh.issue_view(epic)
     if not resolve_profile(detail)["closes"]:
         return {"epic": epic, "merged": False,
@@ -1450,10 +1000,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
             body=f"Integration of every child of #{epic}.\n\nCloses #{epic}",
             draft=True)
     checks = gh.pr_checks(pr_number)
-    # A required suite (backend/frontend) went main-only for cost, so it never runs
-    # on this epic->main PR pre-merge -- it is satisfied by a fresh `local-ci`
-    # attestation instead. Read the PR's comments + head SHA so the merge gate can
-    # honour it, exactly as `cmd_pr_checks`/`merge-pr` do (see `local_ci_suites_attested`).
+    # Comments + head SHA let a fresh `local-ci` attestation satisfy a required suite.
     view = gh.pr_view(pr_number, "comments,headRefOid")
     status, missing_checks = merge_gate_status(
         gh.pr_files(pr_number), checks,
@@ -1475,16 +1022,8 @@ _INITIATIVE_VERIFICATION_MARKER = re.compile(
 
 
 def missing_initiative_verification(comments: list) -> list:
-    """Closing an Initiative needs exactly one kind of evidence: a `requirements`
-    pass -- an agent playing the product-manager role, running the actually
-    delivered application (every cut Epic already merged to `main` by the time
-    this runs) and validating it against every requirement in the Initiative's
-    own `product.md`. Unlike an Epic's e2e+exploratory pair, there is no second
-    kind and no branch-reconcile ordering concern here: an Initiative has no
-    branch of its own at all -- its Gate A doc merged straight to `main` via
-    its Product-Roadmap Task, same as a standing child -- so there is no
-    "describes a different tree" trap to guard against -- by the time this is
-    called every cut Epic is already closed onto the one tree there is."""
+    """Problems with an Initiative's closing evidence (one `requirements` marker).
+    No ordering check: an Initiative has no branch of its own."""
     seen = any(_INITIATIVE_VERIFICATION_MARKER.search(c.get("body", "")) for c in comments)
     if seen:
         return []
@@ -1493,10 +1032,7 @@ def missing_initiative_verification(comments: list) -> list:
 
 
 def cmd_record_initiative_verification(gh: GitHub, initiative: int, summary: str) -> dict:
-    """Post an Initiative's closing verification as durable thread evidence --
-    same "never hand-type the marker" reasoning as `cmd_record_epic_verification`,
-    one tier up: `close-initiative` reads it back, and a verification that lives
-    only in a session's memory reads to the next session as one that never ran."""
+    """Post an Initiative's `requirements` closing-verification marker."""
     timestamp = _utc_now_marker()
     gh.issue_comment(initiative,
         f"🧪 Requirements validation — closing verification for #{initiative}. {summary}\n\n"
@@ -1505,12 +1041,8 @@ def cmd_record_initiative_verification(gh: GitHub, initiative: int, summary: str
 
 
 def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
-    """Is this Initiative ready for its own close validation? Every Epic cut
-    from it (a native sub-issue classified "epic") must be closed -- the same
-    "children all closed" question `check-epics-closeable` asks one tier down,
-    without that command's doc/dependents machinery: an Initiative carries no
-    design docs of its own past `product.md` and has no branch that ever merges
-    anywhere, so there is nothing else here to auto-verify."""
+    """`closeable` when at least one Epic was cut from the Initiative and all are closed;
+    otherwise `reason` (and `open_epics`)."""
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
     initiative_issue = by_number.get(initiative)
@@ -1531,12 +1063,8 @@ def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
 
 
 def cmd_close_initiative(gh: GitHub, initiative: int) -> dict:
-    """Closes the Initiative issue itself, once every cut Epic is closed and the
-    requirements-validation verification is recorded. Unlike `close-epic`, this
-    is **one call, not two**: there is no branch to reconcile or merge here at
-    all -- an Initiative has none of its own; its Gate A doc merged straight to
-    `main` via its Product-Roadmap Task. Every refusal is a structured exit-0
-    result, never an exception -- "not ready yet" is the normal state here too."""
+    """Close the Initiative once every cut Epic is closed and its verification is
+    recorded. Returns `closed`; refusals carry `reason`."""
     check = cmd_check_initiative_closeable(gh, initiative)
     if not check["closeable"]:
         return {"initiative": initiative, "closed": False,
@@ -1547,8 +1075,7 @@ def cmd_close_initiative(gh: GitHub, initiative: int) -> dict:
         return {"initiative": initiative, "closed": False, "missing_verification": missing,
                 "reason": f"closing verification incomplete: {'; '.join(missing)}"}
     gh.issue_close(initiative)
-    # Terminal fields here, not only in the `issues: closed` Action job, so a
-    # repo without that workflow still ends in the right state.
+    # Also set here so a repo without the `issues: closed` Action still ends correct.
     cmd_mark_issue_closed(gh, initiative)
     return {"initiative": initiative, "closed": True, "epics": check["epics"]}
 
@@ -1596,21 +1123,11 @@ def cmd_check_gate(gh: GitHub, args) -> dict:
 
 
 # --- Run-scoped task cap (`parallelism.maxTasksPerRun`) -----------------------
-# The cap was surfaced by `show-config` and enforced by nobody: it named a
-# number the orchestrator was trusted to count against in prose, over exactly
-# the kind of long run whose defining problem is that its own context (and so
-# its reliability at counting anything) grows without bound. Enforcing it needs
-# state that outlives a single command, so it lives in one small file per epic
-# per run, beside the branch locks.
-#
-# `MAX_TASKS_PER_RUN` is read at call time off the module global -- never
-# captured into a default argument -- the same way `PRODUCT_WIP_CAP` is, so a
-# test or a one-off run can override it on the module.
+# State outlives a single command, so it is one small JSON file per epic.
+# `MAX_TASKS_PER_RUN` is read at call time so tests can override it on the module.
 
 def _run_state_dir() -> str:
-    """Directory of the per-epic run-state files. `SDLC_RUNS_DIR` wins (the test
-    suite, and any operator who wants this state off the worktree root); else
-    `<worktrees.root>/.sdlc-runs`, beside `.sdlc-locks`."""
+    """Run-state directory: `$SDLC_RUNS_DIR`, else `<worktrees.root>/.sdlc-runs`."""
     env = os.environ.get("SDLC_RUNS_DIR")
     if env:
         return env
@@ -1622,12 +1139,8 @@ def _run_state_path(epic: int) -> str:
 
 
 def read_run_state(epic: int) -> Optional[dict]:
-    """`{"run_id": str, "terminal": [issue numbers]}` for `epic`, or None when no
-    run has ever been scoped against it.
-
-    A corrupt or unreadable file reads as None rather than raising: this is a
-    context-budget guard, and failing a whole run over damaged bookkeeping
-    would be a worse outcome than starting the count again."""
+    """`{"run_id", "terminal": [issue numbers]}` for `epic`, or None.
+    A corrupt file reads as None: restarting the count beats failing the run."""
     try:
         with open(_run_state_path(epic)) as f:
             state = json.load(f)
@@ -1640,24 +1153,28 @@ def read_run_state(epic: int) -> Optional[dict]:
 
 
 def _write_run_state(epic: int, state: dict) -> None:
+    """Also stamps the epic and the orchestrating session, which the compaction hook matches on."""
+    state["epic"] = epic
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if session:
+        state["session_id"] = session
     os.makedirs(_run_state_dir(), exist_ok=True)
     with open(_run_state_path(epic), "w") as f:
         json.dump(state, f)
 
 
+def note_in_flight(epic: int, run_id: Optional[str], units: dict) -> None:
+    """Record units ({issue: stage}) this run handed out, until `record_terminal_unit`."""
+    if not run_id or not units:
+        return
+    state = run_cap_state(epic, run_id)
+    state.setdefault("in_flight", {}).update({str(n): stage for n, stage in units.items()})
+    _write_run_state(epic, state)
+
+
 def run_cap_state(epic: int, run_id: Optional[str]) -> Optional[dict]:
-    """The run-state `epic` is judged against for the run `run_id`, resetting it
-    first when the stored id belongs to a different run.
-
-    `run_id` is the orchestrator's own identifier for one invocation. A
-    *different* stored id means the file is a previous run's, whose count says
-    nothing about this one, so it is reset rather than inherited -- that is
-    exactly what makes the cap "per run" instead of "per epic, forever", and
-    what lets the next run resume with a full budget from the pipeline's
-    already crash-safe persisted state.
-
-    Returns None when no `run_id` was passed: the cap is opt-in, and without one
-    behaviour is precisely what it was before any of this existed."""
+    """Run-state for `epic` under `run_id`, reset when the stored id is another run's.
+    None when no `run_id` is given (the cap is opt-in)."""
     if not run_id:
         return None
     state = read_run_state(epic)
@@ -1668,27 +1185,15 @@ def run_cap_state(epic: int, run_id: Optional[str]) -> Optional[dict]:
 
 
 def run_cap_reached(state: Optional[dict]) -> bool:
-    """Whether this run has already driven `maxTasksPerRun` units to a terminal
-    state. A cap of `0` -- the default, and the value for any config predating
-    the key -- is unlimited and never reaches."""
+    """Whether this run already drove `MAX_TASKS_PER_RUN` units to a terminal state (0 = never)."""
     return bool(state) and MAX_TASKS_PER_RUN > 0 \
         and len(state.get("terminal", [])) >= MAX_TASKS_PER_RUN
 
 
 def record_terminal_unit(gh: WorkItemProvider, issue: int) -> Optional[dict]:
-    """Count `issue` against its Epic's current run, when one is being tracked --
-    called by the two commands that genuinely take a unit to a terminal state,
-    `merge-pr` and `close-issue`.
-
-    Counting at the terminal action rather than when work is handed out is what
-    makes the cap count *finished* units: a unit that bounces through several
-    rework rounds still costs its run exactly one slot.
-
-    Silent and cheap when nobody uses run ids -- an absent or empty run-state
-    directory short-circuits before any tracker call, so the default path costs
-    one `os.listdir` and no API request. Idempotent: an issue already counted is
-    not counted twice, so re-running `merge-pr`/`close-issue` after a crash
-    cannot inflate the number."""
+    """Idempotently count `issue` against its parent's tracked run (from `merge-pr` /
+    `close-issue`). Returns the count summary, or None when no run is tracked.
+    An empty run-state dir short-circuits before any tracker call."""
     try:
         if not os.listdir(_run_state_dir()):
             return None
@@ -1704,72 +1209,19 @@ def record_terminal_unit(gh: WorkItemProvider, issue: int) -> Optional[dict]:
     state = read_run_state(parent)
     if state is None:
         return None
-    if issue not in state["terminal"]:
-        state["terminal"].append(issue)
+    if issue not in state["terminal"] or str(issue) in state.get("in_flight", {}):
+        if issue not in state["terminal"]:
+            state["terminal"].append(issue)
+        state.get("in_flight", {}).pop(str(issue), None)
         _write_run_state(parent, state)
     return {"epic": parent, "run_id": state.get("run_id"),
             "terminal_count": len(state["terminal"]), "cap": MAX_TASKS_PER_RUN}
 
 
 def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> dict:
-    """Picks the one unit -- one of the named Epic's/Initiative's children --
-    to work next. `epic` is now
-    a **required** argument (see "Epic number is mandatory" in SKILL.md, added
-    2026-08-20 per operator instruction): the operator names which unit to
-    drive end-to-end, and this function never looks outside that unit's own
-    tree. This replaced an earlier model where the picker scanned every open
-    epic in the repo and ranked them against each other (started-epics-first,
-    then Priority, then age) to decide which epic's turn it was -- that
-    cross-epic ranking, and the milestone scoping that existed purely to keep
-    it from reaching into a not-yet-triaged epic, are both gone; naming the
-    unit directly makes both moot.
-
-    Raises `GhError` if `epic` isn't actually an epic or Initiative -- passing
-    a child issue number here is a caller mistake, not a legitimate "nothing
-    to do" outcome.
-
-    An `epic:legacy` epic is checked first, before anything else -- including
-    crash-recovery -- and short-circuits to `action: "skip"`: this pipeline no
-    longer drives that epic or any of its children at all, in any flow. See
-    `is_epic_legacy` and "Which epics are exempt" in references/epics.md.
-
-    Otherwise, crash-recovery (Pipeline Status = in-progress) is checked first,
-    scoped to the unit's own open children only.
-
-    **An Epic or Initiative never runs a stage itself** -- an Initiative's
-    `product` work is its own Product-Roadmap Task (a plain child), and an
-    Epic's `architecture`/`lld` work are its own Architecture-phase/LLD-phase
-    Tasks (also plain children) -- see "Cutting an Epic"/"Cutting Epics from
-    an approved Initiative" in SKILL.md. Ordering between an Epic's own
-    phase-Tasks is a native `blockedBy` edge the orchestrator sets when cutting
-    them, not anything this function enforces.
-
-    A cut Epic is itself a native sub-issue of its Initiative, but must never
-    be treated as a plain child here -- it runs its own independent lifecycle
-    through its own top-level `/sdlc-pipeline <epic-n>` invocation. The
-    children list excludes anything `is_epic()` for exactly this reason.
-
-    The open children (excluding any cut Epic) are ranked by `sort_key`
-    (Priority, then age) and the first eligible one is picked (needs-human
-    skip, gate check, blocked check, Stage-field-assignment side effect on
-    first sight). A Stage-less child of a non-standing Epic is never staged
-    here (`default_stage` returns None): before the Epic is architected it is
-    a Task waiting on `merge-lld-doc`; after, it was filed late and is reported
-    in `unstaged` on a `none` result for the orchestrator to route.
-
-    Every result dict carries `unit: "issue"`, except `action: "skip"` (no
-    unit to act on) and `none`/`stop-at-cap`.
-    `action: "none"` means this unit genuinely has nothing actionable left
-    right now -- not that the whole repo is drained; a different epic may
-    still have plenty to do, but this function doesn't know or care, by
-    design.
-
-    **Product WIP cap.** A *fresh* `product` delegation (not a resume) is skipped -- the loop moves on to the next actionable unit --
-    while `product_gate_pending` is at `PRODUCT_WIP_CAP` (`pipeline.productWip.
-    maxGateAPending`, default 5). A `none` reached that way carries
-    `product_cap` naming the deferred units, so the orchestrator's report can
-    say why nothing started. Gate actions (`pass-gate`, `address-gate-feedback`)
-    are what drain the queue and are never gated."""
+    """Pick the next action among the named Epic's/Initiative's open non-Epic children:
+    `skip` | `resume` | `pass-gate` | `address-gate-feedback` | `delegate` | `stop-at-cap` | `none`.
+    Raises GhError when `epic` is not an Epic or Initiative. Caps gate only fresh work."""
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
     epic_issue = by_number.get(epic)
@@ -1786,17 +1238,12 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
                           "its children; skipping entirely."}
     children = [i for i in all_issues if i["state"] == "OPEN"
                 and i.get("parent") and i["parent"]["number"] == epic and not is_epic(i)]
-    # A profile whose Gate A auto-passes (`requiresHumanGateA: false`) never puts a
-    # unit in the human's queue, so its product delegations are never capped.
+    # A profile whose Gate A auto-passes never fills the human queue, so it is uncapped.
     product_headroom = (product_wip_headroom(all_issues)
                         if effective_gates(epic_issue)["requiresHumanGateA"] else None)
     deferred_by_cap: list = []
     unstaged: list = []
-    # Run-scoped task cap (`parallelism.maxTasksPerRun`). It gates only *fresh*
-    # work: `resume`, `pass-gate` and `address-gate-feedback` are never checked
-    # against it, because they finish work already in flight -- refusing those
-    # would strand a unit mid-pipeline rather than bound anything, and the
-    # thing being bounded is how much NEW work one run takes on.
+    # Run cap gates only fresh work; refusing in-flight work would strand it mid-pipeline.
     cap_state = run_cap_state(epic, run_id)
     at_cap = run_cap_reached(cap_state)
     deferred_by_run_cap: list = []
@@ -1806,10 +1253,7 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
 
     def none_result() -> dict:
         if deferred_by_run_cap:
-            # Reported as its own action, never as `none`: "nothing to do" and
-            # "this run is full" are opposite instructions to the orchestrator,
-            # and reading the second as the first would close out an epic that
-            # still has work left.
+            # Never `none`: "run is full" must not read as "epic has nothing left".
             completed = list(cap_state.get("terminal", []))
             return {"action": "stop-at-cap", "epic": epic, "cap": MAX_TASKS_PER_RUN,
                     "completed": completed,
@@ -1834,11 +1278,7 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
         elif is_initiative(epic_issue) and epic_issue["state"] == "CLOSED":
             result["reason"] = f"Initiative #{epic} is closed -- nothing left to do."
         elif is_initiative(epic_issue):
-            # No label anywhere disambiguates "fresh, roadmap Task not created
-            # yet" from "roadmap Task closed, ready to cut Epics" -- both look
-            # like "no open children" from `children` alone. Distinguish by
-            # actually looking at every child (open AND closed): a cut Epic is
-            # `is_epic()`, the Product-Roadmap Task is not.
+            # "No open children" is ambiguous; inspect every child, open and closed.
             initiative_children = [i for i in all_issues if i.get("parent")
                                    and i["parent"]["number"] == epic]
             cut_epics = [i for i in initiative_children if is_epic(i)]
@@ -1856,8 +1296,6 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
             elif not initiative_children:
                 result["reason"] = ("no Product-Roadmap Task yet -- cut it next (SKILL.md, "
                                     "\"Cutting an Initiative's Product-Roadmap Task\").")
-            # else: the roadmap Task is still open but blocked/needs-human --
-            # plain "none", nothing more useful to say.
         return result
 
     # Crash-recovery: the unit's own open children only.
@@ -1867,13 +1305,8 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
         return {"action": "resume", "issue": target["number"], "unit": "issue",
                 "stage": current_stage(target) or default_stage(target, epic_issue)}
 
-    # A non-standing Epic's Tasks exist before its design is done -- the orchestrator
-    # creates them with `create-lld-tasks` -- and `merge-lld-doc` advances only
-    # Tasks with no Stage. Until the Epic is architected, a Stage-less child is
-    # one of those Tasks (phase-Tasks are staged when cut), so it is neither
-    # delegated nor staged here. Found live, 2026-09-15: once the LLD-phase
-    # Task closed, a functional Task was delegated at `lld` and its written
-    # Stage then hid it from `merge-lld-doc`.
+    # Before the Epic is architected a Stage-less child is a Task awaiting
+    # `merge-lld-doc`, which only advances Stage-less Tasks -- so leave it untouched.
     design_pending = (is_epic(epic_issue) and not is_epic_standing(epic_issue)
                       and not is_epic_architected(epic_issue))
 
@@ -1899,23 +1332,16 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
             unstaged.append(issue["number"])
             continue
         if capped(stage):
-            # Checked before the blockedBy call and the Stage-assign write: a unit
-            # the cap defers this pass gets no side effects at all.
+            # Before blockedBy and the Stage write: a deferred unit gets no side effects.
             deferred_by_cap.append(issue["number"])
             continue
         if at_cap:
-            # Checked before the blockedBy call and before the Stage-assign
-            # write below, same as the product cap: a unit this pass defers
-            # must come away with no side effects at all.
             deferred_by_run_cap.append(issue["number"])
             continue
         if gh.blocked_by(issue["number"]):
             continue
         if current_stage(issue) is None:
-            # Assign the Stage field the first time an eligible child is seen with
-            # none set yet -- operator instruction: a new issue should show its
-            # stage directly, not sit blank on the board until claim() eventually
-            # picks it up.
+            # Stamp the Stage on first sight so the board never shows it blank.
             gh.set_stage_field(issue["number"], stage)
         return {"action": "delegate", "issue": issue["number"], "unit": "issue",
                 "stage": stage}
@@ -1924,43 +1350,19 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
 
 
 def cmd_next_action(gh: GitHub, args) -> dict:
-    """`next-action`'s CLI wrapper. `cap_enforced` is added here rather than
-    inside `decide_next_action` deliberately: it describes how the *command* was
-    invoked, not what the decision was, and the decision function's result shape
-    is read by every other caller. Without a `--run-id` the cap is off and this
-    reports `false`, which is also the honest answer for a configured cap of 0."""
+    """`next-action`: `decide_next_action` plus `cap_enforced` (true only with a
+    `--run-id` and a nonzero cap), which describes the invocation, not the decision."""
     run_id = getattr(args, "run_id", None)
     result = decide_next_action(gh, args.epic, run_id=run_id)
+    if "issue" in result:
+        note_in_flight(args.epic, run_id, {result["issue"]: result.get("stage")})
     return {**result, "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0}
 
 
 def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None) -> dict:
-    """Every open child of `epic` whose development PR is sitting finished-and-
-    unreviewed: Stage = `PR Review` (or the retired `Testing`, for an issue an
-    in-flight epic stranded there), an open **draft** PR on its `issue-<n>`
-    branch, `development`'s own
-    `<!-- stage-transition: development->pr-review ... -->` handoff marker
-    posted, and no `pr-review` outcome recorded *since* that
-    marker. Returns up to `limit` (default `PR_REVIEW_PARALLELISM`) of them,
-    each with the issue number, PR number and branch -- enough for the
-    orchestrator to stand up one worktree per review. See "Parallel PR review"
-    in SKILL.md.
-
-    `epic` is required, same as `next-action` (see "Epic number is mandatory" in
-    SKILL.md) -- the review pool this draws from is scoped to the one epic the
-    operator is currently driving end-to-end, not the whole repo.
-
-    The "since that marker" ordering is what makes rework rounds work: an issue
-    that failed review goes back to `development` while its Stage stays
-    `PR Review` and its Pipeline Status stays `In Progress`, so neither field can
-    distinguish "awaiting review" from "already reviewed, being fixed". A recorded
-    outcome newer than the latest `development->pr-review` handoff means this
-    round's review already ran; a *later* handoff marker (posted when
-    `development` re-hands-off the fix) makes it eligible again.
-
-    Read-only: never claims, never posts. `skipped` reports every review-entry
-    child of this epic that was excluded and why, so "my PR isn't listed" is
-    answerable without re-deriving the filter by hand."""
+    """Up to `limit` children of `epic` with an open draft PR and no review outcome
+    since the latest development->pr-review handoff (so each rework round re-qualifies).
+    Read-only. Returns `ready_for_review`, `count`, `eligible_total`, `skipped`."""
     limit = PR_REVIEW_PARALLELISM if limit is None else limit
     all_issues = gh.issue_list()
     open_issues = [i for i in all_issues if i["state"] == "OPEN"]
@@ -2004,27 +1406,13 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
             "eligible_total": len(ready), "limit": limit, "epic": epic, "skipped": skipped}
 
 
-# The optional `17. ` prefix: architecture.template.md numbers its sections, so the
-# heading is `## 17. Footprint` there and a bare `## Footprint` in older docs. Both parse.
+# Accepts a numbered heading (`## 17. Footprint`) as well as a bare one.
 _FOOTPRINT_HEADING = re.compile(r"^#+\s*(?:\d+[.)]\s*)?Footprint\b.*$",
                                 re.IGNORECASE | re.MULTILINE)
 _FOOTPRINT_BULLET_PATH = re.compile(r"^-\s+`([^`]+)`")
-# An Epic's lld.md convention (sdlc-lld.md, "The document"): one `##
-# Task #<n>` subsection per Task, each carrying its own `### Footprint`.
-# `## Task #<n>` is the documented form (`sdlc-lld.md`, "The document"); `###`
-# and a missing `#` are accepted because a Task silently dropped from the
-# parallel lane over heading punctuation cost a live run on 2026-09-15.
-_TASK_SUBSECTION_HEADING = re.compile(r"^#{2,3}\s*Task\s*#?(\d+)\b.*$",
-                                      re.IGNORECASE | re.MULTILINE)
-# A Task heading names its Task one of two ways: by issue number (`## Task
-# #<n>`, what every published doc carries) or -- before the issues exist at all
-# -- by the short slug key its `lld` author chose (`## Task <key>: <title>`,
-# e.g. `## Task skeleton-health: Add /health`). `create-lld-tasks` rewrites the
-# second form into the first once the carving has been approved.
-#
-# A key must be a slug (lowercase alphanumerics and hyphens) deliberately, so an
-# ordinary prose heading like `## Task Breakdown` or `## Task Overview` is not
-# read as a Task and never has an issue created for it.
+# A Task heading is `## Task #<n>` or, before issues exist, `## Task <slug-key>: ...`
+# (`###` and a missing `#` also parse). Keys must be slugs so prose headings like
+# `## Task Breakdown` are never read as Tasks.
 _TASK_HEADING_LINE = re.compile(r"^(#{2,3})\s*Task\b\s*(\S+)(.*)$",
                                 re.IGNORECASE | re.MULTILINE)
 _TASK_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -2032,20 +1420,9 @@ _TASK_KEY_MARKER = re.compile(r"<!--\s*task-key:\s*([a-z0-9][a-z0-9-]*)\s*-->", 
 
 
 def parse_task_headings(doc_text: str) -> list:
-    """Every `## Task ...` heading in an Epic-level `lld.md`, in document order.
-
-    One scanner covers both spellings because **section boundaries have to see
-    every heading, not only the ones a caller is asking about**. Slicing Task
-    #51 out of a half-rewritten document using the numbered headings alone
-    would run straight past the still-keyed sections after it and hand back
-    their design as part of #51's -- which is precisely the window
-    `create-lld-tasks` opens while it renumbers.
-
-    Each entry carries `start`/`end` (the section's span), `line_start`/
-    `line_end` (the heading line itself), `hashes`, `number` (int or None),
-    `key` (the slug, or None once renumbered), `task_key` (the slug preserved
-    in a `<!-- task-key: ... -->` marker on an already-rewritten heading), and
-    `title`."""
+    """Every Task heading (numbered or keyed) in an Epic `lld.md`, in order, as dicts
+    with `start`/`end`, `line_start`/`line_end`, `hashes`, `number`, `key`,
+    `task_key`, `title`. Both spellings are scanned so section ends are always right."""
     entries = []
     for m in _TASK_HEADING_LINE.finditer(doc_text):
         ident, rest = m.group(2).rstrip(":"), m.group(3)
@@ -2068,12 +1445,28 @@ def parse_task_headings(doc_text: str) -> list:
     return entries
 
 
+def number_task_headings(doc_text: str, key_to_number: dict) -> str:
+    """`doc_text` with each keyed Task heading in `key_to_number` rewritten to
+    `## Task #<n>: <title> <!-- task-key: <key> -->`, as `create-lld-tasks` pushes it."""
+    out = doc_text
+    for h in parse_task_headings(doc_text):
+        if h["key"] in key_to_number:
+            out = out.replace(doc_text[h["line_start"]:h["line_end"]],
+                              f"{h['hashes']} Task #{key_to_number[h['key']]}: "
+                              f"{h['title'] or h['key']} <!-- task-key: {h['key']} -->", 1)
+    return out
+
+
+def is_numbered_copy(src: str, dest: str) -> bool:
+    """Whether `dest` is exactly `src` after `create-lld-tasks` numbered its Task headings."""
+    numbers = {h["task_key"]: h["number"] for h in parse_task_headings(dest)
+               if h["number"] and h["task_key"]}
+    return bool(numbers) and number_task_headings(src, numbers) == dest
+
+
 def _task_heading_matches(entry: dict, task) -> bool:
-    """Whether one parsed heading is the Task asked for. A number matches `##
-    Task #<n>`; a slug matches either a not-yet-renumbered `## Task <key>`
-    heading or the `<!-- task-key: ... -->` marker `create-lld-tasks` leaves
-    behind -- so a caller holding only the design-time key can still find the
-    section after it has been renumbered."""
+    """Whether a parsed heading is `task`: a number matches `#<n>`; a slug matches
+    the heading's key or its preserved `task-key` marker (so it survives renumbering)."""
     ident = str(task)
     if ident.isdigit():
         return entry["number"] == int(ident)
@@ -2081,15 +1474,8 @@ def _task_heading_matches(entry: dict, task) -> bool:
 
 
 def parse_footprint(doc_text: str) -> list:
-    """Extracts the path list from a design doc's required '## Footprint'
-    section -- every standing child's `architecture.md`, and every Task
-    subsection of an Epic's `lld.md` (via `parse_task_footprint`), must already
-    name its footprint as a plain bullet list, so
-    this reads existing required content rather than asking the architect/lld
-    agent to maintain a second, structured artifact. Stops at the next
-    markdown heading. Returns `[]` if no such section is found -- callers
-    treat that as "cannot verify non-overlap, so not eligible", never as
-    "no footprint declared, so no risk of overlap"."""
+    """Backticked bullet paths under the first `## Footprint` heading, up to the next
+    heading. `[]` when absent -- callers treat that as "cannot verify", never "no overlap"."""
     m = _FOOTPRINT_HEADING.search(doc_text)
     if not m:
         return []
@@ -2105,18 +1491,8 @@ def parse_footprint(doc_text: str) -> list:
 
 
 def parse_task_footprint(doc_text: str, task_number: int) -> list:
-    """Slices an Epic-level `lld.md` to one Task's own `## Task #<n>`
-    subsection, then runs `parse_footprint` within just that slice. Required
-    because the doc covers every Task in the Epic in one file (`sdlc-lld.md`,
-    "The document") -- running `parse_footprint` on the whole document would
-    silently return the FIRST Task's footprint for every Task's own query,
-    since `_FOOTPRINT_HEADING.search` only ever finds the first match. Returns
-    `[]` both when the Task's own subsection is missing and when it has one but
-    no bullets in it -- the same "cannot verify, so not eligible" contract
-    `parse_footprint`/`read_footprint`'s callers already rely on.
-
-    `task_number` may be an issue number or a design-time task key; boundaries
-    are computed over every Task heading either way (see `parse_task_headings`)."""
+    """`parse_footprint` scoped to one Task's subsection of an Epic `lld.md`
+    (`task_number` may be an issue number or task key); `[]` when missing."""
     for entry in parse_task_headings(doc_text):
         if _task_heading_matches(entry, task_number):
             return parse_footprint(doc_text[entry["line_end"]:entry["end"]])
@@ -2124,15 +1500,8 @@ def parse_task_footprint(doc_text: str, task_number: int) -> list:
 
 
 def slice_task_subsection(doc_text: str, task_number: int) -> Optional[str]:
-    """Returns just one Task's `## Task #<n>` subsection of an Epic-level
-    `lld.md` -- its heading through to the line before the next Task
-    heading. Every Task's design lives in one shared Epic document
-    (`sdlc-lld.md`, "The document"), so a functional Task's `development` and
-    `pr-review` must read only their own subsection; reading the whole document
-    turns it into a shared floor re-read by every one of the Epic's Tasks. Same
-    heading grammar as `parse_task_footprint` (`## Task #<n>`, `###`, and a
-    missing `#` all parse, as does a pre-renumbering `## Task <key>`). Returns
-    None when no subsection carries that number or key."""
+    """One Task's subsection of an Epic `lld.md` (heading up to the next Task
+    heading), by issue number or task key; None when not found."""
     for entry in parse_task_headings(doc_text):
         if _task_heading_matches(entry, task_number):
             return doc_text[entry["start"]:entry["end"]].rstrip() + "\n"
@@ -2141,19 +1510,9 @@ def slice_task_subsection(doc_text: str, task_number: int) -> Optional[str]:
 
 def cmd_lld_section(repo_path: str, epic: int, task,
                      runner: Runner = _default_runner) -> dict:
-    """Prints one Task's `## Task #<n>` subsection out of its Epic's
-    `epic-<n>/lld.md` (read from `origin/epic-<n>` via `git show`) to stdout,
-    and returns a small status dict as this command's JSON footer. This is what a
-    functional Task's `development` and `pr-review` read as their design doc --
-    only their own subsection, not the whole Epic document. It deliberately
-    prints raw markdown before the JSON line every other subcommand returns,
-    because the caller reads the section as a document, not as a JSON value.
-
-    `task` may be an issue number (`--task 51`) or a design-time task key
-    (`--task skeleton-health`). **Both heading forms resolve**, so an epic
-    already in flight with numbered headings keeps working unchanged while an
-    epic whose `lld` has been written but whose Tasks are not carved yet can
-    still be read section by section."""
+    """Print one Task's subsection of `origin/epic-<n>:.../lld.md` as raw markdown,
+    then return `{ok, epic, task, chars}` as the JSON footer. `task` is an issue
+    number or task key."""
     try:
         text = runner(["git", "-C", repo_path, "show",
                         f"origin/{epic_branch(epic)}:{DOC_ROOT}/epic-{epic}/lld.md"])
@@ -2164,26 +1523,16 @@ def cmd_lld_section(repo_path: str, epic: int, task,
     if section is None:
         label = f"#{task}" if str(task).isdigit() else f"{task}"
         raise GhError(f"no `## Task {label}` subsection in {DOC_ROOT}/epic-{epic}/lld.md "
-                       f"(headings must read `## Task {label}: ...`, per sdlc-lld.md)")
+                       f"(headings must read `## Task {label}: ...`, per agents/lld.md)")
     print(section, end="")
     return {"ok": True, "epic": epic, "task": task, "chars": len(section)}
 
 
 def read_footprint(repo_path: str, issue: int, runner: Runner = _default_runner,
                     epic: Optional[int] = None) -> list:
-    """Reads issue #<issue>'s own declared footprint straight off its committed
-    design doc on `origin/issue-<n>`, via `git show` against the shared
-    checkout's remote-tracking ref -- deliberately not a worktree read, since
-    computing parallel-eligibility must not itself require standing up a
-    worktree first. A standing epic's child declares it in its own
-    `issue-<n>/architecture.md`.
-
-    An Epic's Task has no `issue-<n>` doc of its own -- its footprint lives in
-    its own `## Task #<n>` subsection of its Epic's `epic-<n>/lld.md`
-    (`sdlc-lld.md`, "The document"). When `epic` is given and no per-issue doc
-    exists, falls back to reading that subsection out of the Epic's shared doc
-    via `parse_task_footprint`, so a fresh Task without any doc of its own isn't
-    silently treated as "cannot verify non-overlap"."""
+    """An issue's footprint from `origin/issue-<n>`'s architecture.md, else (with
+    `epic`) from its Task subsection of the Epic's lld.md; `[]` when unreadable.
+    Reads origin refs via `git show`, so no worktree is needed."""
     try:
         text = runner(["git", "-C", repo_path, "show",
                         f"origin/{issue_branch(issue)}:{DOC_ROOT}/issue-{issue}/architecture.md"])
@@ -2204,15 +1553,13 @@ def read_footprint(repo_path: str, issue: int, runner: Runner = _default_runner,
 
 
 def _footprint_prefix(path: str) -> str:
-    """Strips a trailing '**' or '*' glob suffix so overlap reduces to a plain
-    path-prefix containment check -- every footprint declared in this repo's
-    docs is either an exact file path or a directory-prefix glob (e.g.
-    'backend/src/notifications/**'), never a mid-path wildcard, so
-    prefix comparison is sufficient without pulling in real glob matching."""
+    """Strip a trailing `*`/`**` glob; footprints are exact paths or directory
+    globs, so prefix containment is enough."""
     return path.rstrip("*").rstrip("/")
 
 
 def footprint_overlaps(a: list, b: list) -> bool:
+    """Whether any path in `a` equals or contains/is contained by one in `b`."""
     a_prefixes = [_footprint_prefix(p) for p in a]
     b_prefixes = [_footprint_prefix(p) for p in b]
     return any(x == y or x.startswith(y + "/") or y.startswith(x + "/")
@@ -2221,10 +1568,7 @@ def footprint_overlaps(a: list, b: list) -> bool:
 
 def worktree_path_for_branch(branch: str, runner: Runner = _default_runner,
                               base_repo: str = ".") -> Optional[str]:
-    """Filesystem path of the live git worktree that has `branch` checked out, or
-    None. Same porcelain source as active_worktree_branches -- one
-    `worktree <path>` line per worktree, followed by its `branch refs/heads/...`
-    line when one is checked out."""
+    """Path of the live worktree with `branch` checked out, or None."""
     out = runner(["git", "-C", base_repo, "worktree", "list", "--porcelain"])
     path = None
     for line in out.splitlines():
@@ -2236,141 +1580,19 @@ def worktree_path_for_branch(branch: str, runner: Runner = _default_runner,
 
 
 def worktree_path(unit: str, number: int) -> str:
-    """Where the orchestrator keeps this unit's worktree, from `pipeline.worktrees`
-    (default `/tmp/sdlc-dev-<n>` for a child, `/tmp/sdlc-epic-<n>` for an epic).
-    An Initiative/Epic's own phase-Tasks (Product-Roadmap, Architecture-phase,
-    LLD-phase) are plain children -- `unit="issue"`, same as any other."""
+    """Configured worktree path for a unit (default `/tmp/sdlc-dev-<n>`, or
+    `/tmp/sdlc-epic-<n>` for `unit="epic"`)."""
     w = PIPELINE["worktrees"]
     prefix = w["epicPrefix"] if unit == "epic" else w["devPrefix"]
     return os.path.join(w["root"], f"{prefix}{number}")
 
 
-def init_skill_submodule(worktree: str, runner: Runner = _default_runner) -> dict:
-    """Make `<worktree>/<pipeline.skill.submodulePath>` hold the skill at the
-    commit this worktree's branch pins -- the per-epic `$SDLC_DIR` stage agents
-    read (`SKILL.md`, "Setup"). A linked worktree does NOT populate submodules on
-    `git worktree add`, and a merge that moves the gitlink only marks it
-    `modified (new commit)`; both need `git submodule update --init` in that
-    worktree. Verified empirically 2026-09-12 on git 2.50.1: the submodule's
-    gitdir lands under `$GIT_COMMON_DIR/worktrees/<id>/modules/`, so each
-    worktree's copy is independent of the main checkout's and of every other
-    worktree's. That per-worktree gitdir is what the post-init check asserts --
-    a git too old to do it would share one gitdir across worktrees, and the
-    check refuses rather than let two epics silently fight over one checkout.
-
-    Structured, never raising for the "no submodule here" case:
-    `{"skill_dir": None, "reason": ...}` when the feature is disabled or the
-    path is not a tracked gitlink in this tree."""
-    sub = (PIPELINE["skill"].get("submodulePath") or "").strip("/")
-    if not sub:
-        return {"skill_dir": None, "reason": "pipeline.skill.submodulePath is empty"}
-    try:
-        runner(["git", "-C", worktree, "ls-files", "--error-unmatch", sub])
-    except GhError:
-        return {"skill_dir": None, "reason": f"{sub} is not tracked in this tree"}
-    runner(["git", "-C", worktree, "submodule", "update", "--init", "--", sub])
-    skill_dir = os.path.join(worktree, sub)
-    gitdir = runner(["git", "-C", skill_dir, "rev-parse", "--absolute-git-dir"]).strip()
-    if "/worktrees/" not in gitdir:
-        raise GhError(
-            f"submodule {sub} in linked worktree {worktree} uses gitdir {gitdir}, which is not "
-            f"per-worktree ($GIT_COMMON_DIR/worktrees/<id>/modules/...). This git cannot keep "
-            f"one skill checkout per epic; upgrade git (verified working on 2.50.1).")
-    probe = PIPELINE["skill"].get("probeFile")
-    try:
-        runner(["git", "-C", skill_dir, "ls-files", "--error-unmatch", probe] if probe else
-               ["git", "-C", skill_dir, "rev-parse", "HEAD"])
-    except GhError:
-        raise GhError(f"submodule {sub} initialised but {probe or 'HEAD'} is missing in "
-                      f"{skill_dir} -- the pinned skill commit is not checked out")
-    pinned = runner(["git", "-C", skill_dir, "rev-parse", "HEAD"]).strip()
-    return {"skill_dir": skill_dir, "skill_commit": pinned}
-
-
-_AGENT_TEMPLATE_PLACEHOLDERS = {
-    "<docRoot>": lambda: DOC_ROOT,
-    "<your-token-file>": lambda: TOKEN_PATH,
-    "<requirements-dir>": lambda: REQUIREMENTS_DIR,
-}
-
-
-def cmd_sync_skill(repo_path: str = ".", ref: Optional[str] = None,
-                    runner: Runner = _default_runner) -> dict:
-    """The in-place update SKILL.md's retro Step 5 otherwise spells out as manual
-    `git` + copy-paste: bump `pipeline.skill.submodulePath` to `ref` (default the
-    skill's `origin/main`) and re-vendor `$SDLC_DIR/agents/*.md` into the driven
-    repo's `.claude/agents/`, substituting the same placeholders the manual process
-    always has (`<docRoot>`, `<your-token-file>`, `<requirements-dir>`). Stages both
-    (`git add`) but does not commit -- the commit message names the retrospective,
-    which only the caller knows.
-
-    Does not itself decide whether the lane is quiet; SKILL.md's rule stands --
-    run this only when no stage agent is reading `$SDLC_DIR` mid-turn.
-
-    A template placeholder with no configured value raises rather than vendoring a
-    literal `<requirements-dir>` into a driven repo's `.claude/agents/` -- that
-    silently ships an agent that reads its own doc root as a literal string."""
-    sub = (PIPELINE["skill"].get("submodulePath") or "").strip("/")
-    if not sub:
-        raise GhError("pipeline.skill.submodulePath is empty -- nothing to sync")
-    skill_dir = os.path.join(repo_path, sub)
-    old_sha = runner(["git", "-C", skill_dir, "rev-parse", "HEAD"]).strip()
-    runner(["git", "-C", skill_dir, "fetch", "origin"])
-    runner(["git", "-C", skill_dir, "checkout", "--detach", ref or "origin/main"])
-    new_sha = runner(["git", "-C", skill_dir, "rev-parse", "HEAD"]).strip()
-    runner(["git", "-C", repo_path, "add", "--", sub])
-
-    agents_src = os.path.join(skill_dir, "agents")
-    agents_dst = os.path.join(repo_path, ".claude", "agents")
-    os.makedirs(agents_dst, exist_ok=True)
-    vendored = []
-    for name in sorted(os.listdir(agents_src)):
-        if not name.endswith(".md"):
-            continue
-        with open(os.path.join(agents_src, name)) as f:
-            content = f.read()
-        for token, getval in _AGENT_TEMPLATE_PLACEHOLDERS.items():
-            if token not in content:
-                continue
-            value = getval()
-            if value is None:
-                raise GhError(
-                    f"{name} contains {token} but the pipeline config has no value "
-                    f"for it -- set the corresponding key in sdlc-pipeline.config.json "
-                    f"before running sync-skill")
-            content = content.replace(token, value)
-        with open(os.path.join(agents_dst, name), "w") as f:
-            f.write(content)
-        vendored.append(name)
-    runner(["git", "-C", repo_path, "add", "--", os.path.join(".claude", "agents")])
-
-    return {"submodule_path": sub, "old_sha": old_sha, "new_sha": new_sha,
-            "changed": old_sha != new_sha, "agents_vendored": vendored}
-
-
 def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: str = ".",
                      runner: Runner = _default_runner, base: Optional[str] = None) -> dict:
-    """Stand up the unit's worktree the one correct way, so the orchestrator never
-    hand-types `git worktree add` (SKILL.md, "Deterministic control plane").
-
-    * Branch already checked out somewhere -> no-op, returns that path.
-    * `origin/<branch>` exists (a resume, or a later stage) -> `-B <branch>
-      origin/<branch>`: the pushed tip, never fresh off `main` (the 2026-09-04
-      resume-base bug -- see references/parallelism.md, "Resume base").
-    * Otherwise a first touch -> `-b <branch>` off `base` if given, else the
-      unit's auto-detected integration base (`origin/epic-<parent>` for a
-      non-standing Epic's Task, `origin/main` for a standing-epic child, a
-      parentless issue, or an epic's own branch).
-
-    **`base` (e.g. `"origin/main"`) is required, not optional, for an
-    Architecture-phase or LLD-phase Task** -- `integration_base`'s
-    auto-detection cannot tell one of these apart from an ordinary functional
-    Task under the same (non-standing) Epic without new classification, and
-    its default for them is wrong. See `integration_base`'s own docstring and
-    "Cutting an Epic" in SKILL.md.
-
-    Always fetches first so every origin ref read is current."""
-    branch = epic_branch(number) if unit == "epic" else issue_branch(number)
+    """Create or resume the unit's worktree: reuse a live one (fast-forwarded), else
+    `-B` from `origin/<branch>` when pushed, else `-b` off `base` or the integration base.
+    Returns `created`, `path`, `branch`, `base`, `resumed` plus sync fields."""
+    branch = unit_branch(unit, number)
     path = worktree_path(unit, number)
     existing = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
     if existing:
@@ -2382,10 +1604,7 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
         base = f"origin/{branch}"
         runner(["git", "-C", repo_path, "worktree", "add", path, "-B", branch, base])
         resumed = True
-        # `-B <branch> origin/<branch>` points the local branch at origin's tip
-        # outright, so this resume is current by construction. `behind_before`
-        # is None rather than 0: whatever the local ref pointed at is discarded
-        # here, so "how far behind it was" was never measured.
+        # None, not 0: the old local ref is discarded unmeasured.
         synced = {"synced_to_origin": True, "behind_before": None}
     else:
         base = base or f"origin/{integration_base(gh, number, unit)}"
@@ -2396,13 +1615,9 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
             runner(["git", "-C", repo_path, "push", "origin",
                     f"refs/heads/{branch}:refs/heads/{branch}"])
         resumed = False
-        # A branch being created here has no origin tip to be behind.
         synced = {}
-    # A linked worktree's submodule directory is empty until initialised; do it
-    # here so `skill_dir` is the per-unit `$SDLC_DIR` from the first command on.
-    skill = init_skill_submodule(path, runner=runner)
     return {"created": True, "path": path, "branch": branch, "base": base,
-            "resumed": resumed, **synced, **skill}
+            "resumed": resumed, **synced}
 
 
 def _rev_count(repo_path: str, rev_range: str, runner: Runner) -> int:
@@ -2412,35 +1627,13 @@ def _rev_count(repo_path: str, rev_range: str, runner: Runner) -> int:
 
 
 def _resume_live_worktree(path: str, branch: str, repo_path: str, runner: Runner) -> dict:
-    """Hand back the live worktree that already holds `branch` -- **current with
-    `origin/<branch>`**, not at whatever commit it was last left on.
-
-    Handing it back untouched is what this did before 2026-09-16, and it is how
-    a whole run was worked on `epic-53` against a tree missing four
-    already-merged PRs. Every *other* resume path goes through `git worktree
-    add -B <branch> origin/<branch>`, which points the branch at the pushed tip
-    by construction, so this -- the path taken precisely when work is already
-    in flight and a tree exists -- was the only one that could return a stale
-    checkout, and it did so silently: nothing in the result said how old the
-    tree was, so no caller could have noticed.
-
-    Fast-forwards only when the local branch is **strictly behind** origin. A
-    branch that has diverged (commits on both sides) carries unpushed work, and
-    is reported as `diverged` and left exactly as it is -- never force-reset.
-    Discarding somebody's commit to make a resume look clean is the one outcome
-    this must not have; the caller reconciles it (`sync-branch`, or push/discard
-    the local commits) and resumes again.
-
-    `synced_to_origin` says the returned tree is not behind origin;
-    `behind_before` says how far behind it was on arrival (0 = it was already
-    current, None = origin has no such branch yet)."""
+    """Return the live worktree holding `branch`, fast-forwarded to origin when
+    strictly behind. A diverged branch is reported (`diverged`) and never reset.
+    Adds `synced_to_origin` and `behind_before` (None when origin lacks the branch)."""
     runner(["git", "-C", repo_path, "fetch", "origin"])
     result = {"created": False, "path": path, "branch": branch, "resumed": True,
               "reason": "branch already checked out in a live worktree"}
     if not origin_branch_exists(repo_path, branch, runner=runner):
-        # Never pushed -- a just-cut epic branch, or a first-touch child still
-        # mid-stage. No origin tip exists to be behind, so the tree is as
-        # current as it can be and there is nothing to fast-forward to.
         return {**result, "synced_to_origin": False, "behind_before": None,
                 "origin_missing": True}
     behind = _rev_count(path, f"{branch}..origin/{branch}", runner)
@@ -2459,25 +1652,9 @@ def _resume_live_worktree(path: str, branch: str, repo_path: str, runner: Runner
 
 def release_worktree(branch: str, runner: Runner = _default_runner,
                       base_repo: str = ".") -> dict:
-    """Remove the git worktree holding `branch`, if one exists and holds nothing
-    unsaved -- the mechanical half of "a parked or finished unit stops consuming
-    a dev-lane slot".
-
-    Called by every command that takes a unit to a stopping point
-    (`mark-needs-human`, `mark-blocked`, `merge-pr`), because relying on the
-    orchestrator to remember `git worktree remove` did not survive contact: a
-    real incident on 2026-08-20 left `/tmp/sdlc-dev-186`'s worktree behind after
-    #186 was parked `needs-human`, and `list-parallel-ready` -- which counts
-    slots off live worktrees -- read the lane as full (3/3) and proposed nothing
-    for the rest of the invocation, with no error anywhere to notice.
-
-    **Never destroys work.** Refuses (structured result, no exception) when the
-    worktree has uncommitted changes or commits not yet on `origin/<branch>`,
-    and when the branch is checked out in the repository's *main* worktree
-    (which `git worktree remove` cannot remove anyway). Absent worktree is the
-    common, unremarkable case -- `{"released": False, "reason": "no worktree"}`.
-    `cmd_list_parallel_ready` self-heals the slot count independently, so a
-    refusal here is a disk-hygiene note, never a stuck lane."""
+    """Remove the worktree holding `branch` so a parked/finished unit frees its lane
+    slot. Returns `{released, path?, reason?}`; never raises and never destroys work
+    (refuses on uncommitted/unpushed changes or the main worktree)."""
     try:
         path = worktree_path_for_branch(branch, runner=runner, base_repo=base_repo)
     except GhError as exc:
@@ -2500,15 +1677,8 @@ def release_worktree(branch: str, runner: Runner = _default_runner,
         if unpushed:
             return {"released": False, "path": path,
                     "reason": f"{len(unpushed.splitlines())} commit(s) not pushed to origin/{branch}"}
-        # `--force` is required, not a convenience: since the skill became a
-        # per-unit submodule *inside* each worktree, plain `worktree remove` refuses
-        # every single call with "working trees containing submodules cannot be moved
-        # or removed" -- so this function failed 100% of the time and reintroduced the
-        # exact 2026-08-20 incident the docstring above describes (three merges on
-        # 2026-09-13 each left their worktree behind). It does not weaken any promise:
-        # the uncommitted-changes and unpushed-commits refusals both run above, so by
-        # the time this executes the tree is clean of modifications and untracked
-        # files, which is the only property `--force` would otherwise erode.
+        # Safe: the refusals above guarantee a clean tree. Plain `remove` refuses
+        # any tree containing submodules.
         runner(["git", "-C", base_repo, "worktree", "remove", "--force", path])
     except GhError as exc:
         return {"released": False, "path": path, "reason": str(exc)}
@@ -2517,20 +1687,15 @@ def release_worktree(branch: str, runner: Runner = _default_runner,
 
 def resolve_repo_path(repo_path: Optional[str], branch: str,
                        runner: Runner = _default_runner) -> str:
-    """Where a **read-only** command (`verify-exit`) looks for a branch's files.
-    An explicitly passed `--repo-path` wins; otherwise the branch's live worktree
-    from `git worktree list`; "." only when nothing holds the branch. Commands
-    that *write* to a branch never use this -- they go through
-    `branch_workspace`, which never yields the main checkout (2026-09-12)."""
+    """Where a read-only command reads a branch's files: `repo_path` if given, else
+    the branch's live worktree, else ".". Writers use BranchWorkspace instead."""
     if repo_path is not None:
         return repo_path
     return worktree_path_for_branch(branch, runner=runner) or "."
 
 
 def _lock_dir() -> str:
-    """Directory of the per-branch lockfiles. `SDLC_LOCK_DIR` wins (the test suite
-    and any operator who wants locks off the worktree root); else the config's
-    `pipeline.locks.dir` with `{worktreesRoot}` expanded."""
+    """Per-branch lockfile directory: `SDLC_LOCK_DIR`, else `pipeline.locks.dir`."""
     env = os.environ.get("SDLC_LOCK_DIR")
     if env:
         return env
@@ -2543,19 +1708,9 @@ class BranchLocked(GhError):
 
 @contextlib.contextmanager
 def branch_lock(branch: str, wait_seconds: Optional[float] = None):
-    """Exclusive per-branch `flock` around every branch-touching command, so two
-    sessions (or two lanes of one session) can never fetch/checkout/merge/push
-    the same branch at the same time. Keyed by branch name, so operations on
-    *different* branches never contend -- a global main-checkout mutex would
-    serialize the whole pipeline for no gain, and is not what removed the race:
-    the race is gone because the main checkout is no longer a write target at
-    all (`branch_workspace`); the lock is the belt for two writers on one branch.
-
-    Blocks up to `pipeline.locks.waitSeconds` (default 600, `0` = fail fast),
-    polling non-blocking `flock` every 0.5s, then raises `BranchLocked` (a
-    `GhError`, exit 1) naming the lockfile so the operator can see who holds it.
-    The lockfile is never deleted -- deleting it would let a third process lock a
-    fresh inode while two others still contend on the old one."""
+    """Exclusive per-branch `flock`; waits up to `pipeline.locks.waitSeconds`, then
+    raises `BranchLocked`. Yields the lockfile path, which is never deleted (a new
+    inode would let a third process lock alongside two contending on the old one)."""
     if wait_seconds is None:
         wait_seconds = float(PIPELINE["locks"]["waitSeconds"])
     lock_dir = _lock_dir()
@@ -2586,10 +1741,8 @@ def branch_lock(branch: str, wait_seconds: Optional[float] = None):
 
 
 def worktree_map(base_repo: str = ".", runner: Runner = _default_runner) -> tuple:
-    """`(main_path, {branch: path})` from `git worktree list --porcelain`. The
-    first `worktree` entry is always the repository's main worktree (git lists
-    it first, unconditionally); detached worktrees have no `branch` line and are
-    absent from the map."""
+    """`(main_path, {branch: path})` from `git worktree list`; git always lists the
+    main worktree first, and detached worktrees are omitted."""
     out = runner(["git", "-C", base_repo, "worktree", "list", "--porcelain"])
     main_path, path, by_branch = None, None, {}
     for line in out.splitlines():
@@ -2603,26 +1756,9 @@ def worktree_map(base_repo: str = ".", runner: Runner = _default_runner) -> tupl
 
 
 class BranchWorkspace:
-    """A working tree that has `branch` checked out, for a command that must
-    write to that branch -- **never the repository's main checkout.**
-
-    Resolution order:
-    1. A live non-main worktree already holds the branch -> use it, leave it.
-    2. The *main* checkout holds the branch -> refuse (`GhError`) with the
-       recovery recipe. This is the stolen-branch state the 2026-09-10/12
-       incidents left behind (`ops_main_checkout_steals_branch`): operating there
-       would keep the main checkout off `main` and keep the branch's real
-       `/tmp/sdlc-*` worktree detached under whichever agent is using it.
-    3. Nothing holds it -> stand up an **ephemeral** worktree at
-       `<worktrees.root>/<ephemeralPrefix><branch>-<pid>` from `origin/<branch>`
-       (fetch first), operate, and remove it on exit if it is clean and fully
-       pushed. A local `<branch>` ref carrying commits not on origin is refused
-       rather than reset away; a branch on neither origin nor local is an error.
-
-    Used as a context manager; `.path` is the tree to operate in, `.ephemeral`
-    says whether it was created here, and `.retained` is set when an ephemeral
-    tree could not be removed (dirty / unpushed -- surfaced in the caller's
-    result so the operator knows a tree is left behind)."""
+    """Context manager yielding a tree with `branch` checked out for writing, never the
+    main checkout: the branch's live worktree, else an ephemeral one from origin that is
+    removed on exit when clean. `.retained` names an ephemeral tree left behind."""
 
     def __init__(self, branch: str, base_repo: str = ".", runner: Runner = _default_runner):
         self.branch = branch
@@ -2692,19 +1828,14 @@ class BranchWorkspace:
 
 
 def _with_workspace(result: dict, ws: BranchWorkspace) -> dict:
-    """Surface a retained ephemeral tree in a command's JSON result; silent when
-    the tree was a live worktree or was cleanly removed."""
+    """Add `retained_worktree` to `result` when an ephemeral tree was left behind."""
     if ws.retained:
         result["retained_worktree"] = ws.retained
     return result
 
 
 def origin_branch_exists(repo_path: str, branch: str, runner: Runner = _default_runner) -> bool:
-    """Whether `origin/<branch>` exists as a remote-tracking ref in `repo_path`.
-    Relies on the `git fetch origin` `cmd_list_parallel_ready` runs first, so
-    the answer reflects origin's current state, not a stale local ref cache.
-    `git show-ref --verify --quiet` exits nonzero (raised as GhError by the
-    runner) when the ref is absent -- that's the False case, not a failure."""
+    """Whether the remote-tracking ref `origin/<branch>` exists; callers fetch first."""
     try:
         runner(["git", "-C", repo_path, "show-ref", "--verify", "--quiet",
                  f"refs/remotes/origin/{branch}"])
@@ -2715,16 +1846,8 @@ def origin_branch_exists(repo_path: str, branch: str, runner: Runner = _default_
 
 def ensure_branch_on_origin(repo_path: str, branch: str, base: str = "main",
                             runner: Runner = _default_runner) -> str:
-    """Make `origin/<branch>` exist before a command that writes to it.
-
-    Returns `"exists"` when origin already has it, `"pushed-local"` when only a
-    local ref did (pushed as-is), or `"created"` when neither did (cut from
-    `origin/<base>`). An Epic's branch has no natural first writer --
-    the Epic runs no stage of its own, and its first commit is `publish-doc`
-    landing the Architecture-phase Task's doc -- so without this, the first
-    publish failed on a branch nobody had created, and a branch created
-    locally by `worktree-add --unit epic` failed deeper, inside `_publish_doc`'s
-    `origin/<epic>...<epic>` diff. Both found live, 2026-09-15."""
+    """Make `origin/<branch>` exist before writing to it. Returns `"exists"`,
+    `"pushed-local"` (local ref pushed as-is) or `"created"` (cut from `origin/<base>`)."""
     runner(["git", "-C", repo_path, "fetch", "origin"])
     if origin_branch_exists(repo_path, branch, runner=runner):
         return "exists"
@@ -2740,15 +1863,8 @@ def ensure_branch_on_origin(repo_path: str, branch: str, base: str = "main",
 
 
 def active_worktree_branches(repo_path: str, runner: Runner = _default_runner) -> set:
-    """Branch names currently checked out in a git worktree under `repo_path`'s
-    repository, main worktree included -- the live ground truth for which
-    `issue-<n>` branches are actively being developed right now, so
-    DEV_LANE_PARALLELISM is enforced off real state instead of hand-tracked
-    notes that don't survive a crashed session. `git worktree list --porcelain`
-    emits one `branch refs/heads/<name>` line per worktree that has a branch
-    checked out -- a *detached* worktree (the kind `pr-review`'s own pool uses)
-    has no such line and is correctly excluded, since a PR under review isn't
-    development-lane work."""
+    """Branches checked out in any worktree (main included). Detached review
+    worktrees are excluded, so they don't count against the dev lane."""
     out = runner(["git", "-C", repo_path, "worktree", "list", "--porcelain"])
     branches = set()
     for line in out.splitlines():
@@ -2760,32 +1876,9 @@ def active_worktree_branches(repo_path: str, runner: Runner = _default_runner) -
 def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional[int] = None,
                              runner: Runner = _default_runner,
                              run_id: Optional[str] = None) -> dict:
-    """Every open child of `epic` at `development`/`testing` that's safe to
-    start (or resume) concurrently, in its own `git worktree`, right now -- see
-    "Parallel implementation lane" in references/parallelism.md. This is the mechanical
-    replacement for hand-tracking eligibility against `architecture.md`'s prose:
-    a candidate is proposed only if it (a) isn't already running in its own
-    worktree, (b) isn't blocked/needs-human/gate-pending, (c) has no open
-    native `blockedBy`, and (d) its declared `## Footprint` doesn't overlap any
-    currently-active child's, or any other candidate already selected this
-    call (checked in `sort_key` order, so higher-priority/older children win a
-    footprint collision). `active_count` is read live off `git worktree list`,
-    not hand-tracked, so it's correct even after a crashed session.
-
-    Every child issue in this pipeline always works in its own worktree now
-    (see "Working on a branch" in references/parallelism.md) -- there is no separate
-    "shared-checkout occupant" to account for on top of `active_count`.
-
-    A child with no readable footprint is skipped ("cannot verify
-    non-overlap"), never assumed safe. An Epic's Task always has one by the time
-    it reaches `development`: the Epic's `lld.md` is published before
-    `merge-lld-doc` advances it. A Stage-less child is never proposed
-    (`default_stage` has no guess for it -- `next-action` reports it).
-
-    Read-only apart from a `git fetch origin` (needed so origin-ref reads --
-    footprints, branch existence -- reflect current remote state): never
-    claims, never posts, never creates a worktree. `skipped` names every child
-    this call excluded and why."""
+    """Children of `epic` at development/testing that can start now: not active, parked,
+    blocked or footprint-overlapping another (a missing footprint is never assumed safe).
+    Returns `parallel_ready` (up to free slots), `skipped`, `stale_worktrees` and counts."""
     limit = DEV_LANE_PARALLELISM if limit is None else limit
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
@@ -2799,10 +1892,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
             "active_branches": [], "limit": limit, "slots_available": 0, "epic": epic,
             "skipped": [], "cap_enforced": cap_enforced}
     if run_cap_reached(cap_state):
-        # The dev lane is the other way fresh work gets handed out, so the cap
-        # has to close it too -- capping `next-action` alone would just move the
-        # overflow into the parallel lane. An empty list with the flag set, not
-        # an error: there is nothing wrong, the run is simply full.
+        # The cap must close this lane too, or overflow just moves here from next-action.
         completed = list(cap_state.get("terminal", []))
         return {**base, "stop_at_cap": True, "cap": MAX_TASKS_PER_RUN, "completed": completed,
                 "note": f"run has driven {len(completed)} unit(s) to a terminal state, at "
@@ -2813,8 +1903,6 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
         return {**base, "note": f"epic #{epic} is epic:legacy -- not driven by this pipeline"}
     if resolve_profile(epic_issue)["childrenNeedArchitectedEpic"] \
             and not is_epic_architected(epic_issue):
-        # Same guard as decide_next_action's children loop: a non-standing Epic's
-        # Tasks stay out of the lane until `merge-lld-doc` marks it epic:architected.
         return {**base, "note": f"epic #{epic} is not epic:architected yet -- its children "
                                  f"are not eligible for the implementation lane"}
     open_issues = [i for i in all_issues if i["state"] == "OPEN"]
@@ -2824,18 +1912,8 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
     runner(["git", "-C", repo_path, "fetch", "origin"])
     active_branches = active_worktree_branches(repo_path, runner=runner)
 
-    # Split the live worktrees into the ones something is actually working in
-    # (`occupied`) and the ones holding a branch nothing can advance (`stale`)
-    # BEFORE either the footprint collision set or the slot count is derived
-    # from them. Both derivations have to see the same split: a worktree whose
-    # issue is closed, needs-human, gate-pending or blocked is not a collision
-    # risk for the same reason it is not a slot -- nothing is going to write in
-    # it. Deriving the slot count from the split while deriving collisions from
-    # the raw list is what stranded #494 on 2026-09-13: it was skipped for
-    # "footprint overlaps active/eligible #323" where #323 was a parked
-    # worktree of another epic, blocked on an open dependency, correctly
-    # excluded from the slot count two loops further down and just as correctly
-    # unable to collide with anything (see `references/history.md`).
+    # A worktree nothing can advance (closed/parked/blocked issue) is neither a slot
+    # nor a collision risk; both derivations below use this one split.
     occupied, stale = [], []
     for branch in sorted(active_branches):
         number = issue_number_from_branch(branch)
@@ -2859,9 +1937,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
         number = issue_number_from_branch(branch)
         if number is None:
             continue
-        # Not necessarily THIS call's own `epic` -- an active branch can belong
-        # to any epic's Task (footprint collisions are checked across the
-        # whole dev lane, not just this epic's own children).
+        # Collisions span the whole dev lane, so use the active branch's own epic.
         active_parent = (by_number.get(number) or {}).get("parent")
         fp = read_footprint(repo_path, number, runner=runner,
                              epic=active_parent["number"] if active_parent else None)
@@ -2876,10 +1952,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
         if branch in active_branches:
             skipped.append({"issue": number, "reason": "already active in its own worktree"})
             continue
-        # A brand-new child next-action hasn't surveyed yet has no Stage value;
-        # default_stage() says what it would be assigned. Read-only here -- the
-        # field itself is written by next-action's own survey, `merge-lld-doc`,
-        # or `claim`, not this command.
+        # An unsurveyed child has no Stage yet; use what it would be assigned.
         stage = current_stage(issue) or default_stage(issue, epic_issue)
         if stage not in ("development", "testing"):
             skipped.append({"issue": number, "reason": f"stage is {stage!r}, not development/testing"})
@@ -2912,19 +1985,11 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
         eligible.append({"issue": number, "branch": branch, "stage": stage, "title": issue["title"]})
         selected_footprints.append((number, footprint))
 
-    # Slot count is independent of whether a footprint was readable for an
-    # active branch -- a stale/undocumented active branch still consumes a slot.
-    # It is *not* independent of whether anything is still working there: a
-    # worktree whose issue is parked (needs-human / blocked / gate-pending) or
-    # already closed holds a slot nothing can ever use. Releasing it is
-    # `release_worktree`'s job at park time; counting it correctly here is the
-    # backstop for when that didn't happen -- a crashed session, a hand-parked
-    # issue, or the 2026-08-20 incident where a leftover /tmp/sdlc-dev-186 read
-    # as a full lane and silently starved the invocation. The split itself is
-    # computed once, above, so collisions and slots cannot disagree about it.
+    # An occupied branch holds a slot even when its footprint was unreadable.
     active_count = len(occupied)
     slots = max(0, limit - active_count)
     selected = eligible[:slots]
+    note_in_flight(epic, run_id, {u["issue"]: u["stage"] for u in selected})
     return {"parallel_ready": selected, "count": len(selected), "eligible_total": len(eligible),
             "active_count": active_count, "active_branches": sorted(occupied),
             "limit": limit, "slots_available": slots, "epic": epic, "skipped": skipped,
@@ -2933,49 +1998,9 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
 
 def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional[int] = None,
                            runner: Runner = _default_runner) -> dict:
-    """Every open child of a **standing** `epic` at `product`/`architecture` that's
-    safe to start (or resume) concurrently, in its own `git worktree`, right now --
-    the design-stage sibling of `list-parallel-ready` (which only ever proposes
-    `development`/`testing` children). See "Design lane" in
-    references/parallelism.md.
-
-    Standing-profile only. A standing epic has no Architecture-/LLD-phase Tasks
-    (`epicLevelPhase == false`, see `is_epic_standing`); each child runs its own
-    full `product`->...->`testing` flow, so its design stages are per-child work
-    that can fan out. A non-standing Epic's design is one Architecture-phase Task
-    then one LLD-phase Task, ordered by `blockedBy` and driven by `next-action` --
-    there is nothing to fan out, so this returns empty (with a `note`) for it.
-    Gated on the resolved profile's
-    `epicLevelPhase`, not the hardcoded `epic:standing` label, so a client's own
-    label->profile mapping is honoured (same as everywhere else -- see
-    `resolve_profile`).
-
-    Same eligibility gating as the dev lane: a candidate is proposed only if it
-    (a) isn't already running in its own worktree, (b) isn't
-    blocked/needs-human/gate-pending, and (c) has no open native `blockedBy`.
-    Unlike the dev lane there is **no footprint check**: `product`/`architecture`
-    for a standing child write only that child's own `{DOC_ROOT}/issue-<n>/`
-    docs folder, which cannot collide with a sibling's, so there is no
-    cross-child code overlap to verify (the footprint gate exists for the dev
-    lane, where children touch shared source trees). `active_count` is read live
-    off `git worktree list`, counting only worktrees whose child is itself in a
-    design stage -- a sibling that has already moved to the dev lane
-    (`development`/`testing`) holds a worktree but is the dev lane's
-    concern and its own cap, never a design-lane slot.
-
-    Read-only apart from a `git fetch origin` (so the active-worktree read
-    reflects current remote state): never claims, posts, or creates a worktree.
-    `skipped` names every child this call excluded and why. Mirrors
-    `list-parallel-ready`'s JSON shape, with `design_ready` in place of
-    `parallel_ready`.
-
-    **Product WIP cap** (`pipeline.productWip.maxGateAPending`, default 5): a
-    `product`-stage candidate is proposed only while the repo-wide Gate A queue
-    (`product_gate_pending`) plus the `product` candidates already selected in
-    this call leave headroom under the cap -- one fan-out cannot push the human's
-    review queue past it. `architecture`-stage candidates are never gated (they
-    are past Gate A). Result carries `product_cap` with the cap and the pending
-    list so the orchestrator can report it."""
+    """Children of a standing `epic` at `product`/`architecture` that can start now,
+    each in its own worktree, up to the design-lane cap. Read-only apart from a fetch.
+    Returns `design_ready`, `skipped`, `stale_worktrees`, `product_cap` and slot counts."""
     limit = DESIGN_LANE_PARALLELISM if limit is None else limit
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
@@ -2983,8 +2008,7 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
     if epic_issue is None or not is_epic(epic_issue):
         raise GhError(f"#{epic} is not an epic (pipeline.classification does not call it "
                        f"\"epic\") -- pass the epic's own issue number, not a child issue's")
-    # Same exemption as decide_next_action: an auto-passing Gate A never queues on
-    # the human, so that profile's product candidates are not capped.
+    # An auto-passing Gate A never queues on the human, so it is exempt from the WIP cap.
     product_headroom = (product_wip_headroom(all_issues)
                         if effective_gates(epic_issue)["requiresHumanGateA"] else None)
     product_cap = {"limit": PRODUCT_WIP_CAP, "pending": product_gate_pending(all_issues)}
@@ -2994,10 +2018,6 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
     if is_epic_legacy(epic_issue):
         return {**base, "note": f"epic #{epic} is epic:legacy -- not driven by this pipeline"}
     if not is_epic_standing(epic_issue):
-        # Non-standing Epic: its design is one Architecture-phase Task then one
-        # LLD-phase Task, driven by next-action -- never fanned out. Gate on the
-        # resolved profile's epicLevelPhase, not the standing label (see
-        # docstring / resolve_profile).
         return {**base, "note": f"epic #{epic} is not a standing epic -- its design work is "
                                  f"its Architecture-phase and LLD-phase Tasks, driven one at a "
                                  f"time by next-action, not fanned out across children"}
@@ -3015,10 +2035,7 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
         if branch in active_branches:
             skipped.append({"issue": number, "reason": "already active in its own worktree"})
             continue
-        # A standing child next-action hasn't surveyed yet has no Stage value;
-        # default_stage() says what it would be assigned (`product`, or
-        # `architecture` for a Bug). Read-only here -- the field itself is
-        # written by next-action's own survey or by `claim`, not this command.
+        # An unsurveyed child has no Stage yet; use what next-action would assign.
         stage = current_stage(issue) or default_stage(issue, epic_issue)
         if stage not in ("product", "architecture"):
             skipped.append({"issue": number, "reason": f"stage is {stage!r}, not product/architecture"})
@@ -3047,12 +2064,7 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
             product_headroom -= 1
         eligible.append({"issue": number, "branch": branch, "stage": stage, "title": issue["title"]})
 
-    # Slot count off live worktrees, restricted to *design*-stage occupants: a
-    # sibling worktree in development/testing is the dev lane's slot, not
-    # this one's (the two lanes have independent caps). A worktree whose issue is
-    # parked (needs-human / blocked / gate-pending) or already closed holds a
-    # slot nothing can use -- reported under `stale_worktrees`, same backstop as
-    # the dev lane (see cmd_list_parallel_ready).
+    # Only design-stage worktrees occupy a design slot; parked or closed ones are stale.
     occupied, stale = [], []
     for branch in sorted(active_branches):
         number = issue_number_from_branch(branch)
@@ -3064,8 +2076,6 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
             continue
         stage = current_stage(issue) or default_stage(issue, epic_issue)
         if stage not in ("product", "architecture"):
-            # A dev-lane worktree -- counted against DEV_LANE_PARALLELISM by
-            # list-parallel-ready, never against the design lane.
             continue
         status = pipeline_status(issue)
         if status == "needs-human" or status in GATE_PENDING_STATUSES:
@@ -3085,24 +2095,8 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
 
 
 def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> dict:
-    """`development`'s exit action once its own suites are green: posts the
-    canonical `<!-- stage-transition: development->pr-review @ <ts> -->` handoff
-    marker that puts this issue into `list-ready-for-review`'s pool. Run it every
-    time development finishes -- including after a rework round, since a fresh
-    handoff marker is exactly what makes an issue reviewable again after a
-    recorded `rework` outcome (see `cmd_list_ready_for_review`).
-
-    Exists as a command rather than prose because the marker is now load-bearing
-    (it's the queue), not just a visibility breadcrumb. It had been left to each
-    stage agent to hand-write, and the real thread history shows that does not
-    hold up: #115 wrote `development->pr-review`, #111 wrote a mangled
-    `pr-review->development->pr-review`, #130 wrote none at all. Same reasoning as
-    `start-comment` -- fixed, judgment-free wording belongs here, not in a
-    hand-typed `gh issue comment`. See "Deterministic control plane" in SKILL.md.
-
-    Does not touch Stage (already `PR Review` from `open-dev-pr`) or Pipeline
-    Status (still `In Progress`) -- a queued-for-review issue is not a *new* state,
-    it's the same one, now with a marked handoff."""
+    """Post the `development->pr-review` handoff marker that queues the PR for review.
+    Run after every development round, including rework. Returns `queued_for`."""
     timestamp = _utc_now_marker()
     gh.issue_comment(issue,
         f"✅ Development complete. {summary} "
@@ -3116,22 +2110,8 @@ PR_REVIEW_OUTCOMES = ("clean", "rework")
 
 def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary: str,
                          same_class_recurrence: bool = False) -> dict:
-    """Records that a `pr-review` pass ran on this issue's PR and what it found --
-    the last action of every review, clean or not, **before** `merge-pr` or a
-    rework resume. Posts one comment carrying the
-    `<!-- pr-review-outcome: <outcome>:<pr> [same-class:true] @ <ts> -->` marker
-    `list-ready-for-review` reads back, so a PR under rework is never handed to a
-    second, concurrent review agent (see `cmd_list_ready_for_review`).
-
-    `outcome` is `clean` (nothing found; merging next) or `rework` (findings sent
-    back to `development`). Recording it on the clean path too is not redundant:
-    the merge can fail or be delayed by CI, and the issue stays listable until it
-    actually closes.
-
-    `same_class_recurrence=True` -- pass it when this round's finding is the same
-    defect class as an earlier round's on this PR. See `cmd_record_design_review`
-    for why this needs to be a marker `cmd_pairing_counts` reads, not a sentence
-    in the verdict prose that nothing acts on."""
+    """Post the `pr-review-outcome` marker (`clean` | `rework`, optional same-class flag)
+    that `list-ready-for-review` and `pairing-counts` read. Returns `recorded`."""
     if outcome not in PR_REVIEW_OUTCOMES:
         raise GhError(f"outcome must be one of {PR_REVIEW_OUTCOMES}, got {outcome!r}")
     if same_class_recurrence and outcome != "rework":
@@ -3151,20 +2131,14 @@ def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary:
             "same_class_recurrence": same_class_recurrence, "recorded": True}
 
 
-# How much of a suite run's captured output an attestation embeds. Enough to show
-# the summary line and the last failures a real run would print; short enough that
-# the PR thread stays readable and the comment stays inside GitHub's body limit.
+# Tail of a suite run embedded in an attestation; bounded by GitHub's comment body limit.
 LOCAL_CI_EVIDENCE_LINES = 40
 LOCAL_CI_EVIDENCE_CHARS = 4000
 
 
 def read_ci_evidence(output_path: str) -> str:
-    """The tail of a suite run's own captured stdout/stderr, for `record-local-ci`.
-
-    Reads the file the stage redirected its run into. Refuses an unreadable or
-    empty one: the point of the attestation is that the merge gate sees the
-    runner's words rather than the agent's summary of them, and an empty file is
-    exactly the claim-without-evidence this replaced."""
+    """The trimmed tail of a suite run's captured output file for `record-local-ci`.
+    Raises on an unreadable or empty file: the attestation must carry real output."""
     try:
         with io.open(os.path.expanduser(output_path), encoding="utf-8", errors="replace") as fh:
             text = fh.read()
@@ -3186,32 +2160,9 @@ def read_ci_evidence(output_path: str) -> str:
 
 def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
                          command: str, output: str) -> dict:
-    """Attest that a required suite (`backend`/`frontend`) passed locally against a
-    specific commit -- the merge-gate stand-in for the GHA check that no longer
-    runs on a child PR (both suites went main-only for cost on 2026-09-04; see each
-    workflow's `on:` block and `REQUIRED_WORKFLOWS`).
-
-    Run by the `development` stage once per suite it actually ran, against the
-    exact commit it ran against. Posts one comment on the *PR* (not the issue --
-    the attestation is bound to this PR's head commit, and `merge-pr`/`pr-checks`
-    read it back from the PR thread alongside the head SHA) carrying
-    `<!-- local-ci: <suite>:<pr> @ <sha> -->`.
-
-    **The attestation carries evidence, not a claim.** `--command` is the exact
-    command run and `--output` a file holding that run's own captured stdout/stderr;
-    its tail is embedded in the comment. This is the whole of what replaced the
-    retired `testing` stage's independent re-run (2026-09-12): the implementer now
-    writes and runs its own tests, so the merge gate's protection is that the
-    evidence is machine-produced and pinned to a sha, not that a second agent
-    repeated the work. A summary with no captured output is refused here rather
-    than discovered at `pr-review`.
-
-    `merge-pr` honours it only while `sha` matches the PR's current head: push a new
-    commit (a rework round) and the attestation goes stale and must be re-run. Pass
-    the tested worktree's `git rev-parse HEAD`; a short sha is fine (prefix-matched).
-    Not a substitute for the `testing->pr-review` handoff or the `pr-review` outcome
-    -- those still gate merge via `missing_pipeline_evidence`; this is only the CI
-    half."""
+    """Post a `local-ci` attestation on the PR: `suite` passed at `sha`, with the command
+    and its captured output tail. The merge gate honours it only while `sha` matches
+    the PR head. Returns `attested`, `evidence_lines`."""
     if suite not in LOCAL_CI_SUITES:
         raise GhError(f"suite must be one of {LOCAL_CI_SUITES}, got {suite!r}")
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha or ""):
@@ -3237,32 +2188,8 @@ DESIGN_REVIEW_ROLES = ("product-review", "arch-review", "lld-review")
 
 def cmd_record_design_review(gh: GitHub, issue: int, role: str, outcome: str,
                              summary: str, same_class_recurrence: bool = False) -> dict:
-    """Records that `arch-review` or `lld-review` ran and what it concluded --
-    the design-side twin of `record-pr-review`, and the last action of every
-    design review, clean or not, before the orchestrator resumes the design agent
-    or moves the unit on.
-
-    Posts one comment carrying
-    `<!-- design-review-outcome: <outcome>:<role> [same-class:true] @ <ts> -->`,
-    which `cmd_pairing_counts` reads back per role. Added 2026-08-28 out of epic
-    #98's retrospective -- see `_DESIGN_REVIEW_OUTCOME_MARKER` for why the pairing
-    that fires the valve most often had no counter until then.
-
-    `same_class_recurrence=True` -- pass it when this round's blocking finding is
-    the same defect class as an earlier round's on this unit (the review agent's
-    own instructions call for this, see "Fan-out"/"rework" sections). This is the
-    mechanical form of "escalate on the pattern": on #157's #504 (2026-09-14) a
-    reviewer wrote that sentence in the verdict prose at two separate rounds and
-    nothing acted on it, because nothing parses a verdict's prose. A same-class
-    marker is what `references/rework.md`'s escalation valve reads instead of the
-    generic bounce count, so a same-class recurrence escalates on its own terms
-    the first time `cmd_pairing_counts` reports it, not on whichever bounce number
-    the generic counter happens to be at.
-
-    This does **not** replace the `arch-review-confidence` marker, which
-    `skip-gate` reads and which answers a different question (how much to trust a
-    *clean* verdict). Confidence cannot stand in for a bounce count: it is
-    meaningless on a rework verdict, which is precisely the verdict a valve counts."""
+    """Post the `design-review-outcome` marker for a design review role (`clean` |
+    `rework`, optional same-class flag) that `pairing-counts` reads. Returns `recorded`."""
     if role not in DESIGN_REVIEW_ROLES:
         raise GhError(f"role must be one of {DESIGN_REVIEW_ROLES}, got {role!r}")
     if outcome not in PR_REVIEW_OUTCOMES:
@@ -3290,11 +2217,8 @@ def _post_start_comment(gh: GitHub, issue: int, role: str):
 
 
 def cmd_claim(gh: GitHub, issue: int, role: str) -> dict:
+    role = RETIRED_ROLES.get(role, role)
     if role not in STAGE_OPTION_IDS:
-        # A typo'd role used to silently skip the Stage write while still
-        # claiming In Progress and posting a start comment naming the bogus
-        # role -- surface it loudly instead; every claimable role is a real
-        # Stage option.
         raise GhError(f"unknown role {role!r} -- must be one of "
                        f"{sorted(STAGE_OPTION_IDS)}")
     gh.set_stage_field(issue, role)
@@ -3304,15 +2228,7 @@ def cmd_claim(gh: GitHub, issue: int, role: str) -> dict:
 
 
 def cmd_set_stage(gh: GitHub, issue: int, stage: str) -> dict:
-    """Set the Stage field with no other side effect -- unlike `claim`, does
-    NOT touch Pipeline Status or post a start comment. Used when cutting an
-    Epic's Architecture-phase or LLD-phase Task (`default_stage()` has no guess
-    for a non-standing Epic's children), and when routing a Stage-less child
-    `next-action` reported as `unstaged` -- the Task stays genuinely fresh
-    (Pipeline Status unset) until an actual `/sdlc-pipeline` invocation claims
-    and delegates it. See "Cutting an Epic" in SKILL.md. A Product-Roadmap Task
-    doesn't need this: `default_stage()` starts an Initiative's child at
-    `product`."""
+    """Set the Stage field only -- no Pipeline Status change, no start comment."""
     if stage not in STAGE_OPTION_IDS:
         raise GhError(f"unknown stage {stage!r} -- must be one of {sorted(STAGE_OPTION_IDS)}")
     gh.set_stage_field(issue, stage)
@@ -3320,18 +2236,7 @@ def cmd_set_stage(gh: GitHub, issue: int, stage: str) -> dict:
 
 
 def cmd_start_comment(gh: GitHub, issue: int, role: str) -> dict:
-    """Post the mandatory '🚧 Picking this up' start comment with no field mutation --
-    for transitions into a role that has no Stage value of its own (arch-review,
-    lld-review, pr-review) or where Pipeline Status is already "In Progress" from
-    the prior stage (testing, picked up right after development's open-dev-pr
-    already set Stage to "Testing"). Keeps this fixed, judgment-free wording out of
-    hand-typed `gh` calls -- see "Deterministic control plane" in SKILL.md.
-
-    `lld-review` was added 2026-08-22: it is mandatory after every `lld` and
-    ran ~15 times across epic #156 without posting a single start comment, because
-    the only accepted role string was `arch-review` and the playbook's instruction to
-    reuse it would have produced a comment naming the wrong stage. Every other stage
-    announces itself; a silent mandatory stage is invisible to crash recovery."""
+    """Post the start comment with no field mutation, for roles with no Stage of their own."""
     _post_start_comment(gh, issue, role)
     return {"issue": issue, "started": role}
 
@@ -3350,21 +2255,9 @@ _GATE_PR_BODY = (
 
 def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, doc: str,
                    next_stage: str, summary: str, runner: Runner = _default_runner) -> dict:
-    stage = doc.rsplit(".", 1)[0]  # "product.md" -> "product", "architecture.md" -> "architecture"
-    branch = issue_branch(issue)
-    # Every gate is `issue-<n>` -> `main` directly, no sub-branch: a standing
-    # child, a parentless issue, and a phase-Task (an Initiative's
-    # Product-Roadmap Task, an Epic's Architecture-phase Task) alike. A
-    # phase-Task is cut from `origin/main` via `worktree-add --base`, since
-    # nothing is ever committed to its branch again once its gate merges. See
-    # "Cutting an Epic" / "Cutting Epics from an approved Initiative" in SKILL.md.
-    head, base = branch, "main"
-    # The SHA the gate comment cites is the PUSHED head -- `origin/<head>` after a
-    # fetch -- never a local worktree's HEAD. The PR is opened against origin, so
-    # a local-only commit could only ever produce a comment citing a SHA the PR
-    # does not contain; and reading origin needs no working tree at all, so this
-    # command no longer touches (or steals) any checkout. `repo_path` is only
-    # where `git fetch` runs (default: the current directory).
+    stage = doc.rsplit(".", 1)[0]
+    head, base = issue_branch(issue), "main"
+    # Cite the pushed head, not a local HEAD: the PR only contains what is on origin.
     repo_path = repo_path or "."
     runner(["git", "-C", repo_path, "fetch", "origin"])
     sha = runner(["git", "-C", repo_path, "rev-parse", f"origin/{head}"]).strip()
@@ -3378,11 +2271,11 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
     timestamp = _utc_now_marker()
     doc_verb = "Requirements locked" if stage == "product" else "Design locked"
     comment = (
-        f"✅ {doc_verb} — see `{DOC_ROOT}/{branch}/{doc}` (`{sha}`). {summary}\n\n"
+        f"✅ {doc_verb} — see `{DOC_ROOT}/issue-{issue}/{doc}` (`{sha}`). {summary}\n\n"
         f"⏸️ Awaiting human review — see #{pr_number}. Merge it to approve and continue to "
         f"`{next_stage}`, or leave review comments on it for anything that needs to change "
         f"(leave it unmerged — the pipeline picks up your comments and revises the doc "
-        f"automatically). Run `/sdlc-pipeline` again once you've merged it, or any time after "
+        f"automatically). Run `/sdlc:run` again once you've merged it, or any time after "
         f"leaving comments if you'd like the revision done sooner.\n\n"
         f"<!-- gate-pr: {stage}:{pr_number} -->\n"
         f"<!-- stage-transition: {stage}->human-review:{stage} @ {timestamp} -->"
@@ -3394,50 +2287,9 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
 
 def git_reconcile_branch(repo_path: str, branch: str, base: str = "main",
                           runner: Runner = _default_runner):
-    """Fetch, merge `origin/<base>` into `branch`, and push the result straight back to
-    origin -- so the branch handed off to the next stage's agent is already in sync
-    with origin, and that agent (or the orchestrator, before delegating) never needs
-    to separately notice/push a local-only merge commit.
-
-    Always a real merge, never a rebase -- deliberately. Development PRs are
-    squash-merged into `main` (see `cmd_merge_pr`), so a squashed commit shares no
-    ancestry with the original per-commit history it replaced; rebasing any other
-    still-open issue/epic branch onto a `main` that contains that squash commit
-    would try to replay commits `main` already has under different SHAs, producing
-    spurious conflicts or duplicated diffs. A merge has no such problem -- it only
-    ever looks at current tree content, never shared ancestry -- so it's the only
-    safe way to keep a branch current here. A per-issue gate PR (`issue-<n>` ->
-    `main`), by contrast, is never squash-merged (see "Passing a gate" in
-    references/gates.md) specifically so a later `git_reconcile_branch` merge of
-    `main` back into that same branch is a clean no-op, not a phantom diff. An
-    epic-level gate never touches `main` at all: its sub-branch merges into
-    `epic-<n>` (squash allowed -- the sub-branch is disposable), and `cmd_pass_gate`
-    then calls this with `base=epic-<n>` so the epic worktree just fast-forwards
-    to `origin/epic-<n>`.
-
-    `checkout` here relies on `runner` raising on a nonzero exit (the default
-    `_default_runner` does) so a checkout collision -- e.g. this exact branch
-    already checked out in another worktree -- aborts loudly instead of silently
-    merging/pushing onto whatever branch happened to be checked out in
-    `repo_path` at the time. That failure mode is exactly what happened once by
-    hand in this pipeline's own operation, from typing the fetch/checkout/merge/
-    push sequence directly instead of going through this function -- see
-    "Deterministic control plane" in SKILL.md for why every mechanical git
-    sequence belongs here, not retyped in a shell.
-
-    Raises `MergeConflict` (a `GhError` subclass, carrying the conflicting
-    file paths) specifically when the `merge` step fails with real unmerged
-    paths -- distinguished from any other merge failure (e.g. uncommitted
-    local changes) by checking `git diff --diff-filter=U` after the failed
-    merge; if that comes back empty, the original error is re-raised as-is,
-    since it isn't a content conflict this function knows how to characterize.
-    On a real conflict, the merge is aborted (`git merge --abort`) before
-    raising, so `repo_path` is left clean rather than mid-conflict. Only
-    `cmd_sync_branch` below catches this specially; every other caller (e.g.
-    `cmd_pass_gate`) lets it propagate as an ordinary operational failure,
-    since a gate PR is doc-only and a real conflict there is unexpected enough
-    to warrant stopping loudly rather than routing through rework. See
-    "Parallel implementation lane" / git-conflict handling in references/parallelism.md."""
+    """Fetch, merge `origin/<base>` into `branch` and push it. Always a merge, never a
+    rebase: squash-merged PRs share no ancestry with their branches. Raises
+    `MergeConflict` (after `merge --abort`) on real unmerged paths."""
     runner(["git", "-C", repo_path, "fetch", "origin"])
     runner(["git", "-C", repo_path, "checkout", branch])
     try:
@@ -3453,11 +2305,7 @@ def git_reconcile_branch(repo_path: str, branch: str, base: str = "main",
 
 
 class MergeConflict(GhError):
-    """Raised by `git_reconcile_branch` when merging `origin/main` into a
-    branch hits real unmerged paths -- see that function's docstring. A
-    `GhError` subclass so any caller that doesn't specifically catch it (every
-    one except `cmd_sync_branch`) still gets the existing "operational
-    failure, exit 1" behavior via `main()`'s generic `except GhError`."""
+    """Real unmerged paths while reconciling a branch; `files` lists them."""
 
     def __init__(self, files: list, base: str = "main"):
         super().__init__(f"merge conflict reconciling with origin/{base} on {len(files)} "
@@ -3468,78 +2316,30 @@ class MergeConflict(GhError):
 
 def cmd_sync_branch(gh: GitHub, repo_path: Optional[str], issue: int, unit: str = "issue",
                      runner: Runner = _default_runner, base: Optional[str] = None) -> dict:
-    """Reconcile `<unit>-<issue>`'s branch with `origin/main` -- see "Keeping a
-    branch current" in references/parallelism.md. Run this before delegating to *any* new stage's
-    subagent, not just at a gate pass (which already reconciles internally via
-    `cmd_pass_gate`) -- a plain internal stage transition (e.g. `arch-review`
-    finishing clean, `testing` handing off to `pr-review`) does not otherwise
-    touch `main` at all, and a sibling issue's PR can merge into `main` at any
-    point while this issue is mid-flight.
-
-    A real merge conflict is a **valid result**, not an operational failure --
-    it's exactly the kind of content judgment call ("whose defect is this,
-    who resolves it") that stays a prose decision for the orchestrator, per
-    "Deterministic control plane" in SKILL.md, not something this command
-    should crash on. So `MergeConflict` is caught here specifically and
-    reported as `{"synced": false, "conflict": true, "conflicting_files": [...]}`
-    at exit 0, instead of propagating as `GhError` (exit 1) the way every
-    other git failure from this command still does.
-
-    **`base` overrides the auto-detected integration base**, mirroring
-    `worktree-add --base` and added for the same reason (2026-09-16 retro). A
-    Architecture-phase or LLD-phase Task is a plain child of a non-standing
-    Epic, so `integration_base` resolves it to `origin/epic-<n>` -- but those
-    two Tasks gate against `main`, so reconciling them with the epic branch
-    merges the wrong tree, and on a fresh Epic whose branch has not been pushed
-    yet it failed outright at exit 1, making `sync-branch` unrunnable on them
-    at all. When the caller names the base, `integration_base` is never
-    consulted, so this works before the epic branch exists and costs no
-    `issue_list` call. Either spelling is accepted -- `main` or `origin/main`,
-    since the mirrored `worktree-add --base` takes a full `origin/<ref>`.
-
-    A base that does not exist on origin is likewise a **structured exit-0
-    result** (`{"synced": false, "base_missing": true, ...}`), not a crash: it
-    is a legitimate state (a unit cut before its base branch was ever pushed),
-    and a branch with nothing to reconcile against is already as current as it
-    can be. Crashing there told the orchestrator the command was broken."""
-    branch = f"{unit}-{issue}"
+    """Merge the unit's integration base (or `base`) into its branch and push. A merge
+    conflict (`conflict`) or missing base (`base_missing`) is a structured exit-0
+    result with `synced: false`, not an error."""
+    branch = unit_branch(unit, issue)
     if base:
         base = base[len("origin/"):] if base.startswith("origin/") else base
     else:
         base = "main" if unit == "epic" else integration_base(gh, issue, unit)
     result = {"issue": issue, "unit": unit, "branch": branch, "base": base, "synced": True}
     with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
-        # Fetch before the existence check so it reads origin's current state,
-        # not a stale remote-tracking ref (`git_reconcile_branch` fetches again;
-        # a second fetch is cheap next to reporting a branch as missing because
-        # this checkout had not heard of it yet).
+        # Fetch first so the existence check never reads a stale remote-tracking ref.
         runner(["git", "-C", ws.path, "fetch", "origin"])
         if not origin_branch_exists(ws.path, base, runner=runner):
             result.update({
                 "synced": False, "base_missing": True,
                 "reason": f"origin/{base} does not exist -- there is nothing to reconcile "
                           f"`{branch}` with, so it is already as current as it can be. If "
-                          f"this unit integrates somewhere else, pass `--base <ref>` (an "
-                          f"Architecture-/LLD-phase Task takes `--base main`); otherwise "
-                          f"create origin/{base} first."})
+                          f"this unit integrates somewhere else, pass `--base <ref>`; "
+                          f"otherwise create origin/{base} first."})
         else:
             try:
                 git_reconcile_branch(ws.path, branch, base=base, runner=runner)
-                # The merge may have moved the skill submodule's gitlink; a merge
-                # alone leaves the working files at the OLD pin ("modified (new
-                # commit)"). Re-init here -- sync-branch runs between stage agents,
-                # so this is the one naturally quiet point per worktree. Only for a
-                # live worktree an agent will read from; an ephemeral tree exists
-                # for the git op alone.
-                if not ws.ephemeral:
-                    skill = init_skill_submodule(ws.path, runner=runner)
-                    if skill.get("skill_dir"):
-                        result.update(skill)
             except MergeConflict as e:
-                # Persist the conflict on the issue -- the JSON result alone doesn't
-                # survive a crashed session, and the sync-branch-conflict <->
-                # development escalation-valve pairing must be reconstructible from the
-                # thread (cmd_pairing_counts reads this marker back).
+                # Persisted as a marker so pairing-counts can rebuild it after a crash.
                 timestamp = _utc_now_marker()
                 gh.issue_comment(issue,
                     f"⚠️ Merge conflict reconciling `{branch}` with `origin/{base}` — "
@@ -3550,13 +2350,7 @@ def cmd_sync_branch(gh: GitHub, repo_path: Optional[str], issue: int, unit: str 
     return _with_workspace(result, ws)
 
 
-# A `git push` refused by origin because the remote ref moved under us
-# (someone else pushed the epic branch between our fetch and our push). This is
-# a content race, not an operational git failure -- `_publish_doc` reports
-# it as a structured `conflict` result at exit 0, the same spirit as
-# `cmd_sync_branch`'s `MergeConflict` catch, and lets the orchestrator re-run
-# rather than crashing. Every other `git` failure (bad ref, dirty tree, network)
-# still propagates as GhError (exit 1).
+# A push rejected because origin moved under us: a retryable race, not a git failure.
 _PUSH_REJECTED_RE = re.compile(
     r"\[rejected\]|\[remote rejected\]|non-fast-forward|fetch first|updates were rejected",
     re.IGNORECASE)
@@ -3564,35 +2358,14 @@ _PUSH_REJECTED_RE = re.compile(
 
 def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
                        runner: Runner = _default_runner) -> dict:
-    """Close out an Epic's design phase once its LLD-phase Task's `lld-review` is
-    clean and `publish-doc` + `create-lld-tasks` have run. There is no source
-    branch to reconcile from -- `publish-doc` already put `epic-<n>/lld.md` onto
-    `origin/epic-<n>` -- so this only verifies the doc actually reached origin
-    (protects against advancing Tasks off a commit that was made locally but
-    never pushed, e.g. a crash between commit and push) before advancing every
-    Task `create-lld-tasks` created.
-
-    **Every open Task under this Epic still at its just-created state (no Stage
-    field at all) is advanced** to `development` -- no claim, Pipeline Status
-    cleared -- functional Tasks and the two standing Integration-test/e2e-test
-    Tasks alike. Idempotent: a Task already advanced (Stage already set, from an
-    earlier run of this same command) is skipped. The Tasks then surface as
-    fresh `next-action` / `list-parallel-ready` units.
-
-    Scoped to `classify_unit_from_issue(...) == "task"` and `state == "OPEN"`
-    -- not just "any Stage-less child" -- so a non-Task child (something
-    manually added under this Epic) is never silently advanced as if `lld` had
-    specified it, and a child that got closed without ever being staged (an
-    abandoned Task from a `lld-review` carving bounce, closed by the
-    orchestrator per "How you carve tasks" in `sdlc-lld.md`) is not mistaken
-    for a fresh one either."""
+    """Verify `epic-<n>/lld.md` is on `origin/epic-<n>`, advance every open, Stage-less
+    Task child to `development`, and label the Epic architected. Idempotent.
+    Returns `merged`, `verified_on_origin`, `advanced_tasks`."""
     epic_br = epic_branch(epic)
     doc_path = f"{DOC_ROOT}/epic-{epic}/lld.md"
     with branch_lock(epic_br), BranchWorkspace(epic_br, repo_path, runner) as ws:
         runner(["git", "-C", ws.path, "fetch", "origin"])
         blob = _blob_at(ws.path, f"origin/{epic_br}", doc_path, runner)
-        # The comment names a commit, like every other doc-published comment;
-        # the blob is only the "is it on origin" check.
         tip = (runner(["git", "-C", ws.path, "rev-parse", f"origin/{epic_br}"]).strip()
                if blob is not None else None)
     if blob is None:
@@ -3607,32 +2380,20 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
     for task in tasks:
         number = task["number"]
         gh.set_stage_field(number, "development")
-        gh.clear_pipeline_status_field(number)
+        gh.set_pipeline_status_field(number, "todo")
         gh.issue_comment(number,
             f"➡️ Epic #{epic}'s `lld-review` clean and `lld.md` published — Stage "
             f"advanced to `development` (not claimed). `next-action` / "
             f"`list-parallel-ready` pick it up as a fresh unit.\n\n"
             f"<!-- stage-transition: lld-review->development @ {timestamp} -->")
         advanced.append(number)
-    # The epic's own design phase (architecture + its one lld pass) is now
-    # fully done -- the "Tasks may proceed" signal. This is the only place
-    # `epic:architected` is ever set. Idempotent: a re-run of this command after a crash mid-way finds the label
-    # already there and the fields already clear -- both writes are no-ops in
-    # substance, just repeated.
+    # The only place `epic:architected` is set: the Epic's Tasks may now proceed.
     completed_now = not has_label(gh.issue_view(epic), LABELS["architected"])
     if completed_now:
         gh.clear_stage_and_status_fields(epic)
         gh.issue_edit(epic, add_labels=[LABELS["architected"]])
-        # `publish-doc` posts the architecture.md link on this same thread;
-        # this names the lld.md transition, which has no gate of its own to
-        # post it from (`lld` has no human review). Without this, the epic's own thread names an architecture
-        # doc but never the lld doc that unblocked its Tasks -- found live,
-        # 2026-09-14: a real epic's comment thread had zero mentions of its
-        # own lld.md at all.
         tasks_line = (f"Tasks advanced to `development`: {', '.join(f'#{n}' for n in advanced)}."
                       if advanced else "No fresh Tasks to advance this run.")
-        # `publish-doc` already announced the doc on this thread; this names the
-        # phase transition only, so the Epic reads one lld.md announcement.
         gh.issue_comment(epic,
             f"📐 Epic design phase (architecture + lld) complete — `{doc_path}` "
             f"(`{tip}`). {tasks_line}\n\n"
@@ -3659,47 +2420,28 @@ def _blob_at(repo_path: str, ref: str, path: str, runner: Runner) -> Optional[st
 def _publish_doc(gh: GitHub, epic_path: str, issue: int, epic: str, src_doc_path: str,
                  src_ref: str, runner: Runner, dest_doc_path: str,
                  doc_label: str, attempts: int = 2) -> dict:
-    """The reconcile loop behind `publish-doc` (an Architecture-phase or
-    LLD-phase Task's doc onto its epic branch). **Every decision is made against `origin/<epic>`,
-    never the local tree** -- the 2026-09-12 defect
-    (`sdlc_merge_lld_doc_branch_steal_bug`) was exactly the old shape: a doc
-    committed on a stale local base, push rejected, and the re-run comparing the
-    working tree (which already held the doc) to itself and reporting
-    `up-to-date` while `origin/<epic>` never received the file.
-
-    A phase-Task publishes to a *different* path than its own -- `epic-<n>/
-    architecture.md` / `epic-<n>/lld.md`, the one path every reader (functional
-    Tasks, `read_footprint`) already expects, regardless of which Task's own
-    branch produced it -- so this stages the source blob at `dest_doc_path`
-    directly rather than `git checkout -- <path>`, which only ever restores a
-    path to itself.
-
-    Per attempt: fetch; compare the doc's blob on `src_ref` with the existing
-    blob at `dest_doc_path` on `origin/<epic>` (identical -> genuinely
-    up-to-date, verified on origin); otherwise hard-reset the epic worktree to
-    `origin/<epic>` (a stale doc-only commit from a rejected earlier attempt is
-    discarded and replayed; anything else unpushed on the local epic branch
-    refuses first), write the doc at `dest_doc_path`, commit, push. After the
-    push: fetch again and **verify the blob is now on `origin/<epic>`** -- only
-    then is `merged: true` reported. A rejected push (origin moved between
-    fetch and push) retries once from the new origin tip; still rejected -> a
-    structured `conflict` result that says the doc is NOT published. Never a
-    success it did not verify."""
+    """Publish the doc blob at `src_ref:src_doc_path` to `dest_doc_path` on `origin/<epic>`,
+    deciding everything against origin, never the local tree. Retries a rejected push
+    once; reports `merged: true` only after verifying the blob on origin."""
     runner(["git", "-C", epic_path, "fetch", "origin"])
     src_blob = _blob_at(epic_path, src_ref, src_doc_path, runner)
     if src_blob is None:
         return {"issue": issue, "merged": False, "epic_branch": epic,
                 "reason": f"no {doc_label} on {src_ref} — nothing to publish"}
-    if _blob_at(epic_path, f"origin/{epic}", dest_doc_path, runner) == src_blob:
+    dest_blob = _blob_at(epic_path, f"origin/{epic}", dest_doc_path, runner)
+
+    def text(blob):
+        return runner(["git", "-C", epic_path, "cat-file", "blob", blob])
+    # A re-run after `create-lld-tasks` numbered the doc must not revert the numbering.
+    if dest_blob == src_blob or (dest_blob and doc_label == "lld.md"
+                                 and is_numbered_copy(text(src_blob), text(dest_blob))):
         return {"issue": issue, "merged": False, "epic_branch": epic, "reason": "up-to-date",
                 "verified_on_origin": True}
     if runner(["git", "-C", epic_path, "status", "--porcelain"]).strip():
         return {"issue": issue, "merged": False, "epic_branch": epic,
                 "reason": f"epic worktree {epic_path} has uncommitted changes — refusing to "
                           f"reset it; commit or stash them, then re-run"}
-    # Unpushed local commits on the epic branch: a stale doc-only commit from a
-    # rejected earlier attempt is exactly what the reset below replays and is
-    # safe to drop; anything else touching other paths is somebody's work -- refuse.
+    # A stale doc-only commit from a rejected attempt is safe to drop; anything else is not.
     unpushed_files = runner(["git", "-C", epic_path, "diff", "--name-only",
                              f"origin/{epic}...{epic}"]).split()
     if any(f != dest_doc_path for f in unpushed_files):
@@ -3710,18 +2452,10 @@ def _publish_doc(gh: GitHub, epic_path: str, issue: int, epic: str, src_doc_path
     last_error = None
     for attempt in range(1, attempts + 1):
         runner(["git", "-C", epic_path, "checkout", "-B", epic, f"origin/{epic}"])
-        # Stage the EXISTING blob at the new path directly via plumbing --
-        # `update-index --add --cacheinfo` needs no working-tree file at
-        # all, unlike a show+write+add round-trip, so this never touches
-        # the real filesystem outside the git object database (matters for
-        # testability: the epic worktree in a test is a fake path no
-        # process may actually write to).
+        # Stage the existing blob at the new path via plumbing; no working-tree write needed.
         runner(["git", "-C", epic_path, "update-index", "--add", "--cacheinfo",
                 f"100644,{src_blob},{dest_doc_path}"])
-        # No pathspec: `commit -- <path>` takes <path> from the working tree,
-        # where the plumbing above never wrote it, so git reports "nothing
-        # to commit". The index holds only this one change -- the branch
-        # was just reset to origin and checked clean above.
+        # No pathspec: `commit -- <path>` would read the (unwritten) working-tree file.
         runner(["git", "-C", epic_path, "commit", "-m",
                 f"docs(sdlc): publish issue-{issue} {doc_label} to {epic}"])
         # Materialize the committed file, or the worktree reads as a
@@ -3753,18 +2487,9 @@ def _publish_doc(gh: GitHub, epic_path: str, issue: int, epic: str, src_doc_path
 
 def cmd_publish_doc(gh: GitHub, repo_path: Optional[str], issue: int, doc: str,
                     runner: Runner = _default_runner) -> dict:
-    """Publish a phase-Task's own doc (an Architecture-phase Task's
-    `architecture.md`, an LLD-phase Task's `lld.md`) from its own `issue-<n>`
-    branch onto its parent Epic's branch, at the Epic-scoped path every other
-    reader already expects (`epic-<n>/<doc>`).
-
-    This IS the mechanism that answers "where's the architecture.md/lld.md
-    link on the Epic" -- it posts a comment on the Epic itself naming the doc
-    and the publishing Task, the general form of what `open-gate` already does
-    for a plain gate. See "Cutting an Epic" in SKILL.md.
-
-    Refuses (structured, exit 0) for an issue with no parent, or a standing
-    epic's child -- there is no epic branch to publish to either way."""
+    """Publish a phase-Task's `<doc>` from its `issue-<n>` branch to its Epic's branch at
+    `epic-<n>/<doc>` and comment the link on the Epic. Refuses (exit 0) for a parentless
+    issue or a standing epic's child: there is no epic branch to publish to."""
     issues = {i["number"]: i for i in gh.issue_list()}
     entry = issues.get(issue)
     if entry is None:
@@ -3797,24 +2522,32 @@ def cmd_publish_doc(gh: GitHub, repo_path: Optional[str], issue: int, doc: str,
 
 
 def cmd_add_blocked_by(gh: GitHub, issue: int, dep: int) -> dict:
-    """Declare a native `blockedBy` edge with no other side effect -- used
-    when cutting an Epic to order its LLD-phase Task after its
-    Architecture-phase Task. Distinct from `mark-blocked`, which also parks an
-    already-in-flight unit (releases its worktree, resets Pipeline Status,
-    posts a comment) -- wrong shape for a Task that was never started."""
+    """Add a native `blockedBy` edge with no other side effect (unlike `mark-blocked`,
+    which also parks an in-flight unit)."""
     gh.add_blocked_by(issue, dep)
     return {"issue": issue, "blocked_on": dep, "added": True}
 
 
-_DEPENDS_ON_LINE = re.compile(r"^\s*(?:[-*]\s+)?(?:\*\*)?Depends on(?:\*\*)?\s*:\s*(.+?)\s*$",
-                              re.IGNORECASE | re.MULTILINE)
+def _task_line(name: str) -> re.Pattern:
+    """A `<name>: <value>` line in a Task section; bullet and bold markup tolerated."""
+    return re.compile(rf"^\s*(?:[-*]\s+)?(?:\*\*)?{name}(?:\*\*)?\s*:\s*(.+?)\s*$",
+                      re.IGNORECASE | re.MULTILINE)
+
+
+_DEPENDS_ON_LINE = _task_line("Depends on")
+_PRIORITY_LINE = _task_line("Priority")
+_EFFORT_LINE = _task_line("Effort")
+
+
+def parse_task_field(section_text: str, line: re.Pattern) -> Optional[str]:
+    """The value of the section's first `line` match (markup stripped), or None."""
+    m = line.search(section_text)
+    return m.group(1).strip("`*. ") if m else None
 
 
 def parse_task_depends_on(section_text: str) -> list:
-    """The task keys one `## Task <KEY>` section declares it depends on, read off
-    its `Depends on: <KEY>` line. Accepts a comma- or `and`-separated list and
-    tolerates backticks and a trailing period, so ``Depends on: `skeleton-health`,
-    config-loader`` parses as two keys. Returns [] when none are declared."""
+    """Task keys from a section's `Depends on:` line(s) (comma- or `and`-separated,
+    backticks and trailing period tolerated); [] when none."""
     keys = []
     for m in _DEPENDS_ON_LINE.finditer(section_text):
         for raw in re.split(r",|\band\b", m.group(1)):
@@ -3826,13 +2559,9 @@ def parse_task_depends_on(section_text: str) -> list:
 
 def _commit_doc_to_epic_branch(repo_path: Optional[str], epic: str, doc_path: str,
                                 text: str, runner: Runner, message: str) -> dict:
-    """Commit `text` at `doc_path` on branch `epic` and push it, through that
-    branch's own worktree or an ephemeral one -- never the main checkout.
-
-    Carries the same guards as `_publish_doc`, for the same reasons: a dirty
-    tree or unpushed commits touching anything other than this doc are refused
-    rather than reset over, and a push rejected because origin moved is reported
-    as a structured `conflict` rather than raised, so the caller can re-run."""
+    """Commit `text` at `doc_path` on branch `epic` and push. Refuses a dirty tree or
+    unpushed commits touching other files; a rejected push returns `conflict: True`.
+    Returns `committed`, `pushed` (+ `reason`)."""
     with branch_lock(epic):
         ensure_branch_on_origin(repo_path or ".", epic, runner=runner)
         with BranchWorkspace(epic, repo_path, runner) as ws:
@@ -3871,34 +2600,17 @@ def _commit_doc_to_epic_branch(repo_path: Optional[str], epic: str, doc_path: st
     return _with_workspace(out, ws)
 
 
+def task_type_name() -> str:
+    """The native Issue Type a Task is created with: classification.task's issueType, else Task."""
+    rule = PIPELINE.get("classification", {}).get("task") or {}
+    return rule["value"] if rule.get("field") == "issueType" else "Task"
+
+
 def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
                           runner: Runner = _default_runner) -> dict:
-    """Create one Task issue per `## Task <KEY>` section of an Epic's published
-    `lld.md`, renumber the doc's headings in place, wire every declared
-    `Depends on:` as a native `blockedBy` edge, and push the rewritten doc.
-
-    **Why this is a command instead of something `lld` does in its own turn.**
-    It used to be the latter: `lld` carved the Tasks and created their issues
-    while writing the document. But `lld-review` is chartered to review the
-    carving itself -- whether this is the right split at all -- and by the time
-    it ran, the carving already existed as live issues that other commands could
-    see and act on. A carving-level bounce therefore meant editing and closing
-    real issues, making the cheapest review outcome the most expensive one to
-    act on. Creating them only after approval turns that bounce back into what
-    it should be: an edit to a document.
-
-    **Idempotent, and specifically repair-shaped rather than merely safe.** A
-    heading that already carries a number is skipped, so a re-run after a
-    partial failure finishes the job instead of duplicating it. Two independent
-    records make that hold even across a crash *between* creating an issue and
-    pushing the rewritten doc -- the `<!-- task-key: KEY -->` marker left on
-    each rewritten heading, and the same marker written into each created
-    issue's body, which lets this match the Epic's existing children back to
-    their keys when the doc on origin still shows them unnumbered.
-
-    Order is: create every issue (a `Depends on:` may name a key carved further
-    down the document, so they must all exist first), then the edges, then one
-    commit and push."""
+    """Create one Task per `## Task <KEY>` section of the Epic's published `lld.md`,
+    renumber the headings, wire `Depends on:` as `blockedBy` edges, and push the doc.
+    Idempotent: existing issues are matched back by their `task-key` marker."""
     epic_br = epic_branch(epic)
     doc_path = f"{DOC_ROOT}/epic-{epic}/lld.md"
     runner(["git", "-C", repo_path, "fetch", "origin"])
@@ -3917,8 +2629,7 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
                 "reason": "every `## Task` heading already carries an issue number -- "
                           "nothing to create. A re-run after a completed pass lands here, "
                           "which is what makes this command safe to retry."}
-    # Recover any key whose issue already exists -- a crash between the create
-    # and the push below -- so this repairs rather than duplicating.
+    # A crash between create and push leaves issues the doc doesn't number yet.
     key_to_number = {h["task_key"]: h["number"] for h in headings
                      if h["number"] and h["task_key"]}
     for child in gh.issue_list():
@@ -3927,13 +2638,13 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
         m = _TASK_KEY_MARKER.search(child.get("body") or "")
         if m:
             key_to_number.setdefault(m.group(1), child["number"])
-    # When `pipeline.classification.task` is label-based, that label is the only
-    # thing that will ever classify these as Tasks (`classify_unit_from_issue`),
-    # and `merge-lld-doc` advances Tasks and nothing else -- so
-    # attach it here instead of leaving every caller to remember it.
-    rule = PIPELINE.get("classification", {}).get("task") or {}
-    labels = [rule["value"]] if rule.get("field") == "label" else []
-    rewritten = doc
+    # `merge-lld-doc` advances only issues that classify as Tasks.
+    type_name = task_type_name()
+    # Validate every section's Priority/Effort before creating any issue.
+    fields = {h["key"]: issue_field_values(
+                  parse_task_field(doc[h["line_end"]:h["end"]], _PRIORITY_LINE),
+                  parse_task_field(doc[h["line_end"]:h["end"]], _EFFORT_LINE))
+              for h in pending}
     for h in pending:
         key = h["key"]
         title = h["title"] or key
@@ -3942,11 +2653,10 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
             body = (f"{doc[h['line_end']:h['end']].strip()}\n\n"
                     f"Carved from `{doc_path}` on `{epic_br}` (Epic #{epic}).\n\n"
                     f"<!-- task-key: {key} -->")
-            created = cmd_create_issue(gh, title, body, epic, list(labels), type_name="Task")
+            created = cmd_create_issue(gh, title, body, epic, [], type_name=type_name,
+                                       **fields[key])
             if created.get("ok") is False:
-                # `cmd_create_issue` is atomic up to the create and structured
-                # after it. Hand its own repair instructions straight back
-                # rather than renumbering a document against a half-made issue.
+                # Never renumber the doc against a half-made issue.
                 return {**result, "ok": False, "committed": None, "pushed": False,
                         "tasks": key_to_number, "failed_key": key,
                         "failed_step": created.get("failed_step"),
@@ -3957,9 +2667,6 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
         else:
             result["reused"].append({"key": key, "issue": number, "title": title})
         key_to_number[key] = number
-        rewritten = rewritten.replace(
-            doc[h["line_start"]:h["line_end"]],
-            f"{h['hashes']} Task #{number}: {title} <!-- task-key: {key} -->", 1)
     for h in pending:
         issue_number = key_to_number[h["key"]]
         for dep_key in parse_task_depends_on(doc[h["line_end"]:h["end"]]):
@@ -3973,28 +2680,19 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
                 gh.add_blocked_by(issue_number, dep)
                 result["blocked_by"].append({"issue": issue_number, "on": dep})
             except GhError as e:
-                # Recorded, never raised: re-adding an edge that already exists
-                # errors, and a resumed run must not crash on its own last pass.
+                # Re-adding an existing edge errors; a resumed run must not crash on it.
                 result["blocked_by_failed"].append(
                     {"issue": issue_number, "on": dep, "error": str(e)})
     published = _commit_doc_to_epic_branch(
-        repo_path, epic_br, doc_path, rewritten, runner,
+        repo_path, epic_br, doc_path, number_task_headings(doc, key_to_number), runner,
         message=f"docs(sdlc): number epic-{epic} lld tasks")
     return {**result, "tasks": key_to_number, **published}
 
 
 def phase_task_parent(gh: GitHub, issue: int) -> Optional[dict]:
-    """The parent that makes `issue` a phase-Task, as `{"number", "kind"}`
-    (`kind` is `"initiative"` or `"epic"`), or None for any other issue.
-
-    Read from the tree, not from a new classification: under an Initiative or
-    a non-standing Epic, a gate is only ever opened on a *phase* child. An
-    Initiative's one plain child is its Product-Roadmap Task; an Epic's
-    functional Tasks enter at `development` and never reach a gate, so the
-    gate-bearing children under it are exactly its Architecture-phase Tasks
-    (including an Architecture revision Task). Callers ask this only on a gate
-    path. A standing epic's children and a parentless issue match neither and
-    keep the per-issue flow."""
+    """`{"number", "kind": "initiative"|"epic"}` when `issue`'s parent makes it a
+    phase-Task, else None. Only meaningful on a gate path: under an Initiative or
+    non-standing Epic, only phase children ever open a gate."""
     parent = gh.issue_epic_info(issue).get("parent")
     if not parent:
         return None
@@ -4008,17 +2706,9 @@ def phase_task_parent(gh: GitHub, issue: int) -> Optional[dict]:
 
 def _complete_phase_task(gh: GitHub, repo_path: Optional[str], issue: int, stage: str,
                          parent: dict, note: str, runner: Runner, markers: str = "") -> dict:
-    """Finish a phase-Task whose gate just passed (or was skipped): publish
-    what has to reach the Epic branch, then close the Task. It has no next
-    stage. `pass-gate` used to claim `STAGE_AFTER_GATE[stage]` here like any
-    per-issue gate, leaving a Product-Roadmap Task `in-progress` at
-    `architecture` and an Architecture-phase Task at `development` -- found
-    live, 2026-09-15.
-
-    An Architecture-phase Task publishes `architecture.md` to its Epic's branch
-    first and stays open unless that doc is verified on origin, so a failed
-    publish never closes the Task that owns the doc. A Product-Roadmap Task
-    has nothing to publish: its gate already landed `product.md` on `main`."""
+    """Finish a phase-Task whose gate passed or was skipped: publish `architecture.md`
+    to the Epic branch (Epic parent only), then close the Task. It has no next stage;
+    stays open if the publish isn't verified on origin."""
     result = {"issue": issue, "unit": "issue", "phase_task_complete": False,
               "parent": parent["number"]}
     if stage == "architecture" and parent["kind"] == "epic":
@@ -4038,31 +2728,9 @@ def _complete_phase_task(gh: GitHub, repo_path: Optional[str], issue: int, stage
 
 def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: str,
                    runner: Runner = _default_runner, live: bool = True) -> dict:
-    """`stage` should be next-action's own returned `stage` field, passed verbatim --
-    but since a wrong value here silently corrupts issue fields/comments (it did,
-    once, back when this was a label; see the sdlc-next retrospective that added
-    this check), self-derive the real stage from the issue's own
-    `<!-- gate-pr: stage:pr -->` marker and refuse to proceed on any mismatch,
-    rather than trusting the caller-supplied argument blindly.
-
-    A phase-Task's gate (see `phase_task_parent`) is special: it claims no next
-    stage -- `_complete_phase_task` publishes what has to reach the Epic branch
-    and closes the Task instead.
-
-    `live=True` (the default, used by the orchestrator's own manual "Passing a
-    gate" flow) claims the next stage outright -- Pipeline Status -> in-progress,
-    start comment posted -- because the orchestrator continues straight into that
-    stage's delegation in the same invocation; there's no gap between "gate
-    passed" and "work starts". `live=False` (used only by `cmd_auto_pass_gate`,
-    which fires in real time the instant a human merges the gate PR on GitHub,
-    with no agent running at all) must NOT make that same claim -- it only
-    advances the Stage field and clears Pipeline Status back to unset, leaving the
-    next actual `/sdlc-pipeline` run to claim the stage for real, whenever that turns
-    out to be. Without this distinction, a CI-driven gate merge looks identical to
-    a crashed-mid-stage issue (Pipeline Status stuck at in-progress with a stale
-    "picking this up" comment nobody acted on) -- `next-action`'s `resume` outcome
-    can no longer tell "actually crashed" from "gate advanced by CI, not yet
-    started" apart."""
+    """Pass a merged gate: reconcile the branch with main, then claim the next stage
+    (`live`) or only advance Stage (`live=False`, CI). Refuses a `stage`/`gate_pr` that
+    disagrees with the issue's gate-pr marker; a phase-Task is closed instead."""
     issue_data = gh.issue_view(issue)
     found = find_gate_pr(issue_data.get("comments", []))
     if not found:
@@ -4077,9 +2745,7 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
                        f"{actual_stage!r}, not stage={stage!r} -- pass next-action's own 'stage' "
                        f"field verbatim; it is the gate's owning doc-stage, not a target you pick")
     branch = issue_branch(issue)
-    # A merged gate landed on `main`, so the issue branch reconciles with
-    # `origin/main`. Under the branch lock, in the branch's own (or an
-    # ephemeral) worktree -- never the main checkout (epic #365).
+    # The gate merged into main, so reconcile the issue branch with main.
     with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
         git_reconcile_branch(ws.path, branch, base="main", runner=runner)
     parent = phase_task_parent(gh, issue)
@@ -4097,22 +2763,17 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
         cmd_claim(gh, issue, next_stage)
     else:
         gh.issue_comment(issue,
-            f"{prefix}Stage advanced to `{next_stage}`. Pick up with `/sdlc-pipeline` "
+            f"{prefix}Stage advanced to `{next_stage}`. Pick up with `/sdlc:run` "
             f"whenever you're ready to run this stage.\n\n{marker}")
         gh.set_stage_field(issue, next_stage)
-        gh.clear_pipeline_status_field(issue)
+        gh.set_pipeline_status_field(issue, "todo")
     return _with_workspace({"issue": issue, "unit": "issue", "next_stage": next_stage,
                             "claimed": live}, ws)
 
 
-GATE_B_SKIP_CONFIDENCE_THRESHOLD = PIPELINE["gates"]["skipConfidenceThreshold"]
-
-
 def _profile_for_issue(gh: GitHub, issue: int) -> dict:
-    """The behavioural profile governing `issue`: its parent epic's (a child
-    inherits its epic's profile -- the profile-selecting label, e.g.
-    `epic:standing`/`RTB`, lives on the epic, not the child). Falls back to the
-    all-defaults profile if the issue has no parent."""
+    """The profile of `issue`'s parent epic (profile labels live on the epic), or the
+    default profile when it has no parent."""
     parent = gh.issue_epic_info(issue).get("parent")
     info = gh.issue_epic_info(parent["number"]) if parent else None
     return resolve_profile(info)
@@ -4120,15 +2781,8 @@ def _profile_for_issue(gh: GitHub, issue: int) -> dict:
 
 def cmd_skip_gate(gh: GitHub, issue: int, stage: str, confidence: int, summary: str,
                    repo_path: Optional[str] = None, runner: Runner = _default_runner) -> dict:
-    """Skip the Gate B human-review PR entirely when arch-review returned a clean
-    verdict with high enough self-reported confidence -- see "Human-review gates" in
-    SKILL.md. Gate A (product) has no confidence skip; whether it needs a human at all
-    is a profile decision (`requiresHumanGateA`), applied by `cmd_auto_pass_gate_a`.
-
-    The confidence bar is per-profile: `resolve_profile(epic).gates.skipConfidenceThreshold`
-    (default 95). A standing/RTB profile can lower it (e.g. 90) without touching the
-    global default. A phase-Task completes via `_complete_phase_task` instead of
-    claiming `development`."""
+    """Skip Gate B when arch-review's confidence exceeds the profile's
+    `skipConfidenceThreshold`; claims `development`, or completes a phase-Task."""
     if stage != "architecture":
         raise GhError(f"only the architecture gate (Gate B) may be skipped, got stage={stage!r}")
     threshold = _profile_for_issue(gh, issue)["gates"]["skipConfidenceThreshold"]
@@ -4157,14 +2811,8 @@ def cmd_skip_gate(gh: GitHub, issue: int, stage: str, confidence: int, summary: 
 
 
 def cmd_auto_pass_gate_a(gh: GitHub, issue: int, stage: str, summary: str) -> dict:
-    """Advance past Gate A (the product gate) with no human review, when the epic's
-    profile says `requiresHumanGateA: false`. Called by the orchestrator only after a
-    clean `product-review`; it is the configurable counterpart to Gate A's default
-    hard stop. Refuses if the resolved profile still requires a human -- then the
-    orchestrator opens a real gate instead.
-
-    Advances `product -> architecture` and claims `architecture` in the same
-    invocation. See "Gate A configurability" in references/gates.md."""
+    """Pass Gate A without a human when the profile sets `requiresHumanGateA: false`;
+    claims `architecture`. Raises when the profile still requires a human."""
     if stage != "product":
         raise GhError(f"Gate A is the product gate; got stage={stage!r} -- "
                        f"the architecture gate uses skip-gate, not auto-pass-gate-a")
@@ -4172,7 +2820,7 @@ def cmd_auto_pass_gate_a(gh: GitHub, issue: int, stage: str, summary: str) -> di
     if profile["gates"]["requiresHumanGateA"]:
         raise GhError(f"profile '{profile['name']}' requires a human at Gate A "
                        f"(requiresHumanGateA: true) -- open a gate, do not auto-pass")
-    next_stage = STAGE_AFTER_GATE[stage]  # "architecture"
+    next_stage = STAGE_AFTER_GATE[stage]
     timestamp = _utc_now_marker()
     gh.issue_comment(issue,
         f"⚡ Gate A auto-passed — profile '{profile['name']}' needs no human review of "
@@ -4187,24 +2835,14 @@ def cmd_auto_pass_gate_a(gh: GitHub, issue: int, stage: str, summary: str) -> di
 
 
 _CLOSES_ISSUE_RE = re.compile(r"\bCloses #\d+", re.IGNORECASE)
-# A gate PR's head is always `issue-<n>`, opened against `main` (see "Human-review
-# gates" in references/gates.md). A bare `epic-<n>` head is deliberately *not* a
-# gate -- that is the epic's own integration PR (`close-epic`), and matching it
-# would let a merged epic close fire the gate backstop.
+# Gate PRs are `issue-<n>` -> main; an `epic-<n>` head is the epic's integration PR, not a gate.
 _GATE_BRANCH_RE = re.compile(rf"^{re.escape(ISSUE_BRANCH_PREFIX)}(?P<issue_n>\d+)$")
-# GitHub's own convention for a bot account's login (e.g. "github-actions[bot]") --
-# used by `cmd_mark_feedback_received` to ignore automated comments/reviews (most
-# importantly this workflow's own prior runs, and any other bot integration on the
-# repo), so a bot commenting on a gate PR never flips Pipeline Status or fires a
-# second webhook run in a loop.
+# Bot logins end in "[bot]"; ignoring them stops a bot comment from looping the workflow.
 _BOT_AUTHOR_RE = re.compile(r"\[bot\]$")
 
 
 class _NotAGate(Exception):
-    """Internal control-flow signal used only within `_match_open_gate` /
-    `cmd_auto_pass_gate` below: `pr` does not match a currently open gate for any
-    issue. Carries the human-readable skip reason; caught once, right where it's
-    raised from, and never escapes `cmd_auto_pass_gate` itself."""
+    """Raised by `_match_open_gate` when a PR is not an open gate; carries the skip reason."""
 
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -4212,18 +2850,9 @@ class _NotAGate(Exception):
 
 
 def _match_open_gate(gh: GitHub, pr: dict, pr_number: int) -> tuple:
-    """Shared identification logic for `cmd_auto_pass_gate`'s two branches (a merged
-    gate PR, or one closed without merging) and `cmd_mark_feedback_received` --
-    everything about deciding *whether* `pr` is some issue's currently open gate PR
-    is identical across all three call sites; only what happens after a match
-    differs. "Currently open" means Pipeline Status is either
-    `awaiting-human-review` or `feedback-received` (see `GATE_PENDING_STATUSES`) --
-    the latter is purely a visibility flip on top of the former, not a second,
-    independent state a gate PR could be closed/merged out of. Returns
-    `(issue_number, marker_stage, status)` on a clean match -- `status` is the
-    issue's exact current Pipeline Status value, for a caller (like
-    `cmd_mark_feedback_received`) that needs to distinguish the two pending states
-    -- or raises `_NotAGate(reason)`."""
+    """Identify `pr` as some issue's currently open gate PR (status in
+    `GATE_PENDING_STATUSES`, matching gate-pr marker). Returns
+    `(issue_number, marker_stage, status)`; raises `_NotAGate(reason)` otherwise."""
     m = _GATE_BRANCH_RE.match(pr.get("headRefName") or "")
     if not m:
         raise _NotAGate(f"PR #{pr_number} head branch {pr.get('headRefName')!r} is not "
@@ -4258,37 +2887,9 @@ def _match_open_gate(gh: GitHub, pr: dict, pr_number: int) -> tuple:
 
 def cmd_auto_pass_gate(gh: GitHub, repo_path: str, pr_number: int,
                         runner: Runner = _default_runner) -> dict:
-    """Entry point for `.github/workflows/gate-auto-advance.yml` -- reacts to any
-    closed PR in the repo (merged or not) and, if (and only if) it recognizes it as a
-    currently-open gate PR (see "Human-review gates" in references/gates.md), drives the same
-    deterministic field mutation a human running `/sdlc-pipeline` by hand would reach --
-    but never the "claim this stage now" side effect, since no agent is actually
-    about to run:
-    - **Merged** -> calls `cmd_pass_gate` with `live=False`: advances the Stage
-      field but leaves Pipeline Status unset (not in-progress) and skips the start
-      comment, since nothing is actually about to work this stage in real time --
-      that only happens once a live `/sdlc-pipeline` run claims it for real. See
-      `cmd_pass_gate`'s own `live` docstring for why this distinction exists.
-    - **Closed without merging** -> calls the same `cmd_mark_needs_human` logic --
-      see "Edge cases" under "Human-review gates" in references/gates.md: a bare close carries
-      no actionable content to revise against, so this is `status:needs-human`, not
-      a guess.
-
-    Either way, this fires the moment the human acts, instead of waiting for the next
-    manual `/sdlc-pipeline` invocation to notice via `check-gate`. This is a real-time
-    backstop alongside that existing detection, not a replacement for it --
-    `next-action` stays fully idempotent: once this has already advanced the fields
-    (or marked the issue needs-human), it simply finds nothing left to do there.
-
-    Deliberately conservative: this fires for *every* closed PR in the repo (the
-    workflow can't filter more precisely at the trigger level), so every branch below
-    that isn't a clean, unambiguous gate-PR match returns a `skipped` result with no
-    mutation, never an error -- a still-open PR, a wrong-base, non-gate-headed, or
-    `Closes #`-carrying (development / epic-integration) PR is all completely normal traffic
-    here, not a problem to surface. Uses `dict.get("ok", ...)` for its result
-    convention (checked by `main()` below to set the exit code) rather than raising
-    GhError on a mismatch -- unlike every other subcommand, a "not a gate PR" outcome
-    here is the *expected* common case, not an operational failure."""
+    """CI entry point for any closed PR: a merged gate PR passes the gate with
+    `live=False`; one closed unmerged marks the issue needs-human. Any non-gate PR
+    returns `{"ok": True, "skipped": reason}` with no mutation."""
     try:
         pr = gh.pr_view(pr_number, fields="number,headRefName,baseRefName,state,mergedAt,body")
     except GhError as e:
@@ -4324,23 +2925,9 @@ def cmd_auto_pass_gate(gh: GitHub, repo_path: str, pr_number: int,
 
 
 def cmd_mark_feedback_received(gh: GitHub, pr_number: int, author: str, body: str = "") -> dict:
-    """Entry point for `.github/workflows/gate-auto-advance.yml`'s
-    `pull_request_review`/`issue_comment` triggers -- flips Pipeline Status forward
-    from `awaiting-human-review` to `feedback-received` the instant a human leaves
-    real feedback (a review comment, a review carrying a body, or a plain PR/issue
-    comment) on a currently open gate PR. Purely a visibility marker closing the gap
-    where Pipeline Status sits at `Awaiting Human Review` for the entire time a gate
-    PR is open, indistinguishable from "nothing has happened yet" -- `evaluate_gate`'s
-    own feedback_pending detection (unresolved review threads / new plain comments,
-    re-derived live from the PR every time) remains the sole authority on whether
-    there's actually something to address; this never substitutes for that.
-
-    Deliberately conservative, same spirit as `cmd_auto_pass_gate`: every branch that
-    isn't a clean "human left real feedback on a currently-awaiting-human-review gate
-    PR" match returns a `skipped` result with no mutation, never an error -- most
-    traffic here (a bot comment, an approval with no body, a comment on some
-    unrelated PR, a second comment once already `feedback-received`) is completely
-    normal, not a problem to surface."""
+    """CI entry point: flip an open gate's Pipeline Status from `awaiting-human-review`
+    to `feedback-received` when a human leaves non-empty feedback. Visibility only;
+    anything else returns `{"ok": True, "skipped": reason}`."""
     if _BOT_AUTHOR_RE.search(author or ""):
         return {"ok": True, "skipped": f"comment/review author {author!r} is a bot"}
     if not (body or "").strip():
@@ -4360,10 +2947,6 @@ def cmd_mark_feedback_received(gh: GitHub, pr_number: int, author: str, body: st
         return {"ok": False, "reason": f"could not read the matching issue: {e}"}
 
     if status != "awaiting-human-review":
-        # Only ever flip forward from awaiting-human-review -- a second comment while
-        # already feedback-received is a clean no-op (not an error, and not a second
-        # comment posted to the issue), and this never touches needs-human or any
-        # other status _match_open_gate wouldn't have matched in the first place.
         return {"ok": True, "skipped": f"issue #{issue_number} Pipeline Status is "
                                         f"{status!r}, not awaiting-human-review -- "
                                         f"nothing to flip forward"}
@@ -4381,31 +2964,31 @@ def cmd_mark_feedback_received(gh: GitHub, pr_number: int, author: str, body: st
 
 
 def cmd_mark_feedback_addressed(gh: GitHub, issue: int) -> dict:
-    """Flips Pipeline Status back to `awaiting-human-review` -- the mirror of
-    `cmd_mark_feedback_received`'s forward flip. Run as the last step of "Addressing
-    gate feedback" in SKILL.md, unconditionally, once the revision is committed and
-    pushed: whether or not the forward flip ever actually fired (e.g. the Action
-    didn't run for some reason, or feedback was only noticed via `check-gate`), the
-    gate is once again simply awaiting human review, so this sets the field directly
-    rather than checking the current value first -- same unconditional-write spirit
-    as `cmd_claim`. Deliberately does not itself post a comment: "Addressing gate
-    feedback" step 5 already has the fresh stage agent post its own comment
-    summarizing what changed, and a second, generic comment here would just be
-    noise on top of that."""
+    """Set Pipeline Status back to `awaiting-human-review` unconditionally, after gate
+    feedback is addressed and pushed. Posts no comment."""
     gh.set_pipeline_status_field(issue, "awaiting-human-review")
     return {"issue": issue, "pipeline_status": "awaiting-human-review"}
 
 
+def cmd_resolve_thread(gh: GitHub, thread_id: str, reply: Optional[str] = None) -> dict:
+    """Reply to (when `reply`) and resolve one PR review thread."""
+    if reply:
+        gh.reply_review_thread(thread_id, reply)
+    try:
+        gh.resolve_review_thread(thread_id)
+    except GhError as e:
+        if not reply:
+            raise
+        return {"thread": thread_id, "replied": True, "resolved": False, "ok": False,
+                "error": str(e), "reason": "the reply was posted but resolving failed -- "
+                                          "re-run without --reply so it is not posted twice"}
+    return {"thread": thread_id, "replied": bool(reply), "resolved": True}
+
+
 def cmd_pause_for_epic_regate(gh: GitHub, issue: int, epic: int, gate_pr: int) -> dict:
-    """Parks a unit that found an architecture deviation while the owning Epic's
-    Architecture revision Task (a second Gate B round -- see "Architecture
-    deviation escalation" in references/epics.md) is pending. Clears only
-    Pipeline Status (Stage is kept) so the unit re-enters the normal per-child
-    eligibility loop -- rather than sitting in the crash-recovery in-progress
-    slot forever -- the moment the revision's gate merges and `next-action`
-    runs again. Also add a `blockedBy` edge on the revision Task so the unit
-    is not picked before the revised design is published."""
-    gh.clear_pipeline_status_field(issue)
+    """Park a unit waiting on its Epic's Architecture revision gate: Pipeline Status
+    `todo` (Stage kept) so it re-enters the normal loop once the gate merges."""
+    gh.set_pipeline_status_field(issue, "todo")
     gh.issue_comment(issue,
         f"⏸️ Paused — `lld` found this doesn't fit epic #{epic}'s current architecture. "
         f"Epic #{epic}'s architecture is being revised; see gate PR #{gate_pr}. This task "
@@ -4414,15 +2997,8 @@ def cmd_pause_for_epic_regate(gh: GitHub, issue: int, epic: int, gate_pr: int) -
 
 
 def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str) -> dict:
-    """Opens the development draft PR -- or, if one is already open on this
-    branch, reports it instead of opening a second.
-
-    The duplicate guard exists because a resumed `development` agent, or a
-    concurrent session that got there first, has no reliable way to know a PR
-    already exists; opening a second one splits review history across two PRs
-    for one branch. Reported as a structured exit-0 result with
-    `created: False`, not an error -- an already-open PR is the normal, correct
-    state to continue from."""
+    """Open the development draft PR and set Stage to `pr-review`; an already-open
+    PR on the branch is reused (`created: False`). Returns `pr`, `created`."""
     existing = gh.pr_list_for_branch(issue_branch(issue))
     if existing:
         pr_number = existing[0]["number"]
@@ -4443,16 +3019,8 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str)
 
 
 # --- citations: cite / verify-citations / verify-exit's citations_ok ---
-#
-# A citation block is a fenced code block whose info line names a file path
-# (and, optionally, a pinned revision) and whose body is a byte-exact fragment
-# copied out of that file. The body is the authority; a line number is never
-# stored, only derived at resolve time as a hint (see issue #194's
-# architecture.md, "Design"). Two kinds of block share one info-string token:
-# `cite` is *asserted* -- the resolver resolves and counts it; `cite-example`
-# is *illustrative* -- parsed so a spec of the format can show one, but never
-# resolved or counted. The token must match exactly, so `cite-example` is
-# never misread as a `cite` block with a stray word.
+# A `cite path=... [rev=...]` fence holds a byte-exact fragment of that file and is
+# resolved; `cite-example` is illustrative and never resolved.
 
 _CITE_FENCE_RE = re.compile(r'^(`{3,})(cite-example|cite)\s+(.*?)\s*$')
 
@@ -4462,15 +3030,9 @@ def _parse_cite_attrs(attr_str: str) -> dict:
 
 
 def parse_cite_blocks(text: str) -> list:
-    """Parses every `cite`/`cite-example` block out of a document's text.
-    Returns one dict per block: `{kind, path, rev, body, line_no}` in document
-    order, where `line_no` is the 1-based line number of the block's first
-    body line (a hint for a human reader, never used for resolution). A
-    fence's closing line is any run of backticks at least as long as the
-    opening one -- `cite` always emits an exact-length match, but a body that
-    itself contains a run of backticks needs the opening fence to be longer
-    still (see `cmd_cite`'s fence-length choice), which this closing rule
-    accommodates without special-casing it."""
+    """Every `cite`/`cite-example` block in `text`, as `{kind, path, rev, body, line_no}`
+    in order (`line_no`: first body line, a hint only). A fence closes on a backtick
+    run at least as long as the opening one."""
     lines = text.splitlines()
     blocks = []
     i = 0
@@ -4501,14 +3063,9 @@ def parse_cite_blocks(text: str) -> list:
 
 def resolve_citation(path: str, body: str, rev: Optional[str] = None,
                       repo_path: str = ".", runner: Runner = _default_runner) -> dict:
-    """Resolves one citation's body against the real file: the working tree,
-    or `git show <rev>:<path>` when a revision is pinned. Matching is a fixed-
-    string (`str.find`/`.count`) search, never a regex, so a body containing
-    `$ { } * \\`` resolves against exactly those bytes with no escaping burden
-    on the author (architecture.md AC9). Never raises -- a missing file, bad
-    path, or bad rev is reported as unresolved with the reason, per
-    architecture.md's "Where the resolver can fail is the point of the
-    design": the failure that matters is reported data, not a crash."""
+    """Fixed-string match of `body` in the working-tree file (or `git show rev:path`).
+    Returns `resolved`, `line_hint` (+ `match_count`/`line_hints`) or `cited_vs_found`;
+    never raises."""
     result = {"path": path, "rev": rev}
     try:
         if rev:
@@ -4542,12 +3099,8 @@ def resolve_citation(path: str, body: str, rev: Optional[str] = None,
 
 def verify_citations_text(text: str, repo_path: str = ".",
                            runner: Runner = _default_runner) -> dict:
-    """Shared resolver core: parses `text`, resolves every *asserted* block
-    against `repo_path`, and skips every *illustrative* one. Both
-    `cmd_verify_citations` (a document at a time) and `cmd_verify_exit`'s
-    `citations_ok` (the single record a completing stage authored) build on
-    this one function, so a block that resolves in one resolves in the
-    other."""
+    """Resolve every `cite` block in `text` (skipping `cite-example`). Returns
+    `citations`, `examples_skipped`, `all_resolved`."""
     blocks = parse_cite_blocks(text)
     citations = []
     examples_skipped = 0
@@ -4564,14 +3117,9 @@ def verify_citations_text(text: str, repo_path: str = ".",
 def cmd_cite(path: str, line: Optional[int] = None, lines: Optional[str] = None,
              match: Optional[str] = None, rev: Optional[str] = None,
              repo_path: str = ".", runner: Runner = _default_runner) -> dict:
-    """Generates a citation block by reading the real file (or
-    `git show <rev>:<path>`) and selecting the target fragment by exact line,
-    an inclusive line range, or the first line literally containing `match`.
-    This is the structural anti-fabrication property (architecture.md AC7):
-    there is nothing to copy for content that is not actually in the file, so
-    a citation for it cannot be produced. Emits nothing (no `block` key,
-    `ok: False` instead) on any error -- an out-of-range line/range, or a
-    `match` that finds zero or several lines and is therefore ambiguous."""
+    """Build a `cite` block from the real file by `line`, inclusive `lines` range, or
+    the single line containing `match`. Returns `block`, `path`, `line_range`; on any
+    out-of-range or ambiguous selection `ok: False` and no block."""
     try:
         if rev:
             content = runner(["git", "-C", repo_path, "show", f"{rev}:{path}"])
@@ -4603,9 +3151,7 @@ def cmd_cite(path: str, line: Optional[int] = None, lines: Optional[str] = None,
                  "reason": f"line range {start}-{end} is out of range for {path} "
                            f"({len(file_lines)} lines)"}
     body = "\n".join(file_lines[start - 1:end])
-    # Fence longer than any backtick run in the body, so arbitrary file
-    # content (including a body that itself contains ``` ```) round-trips
-    # without the fence being mistaken for a close inside the body.
+    # Fence longer than any backtick run in the body so it can't close early.
     fence_len = 3
     for m in re.finditer(r'`+', body):
         fence_len = max(fence_len, len(m.group()) + 1)
@@ -4620,13 +3166,8 @@ def cmd_cite(path: str, line: Optional[int] = None, lines: Optional[str] = None,
 
 def cmd_verify_citations(paths: list, repo_path: str = ".",
                           runner: Runner = _default_runner) -> dict:
-    """Re-resolves every asserted citation in one or more documents. A single
-    document's result is returned flat (`document`/`citations`/
-    `examples_skipped`/`all_resolved`, per architecture.md's Interfaces);
-    several documents are wrapped under `documents`, with an aggregate
-    `all_resolved` across all of them. `ok` mirrors `all_resolved` either way,
-    so the CLI dispatch's `result.get("ok", True)` exit-code contract applies
-    with no new plumbing."""
+    """Resolve every citation in `paths`. One document returns flat; several nest
+    under `documents` with an aggregate `all_resolved`. `ok` mirrors `all_resolved`."""
     documents = []
     for p in paths:
         with open(os.path.join(repo_path, p), "r") as f:
@@ -4641,12 +3182,8 @@ def cmd_verify_citations(paths: list, repo_path: str = ".",
     return result
 
 
-# The canonical filename of the single record a completing stage authored --
-# `cmd_verify_exit`'s `citations_ok` resolves only this file (architecture.md
-# AC12/AC14: "the completing stage's *own* record", scoped so an older
-# doc's rotted citation never fails a later stage). `testing` and the review
-# roles write no doc file at all and are deliberately absent from this map --
-# there is nothing to re-check for them, so `citations_ok` is simply omitted.
+# The one doc each stage authors; `citations_ok` checks only that doc, so an older
+# doc's rotted citation never fails a later stage. Stages absent here write no doc.
 STAGE_RECORD_FILENAMES = {
     "product": "product.md",
     "architecture": "architecture.md",
@@ -4656,12 +3193,9 @@ STAGE_RECORD_FILENAMES = {
 
 def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_stage: str,
                      pr: Optional[int] = None, runner: Runner = _default_runner) -> dict:
-    """One-call post-handoff check: does the issue carry the expected native Stage
-    field value, are the canonical per-issue docs present on disk, what are the
-    last few commits, and (when a PR is in play) is it still a draft on the right
-    branches. Replaces the hand-typed `gh issue view` + `gh pr view` + `ls` +
-    `git log` sequence the orchestrator otherwise repeats identically after every
-    dev/testing handoff."""
+    """Post-handoff check: Stage field matches `expect_stage`, the stage's docs and
+    citations are present, recent commits, and (with `pr`) the PR's draft/branches.
+    Sets `ok: False` (exit 1) with `reason`/`misuse` when the handoff is unverified."""
     repo_path = resolve_repo_path(repo_path, issue_branch(issue), runner=runner)
     issue_data = gh.issue_view(issue)
     labels = label_names(issue_data)
@@ -4670,27 +3204,8 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
     actual_status = PIPELINE_STATUS_FIELD_NAMES.get(fields.get("Pipeline Status"))
     result = {"issue": issue, "labels": sorted(labels), "stage": actual_stage,
               "pipeline_status": actual_status, "expected_stage_present": actual_stage == expect_stage}
-    # Exit nonzero when the Stage field does not say what the caller expected.
-    # This used to be reported and read past: #238 returned
-    # `expected_stage_present: false` and the orchestrator dispatched the next
-    # stage anyway, so the pipeline advanced on an unverified handoff. A result
-    # nobody is forced to look at is not a check.
-    #
-    # Most `REVIEW_ROLES` are excluded because they legitimately have no Stage
-    # value of their own -- a review runs immediately after the stage before it
-    # and inherits that stage's value (see the lifecycle model in SKILL.md).
-    # Asking for one of those is misuse, and is reported as such rather than as
-    # a pipeline failure, so the two cases stay distinguishable.
-    #
-    # `pr-review` is the exception and must NOT be refused: it is a real Stage
-    # field value ("PR Review" in `STAGE_FIELD_NAMES`), the one `open-dev-pr`
-    # writes as `development`'s own exit action. Refusing it left the
-    # `development` handoff with no accepted `--expect-stage` value at all --
-    # `development` fails because the field has already moved on, `pr-review`
-    # failed as misuse -- so the single most bounce-prone handoff in the
-    # pipeline was the one handoff this command could not verify, and the
-    # orchestrator fell back to checking it by hand (2026-09-13, #494; see
-    # `references/history.md`).
+    # Review roles inherit the preceding stage's value, so asking for one is misuse --
+    # except `pr-review`, which is a real Stage value (development's exit writes it).
     if expect_stage in REVIEW_ROLES and expect_stage not in STAGE_FIELD_NAMES.values():
         result["ok"] = False
         result["misuse"] = (f"`{expect_stage}` is a review role and has no Stage field value of "
@@ -4710,25 +3225,8 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
         result["pr_is_draft"] = pr_data.get("isDraft")
         result["pr_head"] = pr_data.get("headRefName")
         result["pr_base"] = pr_data.get("baseRefName")
-        # Handoff-marker gate, added 2026-09-16. `development`'s exit is two
-        # actions, not one: `open-dev-pr` (which moves the Stage field to `PR
-        # Review`) and `handoff-to-pr-review` (which posts the marker that IS
-        # the review queue and IS the merge-time evidence). Only the first
-        # wrote the field this command checked, so an agent that did the first
-        # and skipped the second verified clean here -- and the miss surfaced
-        # much later at `merge-pr`, as `missing_pipeline_evidence`, after the
-        # branch had already been reviewed and was sitting ready to merge. The
-        # check belongs at the handoff it gates, where re-running one command
-        # fixes it.
-        #
-        # Scoped to `expect_stage == "pr-review"` with a PR in hand: that is
-        # exactly the development->pr-review handoff this marker governs. Every
-        # other stage's exit check is unchanged.
-        #
-        # Reported, never repaired. Posting the marker from here would have
-        # this command manufacture the evidence it exists to check -- the
-        # marker has to mean "development ran and handed off", not "something
-        # asked whether it had".
+        # `open-dev-pr` moves the Stage field but only `handoff-to-pr-review` posts the
+        # marker; check it here. Reported, never posted: this must not forge its own evidence.
         if expect_stage == "pr-review":
             problems = []
             marker_present = last_transition_to(
@@ -4745,13 +3243,8 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
             result["problems"] = problems
     docs_dir = os.path.join(repo_path, DOC_ROOT, f"issue-{issue}")
     result["docs_present"] = sorted(os.listdir(docs_dir)) if os.path.isdir(docs_dir) else []
-    # Citation gate: re-checks only the single record the completing stage
-    # itself authored (never the whole docs_dir) -- an older, already-merged
-    # doc's rotted citation must not fail a later stage's own exit check
-    # (architecture.md AC14). A stage with no canonical record (`testing`,
-    # the review roles) or whose record isn't on disk yet is left alone --
-    # `docs_present` already surfaces a missing doc; this gate only ever
-    # fires once there is an actual record to re-check.
+    # Only the completing stage's own record is re-checked, so an older doc's rotted
+    # citation can't fail a later stage's exit.
     record_filename = STAGE_RECORD_FILENAMES.get(expect_stage)
     if record_filename:
         record_path = os.path.join(docs_dir, record_filename)
@@ -4784,15 +3277,8 @@ def checks_status(checks: list) -> str:
     return "passed"
 
 
-# Workflows whose run is REQUIRED when a PR touches their paths. `workflow` must
-# match the workflow file's `name:` exactly -- if you rename a workflow, rename it
-# here in the same commit. Mirrors each workflow's own `paths` filter; keep in step.
-#
-# `suite` names the `local-ci` attestation that stands in for a GHA check on a child
-# PR. As of 2026-09-04 these two workflows are main-only in GitHub Actions (they no
-# longer run on child PRs; see each workflow's `on:` block), so on a child PR the
-# suite is proven by a `record-local-ci --suite <suite>` attestation instead -- see
-# `local_ci_suites_attested` and `references/operations.md`, "Local-CI attestation".
+# Workflows required when a PR touches their paths. `workflow` must match the
+# workflow file's `name:`; `suite` names the `local-ci` attestation that can stand in for it.
 REQUIRED_WORKFLOWS = tuple(
     {"workflow": w["workflow"], "suite": w["suite"],
      "prefixes": tuple(w["prefixes"]), "files": tuple(w.get("files", ()))}
@@ -4802,22 +3288,8 @@ REQUIRED_WORKFLOWS = tuple(
 
 def missing_required_workflows(changed_files: list, checks: list,
                                comments: list = None, head_sha: str = None) -> list:
-    """Required workflows a PR touches whose suite has neither passed in GHA nor
-    been locally attested for the current head.
-
-    Deliberately NOT a total-check-count test. A count is satisfied by *any*
-    workflow reporting -- notification-taxonomy-guard.yml, say -- which says
-    nothing about whether the backend/frontend suite actually ran. Requiring at
-    least one `pass` bucket *from the named workflow* also covers the "every job
-    skipped" variant, which checks_status() reads as green.
-
-    A suite is satisfied by EITHER a passing GHA check from its workflow OR a
-    fresh `local-ci` attestation for its `suite` (see `local_ci_suites_attested`).
-    The second path exists because these workflows went main-only for cost: they
-    don't run on a child PR at all, so on a child PR the local attestation is the
-    only proof there is -- and it counts only when its sha matches `head_sha`, so a
-    stale local run cannot satisfy the gate. `comments`/`head_sha` default to
-    None/empty (the GHA-only behaviour) so existing 2-arg callers are unchanged."""
+    """Names of required workflows the PR touches that have neither a passing GHA check
+    from that workflow nor a `local-ci` attestation for `head_sha`."""
     passing = {c.get("workflow", "") for c in checks if c.get("bucket") == "pass"}
     attested = local_ci_suites_attested(comments or [], head_sha)
     missing = []
@@ -4834,39 +3306,10 @@ def missing_required_workflows(changed_files: list, checks: list,
 
 
 def base_delta_needs_reattest(base_delta_files: list) -> bool:
-    """Whether a behind-base PR must be re-synced and re-attested before merge,
-    given the files `base` changed that the PR lacks (`GitHub.base_delta_files`).
-
-    `cmd_merge_pr` refuses a behind-base PR because CI ran on a stale base and two
-    green siblings can still break `main` together -- a semantic conflict in
-    suite-covered code. That risk exists only when the base delta touches code a
-    required suite runs over. When the base moved only in files no required
-    workflow watches -- docs, a sibling's unrelated tree, the doc set itself --
-    there is nothing for the suite to re-prove, and forcing a sync + fresh CI +
-    re-attest buys nothing but another dev-agent spawn and its handback. So in
-    that case the PR's existing attestation is carried forward.
-
-    Conservative by construction: a 300-file delta (GitHub's compare-API file
-    cap, so possibly truncated) forces re-attest, as does any change to the
-    pipeline's own config, so the docs-only fast path is taken only on a delta
-    read in full that demonstrably triggers no required workflow. An empty delta
-    (base moved by commits with no net file change) needs no re-attest. Reuses
-    the same prefix/workflow-file match as `missing_required_workflows`.
-
-    **The carry-forward test is positive ("is every file a doc?"), not negative
-    ("does anything touch a required-workflow tree?")** -- inverted on
-    2026-09-16 after the negative form was proven wrong live. It asked whether
-    the delta hit a configured suite tree, so in a repo with
-    `requiredWorkflows: []` -- no suites configured at all, which is the
-    default and the state of every repo that has not wired CI yet -- *nothing*
-    could ever match and *every* non-config delta carried its attestation
-    forward. A `pom.xml` + test-class delta, unambiguously suite-covered code,
-    was carried forward exactly like a docs bump. The positive form cannot fail
-    that way: an unrecognised path is not a doc, so it re-attests. A doc is a
-    path under the configured `docRoot`, a `*.md` file anywhere, or anything
-    under `docs/`. Where `requiredWorkflows` IS configured, a delta touching a
-    suite tree still forces re-attest even if every file in it is a `.md` --
-    the suite is what decides, and it runs over that tree."""
+    """Whether a behind-base PR must re-sync and re-attest, given the files its base
+    changed. False only for a fully read delta of docs that touches no required suite
+    or pipeline config; an unrecognised path counts as code."""
+    # 300 is GitHub's compare-API file cap: the delta may be truncated.
     if len(base_delta_files) >= 300:
         return True
     if touches_pipeline_config(base_delta_files):
@@ -4878,43 +3321,21 @@ def base_delta_needs_reattest(base_delta_files: list) -> bool:
 
 
 def _is_doc_path(path: str) -> bool:
-    """Whether one file in a base delta is documentation -- the positive test
-    `base_delta_needs_reattest` carries an attestation forward on. Three forms,
-    deliberately narrow: under the config's own `docRoot` (this pipeline's
-    per-issue/-epic records), any `*.md` file, or anything under a top-level
-    `docs/`. Everything else -- source, build files, fixtures, lockfiles,
-    workflows, assets -- is not a doc and re-attests."""
+    """True for a path under `docRoot`, any `*.md`, or anything under `docs/`."""
     return (path.startswith(DOC_ROOT.rstrip("/") + "/")
             or path.endswith(".md")
             or path.startswith("docs/"))
 
 
 def touches_pipeline_config(changed_files: list) -> bool:
-    """True when a PR changed the pipeline's own config file in the driven repo.
-
-    The skill itself lives outside the repo it drives, so only its config
-    (`CONFIG_FILENAME`) ships through this repo's own merges. A merge that changes
-    it can change how every later command behaves in the same invocation, so
-    surfacing it as a merge-pr result field (`config_changed`) makes re-reading the
-    config mechanical rather than something the orchestrator must remember."""
+    """True when the changes include the driven repo's pipeline config file."""
     return any(os.path.basename(f) == CONFIG_FILENAME for f in changed_files)
 
 
 def merge_gate_status(changed_files: list, checks: list,
                       comments: list = None, head_sha: str = None) -> tuple:
-    """Single source of truth for "is this PR mergeable", shared by pr-checks
-    (surfaces the problem during review) and merge-pr (enforces it). Returns
-    the underlying pending/failed status verbatim rather than reporting
-    missing-checks over it -- a still-running required workflow reads as
-    `pending` (retryable), not as a configuration error.
-
-    `missing` is always computed and returned, regardless of `status` -- a PR
-    touching two required trees where one fails/is-pending and the *other's*
-    workflow never reported at all must surface both facts together. Discarding
-    `missing` whenever status != "passed" would hide that second, genuinely
-    different problem (a config defect, not a code failure) behind whichever
-    check happened to fail or still be running -- exactly the kind of masked
-    signal this gate exists to prevent."""
+    """`(status, missing_workflows)` for pr-checks and merge-pr. A pending/failed check
+    status wins over `missing-checks`, but `missing` is always returned alongside it."""
     status = checks_status(checks)
     missing = missing_required_workflows(changed_files, checks, comments, head_sha)
     if status != "passed":
@@ -4924,10 +3345,6 @@ def merge_gate_status(changed_files: list, checks: list,
 
 def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
     checks = gh.pr_checks(pr_number)
-    # A required suite (backend/frontend) can be satisfied by a `local-ci`
-    # attestation on this PR instead of a GHA check -- both went main-only for cost
-    # and no longer run on a child PR. Read the PR's comments + head SHA so the
-    # merge gate can honour a fresh attestation (see `local_ci_suites_attested`).
     view = gh.pr_view(pr_number, "comments,headRefOid")
     status, missing = merge_gate_status(
         gh.pr_files(pr_number), checks,
@@ -4937,31 +3354,9 @@ def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
 
 
 def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -> dict:
-    """Squash-merges the PR. Does **not** touch the Stage/Pipeline Status fields
-    itself, even when this closes the tracking issue -- that's
-    `cmd_mark_issue_closed`'s job now, fired in real time by
-    `.github/workflows/gate-auto-advance.yml` on the `issues: closed` event this
-    merge triggers (via the PR's `Closes #<n>`). Moved 2026-08-20, per operator
-    instruction: doing it here only ever covered issues closed *through*
-    `merge-pr` specifically, silently missing an issue a human closed by hand;
-    the same `issues: closed` trigger, calling `cmd_mark_issue_closed`, covers
-    every closure path uniformly.
-
-    Also refuses -- as a structured exit-0 result, not an error -- when the
-    branch is *behind* `origin/main` **and** the base delta it lacks touches a
-    required suite's tree. Green CI on a stale base proves nothing about the
-    combined state: with the parallel dev lane, two sibling PRs can each be green
-    independently yet break `main` together (a semantic conflict no textual merge
-    check catches). The orchestrator's fix is mechanical: `sync-branch` (merges
-    origin/main in, pushing re-triggers CI), wait for green, re-run `merge-pr`.
-
-    But a behind-base branch whose base delta touches **no** required-workflow
-    path (a docs-only bump, a sibling's unrelated tree) has no such stale-base
-    risk -- nothing the suites cover changed on the base -- so its existing
-    attestation is carried forward and it merges without a forced re-sync +
-    re-CI + re-attest (`base_delta_needs_reattest`). The result then carries
-    `carried_attestation_forward: True`. The head-SHA attestation match below is
-    unchanged either way."""
+    """Squash-merge the PR after its evidence and checks pass. Refuses (exit 0) when
+    behind a base delta that needs re-attest; otherwise carries the attestation forward.
+    Stage/Pipeline Status are left to `mark-issue-closed` on the `issues: closed` event."""
     base = integration_base(gh, issue)
     behind = gh.branch_behind_by(issue_branch(issue), base=base)
     carried_forward = {}
@@ -4973,12 +3368,6 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
                     "reason": f"branch {issue_branch(issue)} is {behind} commit(s) behind {base} -- CI ran "
                               f"on a stale base that changed suite-covered files; run sync-branch, "
                               f"wait for fresh CI green, then re-run merge-pr"}
-        # The base moved only in files no required workflow watches (docs, an
-        # unrelated tree). Nothing the suites cover changed on the base, so this
-        # PR's existing green CI / local-ci attestation still describes the
-        # merged result -- carry it forward instead of forcing a sync + fresh CI
-        # + re-attest (and the dev-agent spawn that costs). The merge below still
-        # requires that attestation to match the current head, unchanged.
         carried_forward = {"behind_base": behind, "base": base,
                             "base_delta_files": len(base_delta),
                             "carried_attestation_forward": True}
@@ -4994,10 +3383,6 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
                           f"record-pr-review), then re-run merge-pr"}
     checks = gh.pr_checks(pr_number)
     files = gh.pr_files(pr_number)
-    # A required suite that went main-only (backend/frontend) is proven on a child
-    # PR by a fresh `local-ci` attestation instead of a GHA check -- read from the
-    # PR thread, honoured only when its sha matches the current head (a stale local
-    # run must not merge). See `local_ci_suites_attested` / `record-local-ci`.
     view = gh.pr_view(pr_number, "comments,headRefOid")
     status, missing = merge_gate_status(
         files, checks, view.get("comments", []), view.get("headRefOid"))
@@ -5011,26 +3396,12 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
     issue_state = gh.issue_view(issue)["state"]
     issue_closed = issue_state == "CLOSED"
     if not issue_closed and base != "main":
-        # Merging into an epic branch does NOT fire the PR's `Closes #<n>` -- GitHub
-        # only auto-closes an issue when its PR merges to the default branch. Close
-        # the child explicitly so it cannot linger open: a merged-but-open child
-        # phantom-resumes next-action (it re-delegates a done issue) and blocks the
-        # epic's all-children-closed gate. The reactive gate-auto-advance.yml
-        # `issues: closed` trigger then syncs its Stage/Pipeline Status fields, and
-        # `mark-issue-closed` stays available for the field-sync-only path. Replaces
-        # a two-step (pr-review manually running `gh issue close` after merge) that
-        # a session dying mid-close silently skipped. Added 2026-09-06 retro.
+        # `Closes #<n>` only fires on the default branch; a merged-but-open child
+        # would be re-delegated and block the epic's close.
         gh.issue_close(issue)
         issue_closed = True
     if issue_closed:
         gh.issue_comment(issue, f"Merged via #{pr_number}.")
-    # Merged is the terminal stopping point -- release the worktree here rather
-    # than in cmd_mark_issue_closed, which runs in CI where no dev worktree
-    # exists. Everything is on origin by definition at this point, so the
-    # unpushed/dirty guards in release_worktree should be no-ops.
-    # A merged PR is one of the two genuinely terminal outcomes, so it is what
-    # the run cap counts (see `record_terminal_unit`). A no-op unless this
-    # epic's run is being tracked by a `--run-id`.
     terminal = record_terminal_unit(gh, issue)
     return {"pr": pr_number, "issue": issue, "merged": True, "issue_closed": issue_closed,
             "config_changed": touches_pipeline_config(files),
@@ -5041,8 +3412,7 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
 
 def _release_unit_worktree(issue: int, base_repo: str = ".",
                             runner: Runner = _default_runner) -> dict:
-    """Release whichever of `issue-<n>` / `epic-<n>` currently has a worktree --
-    parking commands take a unit number without knowing which kind it is."""
+    """Release whichever of `issue-<n>` / `epic-<n>` currently has a worktree."""
     for branch in (issue_branch(issue), epic_branch(issue)):
         result = release_worktree(branch, runner=runner, base_repo=base_repo)
         if result.get("released") or result.get("reason") != "no worktree":
@@ -5051,22 +3421,8 @@ def _release_unit_worktree(issue: int, base_repo: str = ".",
 
 
 def cmd_mark_blocked(gh: GitHub, issue: int, dep: int, repo_path: str = ".") -> dict:
-    """Records the dependency as a native blockedBy relationship (not a label or a
-    body-text edit) -- next-action's decide_next_action derives blocked-ness
-    straight from this relationship, so it auto-clears on its own once `dep`
-    closes, with no separate dependency-cleared step to run.
-
-    Also releases the unit's worktree (see `release_worktree`): a blocked unit
-    is a stopping point, and a worktree left behind at one consumes a dev-lane
-    slot that nothing is working in.
-
-    Also resets Pipeline Status to `todo`. Blocked-ness itself is derived from the
-    native relationship, not the field -- but leaving the field at `in-progress` makes
-    a parked unit indistinguishable from a crashed run to both `decide_next_action`
-    and `list_parallel_ready`, whose shared heuristic is "in-progress with no
-    worktree". On 2026-09-03 #310 sat blocked all session while `next-action` kept
-    offering it as a `resume`. There is no `blocked` option on the field; `todo` is
-    the honest one, and it is also correct the moment `dep` closes."""
+    """Add a native blockedBy edge on `dep`, reset Pipeline Status to `todo` (so the
+    parked unit doesn't read as a crashed in-progress run) and release its worktree."""
     gh.add_blocked_by(issue, dep)
     gh.set_pipeline_status_field(issue, "todo")
     gh.issue_comment(issue, f"⏸️ Blocked — waiting on #{dep} to merge.")
@@ -5075,9 +3431,7 @@ def cmd_mark_blocked(gh: GitHub, issue: int, dep: int, repo_path: str = ".") -> 
 
 
 def cmd_mark_needs_human(gh: GitHub, issue: int, reason: str, repo_path: str = ".") -> dict:
-    """Parks the unit for the operator, and releases its worktree (see
-    `release_worktree`) so the abandoned checkout stops consuming a dev-lane
-    slot -- the failure mode that silently stalled the lane on 2026-08-20."""
+    """Park the unit as needs-human with `reason` and release its worktree."""
     gh.set_pipeline_status_field(issue, "needs-human")
     gh.issue_comment(issue, f"🙋 Needs human input — {reason}")
     return {"issue": issue, "status": "needs-human",
@@ -5085,14 +3439,7 @@ def cmd_mark_needs_human(gh: GitHub, issue: int, reason: str, repo_path: str = "
 
 
 def cmd_mark_todo(gh: GitHub, issue: int) -> dict:
-    """Sets Pipeline Status to `todo` on a freshly opened issue -- the one native
-    option this pipeline never otherwise writes (see "Issue taxonomy" in
-    SKILL.md), added purely so a new issue shows *some* Pipeline Status on the
-    board instead of a blank field, before anything else has claimed it. Skips
-    cleanly (no mutation) if the issue already has any Pipeline Status value --
-    covers the workflow re-firing, or `issues: opened` landing after some other
-    process (e.g. a fast first `/sdlc-pipeline` claim) already set a real status;
-    never clobber an already-meaningful value with `todo`."""
+    """Set Pipeline Status to `todo` on a new issue; skips if it already has any value."""
     fields = gh.issue_fields(issue)
     current = PIPELINE_STATUS_FIELD_NAMES.get(fields.get("Pipeline Status"))
     if current is not None:
@@ -5102,25 +3449,8 @@ def cmd_mark_todo(gh: GitHub, issue: int) -> dict:
 
 
 def cmd_mark_issue_closed(gh: GitHub, issue: int) -> dict:
-    """Marks `issue` done -- called by .github/workflows/gate-auto-advance.yml
-    the instant *any* issue in the repo closes (`issues: closed`), regardless of
-    why: a `merge-pr` squash-merge auto-closing it via `Closes #<n>`, a human
-    closing it directly, or an epic closing once its children are all done --
-    the epic-integration PR's `Closes #<n>` fires this on merge whether a human
-    or (when `pipeline.epicClose.auto`) the orchestrator triggered `close-epic`
-    (see "Epic closing" in SKILL.md). Added 2026-08-20, per operator instruction, replacing the old
-    approach of `cmd_merge_pr` synchronously deleting both fields itself --
-    that only ever covered issues closed *through* the pipeline's own
-    `merge-pr` call, silently missing any issue a human closed by hand. Moving
-    this to the same real-time `issues: closed` trigger `mark-epic-done`
-    (this command's predecessor) already used covers every closure path
-    uniformly.
-
-    Every closed issue: Stage is cleared (`clear_stage_field` -- "current
-    stage" is meaningless once closed) and Pipeline Status is set to `Done`
-    (`set_pipeline_status_field(..., "done")` -- **not** deleted, unlike the
-    old behavior; a closed issue has a real, meaningful terminal state now that
-    the field has a `Done` option, added 2026-08-20 alongside this change)."""
+    """Terminal fields for any closed issue (run by CI on `issues: closed`): clear
+    Stage, set Pipeline Status `done`. Returns `is_epic`/`is_initiative`."""
     info = gh.issue_epic_info(issue)
     gh.clear_stage_field(issue)
     gh.set_pipeline_status_field(issue, "done")
@@ -5130,56 +3460,26 @@ def cmd_mark_issue_closed(gh: GitHub, issue: int) -> dict:
 
 def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
                     runner: Runner = _default_runner) -> dict:
-    """Close `issue` on the tracker and apply the terminal fields in the same
-    call -- the orchestrator's close, for a phase-Task whose work never
-    merges through `merge-pr`'s `Closes #<n>` (an LLD-phase Task once its doc is
-    published and its Tasks advanced).
-
-    `mark-issue-closed` only *reacts* to a close (the `issues: closed` Action
-    job) and never closes anything itself. Used as the close step, it left the
-    issue open with Pipeline Status `Done` and no Stage, which `next-action`
-    read as a fresh child and handed straight back out -- found live,
-    2026-09-15. The field writes stay here too, so a repo without that
-    Action still ends in the right state; with it, the job's rerun is a no-op.
-
-    Also releases the issue's worktree: a closed Task never takes another
-    stage, and a tree left behind reads as a stale lane slot in
-    `list-parallel-ready`. `release_worktree` refuses (structured, never
-    raising) when the tree holds uncommitted or unpushed work."""
+    """Close `issue`, apply the terminal fields and release its worktree -- for a
+    phase-Task that never merges through `merge-pr`. Counts toward the run cap."""
     gh.issue_close(issue)
     cmd_mark_issue_closed(gh, issue)
     released = release_worktree(issue_branch(issue), runner=runner, base_repo=repo_path or ".")
-    # The other terminal outcome the run cap counts -- a phase-Task whose work
-    # never merges through `merge-pr` still consumed a slot of this run.
     terminal = record_terminal_unit(gh, issue)
     return {"issue": issue, "closed": True, "worktree": released,
             **({"run_terminal": terminal} if terminal else {})}
 
 
-# Tracked file holding the closed-issue count at the last completed retrospective
-# -- committed alongside the retro's own skill edits (Step 5 commits anyway), so
-# the trigger is a watermark ("5 or more closed since the last retro") instead of
-# the old `count % 5 == 0`, which both skipped whenever two issues closed between
-# checks and fired forever once the count query capped out.
+# Closed-issue count at the last completed retrospective (a watermark, not a modulus).
 RETRO_WATERMARK_FILE = PIPELINE["retro"]["watermarkFile"]
 RETRO_EVERY = PIPELINE["retro"]["everyClosedIssues"]
 
 
 def cmd_retro_check(gh: GitHub, repo_path: str = ".", mark_done: bool = False,
                      count: Optional[int] = None) -> dict:
-    """`run_retro` is true once >= 5 issues have closed since the last completed
-    retrospective. `--mark-done --count N` records N as the new watermark -- N
-    must be the `closed_count` this same command returned at the invocation that
-    found `run_retro: true`, captured by the caller and carried through the fix
-    work, not re-read live. The live count moves while the retro's evidence sweep
-    and fix land (2026-09-14: watermark stayed at 171 through an evidence sweep and
-    a four-item fix while the repo's own closed count kept climbing); stamping
-    that later, larger live count as the watermark silently marks every issue that
-    closed in between as reviewed by a sweep that never looked at them -- the next
-    retro's sweep starts counting friction only from the inflated number forward.
-    `--mark-done` without `--count` falls back to the live count for backward
-    compatibility, and the result says so via `count_was_live_fallback` -- prefer
-    always passing `--count`."""
+    """`run_retro` once RETRO_EVERY issues closed since the watermark. `mark_done`
+    stamps `count` -- the `closed_count` captured when the retro was triggered, since
+    the live count moves during the retro; without it, falls back to the live count."""
     path = os.path.join(repo_path, RETRO_WATERMARK_FILE)
     watermark = 0
     if os.path.isfile(path):
@@ -5205,30 +3505,9 @@ def cmd_retro_check(gh: GitHub, repo_path: str = ".", mark_done: bool = False,
 
 
 def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
-    """Mechanical bounce counts for the escalation-valve pairings whose events
-    leave comment markers -- so the valve's thresholds (3 -> context-reset
-    replacement agent, 6 -> needs-human) survive session boundaries
-    (continuous-mode cycle agents have zero memory of prior units by design)
-    instead of living only in one orchestrator's bookkeeping.
-
-    Covers the marker-backed pairings: `pr-review <-> development`
-    (`pr-review-outcome` markers; `rework_since_last_clean` resets on every
-    clean outcome), `sync-branch-conflict <-> development` (`sync-conflict`
-    markers, total count), and -- since 2026-08-28 -- the design pairings
-    `product-review <-> product`, `arch-review <-> architecture` and
-    `lld-review <-> lld` (`design-review-outcome` markers, reported per role under
-    `design_review`).
-    `testing <-> development` still leaves no marker and remains the
-    orchestrator's own session-scoped count.
-
-    `same_class_recurrence_count` (top-level, for `pr-review`, and per role under
-    `design_review`) counts `same-class:true` markers -- added 2026-09-14 because
-    the generic bounce count does not distinguish three different defects from the
-    same defect three times, and a reviewer's own "escalate on the pattern" note in
-    verdict prose changes nothing unless something reads it back. **Any count >= 1
-    here is its own escalation signal, independent of `replace_at`/`needs_human_at`**
-    -- see `references/rework.md`, "Same-class recurrence must be a marker, not a
-    sentence"."""
+    """Escalation-valve bounce counts read back from comment markers: pr-review rework,
+    sync conflicts, and per-role `design_review` counts, each with same-class recurrences.
+    Any same-class recurrence >= 1 is an escalation signal on its own."""
     comments = gh.issue_view(issue).get("comments", [])
     rework_since_clean = total_rework = total_clean = sync_conflicts = 0
     pr_review_same_class = 0
@@ -5269,121 +3548,91 @@ def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
             "pr_review_total_clean": total_clean,
             "pr_review_same_class_recurrence_count": pr_review_same_class,
             "sync_conflict_count": sync_conflicts,
-            # Keyed by role (`arch-review` / `lld-review`) rather than flattened:
-            # a unit can bounce on both, and the valve counts them as separate
-            # pairings. Absent key == that review never ran on this unit.
+            # Per role: each review role is a separate valve pairing; absent = never ran.
             "design_review": design_review}
 
 
+def _issue_kind(type_name: str) -> str:
+    """The classification kind whose issueType rule names `type_name`, else its lowercase."""
+    for kind, rule in PIPELINE.get("classification", {}).items():
+        if rule.get("field") == "issueType" and rule.get("value") == type_name:
+            return kind
+    return type_name.lower()
+
+
+def _option_name(field: str, value, options: dict) -> str:
+    """`value` matched case-insensitively to one of `options`' names; GhError if none."""
+    for name in options:
+        if value is not None and name.lower() == str(value).strip().lower():
+            return name
+    raise GhError(f"{field} {value!r} is not a configured option (one of {sorted(options)}) "
+                  f"-- refused before creating anything")
+
+
+def issue_field_values(priority: Optional[str] = None, effort: Optional[str] = None) -> dict:
+    """Validated `{"priority", "effort"}` for `create-issue`, each only when its field is
+    configured; an omitted value takes `pipeline.issueDefaults`."""
+    defaults = PIPELINE["issueDefaults"]
+    out = {}
+    if PRIORITY_FIELD_ID:
+        out["priority"] = _option_name("Priority", priority or defaults.get("priority"),
+                                       PRIORITY_OPTION_IDS)
+    if EFFORT_FIELD_ID:
+        out["effort"] = _option_name("Effort", effort or defaults.get("effort"), EFFORT_OPTION_IDS)
+    return out
+
+
 def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: list,
-                     type_name: str = "Task") -> dict:
-    """The one path that creates a new issue -- historically only `product`
-    splitting an oversized issue (see "Repo access" in references/operations.md),
-    always a Task. The orchestrator also uses it one level up, cutting Epics
-    from an approved Initiative -- `type_name` defaults to `"Task"`, and a
-    caller creating an Epic must pass `type_name="Epic"` explicitly.
-
-    **This is the write side of `classify_unit`'s read side** (`GitHub.
-    classify_unit`, config-driven via `pipeline.classification`): before this
-    fix, every issue this command created was hardcoded `Type: Task` regardless
-    of caller intent, so an Epic created here would misclassify as a Task the
-    moment anything read it back. If your `pipeline.classification` rule for a
-    kind is label-based rather than issueType-based, pass that label in `labels`
-    yourself -- this command sets the native Issue Type field, not a label, and
-    does not invent a label mapping on your behalf.
-
-    Enforces the "every issue has a parent" invariant at its one entry point:
-    sets the type and links it as a sub-issue of `parent` immediately, rather
-    than leaving that to a follow-up step that could be skipped.
-
-    `type_name` not being a provisioned native Issue Type is only a hard error
-    when nothing else can classify this issue later. If `pipeline.classification`
-    has a label-based rule for this kind (`type_name.lower()`), the label the
-    caller already passed in `labels` is the actual classification signal --
-    custom Issue Types are an organization-level GitHub feature, unavailable on
-    a personal repo at any plan tier, so a personal repo's Epic/Initiative can
-    *never* be provisioned as a native type and must not be forced to fail
-    here. Otherwise (no native type, no label fallback) this issue could never
-    be classified by anything, so it fails loudly via `set_issue_type`'s own
-    clear error rather than creating an unclassifiable issue silently.
-
-    Checked BEFORE `issue_create` runs, not after: when the native type isn't
-    provisioned and classification for this kind is label-based, the label is
-    the ONLY signal that will ever classify this issue -- if the caller forgot
-    to actually put it in `labels`, this must refuse before creating anything,
-    not create an unclassifiable issue and only notice on read-back (the exact
-    "uncreated-in-vain" failure mode SKILL.md's "Cutting Epics from an approved
-    Initiative" warns the operator about)."""
-    kind = type_name.lower()
-    rule = PIPELINE.get("classification", {}).get(kind)
-    classified_by_label = bool(rule) and rule.get("field") == "label"
-    skip_native_type = type_name not in ISSUE_TYPE_IDS and classified_by_label
-    if skip_native_type and rule["value"] not in labels:
+                     type_name: str = "Task", priority: Optional[str] = None,
+                     effort: Optional[str] = None) -> dict:
+    """Create an issue with its native Issue Type (mandatory), parent link, Pipeline Status
+    `todo`, and Priority/Effort when configured. Inputs are validated before creating; a
+    later step failing returns `ok: False` naming the created issue."""
+    known = sorted({*KNOWN_ISSUE_TYPES, *ISSUE_TYPE_IDS})
+    if type_name not in known:
+        raise GhError(f"--type {type_name!r} is not an issue type (one of {known})")
+    if type_name not in ISSUE_TYPE_IDS:
         raise GhError(
-            f"type_name={type_name!r} isn't a provisioned native Issue Type, and "
-            f"pipeline.classification.{kind!r} is label-based (expects "
-            f"{rule['value']!r}) -- but {rule['value']!r} isn't in labels={labels!r}. "
-            f"Nothing would ever classify this issue as {kind!r}. Pass "
-            f"--label {rule['value']} (see \"Cutting Epics from an approved "
-            f"Initiative\" in SKILL.md).")
-    # The OTHER precondition, hoisted above the create on 2026-09-16: a
-    # `type_name` with no `projectFields.issueTypeIds` entry and no label-based
-    # rule to fall back on. `set_issue_type` has always refused it with a clear
-    # error -- but it ran *after* `issue_create`, so the refusal landed on an
-    # issue that already existed, with no type and (the create being step one of
-    # three) no parent either. That is issue #52: a real orphan, invisible to
-    # every later read, that had to be found and closed by hand. The identical
-    # refusal costs nothing here and leaves the tracker untouched. Both
-    # preconditions are now checked before any mutation, which is the whole
-    # atomicity claim this command makes.
-    if not skip_native_type and type_name not in ISSUE_TYPE_IDS:
-        raise GhError(
-            f"type_name={type_name!r} is not in projectFields.issueTypeIds "
-            f"(configured: {sorted(ISSUE_TYPE_IDS)}), and "
-            f"pipeline.classification.{kind!r} has no label-based rule to fall back on "
-            f"-- nothing would ever classify this issue. Provision the native Issue "
-            f"Type and add its id to the config, or configure a label-based rule for "
-            f"{kind!r}. Refused BEFORE creating anything: an issue created with no "
-            f"type and no parent is an orphan no later command can find (#52).")
+            f"Issue Type {type_name!r} is not provisioned: create it under the org's Settings "
+            f"-> Issue types and add its GraphQL id to projectFields.issueTypeIds (configured: "
+            f"{sorted(ISSUE_TYPE_IDS)}). Refused before creating anything -- every pipeline "
+            f"issue carries a native type.")
+    fields = issue_field_values(priority, effort)
+    rule = PIPELINE.get("classification", {}).get(_issue_kind(type_name)) or {}
+    if rule.get("field") == "label" and rule["value"] not in labels:
+        labels = [*labels, rule["value"]]
+    # Parent first: re-runs of cut-phase-tasks / create-lld-tasks find a half-made
+    # issue only through its parent link, so any later failure must not duplicate it.
+    steps = [("add_sub_issue", lambda n: gh.add_sub_issue(parent, n)),
+             ("set_issue_type", lambda n: gh.set_issue_type(n, type_name)),
+             ("set_pipeline_status", lambda n: gh.set_pipeline_status_field(n, "todo"))]
+    if "priority" in fields:
+        steps.append(("set_priority", lambda n: gh.set_priority_field(n, fields["priority"])))
+    if "effort" in fields:
+        steps.append(("set_effort", lambda n: gh.set_effort_field(n, fields["effort"])))
     number = gh.issue_create(title, body, labels)
-    result = {"issue": number, "parent": parent, "type": type_name}
-    # Past this line the issue EXISTS on the tracker. A failure in either
-    # remaining step is reported as a structured result that names the failed
-    # step and carries the number -- never re-raised. A bare exception tells the
-    # caller only "create-issue failed", and the obvious response to that, a
-    # retry, creates a SECOND issue for the same work; with the number in hand
-    # the caller repairs the one that exists instead. `ok: False` still exits
-    # nonzero, so this stops the run rather than being read past.
-    if not skip_native_type:
+    result = {"issue": number, "parent": parent, "type": type_name,
+              "pipeline_status": "todo", **fields}
+    # The issue now exists: report failures with its number rather than raising,
+    # so the caller repairs it instead of retrying into a duplicate.
+    for i, (name, step) in enumerate(steps):
         try:
-            gh.set_issue_type(number, type_name)
+            step(number)
         except GhError as e:
-            return {**result, "ok": False, "complete": False,
-                    "failed_step": "set_issue_type", "error": str(e),
-                    "reason": f"issue #{number} was created but its Issue Type could not "
-                              f"be set to {type_name!r}, and it is not yet linked under "
-                              f"#{parent}. Do NOT re-run create-issue -- that duplicates "
-                              f"it. Repair #{number} in place (set the type, then link it "
-                              f"under #{parent})."}
-    try:
-        gh.add_sub_issue(parent, number)
-    except GhError as e:
-        return {**result, "ok": False, "complete": False,
-                "failed_step": "add_sub_issue", "error": str(e),
-                "reason": f"issue #{number} was created and typed, but the parent link to "
-                          f"#{parent} failed -- it is an orphan until that is repaired. Do "
-                          f"NOT re-run create-issue -- that duplicates it. Link #{number} "
-                          f"under #{parent} and continue."}
+            todo = ", ".join(n for n, _ in steps[i:])
+            return {**result, "ok": False, "complete": False, "failed_step": name,
+                    "error": str(e),
+                    "reason": f"issue #{number} was created but {name} failed ({todo} not "
+                              f"done). Do NOT re-run create-issue -- that duplicates it. Run "
+                              f"`repair-issue {number} --parent {parent} --type {type_name}"
+                              + "".join(f" --{k} {v}" for k, v in fields.items())
+                              + "` and continue."}
     return result
 
 
 def cmd_list_needs_human(gh: GitHub) -> dict:
-    """Every open issue with Pipeline Status = "Needs Human", with the reason text
-    captured from its own mark-needs-human comment -- so Step 1/Step 4 can surface
-    *why* each one is stuck, not just that it is. Blockers only go stale silently if
-    nobody re-reads the reason; this makes that reason cheap to re-surface every
-    time next-action finds nothing else actionable, instead of requiring a human to
-    notice and point it out."""
+    """Open needs-human issues with the reason from their latest mark-needs-human
+    comment: `{"needs_human": [{issue, title, reason}]}`."""
     issues = [i for i in gh.issue_list() if i["state"] == "OPEN" and pipeline_status(i) == "needs-human"]
     result = []
     for issue in issues:
@@ -5398,18 +3647,107 @@ def cmd_list_needs_human(gh: GitHub) -> dict:
     return {"needs_human": result}
 
 
+_KIND_TYPES = {"initiative": "Initiative", "epic": "Epic", "task": "Task"}
+
+
+def inferred_issue_type(issue: dict) -> Optional[str]:
+    """The native type an untyped issue's classification labels name unambiguously, else None."""
+    labels = label_names(issue)
+    kinds = {kind for kind, rule in PIPELINE.get("classification", {}).items()
+             if rule.get("field") == "label" and rule.get("value") in labels}
+    return _KIND_TYPES.get(kinds.pop()) if len(kinds) == 1 else None
+
+
+def cmd_repair_issue(gh: WorkItemProvider, number: int, parent: Optional[int] = None,
+                     type_name: Optional[str] = None, priority: Optional[str] = None,
+                     effort: Optional[str] = None) -> dict:
+    """Set whatever of create-issue's fields `number` lacks, never overwriting a set value.
+    Validates before the first write, so a re-run finishes a partial repair."""
+    info, fields = gh.issue_epic_info(number), gh.issue_fields(number)
+    steps, already = [], []
+    if info.get("parent"):
+        already.append("parent")
+    elif parent is not None:
+        steps.append(("parent", lambda: gh.add_sub_issue(parent, number)))
+    if issue_type(info):
+        already.append("issueType")
+    else:
+        type_name = type_name or inferred_issue_type(info)
+        if type_name is None:
+            raise GhError(f"#{number} has no issueType and its classification names none "
+                          f"unambiguously -- pass --type (one of {sorted(ISSUE_TYPE_IDS)})")
+        if type_name not in ISSUE_TYPE_IDS:
+            raise GhError(f"--type {type_name!r} is not in projectFields.issueTypeIds "
+                          f"({sorted(ISSUE_TYPE_IDS)})")
+        info = {**info, "issueType": {"name": type_name}}
+        steps.append(("issueType", lambda: gh.set_issue_type(number, type_name)))
+    if fields.get("Pipeline Status"):
+        already.append("Pipeline Status")
+    elif not (is_initiative(info) or is_epic(info)):  # cleared by design on containers
+        steps.append(("Pipeline Status", lambda: gh.set_pipeline_status_field(number, "todo")))
+    values = issue_field_values(priority, effort)
+    for name, setter in (("Priority", gh.set_priority_field), ("Effort", gh.set_effort_field)):
+        value = values.get(name.lower())
+        if fields.get(name):
+            already.append(name)
+        elif value:
+            steps.append((name, lambda setter=setter, value=value: setter(number, value)))
+    for _, step in steps:
+        step()
+    return {"issue": number, "set": [name for name, _ in steps], "already_set": already}
+
+
+def cmd_audit_issues(gh: WorkItemProvider, epic: Optional[int] = None) -> dict:
+    """Read-only: open issues in the Initiative/Epic trees (or `epic`'s tree), plus parentless
+    ones, missing issueType, parent (Tasks and other non-containers), Priority, Effort or
+    Pipeline Status; each with a `repair-issue` command."""
+    issues = gh.issue_list()
+    by_number = {i["number"]: i for i in issues}
+    children: dict = {}
+    for i in issues:
+        if i.get("parent"):
+            children.setdefault(i["parent"]["number"], []).append(i["number"])
+    stack = [epic] if epic is not None else [
+        i["number"] for i in issues if is_initiative(i) or is_epic(i)]
+    scope = {i["number"] for i in issues if not i.get("parent")}
+    seen: set = set()
+    while stack:
+        n = stack.pop()
+        if n not in seen:
+            seen.add(n)
+            stack.extend(children.get(n, []))
+    optional = [(name, fid) for name, fid in (("Priority", PRIORITY_FIELD_ID),
+                                              ("Effort", EFFORT_FIELD_ID)) if fid]
+    found = []
+    for n in sorted(scope | seen):
+        i = by_number.get(n)
+        if not i or i["state"] != "OPEN":
+            continue
+        container = is_initiative(i) or is_epic(i)
+        missing = [] if issue_type(i) else ["issueType"]
+        # Engineering-driven Epics are parentless by design.
+        if not i.get("parent") and not container:
+            missing.append("parent")
+        missing += [name for name, _ in optional if not i.get("fields", {}).get(name)]
+        # An Epic/Initiative's Pipeline Status is cleared while its Tasks carry the work.
+        if pipeline_status(i) is None and not container:
+            missing.append("Pipeline Status")
+        if missing:
+            repair = f"repair-issue {n}" + (" --parent <P>" if "parent" in missing else "")
+            if "issueType" in missing and not inferred_issue_type(i):
+                repair += " --type <T>"
+            found.append({"issue": n, "title": i["title"], "missing": missing,
+                          "repair": repair})
+    return {"issues": found, "count": len(found)}
+
+
 _EPIC_CLOSEABLE_MARKER = "<!-- epic-closeable-checklist-posted -->"
 
 
 def cmd_check_epics_closeable(gh: GitHub) -> dict:
-    """Surfaces every open, non-`epic:standing` epic whose children are all closed
-    -- posts a one-time checklist comment and assigns the human operator, but never
-    closes the epic itself (a milestone-level call, same spirit as the two
-    human-review gates -- see "Human-review gates" in references/gates.md). Idempotent: skips
-    epics that already carry the marker comment from a prior run, so this is safe
-    to call every time next-action finds nothing else actionable. `epic:standing`
-    epics (permanent backlog umbrellas) are never proposed for closing, even when
-    momentarily empty of open children. See "Epic closing" in references/epics.md."""
+    """For each open non-standing epic with every child closed, post a one-time
+    closing checklist and assign the human; never closes the epic. Idempotent via
+    `_EPIC_CLOSEABLE_MARKER`. Returns `closeable_epics`."""
     all_issues = gh.issue_list()
     open_epics = [i for i in all_issues if i["state"] == "OPEN" and is_epic(i) and not is_epic_standing(i)]
     results = []
@@ -5423,11 +3761,7 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
             results.append({"epic": epic["number"], "title": epic["title"], "already_notified": True})
             continue
         open_dependents = sorted({d for c in children for d in gh.blocking(c["number"])})
-        # `publish-doc` lands an Epic's architecture.md and lld.md on `epic-<n>`,
-        # not `main`; `close-epic`'s final merge is what carries them to `main`.
-        # So for a still-open epic the branch to check is the epic branch,
-        # GitHub-side. An Epic owns no product.md -- its Initiative's
-        # Product-Roadmap Task landed that on `main`.
+        # An open epic's docs live on its epic branch; `close-epic` carries them to main.
         branch = epic_branch(epic["number"])
         doc_names = ("architecture.md", "lld.md")
         missing_docs = [f"{DOC_ROOT}/epic-{epic['number']}/{name}"
@@ -5472,16 +3806,8 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
 
 
 # --- Per-epic isolated runtime stack -----------------------------------------
-#
-# The git half of "N pipeline instances on N epics with zero shared mutable
-# state" is `BranchWorkspace` + `branch_lock`. This is the runtime half: every
-# epic gets its own compose project, ports, env/secrets profile and database
-# data directory, provisioned at epic start (or before its first e2e-running
-# child) and torn down at epic close. Isolation is config-only -- the driven
-# repo's compose must already read the keys named in `pipeline.stack` (proven
-# on the origin repo: COMPOSE_PROJECT_NAME, *_PORT, DB_PORT_EXPOSE,
-# BACKEND_DEBUG_PORT, POSTGRES_DATA_DIR). See "Per-epic isolated stack" in
-# references/parallelism.md.
+# Each epic gets its own compose project, ports, env/secrets profile and data dir.
+# Isolation is config-only: the driven repo's compose must read the keys in `pipeline.stack`.
 
 Shell = Callable[[str, str], str]  # (command, cwd) -> stdout; raises GhError on nonzero
 
@@ -5532,11 +3858,8 @@ def _stack_layout(epic: int) -> dict:
 
 
 def pick_stack_ports(epic: int, probe: Callable[[int], bool] = _port_free) -> dict:
-    """Distinct host ports for this epic's stack: each configured base port plus
-    a stride-multiple offset derived from the epic number, bumped by another
-    stride while any port in the set is already bound. Deterministic per epic
-    when the machine is quiet, and never colliding with the base profile (offset
-    is never zero) or another provisioned epic (its ports are bound)."""
+    """Host ports for this epic's stack: base ports plus a non-zero stride offset
+    derived from the epic number, bumped while any port is bound. Returns {key: port}."""
     s = PIPELINE["stack"]
     stride = int(s["portStride"])
     base_ports = {k: int(v) for k, v in s["ports"].items()}
@@ -5555,9 +3878,8 @@ _ENV_LINE_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
 
 
 def render_env_profile(base_text: str, overrides: dict) -> str:
-    """The base profile's text with every `KEY=` line in `overrides` replaced in
-    place and any missing key appended under a marker -- so the epic profile
-    stays a faithful copy of the base plus exactly the isolation keys."""
+    """The base env text with each `overrides` key replaced in place; missing keys
+    are appended under a generated-section marker."""
     seen = set()
     out = []
     for line in base_text.splitlines():
@@ -5592,13 +3914,9 @@ def _read_env_ports(path: str) -> dict:
 
 def cmd_provision_epic_stack(epic: int, up: bool = True, shell: Shell = _default_shell,
                              probe: Callable[[int], bool] = _port_free) -> dict:
-    """Stand up the epic's isolated stack: generate `<envFile>` for profile
-    `epic<n>` from the base profile with distinct ports + compose project + data
-    dir, copy the base secrets file (a plain copy -- no secret is ever read),
-    then run `upCommand` and, if set, `seedCommand`. Idempotent: an existing
-    profile is reused as-is (its ports read back), only the up/seed commands
-    re-run. `enabled: false` -> structured no-op, so a repo without a
-    parametrised compose is unaffected."""
+    """Generate the epic's env profile (distinct ports, compose project, data dir),
+    copy the base secrets file, then run `upCommand`/`seedCommand`. Idempotent: an
+    existing profile is reused; `stack.enabled: false` is a structured no-op."""
     s = PIPELINE["stack"]
     if not s["enabled"]:
         return {"epic": epic, "provisioned": False,
@@ -5643,10 +3961,8 @@ def cmd_provision_epic_stack(epic: int, up: bool = True, shell: Shell = _default
 
 def cmd_teardown_epic_stack(epic: int, keep_data: bool = False,
                             shell: Shell = _default_shell) -> dict:
-    """The inverse: `downCommand` (volumes included), then remove the generated
-    env + secrets profile files and the data directory. Structured no-op when
-    nothing is provisioned. A failing down command still removes nothing, so a
-    half-torn stack is visible rather than orphaned."""
+    """Run `downCommand`, then remove the generated env/secrets files and data dir.
+    A failing down command removes nothing, leaving a half-torn stack visible."""
     s = PIPELINE["stack"]
     if not s["enabled"]:
         return {"epic": epic, "torn_down": False,
@@ -5674,128 +3990,358 @@ def cmd_teardown_epic_stack(epic: int, keep_data: bool = False,
             "down_command": cmd, "removed": removed}
 
 
+# --- Composite commands: ordered sequences of existing commands ---------------
+
+class StepSequence:
+    """Runs a composite's `cmd_*` steps in order, recording each, stopping at the first
+    failure: `GhError` or `ok: False` (exit 1), or a `failed` predicate hit (exit 0)."""
+
+    def __init__(self):
+        self.steps: dict = {}
+        self.completed: list = []
+        self.failed_step: Optional[str] = None
+        self.ok = True
+        self.error: Optional[str] = None
+
+    @property
+    def stopped(self) -> bool:
+        return self.failed_step is not None
+
+    def run(self, name: str, call: Callable[[], dict],
+            failed: Optional[Callable[[dict], bool]] = None) -> Optional[dict]:
+        """The step's result, or None when it failed or an earlier step had."""
+        if self.stopped:
+            return None
+        try:
+            result = call()
+        except GhError as e:
+            self.steps[name] = {"error": str(e)}
+            self.failed_step, self.ok, self.error = name, False, str(e)
+            return None
+        self.steps[name] = result
+        if result.get("ok") is False:
+            self.failed_step, self.ok = name, False
+        elif failed is not None and failed(result):
+            self.failed_step = name
+        else:
+            self.completed.append(name)
+            return result
+        return None
+
+    def report(self, failed_key: str = "failed_step", **fields) -> dict:
+        out = {**fields, "ok": self.ok, "completed_steps": self.completed,
+               failed_key: self.failed_step, "steps": self.steps}
+        if self.error:
+            out["error"] = self.error
+        elif self.stopped:
+            failed = self.steps[self.failed_step]
+            out["reason"] = (failed.get("reason") or failed.get("misuse")
+                             or f"step {self.failed_step} did not succeed -- see steps")
+        return out
+
+
+def _not_a_phased_epic(issues: dict, epic: int) -> Optional[str]:
+    """None when `epic` is a non-standing Epic, else the refusal reason."""
+    entry = issues.get(epic)
+    if entry is None:
+        raise GhError(f"issue #{epic} not found in the repo issue list")
+    if not is_epic(entry):
+        return f"#{epic} is not an Epic -- only a non-standing Epic has phase-Tasks"
+    if is_epic_standing(entry):
+        return f"#{epic} is a standing epic -- it has no phase-Tasks or epic branch"
+    return None
+
+
+def _child_titled(issues: dict, parent: int, title: str,
+                  open_only: bool = False) -> Optional[dict]:
+    """`parent`'s child titled `title` -- an open one first, else (unless
+    `open_only`) a closed one; lowest number wins a tie."""
+    matches = sorted((i for i in issues.values()
+                      if (i.get("parent") or {}).get("number") == parent and i["title"] == title
+                      and (i["state"] == "OPEN" or not open_only)),
+                     key=lambda i: (i["state"] != "OPEN", i["number"]))
+    return matches[0] if matches else None
+
+
+def _ensure_staged_task(seq: StepSequence, gh: GitHub, issues: dict, epic: int, key: str,
+                        title: str, body: str, stage: str, open_only: bool = False) -> Optional[dict]:
+    """Reuse or create `title` under `epic` and give it `stage` if it has none.
+    Returns `{"issue", "open"}`, or None when a step failed."""
+    existing = _child_titled(issues, epic, title, open_only=open_only)
+    if existing:
+        task = seq.run(f"{key}.create-issue", lambda: {
+            "issue": existing["number"], "reused": True, "state": existing["state"]})
+    else:
+        task = seq.run(f"{key}.create-issue", lambda: cmd_create_issue(
+            gh, title, body, epic, [], type_name=task_type_name()))
+    if task is None:
+        return None
+    n = task["issue"]
+    is_open = existing is None or existing["state"] == "OPEN"
+    staged = current_stage(existing) if existing else None
+    if not is_open or staged:
+        # A closed phase-Task is finished; a staged one may have moved on -- never rewind it.
+        done = seq.run(f"{key}.set-stage", lambda: {
+            "issue": n, "stage": staged, "unchanged": True,
+            **({} if is_open else {"reason": "issue is closed"})})
+    else:
+        done = seq.run(f"{key}.set-stage", lambda: cmd_set_stage(gh, n, stage))
+    return {"issue": n, "open": is_open} if done is not None else None
+
+
+def _worktree_refused(result: dict) -> bool:
+    return bool(result.get("diverged"))
+
+
+def _add_blocked_by_once(gh: GitHub, issue: int, dep: int) -> dict:
+    """`cmd_add_blocked_by` unless the edge already exists (re-adding one errors)."""
+    if dep in gh.blocked_by(issue):
+        return {"issue": issue, "blocked_on": dep, "added": False, "reason": "edge already present"}
+    return cmd_add_blocked_by(gh, issue, dep)
+
+
+def cmd_cut_phase_tasks(gh: GitHub, epic: int, arch_body: Optional[str] = None,
+                        lld_body: Optional[str] = None, repo_path: str = ".",
+                        runner: Runner = _default_runner) -> dict:
+    """Create (or reuse by title) and stage a non-standing Epic's Architecture- and
+    LLD-phase Tasks, block LLD on Architecture, and add the Architecture worktree off
+    `origin/main`. Returns `architecture_task`, `lld_task` plus the step record."""
+    issues = {i["number"]: i for i in gh.issue_list()}
+    refusal = _not_a_phased_epic(issues, epic)
+    if refusal:
+        return {"epic": epic, "refused": True, "reason": refusal}
+    seq = StepSequence()
+    arch = _ensure_staged_task(
+        seq, gh, issues, epic, "architecture", "Architecture phase",
+        arch_body or f"Architecture-phase Task for Epic #{epic}: `architecture` -> "
+                     f"`arch-review` -> Gate B; publishes `epic-{epic}/architecture.md`.",
+        "architecture")
+    lld = arch and _ensure_staged_task(
+        seq, gh, issues, epic, "lld", "LLD phase",
+        lld_body or f"LLD-phase Task for Epic #{epic}: `lld` -> `lld-review`; publishes "
+                    f"`epic-{epic}/lld.md`, from which the Epic's Tasks are created.",
+        "lld")
+    if lld:
+        a, l = arch["issue"], lld["issue"]
+        if arch["open"]:
+            seq.run("add-blocked-by", lambda: _add_blocked_by_once(gh, l, a))
+            seq.run("worktree-add", lambda: cmd_worktree_add(
+                gh, a, repo_path=repo_path, runner=runner, base="origin/main"),
+                failed=_worktree_refused)
+        else:
+            seq.run("add-blocked-by", lambda: {"issue": l, "blocked_on": a, "added": False,
+                                               "reason": "Architecture-phase Task is closed"})
+    return seq.report(epic=epic, architecture_task=arch and arch["issue"],
+                      lld_task=lld and lld["issue"])
+
+
+def cmd_open_arch_revision(gh: GitHub, epic: int, title: str, body: str,
+                           blocks: Optional[list] = None, repo_path: str = ".",
+                           runner: Runner = _default_runner) -> dict:
+    """Cut an Architecture revision phase-Task under a non-standing Epic: create (or
+    reuse an open one by title), stage `architecture`, worktree off `origin/main`,
+    then block each unit in `blocks` on it. Returns `revision_task`."""
+    if not title.startswith("Architecture revision"):
+        title = f"Architecture revision: {title}"
+    issues = {i["number"]: i for i in gh.issue_list()}
+    refusal = _not_a_phased_epic(issues, epic)
+    if refusal:
+        return {"epic": epic, "refused": True, "reason": refusal}
+    seq = StepSequence()
+    task = _ensure_staged_task(seq, gh, issues, epic, "revision", title, body,
+                               "architecture", open_only=True)
+    if task:
+        seq.run("worktree-add", lambda: cmd_worktree_add(
+            gh, task["issue"], repo_path=repo_path, runner=runner, base="origin/main"),
+            failed=_worktree_refused)
+    for unit in blocks or []:
+        seq.run(f"add-blocked-by:{unit}",
+                lambda unit=unit: _add_blocked_by_once(gh, unit, task["issue"]))
+    return seq.report(epic=epic, revision_task=task and task["issue"])
+
+
+def cmd_finish_lld(gh: GitHub, lld_task: int, epic: int, repo_path: str = ".",
+                   runner: Runner = _default_runner) -> dict:
+    """After a clean `lld-review`: publish-doc lld.md -> create-lld-tasks ->
+    merge-lld-doc -> close-issue, stopping before the close if anything earlier
+    failed. Returns `completed_steps`, `failed_step`, `steps`."""
+    parent = (gh.issue_epic_info(lld_task).get("parent") or {}).get("number")
+    if parent != epic:
+        return {"lld_task": lld_task, "epic": epic, "refused": True,
+                "reason": f"#{lld_task}'s parent is #{parent}, not Epic #{epic}"}
+    seq = StepSequence()
+    seq.run("publish-doc", lambda: cmd_publish_doc(gh, repo_path, lld_task, "lld.md",
+                                                   runner=runner),
+            failed=lambda r: not r.get("verified_on_origin"))
+    # Nothing to create (`tasks == {}`) is a completed earlier run, not a failure.
+    seq.run("create-lld-tasks", lambda: cmd_create_lld_tasks(gh, epic, repo_path,
+                                                             runner=runner),
+            failed=lambda r: not r.get("pushed") and r.get("tasks") != {})
+    seq.run("merge-lld-doc", lambda: cmd_merge_lld_doc(gh, repo_path, epic, runner=runner),
+            failed=lambda r: not r.get("verified_on_origin"))
+    closed = seq.run("close-issue", lambda: cmd_close_issue(gh, lld_task, repo_path=repo_path,
+                                                            runner=runner))
+    return seq.report(lld_task=lld_task, epic=epic, closed=bool(closed))
+
+
+def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
+                    repo_path: str = ".", base: Optional[str] = None,
+                    runner: Runner = _default_runner) -> dict:
+    """`worktree-add` then `claim` -- worktree first, so the unit is never claimed
+    without a live tree. Returns `path`, `claimed` plus the steps."""
+    role = RETIRED_ROLES.get(role, role)
+    seq = StepSequence()
+    worktree = seq.run("worktree-add", lambda: cmd_worktree_add(
+        gh, number, unit, repo_path, runner=runner, base=base), failed=_worktree_refused)
+    claim = seq.run("claim", lambda: cmd_claim(gh, number, role))
+    return seq.report(issue=number, role=role, path=(worktree or {}).get("path"),
+                      claimed=bool(claim))
+
+
+# A review role with no Stage value of its own is verified against the stage it follows.
+_REVIEW_FOLLOWS_STAGE = {"product-review": "product", "arch-review": "architecture",
+                         "lld-review": "lld"}
+
+
+def cmd_transition(gh: GitHub, issue: int, expect_stage: str, pr: Optional[int] = None,
+                   repo_path: Optional[str] = None, base: Optional[str] = None,
+                   runner: Runner = _default_runner) -> dict:
+    """After a stage agent returns: verify-exit -> sync-branch -> start-comment (review
+    roles only). Stops at an unverified exit, a missing pr-review handoff marker, or a
+    sync conflict / missing base. Returns `ready`, `stopped_at`, `steps`."""
+    if expect_stage == "pr-review" and pr is None:
+        raise GhError("transition --expect-stage pr-review needs --pr: the handoff-marker "
+                      "check only runs with the PR in hand")
+    verify_stage = _REVIEW_FOLLOWS_STAGE.get(expect_stage, expect_stage)
+    seq = StepSequence()
+    # An unverified exit (missing handoff marker included) is `ok: False`: exit 1.
+    seq.run("verify-exit", lambda: cmd_verify_exit(gh, repo_path, issue, verify_stage, pr,
+                                                   runner=runner))
+    seq.run("sync-branch", lambda: cmd_sync_branch(gh, repo_path, issue, runner=runner,
+                                                   base=base),
+            failed=lambda r: not r.get("synced"))
+    if expect_stage in REVIEW_ROLES:
+        seq.run("start-comment", lambda: cmd_start_comment(gh, issue, expect_stage))
+    return seq.report(failed_key="stopped_at", issue=issue, expect_stage=expect_stage,
+                      verified_stage=verify_stage, ready=not seq.stopped)
+
+
+# references/stage-playbooks.md, "Comment size is a contract": command -> (flag, cap).
+HANDOFF_CAP, EVIDENCE_CAP = 2_000, 6_000
+COMMENT_CAPS = {
+    "handoff-to-pr-review": ("summary", EVIDENCE_CAP),
+    "record-pr-review": ("summary", EVIDENCE_CAP),
+    "record-design-review": ("summary", EVIDENCE_CAP),
+    "open-dev-pr": ("summary", HANDOFF_CAP),
+    "open-gate": ("summary", HANDOFF_CAP),
+    "skip-gate": ("summary", HANDOFF_CAP),
+    "auto-pass-gate-a": ("summary", HANDOFF_CAP),
+    "record-epic-verification": ("summary", HANDOFF_CAP),
+    "record-initiative-verification": ("summary", HANDOFF_CAP),
+    "mark-needs-human": ("reason", HANDOFF_CAP),
+    "resolve-thread": ("reply", HANDOFF_CAP),
+}
+
+
+def comment_cap_refusal(args) -> Optional[dict]:
+    """A refusal when the command's comment text is over its cap, else None."""
+    flag, cap = COMMENT_CAPS.get(args.command, (None, 0))
+    text = getattr(args, flag, None) if flag else None
+    if not text or len(text) <= cap:
+        return None
+    return {"refused": True,
+            "reason": f"--{flag} is {len(text):,} chars, over the {cap:,}-char cap for this "
+                      f"comment (references/stage-playbooks.md, \"Comment size is a "
+                      f"contract\"); trim it and re-run"}
+
+
 def main(argv: Optional[list] = None) -> int:
     if not os.environ.get("GITHUB_TOKEN"):
-        print(json.dumps({"error": "GITHUB_TOKEN not set — prefix the call with "
+        print(json.dumps({"error": "GITHUB_TOKEN not set — the sdlc plugin's SessionStart hook "
+                                    f"exports it from tokenPath ({TOKEN_PATH}); start a new "
+                                    "session in the driven repo, or prefix the call with "
                                     f"GITHUB_TOKEN=$(cat {TOKEN_PATH})"}))
         return 1
     parser = argparse.ArgumentParser(prog="sdlc_next.py")
+    repo_path_help = "Any path inside the repository; never used as the git-write target"
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("next-action")
-    p.add_argument("epic", type=int, help="The epic issue number to drive end-to-end -- required, "
-                                           "see \"Epic number is mandatory\" in SKILL.md")
+    p.add_argument("epic", type=int, help="The epic to drive")
     p.add_argument("--run-id", default=None,
-                    help="This orchestrator run's own id. Enables the maxTasksPerRun cap: "
-                         "once the run has driven that many units to a terminal state, "
-                         "next-action returns action=stop-at-cap instead of new work "
-                         "(resume/pass-gate/address-gate-feedback are never capped). A new "
-                         "id starts a fresh count. Omit it and nothing is enforced.")
+                    help="This run's id; enables the maxTasksPerRun cap (omit = no cap)")
     p.set_defaults(func=lambda a: cmd_next_action(get_work_item_provider(), a))
     p = sub.add_parser("list-ready-for-review",
-                        help="Up to PR_REVIEW_PARALLELISM of this epic's children whose draft PR "
-                             "is finished, handed off by development, and not yet reviewed this "
-                             "round")
-    p.add_argument("epic", type=int, help="Scope the review pool to this epic's own children")
+                        help="Children whose handed-off draft PR awaits review this round")
+    p.add_argument("epic", type=int, help="The epic")
     p.add_argument("--limit", type=int, default=None,
-                    help=f"How many PRs to return (default: PR_REVIEW_PARALLELISM = "
-                         f"{PR_REVIEW_PARALLELISM})")
+                    help=f"Max PRs to return (default {PR_REVIEW_PARALLELISM})")
     p.set_defaults(func=lambda a: cmd_list_ready_for_review(get_work_item_provider(), a.epic, a.limit))
     p = sub.add_parser("list-parallel-ready",
-                        help="Up to DEV_LANE_PARALLELISM of this epic's lld/development/testing "
-                             "children safe to start/resume concurrently, each in its own worktree "
-                             "-- not blockedBy anything open, footprint doesn't collide with an "
-                             "active/eligible sibling")
-    p.add_argument("epic", type=int, help="Scope the parallel-lane pool to this epic's own children")
+                        help="Dev-lane children safe to start/resume concurrently")
+    p.add_argument("epic", type=int, help="The epic")
     p.add_argument("--repo-path", default=".",
                     help="Repo whose `git worktree list` gives the live active-branch count")
     p.add_argument("--limit", type=int, default=None,
-                    help=f"Total concurrent children allowed (default: DEV_LANE_PARALLELISM = "
-                         f"{DEV_LANE_PARALLELISM})")
+                    help=f"Total concurrent children (default {DEV_LANE_PARALLELISM})")
     p.add_argument("--run-id", default=None,
-                    help="This orchestrator run's own id -- same maxTasksPerRun cap as "
-                         "next-action. At the cap this returns an empty list with "
-                         "stop_at_cap: true rather than proposing new lane work.")
+                    help="This run's id; enables the maxTasksPerRun cap (omit = no cap)")
     p.set_defaults(func=lambda a: cmd_list_parallel_ready(
         get_work_item_provider(), a.repo_path, a.epic, a.limit, run_id=a.run_id))
     p = sub.add_parser("lld-section",
-                        help="Print one Task's `## Task #<n>` subsection of its Epic's "
-                             "epic-<n>/lld.md -- what a functional Task's development/pr-review "
-                             "read as their design doc, instead of the whole Epic document")
-    p.add_argument("--epic", type=int, required=True, help="The Epic whose lld.md holds the subsection")
+                        help="Print one Task's subsection of its Epic's lld.md")
+    p.add_argument("--epic", type=int, required=True, help="The Epic")
     p.add_argument("--task", required=True,
-                    help="The Task whose subsection to print -- its issue number (51) or, "
-                         "before create-lld-tasks has renumbered the doc, its design-time "
-                         "task key (skeleton-health). Both heading forms resolve.")
+                    help="Task issue number, or its design-time key before renumbering")
     p.add_argument("--repo-path", default=".",
-                    help="Repo/worktree with an `origin/epic-<n>` remote-tracking ref to git-show from")
+                    help="Repo with an origin/epic-<n> ref")
     p.set_defaults(func=lambda a: cmd_lld_section(a.repo_path, a.epic, a.task))
     p = sub.add_parser("list-design-ready",
-                        help="Up to DESIGN_LANE_PARALLELISM of this STANDING epic's product/"
-                             "architecture children safe to start/resume concurrently, each in its "
-                             "own worktree -- not blockedBy anything open, not parked/gate-pending. "
-                             "Empty for a non-standing Epic, whose design is its Architecture-phase "
-                             "and LLD-phase Tasks, not fanned out.")
-    p.add_argument("epic", type=int, help="Scope the design-lane pool to this epic's own children")
+                        help="A standing epic's product/architecture children safe to run concurrently")
+    p.add_argument("epic", type=int, help="The epic")
     p.add_argument("--repo-path", default=".",
                     help="Repo whose `git worktree list` gives the live active-branch count")
     p.add_argument("--limit", type=int, default=None,
-                    help=f"Total concurrent design-stage children allowed (default: "
-                         f"DESIGN_LANE_PARALLELISM = {DESIGN_LANE_PARALLELISM})")
+                    help=f"Total concurrent design children (default {DESIGN_LANE_PARALLELISM})")
     p.set_defaults(func=lambda a: cmd_list_design_ready(get_work_item_provider(), a.repo_path, a.epic, a.limit))
     p = sub.add_parser("handoff-to-pr-review",
-                        help="development's exit action once its suites are green: posts the "
-                             "canonical development->pr-review marker that queues this PR for "
-                             "review")
+                        help="Post the development->pr-review handoff marker")
     p.add_argument("issue", type=int)
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--summary", required=True,
-                    help="One sentence: what was built and tested, and the result")
+                    help="One sentence: what was built and tested")
     p.set_defaults(func=lambda a: cmd_handoff_to_pr_review(get_work_item_provider(), a.issue, a.pr, a.summary))
     p = sub.add_parser("record-pr-review",
-                        help="Record a pr-review pass's outcome on the issue (last action of "
-                             "every review, before merge-pr or a rework resume)")
+                        help="Record a pr-review outcome on the issue")
     p.add_argument("issue", type=int)
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--outcome", required=True, choices=list(PR_REVIEW_OUTCOMES))
     p.add_argument("--summary", required=True,
                     help="One sentence: what the review checked and concluded")
     p.add_argument("--same-class-recurrence", action="store_true",
-                    help="This round's finding is the same defect class as an earlier "
-                         "round's on this PR -- the mechanical escalation signal, not a "
-                         "sentence in the verdict prose")
+                    help="Finding repeats an earlier round's defect class (escalation signal)")
     p.set_defaults(func=lambda a: cmd_record_pr_review(
         get_work_item_provider(), a.issue, a.pr, a.outcome, a.summary, a.same_class_recurrence))
     p = sub.add_parser("record-local-ci",
-                        help="development's evidence-carrying attestation that a main-only "
-                             "suite (backend/frontend) passed locally against a given commit -- "
-                             "the merge-gate stand-in for the GHA check that no longer runs "
-                             "on a child PR")
+                        help="Attest a main-only suite passed locally at a commit")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--suite", required=True, choices=list(LOCAL_CI_SUITES))
     p.add_argument("--sha", required=True,
-                    help="The commit the suite ran against (the development worktree's "
-                         "`git rev-parse HEAD`); merge-pr honours it only while it matches "
-                         "the PR's current head")
+                    help="Commit tested; honoured only while it is the PR head")
     p.add_argument("--command", required=True,
-                    help="The exact command the suite was run with, as run")
+                    help="The exact command run")
     p.add_argument("--output", required=True,
-                    help="Path to a file holding that run's own captured stdout/stderr; its "
-                         "tail is embedded in the attestation comment. A summary is not "
-                         "accepted in its place")
+                    help="File with the run's captured output (tail is embedded)")
     p.set_defaults(func=lambda a: cmd_record_local_ci(get_work_item_provider(), a.pr, a.suite, a.sha,
                                                        a.command, a.output))
     p = sub.add_parser("record-design-review",
-                        help="Record an arch-review/lld-review outcome on the unit (last action "
-                             "of every design review, before a rework resume or moving on)")
+                        help="Record an arch-review/lld-review outcome on the unit")
     p.add_argument("issue", type=int)
     p.add_argument("--role", required=True, choices=list(DESIGN_REVIEW_ROLES))
     p.add_argument("--outcome", required=True, choices=list(PR_REVIEW_OUTCOMES))
     p.add_argument("--summary", required=True,
                     help="One sentence: what the review checked and concluded")
     p.add_argument("--same-class-recurrence", action="store_true",
-                    help="This round's finding is the same defect class as an earlier "
-                         "round's on this unit -- the mechanical escalation signal, "
-                         "not a sentence in the verdict prose")
+                    help="Finding repeats an earlier round's defect class (escalation signal)")
     p.set_defaults(func=lambda a: cmd_record_design_review(
         get_work_item_provider(), a.issue, a.role, a.outcome, a.summary, a.same_class_recurrence))
     p = sub.add_parser("check-gate")
@@ -5806,22 +4352,19 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--role", required=True)
     p.set_defaults(func=lambda a: cmd_claim(get_work_item_provider(), a.issue, a.role))
     p = sub.add_parser("set-stage",
-                        help="Set the Stage field with no other side effect (no Pipeline "
-                             "Status write, no start comment) -- used when cutting an Epic's "
-                             "Architecture-phase Task, whose target stage default_stage() "
-                             "cannot guess. See cmd_set_stage")
+                        help="Set the Stage field only (no status write, no comment)")
     p.add_argument("issue", type=int)
     p.add_argument("--stage", required=True)
     p.set_defaults(func=lambda a: cmd_set_stage(get_work_item_provider(), a.issue, a.stage))
     p = sub.add_parser("start-comment")
     p.add_argument("issue", type=int)
     p.add_argument("--role", required=True,
-                   choices=["product-review", "arch-review", "lld-review", "pr-review", "testing"])
+                   choices=sorted(REVIEW_ROLES))
     p.set_defaults(func=lambda a: cmd_start_comment(get_work_item_provider(), a.issue, a.role))
     p = sub.add_parser("open-gate")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
-                    help="Any path inside the repository (base for the worktree map); the command operates in the branch's own live worktree or an ephemeral one, never the main checkout")
+                    help=repo_path_help)
     p.add_argument("--title", required=True)
     p.add_argument("--doc", required=True, choices=["product.md", "architecture.md"])
     p.add_argument("--next-stage", required=True)
@@ -5831,7 +4374,7 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("pass-gate")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
-                    help="Any path inside the repository (base for the worktree map); the command operates in the branch's own live worktree or an ephemeral one, never the main checkout")
+                    help=repo_path_help)
     p.add_argument("--gate-pr", type=int, required=True)
     p.add_argument("--stage", required=True, choices=["product", "architecture"])
     p.set_defaults(func=lambda a: cmd_pass_gate(get_work_item_provider(), a.repo_path, a.issue, a.gate_pr, a.stage))
@@ -5841,12 +4384,10 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--confidence", type=int, required=True)
     p.add_argument("--summary", required=True)
     p.add_argument("--repo-path", default=None,
-                    help="Any path inside the repository; used only when the issue is an "
-                         "Architecture-phase Task, whose architecture.md is published to its Epic branch")
+                    help="Any path inside the repository (Architecture-phase Tasks only)")
     p.set_defaults(func=lambda a: cmd_skip_gate(get_work_item_provider(), a.issue, a.stage, a.confidence, a.summary, repo_path=a.repo_path))
     p = sub.add_parser("auto-pass-gate-a",
-                        help="Advance past Gate A with no human review when the epic's "
-                             "profile sets requiresHumanGateA:false (after a clean product-review)")
+                        help="Pass Gate A without a human when the profile allows it")
     p.add_argument("issue", type=int)
     p.add_argument("--stage", default="product", choices=["product"])
     p.add_argument("--summary", required=True)
@@ -5857,9 +4398,13 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_auto_pass_gate(get_work_item_provider(), a.repo_path, a.pr))
     p = sub.add_parser("mark-feedback-received")
     p.add_argument("--pr", type=int, required=True)
-    p.add_argument("--author", required=True, help="login of the comment/review author")
-    p.add_argument("--body", default="", help="comment/review body text (empty = no-op skip)")
+    p.add_argument("--author", required=True, help="Comment/review author login")
+    p.add_argument("--body", default="", help="Comment/review body (empty = skip)")
     p.set_defaults(func=lambda a: cmd_mark_feedback_received(get_work_item_provider(), a.pr, a.author, a.body))
+    p = sub.add_parser("resolve-thread", help="Reply to and resolve one PR review thread")
+    p.add_argument("--thread-id", required=True)
+    p.add_argument("--reply", default=None)
+    p.set_defaults(func=lambda a: cmd_resolve_thread(get_work_item_provider(), a.thread_id, a.reply))
     p = sub.add_parser("mark-feedback-addressed")
     p.add_argument("issue", type=int)
     p.set_defaults(func=lambda a: cmd_mark_feedback_addressed(get_work_item_provider(), a.issue))
@@ -5870,10 +4415,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.set_defaults(func=lambda a: cmd_mark_issue_closed(get_work_item_provider(), a.issue))
     p = sub.add_parser("close-issue",
-                        help="Close the issue and set its terminal fields (Stage cleared, "
-                             "Pipeline Status Done) -- the orchestrator's close for a "
-                             "phase-Task. mark-issue-closed only reacts to a close. Also "
-                             "releases the issue's worktree")
+                        help="Close the issue, set terminal fields, release its worktree")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
                     help="Any path inside the repository (base for the worktree map)")
@@ -5886,114 +4428,70 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("verify-exit")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
-                    help="Any path inside the repository (base for the worktree map); the command operates in the branch's own live worktree or an ephemeral one, never the main checkout")
+                    help=repo_path_help)
     p.add_argument("--expect-stage", required=True)
     p.add_argument("--pr", type=int, default=None)
     p.set_defaults(func=lambda a: cmd_verify_exit(
         get_work_item_provider(), a.repo_path, a.issue, a.expect_stage, a.pr))
     p = sub.add_parser("cite",
-                        help="Generate a citation block by reading the real file (or "
-                             "git show <rev>:<path>) -- selects the target fragment by "
-                             "--line, --lines, or --match, and errors with nothing "
-                             "emitted if it is not actually there")
+                        help="Emit a citation block read from the real file")
     p.add_argument("path")
     target = p.add_mutually_exclusive_group(required=True)
     target.add_argument("--line", type=int)
-    target.add_argument("--lines", help="inclusive range, e.g. 12-18")
-    target.add_argument("--match", help="literal substring; the fragment is the first "
-                                         "line containing it, erroring if that is zero "
-                                         "or several lines")
-    p.add_argument("--rev", default=None, help="pin to this revision instead of the "
-                                                "working tree")
+    target.add_argument("--lines", help="Inclusive range, e.g. 12-18")
+    target.add_argument("--match", help="Literal substring matching exactly one line")
+    p.add_argument("--rev", default=None, help="Read at this revision")
     p.add_argument("--repo-path", default=".")
     p.set_defaults(func=lambda a: cmd_cite(a.path, line=a.line, lines=a.lines,
                                             match=a.match, rev=a.rev,
                                             repo_path=a.repo_path))
     p = sub.add_parser("verify-citations",
-                        help="Re-resolve every asserted citation in one or more "
-                             "documents against the working tree or each citation's "
-                             "pinned revision")
+                        help="Re-resolve every citation in the given documents")
     p.add_argument("doc", nargs="+")
     p.add_argument("--repo-path", default=".")
     p.set_defaults(func=lambda a: cmd_verify_citations(a.doc, repo_path=a.repo_path))
     p = sub.add_parser("worktree-add",
-                        help="Create (or find) the unit's worktree: resumes from "
-                             "origin/<branch> when it exists, else branches off the "
-                             "integration base")
+                        help="Create or resume the unit's worktree")
     p.add_argument("number", type=int)
     p.add_argument("--unit", choices=["issue", "epic"], default="issue")
     p.add_argument("--repo-path", default=".", help="The shared main checkout")
     p.add_argument("--base", default=None,
-                    help="Override the auto-detected integration base (e.g. origin/main) -- "
-                         "REQUIRED for an Architecture-phase or LLD-phase Task, see "
-                         "integration_base's docstring")
+                    help="Override the auto-detected integration base (e.g. origin/main)")
     p.set_defaults(func=lambda a: cmd_worktree_add(
         get_work_item_provider(), a.number, a.unit, a.repo_path, base=a.base))
-
-    p = sub.add_parser("sync-skill",
-                        help="Bump the skill submodule to --ref (default origin/main) "
-                             "and re-vendor .claude/agents/ from its templates. Stages "
-                             "both; does not commit. Run only on a quiet lane.")
-    p.add_argument("--repo-path", default=".", help="The driven repo's root")
-    p.add_argument("--ref", default=None,
-                    help="Skill commit/branch to bump to (default: origin/main)")
-    p.set_defaults(func=lambda a: cmd_sync_skill(a.repo_path, a.ref))
 
     p = sub.add_parser("sync-branch")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
-                    help="Any path inside the repository (base for the worktree map); the command operates in the branch's own live worktree or an ephemeral one, never the main checkout")
+                    help=repo_path_help)
     p.add_argument("--unit", default="issue", choices=["issue", "epic"])
     p.add_argument("--base", default=None,
-                    help="Override the auto-detected integration base (e.g. main, or "
-                         "origin/main -- both spellings work). REQUIRED for an "
-                         "Architecture-phase or LLD-phase Task, whose gate targets main "
-                         "while integration_base would resolve it to the epic branch. A "
-                         "base that does not exist on origin returns a structured "
-                         "base_missing result at exit 0, not an error.")
+                    help="Override the auto-detected integration base")
     p.set_defaults(func=lambda a: cmd_sync_branch(get_work_item_provider(), a.repo_path,
                                                    a.issue, a.unit, base=a.base))
     p = sub.add_parser("merge-lld-doc",
-                        help="Verify the Epic's lld.md (put there by publish-doc) is on "
-                             "origin/epic-<n>, then advance every Stage-less Task under the Epic "
-                             "to development (NOT claimed) and mark the Epic epic:architected")
-    p.add_argument("epic", type=int, help="The Epic's own issue number")
+                        help="Verify lld.md is published, stage its Tasks, mark the Epic architected")
+    p.add_argument("epic", type=int, help="The Epic")
     p.add_argument("--repo-path", default=None,
-                    help="Any path inside the repository; the check runs in the epic branch's own live worktree or an ephemeral one, never the main checkout")
+                    help=repo_path_help)
     p.set_defaults(func=lambda a: cmd_merge_lld_doc(get_work_item_provider(), a.repo_path, a.epic))
     p = sub.add_parser("publish-doc",
-                        help="Publish a phase-Task's own doc (an Architecture-phase Task's "
-                             "architecture.md, an LLD-phase Task's lld.md) from its own "
-                             "issue-<n> branch onto its parent Epic's branch, at the Epic-scoped "
-                             "path (epic-<n>/<doc>) every other reader expects. Posts a comment "
-                             "on the Epic naming the doc and the publishing Task")
-    p.add_argument("issue", type=int, help="The phase-Task's own issue number")
+                        help="Publish a phase-Task's doc onto its Epic's branch")
+    p.add_argument("issue", type=int, help="The phase-Task")
     p.add_argument("--doc", required=True, help="e.g. architecture.md or lld.md")
     p.add_argument("--repo-path", default=None,
-                    help="Any path inside the repository; publishes from the epic branch's own "
-                         "live worktree or an ephemeral one, never the main checkout")
+                    help=repo_path_help)
     p.set_defaults(func=lambda a: cmd_publish_doc(get_work_item_provider(), a.repo_path, a.issue, a.doc))
     p = sub.add_parser("add-blocked-by",
-                        help="declare issue blockedBy dep as a native edge -- e.g. an "
-                             "Epic's LLD-phase Task blockedBy its Architecture-phase Task, set "
-                             "when cutting the Epic. No side effects beyond the edge itself "
-                             "(unlike mark-blocked, which also parks an already-in-flight unit)")
+                        help="Add a native blockedBy edge (no other side effect)")
     p.add_argument("issue", type=int)
     p.add_argument("--on", type=int, required=True, dest="dep")
     p.set_defaults(func=lambda a: cmd_add_blocked_by(get_work_item_provider(), a.issue, a.dep))
     p = sub.add_parser("create-lld-tasks",
-                        help="create one Task issue per `## Task <KEY>` section of the "
-                             "Epic's published lld.md (parent = the Epic), renumber the "
-                             "doc's headings to `## Task #<n>` in place, translate every "
-                             "`Depends on: <KEY>` into a native blockedBy edge, and push "
-                             "the rewritten doc. Run it AFTER lld-review approves the "
-                             "carving. Idempotent: an already-numbered heading is skipped, "
-                             "so a re-run repairs a partial failure instead of duplicating")
-    p.add_argument("epic", type=int, help="The Epic whose lld.md carves the Tasks")
+                        help="Create one Task per lld.md Task section and renumber the doc (idempotent)")
+    p.add_argument("epic", type=int, help="The Epic")
     p.add_argument("--repo-path", default=".",
-                    help="Any path inside the repository; the doc is rewritten on the epic "
-                         "branch's own live worktree or an ephemeral one, never the main "
-                         "checkout")
+                    help=repo_path_help)
     p.set_defaults(func=lambda a: cmd_create_lld_tasks(get_work_item_provider(), a.epic,
                                                         a.repo_path))
     p = sub.add_parser("open-dev-pr")
@@ -6009,53 +4507,48 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("pr", type=int)
     p.add_argument("--issue", type=int, required=True)
     p.add_argument("--repo-path", default=".",
-                    help="Repo root whose worktree list is searched to release the "
-                         "merged branch's worktree")
+                    help="Repo root (to release the branch's worktree)")
     p.set_defaults(func=lambda a: cmd_merge_pr(get_work_item_provider(), a.pr, a.issue, a.repo_path))
     p = sub.add_parser("create-issue")
     p.add_argument("--title", required=True)
     p.add_argument("--body", required=True)
-    p.add_argument("--parent", type=int, required=True, help="Parent issue number this becomes a sub-issue of (an Epic for a Task, an Initiative for an Epic)")
+    p.add_argument("--parent", type=int, required=True,
+                    help="Parent issue (Epic for a Task, Initiative for an Epic)")
     p.add_argument("--label", action="append", default=[], dest="labels")
     p.add_argument("--type", default="Task", dest="type_name",
-                    help="Native Issue Type to set (default Task; the orchestrator "
-                         "passes Epic when cutting Epics from an Initiative)")
+                    help="Native Issue Type, mandatory on every issue (default Task)")
+    p.add_argument("--priority", default=None, help="Default: pipeline.issueDefaults.priority")
+    p.add_argument("--effort", default=None, help="Default: pipeline.issueDefaults.effort")
     p.set_defaults(func=lambda a: cmd_create_issue(get_work_item_provider(), a.title, a.body,
-                                                    a.parent, a.labels, a.type_name))
+                                                    a.parent, a.labels, a.type_name,
+                                                    a.priority, a.effort))
     p = sub.add_parser("mark-blocked")
     p.add_argument("issue", type=int)
     p.add_argument("--dep", type=int, required=True)
     p.add_argument("--repo-path", default=".",
-                    help="Repo root whose worktree list is searched to release this "
-                         "unit's worktree")
+                    help="Repo root (to release the unit's worktree)")
     p.set_defaults(func=lambda a: cmd_mark_blocked(get_work_item_provider(), a.issue, a.dep, a.repo_path))
     p = sub.add_parser("mark-needs-human")
     p.add_argument("issue", type=int)
     p.add_argument("--reason", required=True)
     p.add_argument("--repo-path", default=".",
-                    help="Repo root whose worktree list is searched to release this "
-                         "unit's worktree")
+                    help="Repo root (to release the unit's worktree)")
     p.set_defaults(func=lambda a: cmd_mark_needs_human(get_work_item_provider(), a.issue, a.reason, a.repo_path))
     p = sub.add_parser("retro-check")
     p.add_argument("--repo-path", default=".",
-                    help="Repo root holding the tracked retro-watermark file")
+                    help="Repo root holding the retro watermark")
     p.add_argument("--mark-done", action="store_true",
-                    help="Record --count (or the live count, if omitted) as the new "
-                         "watermark (commit the file with the retro's own commit)")
+                    help="Record --count (or the live count) as the new watermark")
     p.add_argument("--count", type=int, default=None,
-                    help="The closed_count from the retro-check that found run_retro: "
-                         "true -- pass this back verbatim so issues closed after the "
-                         "retro was triggered, during the fix work, aren't silently "
-                         "counted as reviewed")
+                    help="closed_count from the retro-check that triggered the retro")
     p.set_defaults(func=lambda a: cmd_retro_check(get_work_item_provider(), a.repo_path, a.mark_done, a.count))
     p = sub.add_parser("show-config",
-                        help="Print the effective pipeline tunables (config `pipeline` "
-                             "block merged over defaults) plus repo/docRoot/parallelism")
-    p.set_defaults(func=lambda a: {"repo": REPO, "docRoot": DOC_ROOT,
-                                   # designLane is defaulted in code (not required in the
-                                   # config), so surface the effective value alongside the
-                                   # raw devLane/prReview rather than the raw block alone.
-                                   "parallelism": {**CONFIG["parallelism"],
+                        help="Print the effective config")
+    p.set_defaults(func=lambda a: {"repo": REPO, "docRoot": DOC_ROOT, "tokenPath": TOKEN_PATH,
+                                   "requirementsDir": CONFIG.get("requirementsDir"),
+                                   "parallelism": {**_PARALLELISM,
+                                                   "devLane": DEV_LANE_PARALLELISM,
+                                                   "prReview": PR_REVIEW_PARALLELISM,
                                                    "designLane": DESIGN_LANE_PARALLELISM,
                                                    "maxTasksPerRun": MAX_TASKS_PER_RUN},
                                    "requiredWorkflows": CONFIG["requiredWorkflows"],
@@ -6063,20 +4556,32 @@ def main(argv: Optional[list] = None) -> int:
                                    **PIPELINE})
 
     p = sub.add_parser("pairing-counts",
-                        help="Marker-derived escalation-valve bounce counts for one issue "
-                             "(pr-review rework since last clean, sync-conflict count)")
+                        help="Escalation-valve bounce counts for one issue")
     p.add_argument("issue", type=int)
     p.set_defaults(func=lambda a: cmd_pairing_counts(get_work_item_provider(), a.issue))
     p = sub.add_parser("list-needs-human")
     p.set_defaults(func=lambda a: cmd_list_needs_human(get_work_item_provider()))
+    p = sub.add_parser("audit-issues",
+                        help="Open pipeline issues missing issueType/parent/Priority/Effort/Status")
+    p.add_argument("--epic", type=int, default=None, help="Only this Epic's tree (+ parentless)")
+    p.set_defaults(func=lambda a: cmd_audit_issues(get_work_item_provider(), a.epic))
+    p = sub.add_parser("repair-issue",
+                        help="Set an existing issue's missing parent/type/status/Priority/Effort")
+    p.add_argument("issue", type=int)
+    p.add_argument("--parent", type=int, default=None, help="Linked only when none is set")
+    p.add_argument("--type", default=None, dest="type_name",
+                    help="Default: inferred from the classification label")
+    p.add_argument("--priority", default=None, help="Default: pipeline.issueDefaults.priority")
+    p.add_argument("--effort", default=None, help="Default: pipeline.issueDefaults.effort")
+    p.set_defaults(func=lambda a: cmd_repair_issue(get_work_item_provider(), a.issue, a.parent,
+                                                    a.type_name, a.priority, a.effort))
     p = sub.add_parser("close-epic",
-                        help="Reconcile the epic's integration branch with main, then merge it "
-                             "once closing verification evidence is on the thread")
+                        help="Reconcile and merge the epic branch once verified")
     p.add_argument("epic", type=int)
     p.add_argument("--repo-path", default=".")
     p.set_defaults(func=lambda a: cmd_close_epic(get_work_item_provider(), a.epic, a.repo_path))
     p = sub.add_parser("record-epic-verification",
-                        help="Record one half of an epic's closing verification (e2e | exploratory)")
+                        help="Record one half of an epic's closing verification")
     p.add_argument("epic", type=int)
     p.add_argument("--kind", required=True, choices=["e2e", "exploratory"])
     p.add_argument("--summary", required=True)
@@ -6084,46 +4589,86 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("check-epics-closeable")
     p.set_defaults(func=lambda a: cmd_check_epics_closeable(get_work_item_provider()))
     p = sub.add_parser("close-initiative",
-                        help="close the Initiative issue once every cut Epic is closed and "
-                             "the requirements-validation verification is recorded. One call, "
-                             "not two -- an Initiative branch never merges to main")
+                        help="Close the Initiative once its Epics are closed and verified")
     p.add_argument("initiative", type=int)
     p.set_defaults(func=lambda a: cmd_close_initiative(get_work_item_provider(), a.initiative))
     p = sub.add_parser("record-initiative-verification",
-                        help="record an Initiative's closing verification -- a PM-role pass "
-                             "validating the delivered app against product.md")
+                        help="Record an Initiative's closing verification")
     p.add_argument("initiative", type=int)
     p.add_argument("--summary", required=True)
     p.set_defaults(func=lambda a: cmd_record_initiative_verification(
         get_work_item_provider(), a.initiative, a.summary))
     p = sub.add_parser("check-initiative-closeable",
-                        help="is this Initiative ready for its close validation -- every "
-                             "cut Epic closed?")
+                        help="Whether every Epic of the Initiative is closed")
     p.add_argument("initiative", type=int)
     p.set_defaults(func=lambda a: cmd_check_initiative_closeable(get_work_item_provider(), a.initiative))
     p = sub.add_parser("provision-epic-stack",
-                        help="Stand up the epic's isolated runtime stack (own compose project, "
-                             "ports, env/secrets profile, DB data dir) -- see pipeline.stack; "
-                             "no-op when pipeline.stack.enabled is false")
+                        help="Stand up the epic's isolated runtime stack")
     p.add_argument("epic", type=int)
     p.add_argument("--no-up", action="store_true",
-                    help="Generate the profile only; skip upCommand/seedCommand")
+                    help="Generate the profile only")
     p.set_defaults(func=lambda a: cmd_provision_epic_stack(a.epic, up=not a.no_up))
     p = sub.add_parser("teardown-epic-stack",
-                        help="Compose down -v the epic's stack and remove its generated profile "
-                             "files and data dir")
+                        help="Tear down the epic's stack and its generated files")
     p.add_argument("epic", type=int)
     p.add_argument("--keep-data", action="store_true", help="Leave the DB data dir in place")
     p.set_defaults(func=lambda a: cmd_teardown_epic_stack(a.epic, keep_data=a.keep_data))
+    # --- composites ---
+    p = sub.add_parser("cut-phase-tasks",
+                        help="Create/reuse an Epic's Architecture and LLD phase-Tasks")
+    p.add_argument("epic", type=int)
+    p.add_argument("--arch-body", default=None)
+    p.add_argument("--lld-body", default=None)
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.set_defaults(func=lambda a: cmd_cut_phase_tasks(
+        get_work_item_provider(), a.epic, a.arch_body, a.lld_body, a.repo_path))
+    p = sub.add_parser("finish-lld",
+                        help="publish-doc -> create-lld-tasks -> merge-lld-doc -> close-issue")
+    p.add_argument("lld_task", type=int, help="The LLD-phase Task")
+    p.add_argument("--epic", type=int, required=True)
+    p.add_argument("--repo-path", required=True, help="Any path inside the repository")
+    p.set_defaults(func=lambda a: cmd_finish_lld(
+        get_work_item_provider(), a.lld_task, a.epic, a.repo_path))
+    p = sub.add_parser("open-arch-revision",
+                        help="Cut an Architecture revision Task and block --blocks on it")
+    p.add_argument("epic", type=int)
+    p.add_argument("--title", required=True)
+    p.add_argument("--body", required=True)
+    p.add_argument("--blocks", type=int, nargs="*", default=[],
+                    help="Units that must wait for the revision")
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.set_defaults(func=lambda a: cmd_open_arch_revision(
+        get_work_item_provider(), a.epic, a.title, a.body, a.blocks, a.repo_path))
+    p = sub.add_parser("start-stage", help="worktree-add, then claim")
+    p.add_argument("number", type=int)
+    p.add_argument("--role", required=True, choices=sorted({*STAGE_OPTION_IDS, *RETIRED_ROLES}))
+    p.add_argument("--unit", choices=["issue", "epic"], default="issue")
+    p.add_argument("--base", default=None,
+                    help="Override the auto-detected integration base (e.g. origin/main)")
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.set_defaults(func=lambda a: cmd_start_stage(
+        get_work_item_provider(), a.number, a.role, a.unit, a.repo_path, a.base))
+    p = sub.add_parser("transition",
+                        help="verify-exit -> sync-branch -> start-comment (review roles)")
+    p.add_argument("issue", type=int)
+    p.add_argument("--expect-stage", required=True,
+                    help="Stage just finished, or review role about to start")
+    p.add_argument("--pr", type=int, default=None, help="Required with --expect-stage pr-review")
+    p.add_argument("--repo-path", default=None,
+                    help="Any path inside the repository (base for the worktree map)")
+    p.add_argument("--base", default=None,
+                    help="Override sync-branch's auto-detected integration base")
+    p.set_defaults(func=lambda a: cmd_transition(
+        get_work_item_provider(), a.issue, a.expect_stage, a.pr, a.repo_path, a.base))
     args = parser.parse_args(argv)
+    refusal = comment_cap_refusal(args)
+    if refusal:
+        print(json.dumps(refusal))
+        return 0
     try:
         result = args.func(args)
         print(json.dumps(result))
-        # Most subcommands' results carry no "ok" key at all -- default True keeps
-        # them at exit 0 exactly as before. `auto-pass-gate` is the one subcommand
-        # that reports its own success/failure via an explicit "ok" key rather than
-        # raising GhError on the "nothing to do" case (see its docstring) -- honor
-        # that convention here instead of always exiting 0.
+        # Commands that report their own `ok: False` (auto-pass-gate, composites) exit 1.
         return 0 if result.get("ok", True) else 1
     except GhError as e:
         print(json.dumps({"error": str(e)}))

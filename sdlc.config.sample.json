@@ -1,14 +1,14 @@
 {
-  "_comment": "Template config for the sdlc-pipeline skill. Copy this into the repo you want to drive as `sdlc-pipeline.config.json` (or `.claude/sdlc-pipeline.config.json`) and replace every value below. The skill itself is generic and ships no real config. Despite the `projectFields` name, none of this is a GitHub Projects-v2 board field -- every id here is one of GitHub's ORG-LEVEL custom Issue Types/Issue Fields (the same family: Settings -> Issue types / Issue fields for your org), automatically available on every repo in the org once created, no Projects-v2 board required at all. Look every id up once via `gh api graphql` introspection. See README.md.",
+  "_comment": "Template config for the sdlc plugin. Copy it into the driven repo as `sdlc-pipeline.config.json` (at the root, `.config/` or `.claude/`) and replace every value below; the plugin ships no real config. Despite the `projectFields` name, none of this is a GitHub Projects-v2 board field -- every id here is one of GitHub's ORG-LEVEL custom Issue Types/Issue Fields (the same family: Settings -> Issue types / Issue fields for your org), automatically available on every repo in the org once created, no Projects-v2 board required at all. Look every id up once via `gh api graphql` introspection. See README.md.",
   "repo": "owner/repo",
   "docRoot": "docs/sdlc",
   "tokenPath": "~/.github-token",
   "requirementsDir": "docs/requirements",
   "humanAssignee": "maintainer",
   "parallelism": {
-    "devLane": 3,
-    "prReview": 3,
-    "designLane": 2,
+    "devLane": 1,
+    "prReview": 1,
+    "designLane": 1,
     "maxTasksPerRun": 0
   },
   "requiredWorkflows": [
@@ -37,8 +37,11 @@
     "issueTypeIds": {
       "Task": "IT_TASK_ID",
       "Bug": "IT_BUG_ID",
-      "Feature": "IT_FEATURE_ID"
+      "Feature": "IT_FEATURE_ID",
+      "Epic": "IT_EPIC_ID",
+      "Initiative": "IT_INITIATIVE_ID"
     },
+    "_issueTypeIds_comment": "Mandatory: create-issue sets a native Issue Type on every issue it files and refuses a type missing here. priority*/effort* are optional; when present, create-issue sets them too (pipeline.issueDefaults supplies omitted values).",
     "priorityFieldId": "PRIORITY_FIELD_ID",
     "priorityOptionIds": {
       "Urgent": "PRIORITY_URGENT_ID",
@@ -93,11 +96,6 @@
       "dir": "{worktreesRoot}/.sdlc-locks",
       "waitSeconds": 600
     },
-    "skill": {
-      "_comment": "Where this repo vendors the skill as a submodule. worktree-add/sync-branch run `git submodule update --init` on it inside each unit's worktree so agents read the branch's own pinned copy. Empty submodulePath disables.",
-      "submodulePath": ".github/sdlc-pipeline",
-      "probeFile": "SKILL.md"
-    },
     "stack": {
       "_comment": "Per-epic isolated runtime stack (provision-epic-stack / teardown-epic-stack). Config-only isolation: your compose must read COMPOSE_PROJECT_NAME, every key under `ports`, and `dataDirKey`. Placeholders: {profile} {n} {project} {envFile} {secretsFile} {dataDir} {workspaceRoot}.",
       "enabled": false,
@@ -122,12 +120,17 @@
     },
     "gates": {
       "_comment": "Global gate defaults; a profile's own `gates` override these for epics that match it.",
-      "skipConfidenceThreshold": 95,
+      "skipConfidenceThreshold": 80,
       "requiresHumanGateA": true
     },
     "productWip": {
       "_comment": "Repo-wide cap on units sitting at Stage=Product with an open Gate A (awaiting-human-review / feedback-received). next-action and list-design-ready stop starting fresh product delegations at the cap; 0 disables.",
       "maxGateAPending": 5
+    },
+    "issueDefaults": {
+      "_comment": "Priority / Effort create-issue sets when neither a flag nor an lld Task line names one.",
+      "priority": "Medium",
+      "effort": "Medium"
     },
     "escalation": {
       "replaceAt": 3,
@@ -140,21 +143,12 @@
     "continuous": {
       "cycleCap": 8
     },
-    "models": {
-      "product": "opus",
-      "product-review": "opus",
-      "architecture": "opus",
-      "arch-review": "opus",
-      "lld": "sonnet",
-      "lld-review": "opus",
-      "development": "sonnet",
-      "pr-review": "opus"
-    },
+    "_models_comment": "Optional `models` ({\"<role>\": \"opus|sonnet|haiku\"}) and `fanout` ({\"<review-role>\": {\"allowed\", \"maxChildren\", \"model\", \"axisModels\"}}) override the plugin's hooks/model_policy.json per role; a hook enforces the result on every Agent call.",
     "workItemProvider": {
       "_comment": "Which WorkItemProvider get_work_item_provider() returns. Only \"github\" is implemented -- Jira is a documented seam (README.md, \"Initiative-driven lifecycle\"), not built. Naming anything else is a refusal, not a silent fallback.",
       "type": "github"
     },
-    "_classification_comment": "How GitHub.classify_unit tells an Initiative from an Epic from a Task. Defaults here to LABELS, not Issue Types: custom Issue Types are an organization-level GitHub feature (as of 2026) and are not available on a personal (non-org) repo at any plan tier, while labels work identically everywhere -- create the three labels below in your repo and this works with zero further setup. If your repo IS in an org and you'd rather use real Issue Types (Initiative/Epic provisioned as custom types), swap each rule's \"field\" to \"issueType\" and \"value\" to the type's exact name, and add matching entries to projectFields.issueTypeIds above so set_issue_type can write them back. classify_unit returns \"other\", never a guess, for any issue matching none of these. This is the ONLY way an Epic is recognised -- a standing or legacy epic needs the epic label too, alongside its profile label.",
+    "_classification_comment": "How classify_unit tells an Initiative from an Epic from a Task; an issue matching no rule is \"other\", never a guess. Shown label-based; create-issue adds the kind's label itself. Either way every created issue also gets its native Issue Type, so the repo must be in an org with those types provisioned -- to classify by type instead, set a rule's \"field\" to \"issueType\" and \"value\" to the type's exact name. This is the ONLY way an Epic is recognised -- a standing or legacy epic needs the epic rule to match too, alongside its profile label.",
     "classification": {
       "initiative": {"field": "label", "value": "type:initiative"},
       "epic": {"field": "label", "value": "type:epic"},

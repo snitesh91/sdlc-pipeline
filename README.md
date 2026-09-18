@@ -1,209 +1,150 @@
 # sdlc-pipeline
 
-An agent-driven SDLC pipeline over GitHub Issues. One invocation drives actionable
-work — an Initiative's `product`, an Epic's `architecture` and `lld` as their own
-phase-Tasks, then each Task through `development` → `pr-review` → merge — with the design and
-implementation stages fanning out into bounded, worktree-isolated parallel pools.
-Eligibility is computed mechanically from native `blockedBy` edges and declared
-footprints, never hand-tracked.
+A Claude Code plugin (`sdlc`) that runs an agent-driven SDLC over GitHub Issues.
+`/sdlc:run <n>` drives an Initiative or Epic stage by stage — `product`, `architecture`,
+`lld` as their own phase-Tasks, then each Task through `development` → `pr-review` → merge —
+with human gates on the product and architecture docs. A deterministic control plane
+(`scripts/sdlc_next.py`) owns every GitHub and branch mutation; hooks enforce that.
 
-The skill is **generic**: it carries no repo-, org-, or product-specific values.
-Everything project-specific lives in one config file **in the repo you drive**.
+The plugin is generic. Everything project-specific lives in one config file in the repo you drive.
 
 ## Layout
 
 ```
-SKILL.md                     the orchestration contract (read first)
-references/*.md              on-demand detail (gates, parallelism, stage playbooks, epics, ops, history)
-scripts/sdlc_next.py        the deterministic control plane (all gh/GraphQL/git lives here)
-scripts/tests/              pytest suite (runs offline against the sample config)
-agents/sdlc-*.md            the eight stage-agent definitions — copy into <repo>/.claude/agents/
-workflows/gate-auto-advance.yml  real-time gate backstop — copy into <repo>/.github/workflows/
-templates/*.template.md     product/architecture doc skeletons — copy into <docRoot>/_templates/
-sdlc.config.sample.json     template config — copy into your repo and fill in
+.claude-plugin/                  plugin.json, marketplace.json (this repo is its own marketplace)
+skills/run/SKILL.md              the orchestrator contract, invoked as /sdlc:run <n>
+agents/*.md                      stage agents, addressed as sdlc:<role>
+references/*.md                  on-demand rules shared by the skill and the agents
+templates/*.template.md          product.md / architecture.md skeletons
+hooks/                           hooks.json, the hook scripts, model_policy.json, hooks/tests
+bin/sdlc-run                     starts a run on the policy's orchestrator model (on PATH)
+scripts/sdlc_next.py             the control plane; scripts/tests is its suite
+scripts/sdlc_metrics.py          cost/outcome report over the metrics store
+workflows/gate-auto-advance.yml  real-time gate backstop, copied into the driven repo
+sdlc.config.sample.json          config template
 ```
 
-## Setup
+## Install in a driven repo
 
-1. **Copy the config into your repo** and fill in every value:
+1. **Enable the plugin** in the repo's `.claude/settings.json`, pinned to a tag:
 
-   ```bash
-   cp sdlc.config.sample.json <your-repo>/sdlc-pipeline.config.json
+   ```json
+   {
+     "extraKnownMarketplaces": {
+       "sdlc-pipeline": { "source": { "source": "github", "repo": "snitesh91/sdlc-pipeline", "ref": "<tag>" } }
+     },
+     "enabledPlugins": { "sdlc@sdlc-pipeline": true }
+   }
    ```
 
-   The control plane finds it by walking up from the working directory (repo root,
-   or under `.config/` / `.claude/`), or via `$SDLC_CONFIG`. Nothing is baked into
-   the skill, so a missing config is a loud error, never a silent run on placeholders.
-
-2. **Look up your GitHub custom Issue Types/Fields ids** (the `projectFields` block).
-   Despite the name, these are **not** Projects-v2 board fields — `Stage`, `Pipeline
-   Status`, `Priority`, `Effort` and your Issue Types are GitHub's org-level custom
-   Issue Types/Issue Fields (Settings → Issue types / Issue fields for your org),
-   automatically available on every repo in the org once created there, once. No
-   Projects v2 board is required anywhere in this skill. Provision them once (via the
-   org settings UI) and introspect the ids once, e.g.:
+2. **Add the config.** Copy `sdlc.config.sample.json` to `<repo>/sdlc-pipeline.config.json`
+   (repo root, `.config/` or `.claude/`), fill in every value and commit it. A missing
+   config is a loud error, never a silent run on placeholders.
+3. **Provision GitHub's org-level Issue Types** `Task`, `Bug`, `Feature`, `Epic`,
+   `Initiative` (mandatory: every issue the pipeline files gets one) **and custom Issue
+   Fields** `Stage`, `Pipeline Status` (plus optional `Priority`, `Effort`) via
+   Settings → Issue types / Issue fields. No Projects-v2 board is involved. Look up the ids
+   for `projectFields` once, from your own terminal:
 
    ```bash
    gh api graphql -f query='query { repository(owner:"OWNER", name:"REPO") {
      issueTypes(first:20){nodes{id name}} } }'
    gh api graphql -f query='query { organization(login:"ORG") {
-     issueFields(first:20){nodes{
-       ... on IssueFieldSingleSelect { id name options { id name } } }} } }'
+     issueFields(first:20){nodes{ ... on IssueFieldSingleSelect { id name options { id name } } }} } }'
    ```
 
-3. **Import the skill into your repo.** Recommended layout: a git submodule (so CI
-   and every clone get the same pinned version) plus a *repo-relative* symlink for the
-   agent harness, so the link also resolves inside the worktrees the pipeline creates:
+4. **Copy the workflow**: `workflows/gate-auto-advance.yml` → `<repo>/.github/workflows/`.
+   Set the Actions secret `SDLC_GH_TOKEN` (classic PAT) and the Actions variable
+   `SDLC_PIPELINE_REF` to the same tag `.claude/settings.json` pins (defaults to `main`).
+5. **Token**: point the config's `tokenPath` at a file holding a classic PAT (`ghp_`);
+   fine-grained PATs cannot read check-runs or write the custom fields. The SessionStart
+   hook exports it as `GITHUB_TOKEN` unless you already set one.
+6. Optional: a repo-specific `<docRoot>/_templates/{product,architecture}.template.md`
+   overrides the plugin's templates.
+7. Start a run with `sdlc-run <initiative-or-epic-number> [claude args]`: it launches `claude`
+   on the policy's orchestrator model with `/sdlc:run <n>` (a skill's `model:` does not
+   outlast its turn).
 
-   ```bash
-   cd <your-repo>
-   git submodule add https://github.com/<skill-owner>/sdlc-pipeline.git .github/sdlc-pipeline
-   ln -s ../../.github/sdlc-pipeline .claude/skills/sdlc-pipeline
-   git add .gitmodules .github/sdlc-pipeline .claude/skills/sdlc-pipeline
-   ```
+**Upgrading**: bump the `ref` in `.claude/settings.json` and `SDLC_PIPELINE_REF` together,
+run `claude plugin marketplace update sdlc-pipeline`, and start a new session. Bump only
+when no run is live. There is one plugin version per driven repo.
 
-   Commit the symlink (do not gitignore it) — an untracked or absolute link breaks
-   in `/tmp/sdlc-dev-<n>`-style worktrees. The shipped workflow assumes the
-   `.github/sdlc-pipeline` submodule path. Stage agents never hard-code a skill path:
-   they read `$SDLC_DIR/...`, and the orchestrator states `$SDLC_DIR` (the absolute
-   skill path) in every agent prompt; an agent that does not receive it stops and asks.
+Repo-specific commands (lint, build, test, suite names, ports) belong in the driven repo's
+`CLAUDE.md` / `AGENTS.md`, which every stage agent reads.
 
-4. **Per shell**, before running:
+## Hooks
 
-   ```bash
-   export SDLC_DIR="<path-to>/sdlc-pipeline"
-   export SDLC="$SDLC_DIR/scripts/sdlc_next.py"
-   export GITHUB_TOKEN=$(cat <your-token-file>)   # classic PAT (ghp_)
-   cd <your-repo>
-   ```
+Every hook is a no-op unless the session's git toplevel holds `sdlc-pipeline.config.json`.
+They are stdlib Python, and they fail open on internal errors.
 
-## Tunables — the `pipeline` config block
+| Hook | Enforces |
+|---|---|
+| `SessionStart` | Exports `$SDLC` and `GITHUB_TOKEN` (from `tokenPath`) for every Bash call; warns when no token is available; suggests `rtk init` if `rtk` is absent; flags a session model off the policy's orchestrator model; after a compaction, restates this session's run (epic, run-id, units in flight) |
+| `PreToolUse` (Bash) | Denies hand-run `gh api graphql`, `gh issue create/edit/close/reopen`, `gh pr create/merge/ready/close`, mutating `gh api`, `git worktree add` (except `--detach`), force-push and rebase, naming the `python3 "$SDLC"` command to use instead; limits each `sdlc:<role>` agent to its role's control-plane commands and review roles to no git writes. Only each segment's leading words count |
+| `PreToolUse` (Agent) | Sets every `sdlc:*` agent's `model` from `hooks/model_policy.json` (overridable per role by `pipeline.models` / `pipeline.fanout`); denies nested stages and fan-out a role may not do or has exhausted |
+| `SubagentStart` | Gives each `sdlc:*` agent `$SDLC`, `docRoot`, `requirementsDir`, the references path and the `SDLC-RESULT` format |
+| `SubagentStop` | An `sdlc:*` agent cannot stop until its final message ends with `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "done\|clean\|rework\|blocked\|needs-human\|failed"}`; records every finished agent's metrics |
+| `SessionEnd` | Records the orchestrator's (main thread's) metrics |
 
-Everything that used to be a constant in the script or a number in the prose is a key
-under `pipeline` in the config, each with a default (see `sdlc.config.sample.json`).
-`python3 "$SDLC" show-config` prints the effective values.
+## Tunables
+
+Every tunable is a config key with a code default; `sdlc.config.sample.json` shows most of
+them, and `python3 "$SDLC" show-config` prints the effective values.
 
 | Key | Default | Controls |
 |---|---|---|
-| `parallelism.devLane` / `.prReview` | 3 / 3 | Dev-lane and review-pool caps (top-level, required) |
-| `pipeline.labels.*` | `epic:standing` / `epic:legacy` / `epic:architected` | The three epic labels |
-| `pipeline.classification.*` | `{}` (the sample config uses `type:initiative` / `type:epic` / `type:task` labels) | The **only** way an issue is recognised as an Initiative, Epic or Task — a standing/legacy epic needs the epic classification too |
-| `pipeline.profiles` | `legacy`, `standing`, `"*"` default | Epic behaviour by label: `driven`, `epicLevelPhase` (`false` = standing), `childrenNeedArchitectedEpic`, `closes`, `gates.*` |
-| `pipeline.branches.issuePrefix` / `.epicPrefix` | `issue-` / `epic-` | Branch naming; also how gate PRs are recognised |
-| `pipeline.worktrees.*` | `/tmp`, `sdlc-dev-`, `sdlc-epic-`, `sdlc-review-`, `sdlc-tmp-` | Where the orchestrator puts worktrees; `ephemeralPrefix` names the throwaway worktree a branch-writing command creates when nothing holds its branch |
-| `pipeline.locks.dir` / `.waitSeconds` | `{worktreesRoot}/.sdlc-locks` / 600 | Per-branch `flock` every branch-writing command takes (`SDLC_LOCK_DIR` env overrides the dir) |
-| `pipeline.skill.submodulePath` / `.probeFile` | `.github/sdlc-pipeline` / `SKILL.md` | Where the driven repo vendors this skill; `worktree-add`/`sync-branch` init it per worktree so each unit's agents read their own branch's pinned copy (empty path disables) |
-| `pipeline.stack.*` | `enabled: false`, dev-profile ports 3000/3001/5432/9229, stride 20 | Per-epic isolated runtime stack for `provision-epic-stack`/`teardown-epic-stack`: base profile, env/secrets file templates, compose project template, port keys, data-dir key, up/seed/down commands (`references/parallelism.md`, "Per-epic isolated stack") |
-| `pipeline.gates.skipConfidenceThreshold` | 95 | `arch-review` confidence needed to skip Gate B |
-| `pipeline.escalation.replaceAt` / `.needsHumanAt` | 3 / 6 | Bounce counts for the context-reset replacement and `needs-human` |
-| `pipeline.retro.everyClosedIssues` / `.watermarkFile` | 5 / `{docRoot}/retro-watermark` (`{docRoot}` resolves to the config's `docRoot`, e.g. `docs/sdlc/retro-watermark`) | Retro trigger and watermark location (relative to the driven repo) |
-| `pipeline.continuous.cycleCap` | 8 | Merges per unattended run before pausing for the operator |
-| `pipeline.models.<role>` | opus/sonnet per `SKILL.md` table | Model tier passed to each stage's `Agent` call |
-| `pipeline.docTemplates` | `_templates` | Template folder under `docRoot` |
-| `requirementsDir` | none (optional; top-level, not under `pipeline`) | Where this repo's requirements docs live, e.g. `<requirements-dir>/IRD-*.md` in `agents/sdlc-product.md`. Only needed by `sync-skill`'s agent re-vendor, and only if a template references the placeholder — an existing config without it keeps working until then |
+| `parallelism.devLane` / `.prReview` / `.designLane` | 1 / 1 / 1 | Lane caps; set a lane above 1 to fan it out |
+| `parallelism.maxTasksPerRun` | 0 (unlimited) | Units driven to a terminal state per run |
+| `docRoot` / `requirementsDir` / `tokenPath` | — | Doc tree, requirements docs (IRDs), PAT file |
+| `pipeline.classification.*` | `{}` (sample: `type:initiative` / `type:epic` / `type:task` labels) | The only way an issue is an Initiative, Epic or Task |
+| `pipeline.profiles` | `legacy`, `standing`, `"*"` | Epic behaviour by label: `driven`, `epicLevelPhase`, `childrenNeedArchitectedEpic`, `closes`, `gates.*` |
+| `pipeline.labels.*` | `epic:standing` / `epic:legacy` / `epic:architected` | Epic labels |
+| `pipeline.branches.*` / `pipeline.worktrees.*` | `issue-` / `epic-`; `/tmp/sdlc-dev-<n>` etc. | Branch and worktree naming |
+| `pipeline.locks.*` | `{worktreesRoot}/.sdlc-locks`, 600 s | Per-branch `flock` |
+| `pipeline.stack.*` | `enabled: false` | Per-epic isolated runtime stack |
+| `pipeline.gates.skipConfidenceThreshold` / `.requiresHumanGateA` | 80 / `true` | Gate B skip bar; whether Gate A needs a human |
+| `pipeline.productWip.maxGateAPending` | 5 | Open Gate A PRs allowed repo-wide |
+| `pipeline.escalation.replaceAt` / `.needsHumanAt` | 3 / 6 | Bounces before a context-reset replacement / `needs-human` |
+| `pipeline.retro.everyClosedIssues` / `.watermarkFile` | 5 / `{docRoot}/retro-watermark` | Retro trigger and watermark (driven repo) |
+| `pipeline.continuous.cycleCap` | 8 | Merges per unattended run before pausing |
+| `pipeline.models.<role>` / `pipeline.fanout.<role>` | `hooks/model_policy.json` | Model per stage; which reviews fan out, how wide, at which model |
+| `pipeline.epicClose.auto` | `false` | Whether the orchestrator closes a verified epic itself |
+| `pipeline.issueDefaults.priority` / `.effort` | `Medium` / `Medium` | Priority / Effort `create-issue` sets when no flag or lld line names one |
+| `projectFields.issueTypeIds` | — | Native Issue Type ids; `create-issue` refuses a type missing here |
+| `projectFields.priorityFieldId` / `.priorityOptionIds` / `.effortFieldId` / `.effortOptionIds` | unset | Optional Priority / Effort fields; when set, `create-issue` writes them |
 
-Repo-specific *commands* (lint, test, e2e) are not config — they belong in the
-`sdlc-*` agent definitions and the repo's own `CLAUDE.md`, which every stage agent
-already reads.
+## Metrics
 
-## Initiative-driven lifecycle, pluggable issue tracking
-
-Two entry points share one lifecycle:
-
-- **Engineering-driven** — a bare Epic, manual scope, no product doc. `architecture` asks its own clarifying questions if scope is unclear.
-- **Initiative-driven** — product-motivated work. `product` writes one IRD for the
-  whole Initiative (market/competitive research, vision-doc awareness, sizing against
-  the vision and backlog); once Gate A passes, **the orchestrator itself** — not a
-  subagent — cuts Epics from it (`create-issue --parent <initiative-n> --type Epic`,
-  see SKILL.md's "Cutting Epics from an approved Initiative"). Each Epic then runs
-  independently from there.
-
-Within an Epic, `architecture` and `lld` each run as the Epic's own phase-Task (a
-plain child issue, gated `issue-<n>` → `main`); the Epic issue itself never runs a
-stage. One `lld.md` covers every Task, carving footprint/dependency boundaries rather
-than even-slicing; once `lld-review` is clean the orchestrator publishes it
-(`publish-doc`), creates the Task issues (`create-lld-tasks`) and advances them
-(`merge-lld-doc <epic>`). `lld-review` judges both the design and the carving. A
-design that turns out not to fit is revised through an Architecture revision
-phase-Task, not by re-opening a gate on the Epic. Every
-Epic always carries two standing Tasks — Integration-test and e2e-test — that write
-the coverage a normal Task's unit tests don't; `pr-review` reviews what a normal
-Task's PR actually contains, and epic-close reuses the standing Tasks' attestations
-rather than re-running suites; its exploratory pass also checks the delivered system
-against the epic's `architecture.md` directly, not just for behavioral bugs.
-
-Closing an Initiative is a new, fully automated step: once every Epic cut from it is
-closed, a `sdlc-initiative-close` pass plays the product-manager role — starts the
-delivered application and validates it against every requirement in the Initiative's
-own `product.md` — before `close-initiative` closes the issue. No human gate; see
-SKILL.md's "Closing an Initiative".
-
-Issue/work-item tracking is now behind a `WorkItemProvider` interface
-(`typing.Protocol`, `scripts/sdlc_next.py`) — `GitHub` is the only implementation
-today; a `pipeline.workItemProvider.type` other than `"github"` is a refusal, not a
-silent fallback. Unit classification (Initiative vs. Epic vs. Task) reads
-`pipeline.classification`, defaulting to labels rather than GitHub custom Issue
-Types, since Issue Types are an organization-level feature unavailable on a personal
-repo at any plan tier. Code hosting (PR/merge/CI) stays git-protocol/github.com —
-deliberately not abstracted. A second provider (Jira), a Confluence doc-store, and a
-`CodeHostProvider` for non-GitHub code hosting are documented seams, not built.
-
-## Installing the shipped pieces
-
-`SKILL.md` assumes these exist in the repo you drive. The first three ship here —
-copy them in, then adapt the agents' repo-specific commands (lint, test, e2e) and
-the `<placeholder>` values to your repo:
+The `SubagentStop` and `SessionEnd` hooks append one JSON line per finished agent to
+`$CLAUDE_PLUGIN_DATA/metrics/<owner>__<repo>.jsonl` (never the driven repo's tree): per-model
+tokens, estimated cost (prices in `hooks/_metrics.py`), duration, turns, and the
+`SDLC-RESULT` issue/stage/outcome.
 
 ```bash
-cp -r agents/* <repo>/.claude/agents/                        # the eight sdlc-* stage agents
-cp workflows/gate-auto-advance.yml <repo>/.github/workflows/  # needs secret SDLC_GH_TOKEN (classic PAT)
-mkdir -p <repo>/<docRoot>/_templates && cp templates/*.template.md <repo>/<docRoot>/_templates/
+python3 scripts/sdlc_metrics.py report [--repo o/r] [--epic N] [--since YYYY-MM-DD] [--by role|model|issue|epic]
+python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<project>   # history, idempotent
 ```
 
-- **Agent definitions** (`agents/`): `sdlc-product`, `sdlc-product-review`,
-  `sdlc-architecture`, `sdlc-design-review`, `sdlc-lld`, `sdlc-development`,
-  `sdlc-pr-review`, `sdlc-exploratory`, `sdlc-initiative-close`. Each carries
-  persona, procedure, refusal criteria and `tools:` only; pipeline rules stay in
-  `references/stage-playbooks.md`. They reference the skill only as `$SDLC_DIR/...`
-  (see Setup step 3).
-- **`workflows/gate-auto-advance.yml`** calling `auto-pass-gate`, `mark-todo`,
-  `mark-issue-closed` (real-time gate backstop; `next-action` works without it, just
-  later). Assumes the skill is the `.github/sdlc-pipeline` submodule.
-- **Doc templates** (`templates/`) → `<docRoot>/_templates/{product,architecture}.template.md`.
+## How it runs
 
-Re-syncing later, once the skill has moved past the commit you first installed: use
-`python3 "$SDLC" sync-skill` instead of repeating the manual `cp` and placeholder edits
-above by hand. It bumps `pipeline.skill.submodulePath` to `--ref` (default
-`origin/main`) and re-vendors `.claude/agents/*.md` from the bumped templates with the
-same three placeholders (`<docRoot>`, `<your-token-file>`, `<requirements-dir>`)
-substituted from your config, staging both changes (`git add`) without committing —
-run it only when no stage agent has a live turn in progress (`SKILL.md`'s retro Step 5
-rule), and write the commit yourself so its message names why you're re-syncing.
-
-Still external — not in this repository:
-
-- **GitHub's org-level custom Issue Fields** `Stage`, `Pipeline Status`, `Priority`,
-  `Effort` with the option names the sample config lists, plus custom Issue Types
-  (Task/Bug/Feature, and optionally Initiative/Epic — label-based `pipeline.classification` works without them) — provisioned once per org via
-  Settings → Issue types / Issue fields, not a Projects-v2 board.
-
-`references/stage-playbooks.md` and `references/parallelism.md` still quote the
-origin repo's own commands and limits (`make lint`, `npm run test:it`, `make e2e`,
-Docker memory) as worked examples; substitute your repo's equivalents.
+- **Initiative-driven**: `product` writes one IRD for the Initiative; after Gate A the
+  orchestrator cuts independently shippable Epics from it.
+- **Engineering-driven**: a bare Epic with its scope in the body starts at architecture.
+- Each Epic's `architecture` and `lld` run as their own phase-Tasks, each gated
+  `issue-<n>` → `main`. After a clean `lld-review`, `finish-lld` publishes `lld.md` and
+  creates the Tasks. Every Epic also gets Integration-test and e2e-test standing Tasks.
+- Tasks run `development` → `pr-review` → auto-merge into the epic branch. The epic closes
+  after a full e2e and an exploratory pass, and an Initiative closes after a PM-style
+  validation of its `product.md`.
+- Issue tracking sits behind a `WorkItemProvider` interface, and GitHub is the only
+  implementation. Code hosting is GitHub.
 
 ## Running the tests
 
 ```bash
-python3 -m pytest scripts/tests/ -q
+(cd scripts && python3 -m pytest -q)   # control plane: offline, against the sample config
+python3 -m pytest -q hooks/tests       # hooks: each runs as a subprocess with JSON on stdin
 ```
 
-The suite points itself at `sdlc.config.sample.json` (via `conftest.py`) and makes no
-network calls — every `gh`/`git` call is a scripted test double.
-
-## Harness coupling
-
-The control plane (`scripts/sdlc_next.py`) and config are harness-agnostic. The
-orchestration layer in `SKILL.md` assumes an agent runtime that can dispatch
-subagents by type and pick a model tier per call (documented against Claude Code:
-`.claude/agents/` definitions, `Agent`/`SendMessage` tools). Port that layer to your
-runtime; the control plane and config do not change.
+Contributors: see `CLAUDE.md`. This repo's `.claude/settings.json` runs the relevant suite on
+`Stop` whenever `scripts/` or `hooks/` has uncommitted changes.

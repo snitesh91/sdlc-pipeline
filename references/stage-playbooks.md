@@ -1,341 +1,208 @@
-# Stage playbooks — docs, comments, rework, and per-stage exit actions
+# Stage playbooks — rules that bind every stage
 
-Referenced from `SKILL.md` (Step 3). **Every stage subagent is told to Read this file
-before doing anything else** — it holds the rules that bind every role: the per-issue
-doc set, citation discipline, the one-turn-finish contract, commenting discipline, the
-rework model, and a pointer to every stage's own exit actions. Rules that bind only
-some roles moved out on 2026-09-14 (see below), each to its own file, so a role that
-does not need them is not told to read them:
+Every stage subagent Reads this file first. Rules that bind only some roles live in:
 
-- `references/design-doc-rules.md` — the content rules for `product.md`/`architecture.md`
-  and the pre-`product` scope-alignment step: read by `product`, `product-review`,
-  `architecture`, and `design-review` (its `arch-review` half).
-- `references/verification-rules.md` — proving a claim by running it rather than
-  asserting it, for `architecture`, `lld`, `development`, `pr-review`, and `design-review`.
-- `references/review-fanout.md` — the subagent-dispatch discipline, for `product-review`,
-  `design-review`, and `pr-review`.
+| File | Read by |
+|---|---|
+| `references/design-doc-rules.md` | `product`, `product-review`, `architecture`, `design-review` (its `arch-review` half) |
+| `references/verification-rules.md` | `architecture`, `lld`, `development`, `pr-review`, `design-review` |
+| `references/review-fanout.md` | `design-review` |
 
-Each of those three files states, at its own top, exactly which roles read it — a role
-not named there does not need to Read it. (A stage agent's prompt also spells out,
-verbatim, its own doc path and worktree — those are issue-specific and not in any of
-these files.)
+A role not listed for a file does not read it. Your prompt gives your doc path and worktree.
+Repo-specific commands (lint/build/test, host vs container, suite names, memory flags,
+ports) live in the driven repo's `CLAUDE.md` and `AGENTS.md` — "the repo's own commands"
+means there.
 
-Everything repo-specific — the exact lint/build/test commands, where they must run
-(host or container), suite names, memory flags, port numbers — lives in the driven
-repo's own `CLAUDE.md` and in the stage's agent definition, never here. Where this file
-says "the repo's own commands", that is where to look.
+- A SubagentStart hook gives you `$SDLC` (the control plane: `python3 "$SDLC" <cmd>`), the
+  plugin root that `references/…` and `templates/…` are under, and `<docRoot>` /
+  `<requirements-dir>`.
+- **The control plane owns every GitHub mutation, GraphQL call, worktree, force-push and
+  rebase.** A Bash guard hook denies hand-run ones and names the command to use instead. It
+  also limits you to your role's commands (review roles: no git writes); anything else is
+  the orchestrator's — report it in your handoff.
 
 ## Per-issue docs (the source of record)
 
-Each issue that runs a design stage gets a folder `<docRoot>/issue-<n>/`, committed on
-the `issue-<n>` branch. A phase-Task's doc is then published to `<docRoot>/epic-<n>/`
-on the epic branch by `publish-doc` — see `references/epics.md`, "Doc layout at the epic
-level"; a standing child's docs reach `main` with its eventual squash-merge. **Three
-filenames exist in this pipeline and no others:**
+Each issue that runs a design stage gets `<docRoot>/issue-<n>/`, committed on branch
+`issue-<n>`. `publish-doc` publishes a phase-Task's doc to `<docRoot>/epic-<n>/` on the
+epic branch (`references/epics.md`, "Doc layout at the epic level"); a standing child's
+docs reach `main` with its squash-merge.
+
+**Exactly three filenames exist:**
 
 | File | Written by | Required? |
 |---|---|---|
-| `product.md` | `product` — an Initiative's Product-Roadmap Task, or a standing-epic child | Required for both, except a standing child's bug fast-track where `architecture` determined no product input was needed. **Never written for an Epic's Task** — its requirements are the Initiative's `product.md` (or the Epic's issue body, engineering-driven). |
-| `architecture.md` | `architecture` — an Epic's Architecture-phase (or revision) Task, or a standing-epic child | Always, for those units |
-| `lld.md` | `lld` — an Epic's LLD-phase Task only | Always: one `## Task` subsection per Task the Epic will run |
+| `product.md` | `product` — an Initiative's Product-Roadmap Task, or a standing-epic child | Yes, except a standing child's bug fast-track where `architecture` found no product input needed. **Never for an Epic's Task** — its requirements are the Initiative's `product.md` (or the Epic's issue body, engineering-driven). |
+| `architecture.md` | `architecture` — an Epic's Architecture-phase (or revision) Task, or a standing-epic child | Always |
+| `lld.md` | `lld` — an Epic's LLD-phase Task only | Always; one `## Task` subsection per Task the Epic will run |
 
-**`development`, `arch-review`/`lld-review` and `pr-review` write no doc file at all.**
-The two reviews are point-in-time passes whose findings live in the issue comment
-thread. `development`'s record is the **PR description** — what was built and why,
-travelling with the diff into `main` — and its evidence is the `record-local-ci`
-attestations, which carry each suite run's own captured output pinned to a head SHA.
-A committed file of self-reported pass/fail numbers is exactly what `pr-review` is
-told not to trust, so it was a file written to be distrusted (`development.md` and the
-never-specified `testing.md` both died this way on 2026-09-12 — `references/history.md`).
-
-**Writing any other file under `<docRoot>/issue-<n>/` is a defect, not initiative.**
-The list above is closed. If a stage believes it needs a fourth document, that is a
-question for a retrospective, not a call it makes mid-run.
-
-Each doc must be **detailed enough that the next stage's agent works from it
-independently**, without reconstructing context from the comment history. A doc may
-double as the stage's working/scratch space (e.g. an internal checklist inside
-`lld.md`), but the filenames above are canonical — no alternate names.
-
-Every `## Task` subsection of an Epic's `lld.md`, and a standing child's
-`architecture.md`, must carry a `## Footprint` section in the exact parseable shape
-defined in `references/epics.md`, "How to size the Tasks" — backticked paths, one per
-bullet.
-
+- `development`, `arch-review`/`lld-review` and `pr-review` write no doc file. Review
+  findings live in the issue comment thread. `development`'s record is the **PR
+  description** (what was built and why); its evidence is the `record-local-ci`
+  attestations, pinned to a head SHA. Never commit self-reported pass/fail numbers.
+- Any other file under `<docRoot>/issue-<n>/` is a defect. If you think a fourth doc is
+  needed, say so in your handoff; do not create it.
+- Write each doc so the next stage can work from it alone, without the comment history.
+  A doc may hold your working checklist; never use alternate filenames.
+- Every `## Task` subsection of an Epic's `lld.md`, and a standing child's
+  `architecture.md`, carries a `## Footprint` section in the exact parseable shape from
+  `references/epics.md`, "How to size the Tasks": backticked paths, one per bullet.
 
 ## Citation discipline — every stage, without exception
 
-Every stage in this pipeline cites the codebase and the docs, and **every stage has
-shipped a wrong citation** — line numbers shifted by an addendum, a test cited ten
-lines off, a blocking review finding raised against an unreachable draft commit
-resolved from a SHA in an old comment link (see `references/history.md`).
-
-The rules that came out of it:
-
-- **Anchor to something stable, not to a line number.** Cite a section heading
-  (`"### Shared files"`), an exact quoted test title, or a grep-anchored quote. Line
-  numbers drift the moment anyone inserts a paragraph above them; headings and titles
-  survive. Where a line number genuinely helps a reader, treat it as a hint alongside
-  the durable anchor, never as the anchor itself.
-- **Never cite a file you did not open in this session.** Not from the issue body, not
-  from a prior stage's doc, not from memory. The body's line numbers are usually stale
-  by the time you read them — several of the above came from exactly that.
-- **When resolving a doc from a branch, `git fetch origin` first, then verify the ref
-  is reachable**: `git merge-base --is-ancestor <sha> origin/<branch>`. A SHA that no
-  branch reaches is the tell that you are reading a superseded draft. Pin *which* ref
-  you resolved and how, so a reviewer can reproduce it.
-- **To check what a commit changed, use `git show <sha> --stat` or three-dot
-  `git diff origin/main...<branch>` — never a two-dot range.** A two-dot range that
-  spans a merge of `origin/main` attributes every merged commit to the agent, and a
-  "you touched files you shouldn't have" correction has been nearly sent on exactly
-  that basis when the agent was right and the check was wrong (see
-  `references/history.md`).
-- **A stale citation in a doc that is about to merge is a real finding**, not a nit —
-  it merges into `main` as a record that actively misleads the next reader. That has
-  been a blocking finding on a design doc that still documented a locator the suite
-  run had empirically disproved.
-- **A citation can be correct when written and wrong when merged — nothing re-checks
-  it after a merge.** A merge commit that pulls a sibling's refactor onto the branch
-  after the docs were authored breaks every line number that pointed into the
-  refactored files, and every stage will have verified them honestly (see
-  `references/history.md`).
-
-  So, concretely: **in a document that ships — a runbook, an HLD, anything under the
-  repo's doc/ops trees — prefer the grep-anchored quote alone and drop the line
-  number.** A quote survives a sibling's refactor; a number does not, and correcting
-  numbers just resets a clock that the next sibling edit restarts. Keep line numbers
-  where they are genuinely a working aid — a stage's own evidence log, a review comment
-  — and treat them there as hints, per the first rule above.
-
-  For the same reason, **when `sync-branch` pulls a sibling's work onto a branch whose
-  docs cite that sibling's files, re-check those citations before the PR merges.** It
-  is the one moment the pipeline creates staleness by itself rather than inheriting it.
+- **Anchor to something stable:** a section heading (`"### Shared files"`), an exact
+  quoted test title, or a grep-anchored quote. A line number is at most a hint next to
+  the anchor, never the anchor.
+- **In a document that ships** (runbook, HLD, anything under the repo's doc/ops trees),
+  use the grep-anchored quote alone, with no line number. Line numbers are fine as
+  hints in working evidence (an evidence log, a review comment).
+- **Never cite a file you did not open in this session.** Not from the issue body, a
+  prior stage's doc, or memory. Issue-body line numbers are usually stale.
+- **Resolving a doc from a branch:** `git fetch origin` first, then confirm the ref is
+  reachable with `git merge-base --is-ancestor <sha> origin/<branch>`. An unreachable
+  SHA means a superseded draft. State which ref you resolved and how.
+- **To see what a commit changed**, use `git show <sha> --stat` or three-dot
+  `git diff origin/main...<branch>`. Never use a two-dot range: it attributes merged
+  `origin/main` commits to the branch.
+- **A stale citation in a doc about to merge is a real finding**, not a nit.
+- **When `sync-branch` pulls a sibling's work onto a branch whose docs cite that
+  sibling's files, re-check those citations before the PR merges.** Nothing re-checks
+  them after a merge.
 
 ### Attribution is falsifiable — run the check, do not recall it
 
-The rules above govern *where* a citation points. They do not govern whether the words
-you attribute to a source are actually in it, and that is the gap epic #159 lost four
-review rounds to — two of them buying nothing but prose edits, on a branch whose code
-was already proven sound.
+Run this as a mechanical pass before every handoff:
 
-Every one of these passed a conscientious author's own reading:
-
-- A `development.md` wrote *Per the footprint note ("keep your changes compatible with
-  that shape and do not remove or relocate those guards")*. That sentence exists in no
-  artifact: zero hits across the whole doc tree, the issue body, and its fifteen
-  comments. Its real origin was **the delegation prompt**. The agent quoted an
-  instruction it had been given and cited it to a design doc.
-- The next round, the same document asserted in four separate places that a spec and
-  its timeouts were untouched, while its own later section correctly described raising
-  them. Self-contradiction inside one file.
-- Another presented a comma-joined paraphrase inside a fenced block introduced as a
-  command "run for real". The real script prints one row per line with identifiers.
-  Its stated diff stat was stale in the same paragraph.
-
-So, as a mechanical pass before any handoff, not as a habit of care:
-
-- **Every quoted string must be reproducible by grep against the file you cite.** If
-  `grep -F "<the quoted words>" <cited file>` returns nothing, the quotation is wrong —
-  delete it or fix it. Quote spans short enough to survive reflowing.
-- **The delegation prompt is not a citable source.** Nothing in it is an artifact;
-  it does not merge, a reader cannot open it, and the next agent gets a different one.
-  A constraint that reached you only through your prompt goes in the document's own
-  voice, unquoted and unattributed.
-- **A fenced block introduced as command output must be bytes you captured.** Redirect
-  to a file and paste from the file, or cite the `record-local-ci` attestation, which
-  already embeds a real run's captured output. Prose describing what a command showed
-  is always acceptable; a fence is a claim of literalness.
-- **Generate every "untouched" / "unchanged" / "out of scope" claim from the diff**,
-  with `git diff --name-only origin/<base>...HEAD`, at the moment you write the
-  sentence. These claims are the most likely in any document to have been true when
-  drafted and false by handoff, because the author keeps working after writing them.
-
-A document that ships squash-merges into `main` as a permanent record. A fabricated
-quotation there invents a directive that some future reader will follow.
-
+- **Every quoted string must be reproducible**: `grep -F "<the quoted words>" <cited file>`
+  must hit. If it doesn't, fix or delete the quote. Keep quotes short enough to survive
+  reflowing.
+- **The delegation prompt is not a citable source.** A constraint that reached you only
+  through your prompt goes in the document's own voice, unquoted and unattributed.
+- **A fenced block presented as command output must be bytes you captured.** Redirect
+  to a file and paste from it, or cite the `record-local-ci` attestation. Prose saying
+  what a command showed is fine.
+- **Generate every "untouched" / "unchanged" / "out of scope" claim from the diff**
+  (`git diff --name-only origin/<base>...HEAD`) when you write the sentence, and
+  re-check it before handoff.
 
 ## Subagents finish in one turn — never park awaiting a wake
 
-Every stage agent is a subagent, and a subagent is **not** re-invoked across turns:
-nothing wakes it once its turn ends. So a stage must complete everything it needs while
-its turn is live. For a long command — the integration suite, a container/image build,
-the e2e suite — run it with `run_in_background` and **wait on it in-turn via the Monitor
-tool** (foreground `sleep` is blocked). What must never happen is ending the turn
-"standing by" for a background job or a Monitor notification to resume the agent: the
-notification never arrives, the stage stalls until a human nudges it, and it registers
-as no progress. This recurred across every implementing agent of epic #430
-and killed two agents outright on earlier epics (see `references/history.md`). Those
-three agent definitions used to restate it, and had drifted into three different
-strengths — the weakest of them is what the agent that stalled on 2026-09-13 was
-reading. They now carry the one-sentence contract and point here for the rest.
+Nothing re-invokes a subagent after its turn ends. Finish everything in-turn.
 
-**Restating this rule has stopped working — so it is now a contract on the final
-message.** It is already stated here, and again in three agent definitions, with two
-agents killed by it on earlier epics and a recurrence across every implementing agent
-of epic #430. On 2026-09-13 an epic-159 agent did it again: it started an e2e run,
-set up a Monitor, and ended its turn saying it would resume when the notification
-arrived. Nothing wakes a subagent. It sat idle until the orchestrator noticed, drove
-the run by hand, and re-messaged it.
-
-**Your final message must declare a terminal state**, and there are exactly three:
-finished, blocked on something named, or stopped for a decision you have stated. Any
-final message whose last act is to wait — "I'll pick this up when the run lands",
-"monitoring for completion", "no further action needed until the notification" — is a
-stall, no matter how much real work preceded it. If a run is still going, wait on it
-in-turn; if you cannot, say so and name what you need, which is a terminal state.
-
-**Orchestrator side:** read every returning agent's final message for this shape before
-acting on its content. A returned agent that declared waiting has not finished, and its
-issue is not at the stage its handoff implies. Re-message it with the result it was
-waiting for rather than treating the stage as complete.
+- Run long commands (integration suite, container/image build, e2e suite) with
+  `run_in_background` and wait on them in-turn with the Monitor tool. Foreground
+  `sleep` is blocked.
+- **Your final message declares exactly one terminal state** — the `SDLC-RESULT`
+  outcome below. A final message whose last act
+  is waiting ("I'll pick this up when the run lands", "monitoring for completion") is a
+  stall, however much work came before it. If you cannot wait in-turn, say so and name
+  what you need; that is a terminal state.
+- **Orchestrator:** check every returning agent's final message for this shape before
+  acting on it. An agent that declared waiting has not finished, and its issue is not at
+  the stage its handoff implies. Re-message it with the result it was waiting for.
 
 ### The handback is terse — the detail already shipped
 
-Your final message to the orchestrator is read for routing, not for record. Every
-piece of evidence you gathered — command tables, mutation logs, suite output, file
-paths, the criterion→test map — already lives in the artifact this stage owns: the PR
-description, the issue comment, or the committed doc. Re-pasting it into the handback
-pays for it a second time, in the orchestrator's context — the one context in the run
-that every later stage inherits. So the handback carries only what the orchestrator
-routes on, in this fixed shape and nothing else:
+Your final message to the orchestrator is for routing. The evidence already lives in
+the PR description, issue comment, or committed doc. Send these fields and nothing else:
 
-- **VERDICT:** one word. `finished` / `blocked` / `stopped` for an implementing stage;
-  `clean` / `rework` / `blocked` for a review; `fits` / `deviates` for `lld` and the
-  design stages. It restates the terminal state above, not a summary of the work.
 - **HEAD / PR:** the head SHA, and the PR number if one exists.
-- **BLOCKER:** one line, only when VERDICT is `blocked` or `stopped` — the specific
-  thing named, nothing more.
-- **DETAIL:** a link to the PR description or issue comment where the full evidence
-  already lives — the link, never the evidence itself.
+- **BLOCKER:** one line, only for `blocked` / `needs-human` / `failed` — the named
+  blocker, the exact question, or the failed command.
+- **DETAIL:** a link to the PR description or issue comment that holds the evidence.
+  Send the link, not the evidence.
+- **Last line, always:** `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "<outcome>"}`
+  — `<n>` your unit's number, `<stage>` your role (`product`, `arch-review`, …).
 
-Nothing else: no command tables, no re-pasted logs, no restated diff, no "what I
-checked and found fine" inventory. If the orchestrator needs the detail to route, it
-opens the DETAIL link and reads GitHub — it does not need it inlined to do so. A
-handback that inlines evidence the record already holds is a finding on the handback,
-the same way an over-cap comment is: the orchestrator asks for a terse re-send before
-acting, then routes on the fields.
+| `outcome` | Meaning |
+|---|---|
+| `done` | An authoring stage finished and ran its exit actions |
+| `clean` / `rework` | A review's verdict (CONDITIONAL ACCEPT → `clean`) |
+| `blocked` | Cannot finish without something named outside your stage: a genuine ambiguity an earlier stage owns, a design that does not fit, a dependency, a rejected push |
+| `needs-human` | Stopped for a decision only the operator can make (an escalation, a scope question) |
+| `failed` | A command or exit action failed and you could not recover |
 
-**This contract binds a stage agent reporting to the orchestrator. A fan-out child
-reporting to its parent reviewer is the same discipline one layer down, capped
-tighter (1,200 characters) — `references/review-fanout.md`, "A fan-out child's reply
-is terse too".**
+A SubagentStop hook refuses your stop until the last message carries a valid line.
 
+No command tables, logs, restated diff, or "what I checked and found fine" inventory.
+**Orchestrator:** a handback that inlines evidence is a finding. Ask for a terse re-send
+before acting, then route on the fields.
+
+A fan-out child reporting to its parent reviewer follows the same contract, capped at
+1,200 characters (`references/review-fanout.md`, "A fan-out child's reply is terse too").
 
 ## Commenting discipline
 
-The main agent never needs to *read* a comment to decide what happens next — it just
-ran the previous stage. Comments are the **visibility record** for a human and the
-**resume point** if a session dies. Leaner than the docs — a pointer and a summary:
+Comments are the human's visibility record and the crash-resume point. They are not the
+source of record: that is the committed docs, the commits, and the issue body for durable
+requirements. Keep comments to a pointer plus a summary.
 
-- **Start comment is mandatory.** `🚧 Picking this up — <role> stage starting.` —
-  posted before delegating, every time. When the orchestrator posts it itself
-  (`arch-review`, `lld-review`, and `pr-review`):
-  `sdlc_next.py start-comment <n> --role <role>` — never hand-typed. (For roles
-  claimed via `claim`/`pass-gate` the comment is already posted by that call — don't
-  post twice.)
-- **Comment per milestone, not per step.** Batch a stage's sub-steps into one comment
-  at a coherent unit of progress.
-- **Floor: one comment per stage** (the handoff/exit comment). **Ceiling: one per
-  genuine milestone.**
-- **Link to the doc, don't paste it** — a few sentences plus doc path + commit SHA.
-- **The last comment of a stage must carry real information**, not just a marker.
-- **Enough to resume from a crash**: if a fresh session couldn't tell from comments
-  plus docs where a crashed run left off, there weren't enough.
+- **The start comment is mandatory:** `🚧 Picking this up — <role> stage starting.`,
+  posted before delegating, every time, by a script and never hand-typed. `claim` /
+  `start-stage` / `pass-gate` post it for the roles they claim. For a review role, the
+  orchestrator posts it with `transition <n> --expect-stage <role>` or
+  `start-comment <n> --role <role>`. Never post it twice.
+- Comment per milestone, not per step. Post at least one comment per stage (the
+  handoff) and at most one per genuine milestone.
+- Link to the doc; don't paste it. Give a few sentences plus the doc path and commit SHA.
+- The stage's last comment carries real information, not just a marker.
+- A fresh session must be able to tell from comments plus docs where a crashed run
+  stopped.
 
-**Comment size is a contract, not a style preference.** Measured before this rule
-existed: `arch-review` rounds of 24,284 / 18,689 / 16,070 characters, an `lld-review`
-of 15,365, a `pr-review` of 14,640 — against stage handoffs that owned a doc and stayed
-at 1.4–3.3K. A round-4 architect dispatch pulled 59K characters of review text across
-three fetches. Comment bulk is an **input cost on every downstream stage**, and it
-dilutes the few lines that decide whether a round succeeds. So:
+### Comment size is a contract
 
-- **Stage handoff comment: ≤ 2,000 characters.** What changed, where the doc/commit is,
-  the delta since the last round, the marker. The doc carries the detail.
+- **Stage handoff comment: ≤ 2,000 characters.** Say what changed, where the doc/commit
+  is, the delta since the last round, and the marker.
 - **Evidence-carrying comment** (`product-review`, `arch-review`/`lld-review`,
   `pr-review`, `development`'s handoff): **≤ 6,000 characters.** Findings first, each as
   one heading plus at most three lines (what, why it matters, the fix — described, not
-  applied); non-blocking findings one line each; the verdict one line. Command output
-  and quotes go in a `<details>` block trimmed to the lines that prove the point (≤ 15
-  lines per block). The Scope/Verification section is ≤ 3 lines — say what you read and
-  ran, not everything you found sound.
-- **Do not restate the document, the diff, or the previous round.** A reviewer who has
-  more to say than the cap allows has found a *class*, not a list: state the class
-  once, give two exemplars and the sweep that finds the rest ("A completeness claim …
-  is a sweep, not a list"), and stop. Cut the "what I checked and found fine"
-  inventory first — it is the bulk in every over-length comment measured.
-- **Over the cap is a finding on the comment.** The orchestrator asks for a trimmed
-  re-post before dispatching the next stage, the same way it asks for a missing
-  comment. `wc -c` on the body before posting is the whole check.
+  applied). Non-blocking findings get one line each; the verdict gets one line. Put
+  command output and quotes in a `<details>` block trimmed to the lines that prove the
+  point (≤ 15 lines per block). Keep the Scope/Verification section to ≤ 3 lines: what
+  you read and ran.
+- Don't restate the document, the diff, or the previous round. If you have more to say
+  than the cap allows, you have found a class: state it once, give two exemplars and the
+  sweep that finds the rest. Cut the "what I checked and found fine" inventory first.
+- The control plane refuses an over-cap `--summary` / `--reason` / `--reply`; check a
+  comment you post yourself with `wc -c`.
 
 Each handoff comment ends with the hidden marker
-`<!-- stage-transition: <from-role>-><to-role> @ <ISO8601> -->` — posted by the
-script wherever a script command owns the transition (`open-dev-pr`,
-`handoff-to-pr-review`, `open-gate`, `pass-gate`, `skip-gate`).
+`<!-- stage-transition: <from-role>-><to-role> @ <ISO8601> -->`. The script posts it
+wherever a script command owns the transition (`open-dev-pr`, `handoff-to-pr-review`,
+`open-gate`, `pass-gate`, `skip-gate`).
 
-**Issue comments are status updates, not the source of record** — the real detail
-lives in committed artifacts (the doc files, commits, the issue body for durable
-requirements). Pipeline tooling (this skill, the agent definitions, and any sibling
-tooling the repo tracks alongside them) is tracked in the repo: when a stage touches
-it, commit that change with the related code.
-
+If a stage changes pipeline files the driven repo tracks (its `sdlc-pipeline.config.json`,
+the gate workflow), commit that with the related code. Never edit the plugin itself; flag
+a pipeline problem in your handoff.
 
 ## Rework and blockers — what it means for you
 
-Full routing, resume-message construction, the context-reset replacement and the
-escalation valve moved to `references/rework.md` on 2026-09-13. They are the
-**orchestrator's** decisions — which stage owns a defect, whether a bounce trips the
-valve, what a replacement is told — and they were 198 lines in the file every stage
-agent reads.
+Routing, resume messages, replacements and the escalation valve belong to the
+orchestrator (`references/rework.md`). What applies to you:
 
-What binds you, as a stage agent:
-
-- **Genuine ambiguity → stop and report the specific question in your final message.**
-  Never guess, never open an issue, never change project fields. The orchestrator
-  resolves it with whichever earlier stage owns the question and resumes you with the
-  answer. Stopping this way is a terminal state, not a failure.
-- **Nothing spins off a separate ticket.** Every problem found before merge is fixed
-  inline by the stage that owns it. You will be resumed with the finding rather than
-  replaced, because you still hold the context.
-- **When you are resumed with a review finding, fix the class, not the listed
-  instance.** A same-class repeat bounce escalates; a patched instance invites the next
-  round. Verify the finding against the real code before you act on it: a review
-  finding is a claim to check, not an order to obey. If it is right, fix the whole
-  class; if it is wrong, say so with the evidence that shows it, rather than agreeing
-  performatively or complying silently.
-- **A rework round runs at full rigour.** It is never the place for a cheaper model,
-  a skipped suite, or a shortened document check.
-
+- **Genuine ambiguity:** stop and put the specific question in your final message
+  (outcome `blocked`; `needs-human` when only the operator can answer). Never guess.
+  Stopping this way is a terminal state, not a failure.
+- **Nothing spins off a separate ticket.** The owning stage fixes every pre-merge
+  problem inline. You will be resumed with the finding, not replaced.
+- **When you are resumed with a review finding, verify it against the real code first.**
+  If it is right, fix the whole class, not just the listed instance: a same-class repeat
+  bounce escalates. If it is wrong, say so and show the evidence. Never agree
+  performatively or comply silently.
+- **A rework round runs at full rigour:** no skipped suite, no shortened document check.
 
 ## Stage exit actions live in the agent files
 
-Each stage's exit actions moved into that stage's own `agents/sdlc-*.md` on
-2026-09-13. They were 459 lines here — more than a third of this file — and every
-agent read all of them to use one eighth. A rule is honoured where it is read, and an
-agent is guaranteed to read its own definition.
-
 | Stage | Its exit actions |
 |---|---|
-| `product` | `agents/sdlc-product.md` |
-| `product-review` | `agents/sdlc-product-review.md` |
-| `architecture` | `agents/sdlc-architecture.md` |
-| `arch-review`, `lld-review` | `agents/sdlc-design-review.md` |
-| `lld` | `agents/sdlc-lld.md` |
-| `development` | `agents/sdlc-development.md` |
-| `pr-review` | `agents/sdlc-pr-review.md` |
+| `product` | `agents/product.md` |
+| `product-review` | `agents/product-review.md` |
+| `architecture` | `agents/architecture.md` |
+| `arch-review`, `lld-review` | `agents/design-review.md` |
+| `lld` | `agents/lld.md` |
+| `development` | `agents/development.md` |
+| `pr-review` | `agents/pr-review.md` |
 
-**What stayed the orchestrator's**, in every case:
-
-- **Opening a human-review gate**, after the agent returns — never the agent's
-  (`references/gates.md`).
-- **Posting `start-comment <n> --role <role>`** before a review stage, since the
-  review agent is dispatched after the marker exists.
-- **`publish-doc`, `create-lld-tasks`, `merge-lld-doc <epic>`, `close-issue`** on the
-  LLD-phase Task's clean `lld-review`, which publish the doc, create the Tasks and
-  advance them to `development` without claiming them (see SKILL.md, "After the
-  subagent returns").
-- Exit actions update the same issue's fields in place — **never a new issue for a
-  normal handoff.**
-
-Worktree paths in those files use the config's `pipeline.worktrees` defaults
-(`<root>/<epicPrefix><n>` → `/tmp/sdlc-epic-<n>`, `<root>/<devPrefix><n>` →
-`/tmp/sdlc-dev-<n>`); see `references/parallelism.md`.
+Worktree paths use the `pipeline.worktrees` defaults: `<root>/<epicPrefix><n>` →
+`/tmp/sdlc-epic-<n>`, `<root>/<devPrefix><n>` → `/tmp/sdlc-dev-<n>`
+(`references/parallelism.md`).

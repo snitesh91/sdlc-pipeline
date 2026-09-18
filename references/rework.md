@@ -1,216 +1,156 @@
 # Rework, blockers and escalation — the orchestrator's routing
 
-Read when a review returns a finding, a stage reports ambiguity, a bounce may trip the
-escalation valve, or you are constructing a resume message for a replacement agent.
-Moved out of `references/stage-playbooks.md` on 2026-09-13: every stage agent reads
-that file in full, and none of these are a stage agent's decisions. The stage-facing
-half stayed there as "Rework and blockers — what it means for you".
+A deviation from an Epic's approved `architecture.md` has its own path
+(`references/epics.md`, "Architecture deviation escalation"); all other rework is here.
 
-(A design-level deviation from an Epic's approved `architecture.md` — found by the
-LLD-phase Task, a Task in `development`, or a review — has its own path, an
-Architecture revision Task: `references/epics.md`, "Architecture deviation escalation".
-Everything else below applies to any child of any epic.)
+## Routing a finding
 
-If a later stage (`arch-review`/`lld-review`, `pr-review`) finds a real
-problem attributable to an earlier stage, **do not spawn a fresh subagent and do not
-open a separate GitHub issue.** The orchestrator resumes the original subagent owning
-the responsible stage (via `SendMessage` to its tracked ID) with the specific finding
-— that agent still has full working context and only needs to address the delta.
+When a later stage (`arch-review`/`lld-review`, `pr-review`) finds a problem owned by an
+earlier stage, **do not spawn a fresh subagent and do not open a GitHub issue.** Resume
+the original agent that owns the responsible stage (`SendMessage` to its tracked ID) with
+the specific finding.
 
-- **A stage agent hits genuine ambiguity mid-work** → it stops and reports the
-  specific question in its final message rather than guessing. The orchestrator
-  resumes whichever earlier stage owns the question (product for requirements,
-  architecture/lld for design), gets the decision, and resumes the blocked agent with
-  the answer.
-- **A review finds a defect** → resume the stage that produced it with a specific,
-  actionable finding (file/line references), wait for the fix, re-run the check that
-  failed (often by resuming the reviewing stage's own agent).
-- **A review finds a deeper problem** (correct implementation, wrong requirement;
-  scope conflict) → resume **product** (or **architecture** for design). That agent
-  decides inline: revise the requirement and docs, document an accepted limitation,
-  or conclude it genuinely needs the human — only then `mark-needs-human` and park.
+- **A stage agent reports genuine ambiguity** → resume the earlier stage that owns the
+  question (product for requirements, architecture/lld for design), get the decision,
+  then resume the blocked agent with the answer.
+- **A review finds a defect** → resume the producing stage with a specific, actionable
+  finding (file/line references), wait for the fix, then re-run the failed check (often
+  by resuming the reviewer's own agent).
+- **A review finds a deeper problem** (right implementation, wrong requirement; scope
+  conflict) → resume **product** (or **architecture** for design). It decides: revise
+  the requirement and docs, document an accepted limitation, or — only if it genuinely
+  needs the human — return `needs-human`; you then `mark-needs-human` and park.
 
-**Where a finding this unit will not fix goes.** Reviewers keep rediscovering this, so
-it is written down now: **a finding lands on the issue that will act on it**, not in the
-thread of the PR that is closing. In order of preference —
+## Where a finding this unit will not fix goes
 
-1. **The sibling that owns the surface**, if one is open. A `pr-review` finding about a
-   config override that silently voids a sibling's planned change, posted on *that
-   sibling*, becomes half of the sibling's design instead of a note in a merged PR.
+Everything found before merge on this unit is fixed inline by resuming the responsible
+stage. Only the residue this unit will not fix goes elsewhere — **on the issue that will
+act on it**, in this order:
+
+1. **The open sibling that owns the surface.**
 2. **The epic**, when no single child owns it and it must be settled before the epic
    closes.
-3. **The standing backlog epic** (the one labelled with the config's
-   `pipeline.labels.standing` label) via `create-issue --parent <standing-epic-number>`,
-   for anything real but out of this epic's scope — an `lld` is right to refuse to file
-   findings against another component into the issue it is designing.
+3. **The standing backlog epic** (labelled `pipeline.labels.standing`), for anything
+   real but out of this epic's scope.
 
-**Never leave it only in a closing PR's thread or in a comment on an issue that is
-about to close.** That is a finding deleted: a coverage gap that lives only inside a
-review comment on an already-closed issue is invisible to every sibling that needs it,
-and survives only if one reviewer happens to notice and carry it over by hand (see
-`references/history.md`). This is not the "spin off a ticket instead of fixing it" path
-(`SKILL.md`: everything found *before merge on this unit* is still fixed inline by
-resuming the responsible stage) — it is where the residue goes once this unit is done
-with it.
+When this needs a new issue, the **orchestrator** files it with `create-issue --parent
+<owning epic> --type Bug|Task` (`references/operations.md`, "Issue taxonomy").
 
-**When the original agent cannot be resumed, the replacement still starts from the
-existing work — never from zero.** The resume-the-owner rule above assumes the owning
-agent is alive and holds its context. Sometimes it does not: the session crashed, or the
-agent had to be stopped (a stage agent that parks repeatedly waiting on a background job
-must be `TaskStop`ped, and its replacement dispatched fresh — see "a subagent cannot wait
-across turn boundaries").
+**Never leave it only in a closing PR's thread or on an issue about to close** — no
+sibling will ever see it there.
 
-A fresh agent has none of that context, and its default behaviour is to do the stage
-from the beginning. That is the wrong output twice over: it burns the stage's cost again,
-and it can silently discard work that already passed review. Replacement agents have had
-to be told by hand what was already committed; nothing in the process required it (see
-`references/history.md`).
+## Replacing an agent that cannot be resumed
 
-So a replacement dispatch must carry, explicitly:
+When the owning agent is gone (session crashed, or it was `TaskStop`ped — e.g. a stage
+agent that keeps parking on a background job), the replacement **starts from the
+existing work, never from zero**. Its dispatch must carry:
 
-- **The doc that already exists and its status** — "`lld.md` is at `<sha>` and passed
-  `lld-review` clean in round 2; it is your design, implement it" or "…and has one
-  blocking finding, quoted below." Re-entering `lld` for rework means *re-reading the
-  approved design and addressing the delta*, never re-deriving it.
-- **What is already committed on the branch**, by SHA and one line each, and that it is
-  good — the replacement builds on it rather than reworking it.
-- **The specific finding**, quoted, with its file:line references.
-- **What the earlier rounds settled and must not be re-run**, same inventory the scoped
-  review round gets above.
-- **Why the original agent is gone**, when the reason is a trap the replacement could
-  walk into as well (a stalled install, a suite run that exceeds a tool timeout).
+- **The existing doc and its status** — e.g. "`lld.md` is at `<sha>` and passed
+  `lld-review` clean in round 2; implement it", or "…has one blocking finding, quoted
+  below". Rework means addressing the delta, never re-deriving the design.
+- **What is already committed on the branch**, by SHA with one line each, and that it is
+  good — build on it.
+- **The specific finding**, quoted, with file:line references.
+- **What earlier rounds settled and must not be re-run.**
+- **Why the original agent is gone**, when the cause is a trap the replacement could hit
+  too (a stalled install, a suite run exceeding a tool timeout).
 
-The test for a good replacement prompt: it should be indistinguishable, in what it asks
-for, from a `SendMessage` to the original agent. If it reads like a fresh assignment,
-the stage will be redone.
+Test: it must ask for what a `SendMessage` to the original would — not a fresh assignment.
 
-**Rework rounds are scoped, not repeated from zero.** A confirming round that
-re-derives the whole original review costs roughly 3× the wall clock for no extra
-rigour — a measured scoped pass ran in under a third of the original round's time and
-still found a blocking issue. The resume message should:
+## Rework rounds are scoped, not repeated from zero
 
-- **Enumerate what the prior round settled** and say plainly "accept these, do not
-  re-run" — the inventory, the measurements, the fits-vs-deviates call, the overlap
-  enumeration, whichever apply.
+The resume message must:
+
+- **List what the prior round settled** and say "accept these, do not re-run" (the
+  inventory, measurements, fits-vs-deviates call, overlap enumeration — whichever apply).
 - **Scope the new pass to the delta**, plus a regression check that the delta could not
-  have disturbed what was accepted. Prove it, don't assume it: a good scoped round
-  opens with `git diff --stat origin/main` showing the change was doc-only.
+  have disturbed what was accepted. Prove it: open with `git diff --stat origin/main`
+  showing the change was doc-only.
 - **Re-derive fully when the delta is code**, or when it touches the premise an earlier
-  conclusion rested on. A doc-only delta cannot move a suite result; a code delta can.
+  conclusion rested on.
 
-**Escalation valve, per stage pairing**: each recurring problem gets its own counter
-(e.g. `arch-review` <-> `architecture`, `pr-review` <-> `development`,
-`sync-branch-conflict` <-> `development`). The valve has **two stages and a ceiling** —
-`pipeline.escalation.replaceAt` bounces with the incumbent agent (default 3), then a
-replacement up to `needsHumanAt` (default 6); `pairing-counts` echoes both:
+## Escalation valve
 
-- **Bounces 1–3** — resume the pairing's own tracked agent, as always.
-- **At the third bounce without resolution** — do *not* park. **Retire the incumbent
-  and dispatch a replacement agent** for that stage (see "Context-reset replacement"
-  below). The counter does not reset; the replacement owns bounces 4–6.
-- **At the sixth bounce without resolution** — stop looping: `sdlc_next.py
-  mark-needs-human <n> --reason "..."` summarizing the repeated pattern *and* naming
-  what the replacement round changed and did not change, park the issue, return to
-  Step 1.
+Each recurring problem gets its own counter per stage pairing (e.g. `arch-review` <->
+`architecture`, `pr-review` <-> `development`, `sync-branch-conflict` <->
+`development`). Thresholds: `pipeline.escalation.replaceAt` (default 3) and
+`needsHumanAt` (default 6); `pairing-counts` echoes both.
 
-**One replacement per pairing per unit.** The reset is a one-shot instrument, not a
-loop — a second respawn at bounce 6 is the same intervention that already failed, and
-the failure is then evidence the problem is not context rot.
+| Bounce | Action |
+|---|---|
+| 1–3 | Resume the pairing's own tracked agent. |
+| 3rd unresolved | Do **not** park. Retire the incumbent and dispatch a context-reset replacement (below). The counter does not reset; the replacement owns bounces 4–6. |
+| 6th unresolved | `python3 "$SDLC" mark-needs-human <n> --reason "..."` — summarize the repeated pattern **and** what the replacement round changed and did not change. Park the issue, return to Step 1. |
 
-For the two marker-backed pairings — `pr-review <-> development` and
-`sync-branch-conflict <-> development` — `sdlc_next.py pairing-counts <issue>`
-computes the strike counts mechanically from the issue's own comment markers
-(`rework_since_last_clean` resets on every clean review), so those counters survive
-session boundaries; consult it before deciding a bounce is the third or the sixth. The
-unmarked pairings stay the orchestrator's own session-scoped count.
+- **One replacement per pairing per unit.** Never respawn a second one at bounce 6.
+- **Read counts from `python3 "$SDLC" pairing-counts <issue>` before deciding a bounce is
+  the third or sixth.** It computes them from comment markers, so they survive sessions:
+  `pr-review` <-> `development` (`pr_review_rework_since_last_clean`, reset by every
+  clean review), `sync-branch-conflict` <-> `development` (`sync_conflict_count`), and
+  the design pairings `product-review` <-> `product`, `arch-review` <-> `architecture`,
+  `lld-review` <-> `lld` (per role under `design_review`). Unmarked pairings (e.g.
+  `testing` <-> `development`) are your own session-scoped count.
 
-**Context-reset replacement — how bounce 4 differs from bounce 2.** The generic
-replacement rule above ("the replacement still starts from the existing work — never
-from zero") exists for an agent that *died*: continuity is the goal, because its
-context was good. This one is the opposite case. The incumbent is being retired
-precisely *because* its context is the suspect — three rounds of its own reasoning are
-now sitting in its history, and each round has been anchoring the next on conclusions
-that keep turning out wrong in the same narrow area.
+### Context-reset replacement
 
-**What resets is the reasoning, not the work.** This is a context reset, never a restart
-from zero: a replacement that re-opens settled ground re-runs the whole stage at full
-cost and hands `arch-review` a brand-new document to review from scratch — which is how
-a stuck pairing becomes an unbounded one. The replacement **inherits every artefact and
-discards only the incumbent's rationale**. Its dispatch carries:
+The incumbent's own reasoning is the suspect. **Reset the reasoning, not the work** — the
+replacement inherits every artefact and discards only the incumbent's rationale. Its
+dispatch carries:
 
-- **The requirements** — `product.md`, and the acceptance criteria in full. The
-  replacement is solving the same problem, not re-scoping it.
-- **The current document as the thing to revise** — `architecture.md` (or `lld.md` /
-  the branch diff) at its current SHA, named as *its* document to edit in place. It
-  revises the disputed sections; it does not rewrite the file.
-- **The review feedback, complete** — every outstanding finding verbatim with its
-  citations, and the earlier rounds' findings too, since the recurrence across rounds
-  is the actual signal.
-- **The class, in one sentence** — what has recurred across all three rounds, as the
-  thing to close structurally rather than instance by instance.
-- **What is settled and out of bounds** — the sections earlier rounds got right, named
-  explicitly. Those are not reopened.
-- **Why the incumbent was retired**, so the replacement knows it is being asked for a
-  different reading of the disputed area, not a faster round 4.
+- **The requirements** — `product.md` and the acceptance criteria in full.
+- **The current document as the thing to revise** — `architecture.md` (or `lld.md` / the
+  branch diff) at its current SHA, named as *its* document to edit in place. It revises
+  the disputed sections; it does not rewrite the file.
+- **The complete review feedback** — every outstanding finding verbatim with citations,
+  plus earlier rounds' findings (the recurrence is the signal).
+- **The class, in one sentence** — what has recurred across the rounds, to close
+  structurally rather than instance by instance.
+- **What is settled and out of bounds** — the sections earlier rounds got right, named.
+- **Why the incumbent was retired** — so it gives a different reading of the disputed
+  area, not a faster round 4.
 
-What is **withheld** is narrow and deliberate: the incumbent's rationale for why its
-answers were right, its rejected-option reasoning, and its account of the disputed code.
-The replacement re-derives *that one area* from the files themselves — that
-re-derivation is the entire point of the swap, and inheriting the frame defeats it.
+**Withhold** only the incumbent's rationale for why its answers were right, its
+rejected-option reasoning, and its account of the disputed code. The replacement
+re-derives that one area from the files.
 
-`TaskStop` the incumbent before dispatching, so two agents never hold the same worktree.
+`TaskStop` the incumbent before dispatching — two agents never hold one worktree.
 
-The test for a good context-reset prompt: it asks for a fresh reading of one named area
-inside an existing document, and a reader could not mistake it for a fresh assignment.
-If it reads like round 3 continuing, it produces round 3's answer again; if it reads
-like round 1, the loop never terminates.
+Test: it asks for a fresh reading of one named area inside an existing document — neither
+round 3 continued nor round 1 restarted.
 
-**The counter counts bounces; the thing that actually repeats is a *class*.** Three
-bounces on unrelated defects is a healthy review. Three bounces on three instances of
-one class means every fix is landing at instance level, and the counter cannot tell the
-difference — it will trip on the third instance on a unit whose real remedy is one
-structural change. That is exactly what the context-reset replacement is for, and why
-the third bounce swaps the agent instead of parking the unit. So:
+### The counter counts bounces; the thing that actually repeats is a class
 
-- **Same-class recurrence must be a marker, not a sentence.** This bullet used to ask
-  only for prose in the verdict ("REWORK for one new blocking finding *of the same
-  silent-skip class*") — and on #157's #504 (2026-09-14) a reviewer wrote exactly that,
-  by name, "escalate on the pattern," at two separate rounds, and nothing escalated,
-  because nothing parses a verdict's prose on every resume decision. `record-design-review`
-  and `record-pr-review` now take `--same-class-recurrence`: pass it when this round's
-  blocking finding is the same defect class as an earlier round's on this unit, and it
-  lands in the marker `pairing-counts` reads back as `same_class_recurrence_count`.
-  **Any count >= 1 there is its own escalation signal** — check it before every resume
-  decision on a pairing with a nonzero rework count, the same way `rework_since_last_clean`
-  is already checked, rather than re-reading the verdict prose for the sentence.
-- **The orchestrator's resume message then asks for the class, not the case.** Units
-  handled that way have settled within one round: a `development` that restructures so
-  the guarded set is derived live and an unknown case fails instead of passing ("fixes
-  the bounced class at the root, not at the symptom"); an `lld` that deletes a citation
-  which is correct *today* because its shape rots, and sweeps the next instance before
-  it can exist (see `references/history.md`).
-- **A same-class recurrence triggers the context-reset replacement (or, if the
-  replacement has already been spent on this pairing, `mark-needs-human` directly) as
-  soon as `same_class_recurrence_count` is nonzero — do not wait for the generic
-  bounce number to reach 3 or 6.** The generic thresholds are a backstop for problems
-  with no other signal; a same-class marker *is* the stronger signal, and #504 was
-  still on its regular counter (bounce 4, replacement already used at bounce 3) when a
-  fourth same-class instance landed. The class, not the instance, is what the
-  replacement — or the `mark-needs-human` reason — names.
+Three unrelated defects is healthy review; three instances of one class means fixes land
+at instance level — what the context-reset replacement is for.
 
-**Exception — `pr-review` <-> `development` only: test-only findings may
-merge-and-file.** On what would otherwise be the escalating sixth bounce: if every
-outstanding finding is a **test/verification-only gap** (missing/weak coverage, an
-environment limitation, a flaky assertion) and **not** a defect in shipped production
-code (`pr-review` must have independently re-verified the code sound), then file a
-follow-up issue (`create-issue --parent <epic>`, full detail on what's untested and
-why) and merge normally, referencing the follow-up in the merge comment. **Never
-applies** to correctness, security, data-integrity, or unmet-requirement findings —
-those always escalate.
+#### Same-class recurrence must be a marker, not a sentence
 
-**Genuine cross-issue dependency** — the one case resuming can't fix:
-`sdlc_next.py mark-blocked <issue> --dep <dep-issue>` records the native `blockedBy`
-relationship and posts the comment. Nothing else to maintain: `next-action` derives
-blocked-ness live from the relationship, so the issue becomes eligible on its own the
-moment the blocker closes.
+- Reviewers pass `--same-class-recurrence` to `record-design-review` /
+  `record-pr-review` when this round's blocking finding is the same defect class as an
+  earlier round's on this unit. `pairing-counts` reads it back as
+  `same_class_recurrence_count`. Never rely on verdict prose for this.
+- **Check `same_class_recurrence_count` before every resume decision** on a pairing with
+  a nonzero rework count.
+- **Any count ≥ 1 escalates immediately**, without waiting for bounce 3 or 6: dispatch
+  the context-reset replacement, or — if this pairing's replacement is already spent —
+  `mark-needs-human`. Name the class, not the instance, in the replacement prompt or the
+  reason.
+- Every resume message on such a pairing asks the agent to fix the class at the root
+  (e.g. derive the guarded set live so an unknown case fails instead of passing), not
+  the listed case.
 
+## Exception — test-only findings may merge-and-file (`pr-review` <-> `development` only)
+
+On what would otherwise be the escalating sixth bounce: if **every** outstanding finding
+is a test/verification-only gap (missing/weak coverage, environment limitation, flaky
+assertion) and `pr-review` has independently re-verified the production code sound,
+file a follow-up (`create-issue --parent <epic> --type Task`, full detail on what's untested and
+why), merge normally, and reference the follow-up in the merge comment. **Never** for
+correctness, security, data-integrity or unmet-requirement findings — those always
+escalate.
+
+## Genuine cross-issue dependency
+
+The one case resuming can't fix: `python3 "$SDLC" mark-blocked <issue> --dep <dep-issue>`
+records the native `blockedBy` edge and posts the comment. `next-action` derives
+blocked-ness live, so the issue becomes eligible on its own when the blocker closes.
