@@ -84,7 +84,7 @@ They are stdlib Python, and they fail open on internal errors.
 | `PreToolUse` (Bash) | Denies hand-run `gh api graphql`, `gh issue create/edit/close/reopen`, `gh pr create/merge/ready/close`, mutating `gh api`, `git worktree add` (except `--detach`), force-push and rebase, naming the `python3 "$SDLC"` command to use instead; limits each `sdlc:<role>` agent to its role's control-plane commands and review roles to no git writes. Only each segment's leading words count |
 | `PreToolUse` (Agent) | Sets every `sdlc:*` agent's `model` from `hooks/model_policy.json` (overridable per role by `pipeline.models` / `pipeline.fanout`); denies nested stages and fan-out a role may not do or has exhausted; lets the policy's `explore` roles (`development`, `lld`) launch a read-only `Explore` search |
 | `SubagentStart` | Gives each `sdlc:*` agent `$SDLC`, `docRoot`, `requirementsDir`, the references path and the `SDLC-RESULT` format |
-| `SubagentStop` | An `sdlc:*` agent cannot stop until its final message ends with `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "done\|clean\|rework\|blocked\|needs-human\|failed"}`; records every finished agent's metrics |
+| `SubagentStop` | An `sdlc:*` agent cannot stop until its final message ends with `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "done\|clean\|rework\|blocked\|needs-human\|failed"}` (optional `"next"`/`"why"`: a standing child's recommended next stage); records every finished agent's metrics |
 | `SessionEnd` | Records the orchestrator's (main thread's) metrics |
 
 ## Tunables
@@ -103,7 +103,7 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `pipeline.branches.*` / `pipeline.worktrees.*` | `issue-` / `epic-`; `/tmp/sdlc-dev-<n>` etc. | Branch and worktree naming |
 | `pipeline.locks.*` | `{worktreesRoot}/.sdlc-locks`, 600 s | Per-branch `flock` |
 | `pipeline.stack.*` | `enabled: false` | Per-epic isolated runtime stack |
-| `pipeline.gates.skipConfidenceThreshold` / `.requiresHumanGateA` | 80 / `true` | Gate B skip bar; whether Gate A needs a human |
+| `pipeline.gates.skipConfidenceThreshold` / `.requiresHumanGateA` / `.requiresHumanGateB` | 80 / `true` / `true` (`standing` profile: both `false`) | Gate B skip bar; whether Gate A / Gate B needs a human (else `waive-gate`) |
 | `pipeline.productWip.maxGateAPending` | 5 | Open Gate A PRs allowed repo-wide |
 | `pipeline.escalation.replaceAt` / `.needsHumanAt` | 3 / 6 | Bounces before a context-reset replacement / `needs-human` |
 | `pipeline.continuous.cycleCap` | 8 | Merges per unattended run before pausing |
@@ -119,10 +119,12 @@ The `SubagentStop` and `SessionEnd` hooks append one JSON line per finished agen
 `$CLAUDE_PLUGIN_DATA/metrics/<owner>__<repo>.jsonl` (never the driven repo's tree): per-model
 tokens, estimated cost (prices in `hooks/_metrics.py`), duration, turns, tool calls, peak
 context (the largest single request), the `SDLC-RESULT` issue/stage/outcome, and the
-control-plane run id (`next-action --run-id`) when the session drives one.
+control-plane run id (`next-action --run-id`) when the session drives one. `--by route`
+groups each issue under the stages its agents ran (e.g. `architecture>development>pr-review`),
+so `report --epic <standing epic> --by route` compares routed flows' rework rate with full ones.
 
 ```bash
-python3 scripts/sdlc_metrics.py report [--repo o/r] [--epic N] [--run ID] [--since YYYY-MM-DD] [--by role|model|issue|epic]
+python3 scripts/sdlc_metrics.py report [--repo o/r] [--epic N] [--run ID] [--since YYYY-MM-DD] [--by role|model|issue|epic|route]
 python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<project>   # history, idempotent
 ```
 

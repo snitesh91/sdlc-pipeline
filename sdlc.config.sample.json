@@ -128,7 +128,8 @@
     "gates": {
       "_comment": "Global gate defaults; a profile's own `gates` override these for epics that match it.",
       "skipConfidenceThreshold": 80,
-      "requiresHumanGateA": true
+      "requiresHumanGateA": true,
+      "requiresHumanGateB": true
     },
     "productWip": {
       "_comment": "Repo-wide cap on units sitting at Stage=Product with an open Gate A (awaiting-human-review / feedback-received). next-action and list-design-ready stop starting fresh product delegations at the cap; 0 disables.",
@@ -172,9 +173,9 @@
         "childrenNeedArchitectedEpic": false,
         "closes": false,
         "gates": {
-          "_comment": "A standing/RTB backlog: lower the Gate B skip bar and let children through Gate A without a human.",
-          "skipConfidenceThreshold": 90,
-          "requiresHumanGateA": false
+          "_comment": "A standing/RTB backlog: no human gate -- the orchestrator waives both (waive-gate).",
+          "requiresHumanGateA": false,
+          "requiresHumanGateB": false
         }
       },
       {

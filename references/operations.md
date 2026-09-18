@@ -34,9 +34,9 @@ Epic or Initiative is never flagged for lacking a parent.
 
 | Field | Values | Rules |
 |---|---|---|
-| Stage | `Product` / `Architecture` / `Development` / `Testing` / `PR Review` / `LLD` | Sole source of `current_stage()`. Set by `claim`, `set-stage`, `merge-lld-doc`; `open-dev-pr` sets `PR Review`. `arch-review`/`lld-review` write no value of their own. `Testing` is retired (only read, for issues stranded there). `next-action` sets `default_stage()` on first sight: `product` for an Initiative's child, standing child or parentless issue; `architecture` for a standing-child or parentless `Bug`. A non-standing Epic's children get **no** default (phase-Tasks via `set-stage`, Tasks via `merge-lld-doc`; a late Stage-less child is reported `unstaged`). Cleared on close, and on the Epic when it becomes `epic:architected`. |
+| Stage | `Product` / `Architecture` / `Development` / `Testing` / `PR Review` / `LLD` | Sole source of `current_stage()`. Set by `claim`, `set-stage`, `route`, `merge-lld-doc`; `open-dev-pr` sets `PR Review`. `arch-review`/`lld-review` write no value of their own. `Testing` is retired (only read, for issues stranded there). `next-action` sets `default_stage()` on first sight: `product` for an Initiative's child or parentless issue. A standing child gets none — `next-action` returns `route`. A non-standing Epic's children get **no** default (phase-Tasks via `set-stage`, Tasks via `merge-lld-doc`; a late Stage-less child is reported `unstaged`). Cleared on close, and on the Epic when it becomes `epic:architected`. |
 | Pipeline Status | `Todo` / `In Progress` / `Awaiting Human Review` / `Feedback Received` / `Needs Human` / `Done` | `In Progress` = claimed by a live run (crash-recovery marker). `Awaiting Human Review` / `Feedback Received` = paused at an open gate (both gate-pending). `Needs Human` = only the operator can decide. `Todo` is set by `create-issue` (and the workflow on open), and on a unit parked or advanced unclaimed; `Done` on close. Blocked is not a value — it is derived from `blockedBy`. |
-| Type | `Task` / `Bug` / `Feature` / `Epic` / `Initiative` | Mandatory; a defect is type `Bug`, never a `Task` with a label. `Bug` fast-tracks to `architecture` only for a standing-epic child or parentless issue; under a non-standing Epic the orchestrator routes it. |
+| Type | `Task` / `Bug` / `Feature` / `Epic` / `Initiative` | Mandatory; a defect is type `Bug`, never a `Task` with a label. Routing ignores it. |
 | Priority | `Urgent` / `High` / `Medium` / `Low` | Set by `create-issue`; empty = `Medium`. Orders children. |
 | Effort | `High` / `Medium` / `Low` | Set by `create-issue`; read by nothing. `High` alone is not a reason to split a Task — footprint collision is (`references/epics.md`). |
 | `blockedBy` | native relationship | ≥ 1 open blocker = not eligible; clears when the blocker closes. Set with `mark-blocked <n> --dep <m>`. |
@@ -51,10 +51,10 @@ phase-Tasks (`SKILL.md`); it must carry the epic classification.
 Ordered array; `resolve_profile(epic)` returns the first entry whose `match`
 (`{ "label": "<name>" }` or `"*"`) holds. Toggles: `driven`, `epicLevelPhase` (`false` =
 standing), `childrenNeedArchitectedEpic`, `closes`, and `gates`
-(`skipConfidenceThreshold`, `requiresHumanGateA`). Omitted toggles inherit shipped
+(`skipConfidenceThreshold`, `requiresHumanGateA`, `requiresHumanGateB`). Omitted toggles inherit shipped
 defaults (`legacy`, `standing`, catch-all `default`); `gates` inherit `pipeline.gates`. A
 profile applies only to an issue `pipeline.classification` already calls an epic.
-Field reference: `sdlc.config.sample.json`. `product-review` is universal, not a toggle.
+Field reference: `sdlc.config.sample.json`. `product-review` is not a toggle.
 
 ## Assignee convention
 

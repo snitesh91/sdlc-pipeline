@@ -78,6 +78,6 @@ Then the orchestrator routes:
 
 - **REWORK** → resumes the `product` agent with the blockers, then re-review. The `product-review ↔ product` pairing counts toward the escalation valve (`references/rework.md`).
 - **CLEAN**, `requiresHumanGateA: true` (default; every Product-Roadmap Task) → human Gate A: `open-gate <n> ... --doc product.md --next-stage architecture`.
-- **CLEAN**, `requiresHumanGateA: false` (standing/RTB profile) → `auto-pass-gate-a <n> --summary "..."` (`references/gates.md`, "Gate A configurability").
+- **CLEAN**, `requiresHumanGateA: false` (standing/RTB profile) → `waive-gate <n> --stage product --summary "..."` (`references/gates.md`, "Waived gates").
 
 End your final message with the terse handback (`stage-playbooks.md`, "The handback is terse"); its last line is `SDLC-RESULT: {"issue": <n>, "stage": "product-review", "outcome": "clean"}` — `rework` on a REWORK verdict, `failed` if you could not complete the review.
