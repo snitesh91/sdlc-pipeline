@@ -89,6 +89,8 @@ human gates on product/architecture are separate and unaffected.
   `lld-review` records clean, or `arch-review` records clean above the skip threshold /
   under a profile that waives Gate B; otherwise the human merges it at Gate B. It runs no
   code checks, keeps the branch, and never closes the Task. `merge-pr` refuses a phase-Task.
+  A gate PR the operator told you to merge goes through `merge-gate --operator-confirmed`
+  (`references/gates.md`, "Merging a gate PR for the operator").
 - Merge only with `merge-pr`, run by the orchestrator after `pr-review` records clean — a
   reviewer never merges the diff it reviewed. It posts the audit-trail comment on the PR
   and "Merged via #<n>" on the issue, and closes a child merged into an epic branch.

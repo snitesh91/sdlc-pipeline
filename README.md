@@ -134,7 +134,11 @@ python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<proj
 ## How it runs
 
 - **Initiative-driven**: `product` writes one IRD for the Initiative; after Gate A the
-  orchestrator cuts independently shippable Epics from it.
+  orchestrator cuts independently shippable Epics from it, ordered by native `blockedBy` edges
+  (`create-issue --blocked-by`). `/sdlc:run <initiative>` then loops: `next-action` returns
+  `cut-phase-tasks` for the next runnable Epic that has none and `run-epic` to drive it, one Epic
+  at a time under one run id and one `maxTasksPerRun` cap (`--skip-epic` parks a stalled one).
+  `merge-gate --operator-confirmed` merges a gate PR, only when the operator says to.
 - **Engineering-driven**: a bare Epic with its scope in the body starts at architecture.
 - Each non-standing Epic owns a branch `epic-<n>`, created eagerly, and **every child branches
   from it**. Its `architecture` and `lld` run as their own phase-Tasks that author

@@ -29,7 +29,8 @@ What passing/skipping does depends on the issue:
   (`phase_task_complete: true`); a Product-Roadmap Task just closes. If `architecture.md`
   is not on `epic-<n>` (or the design PR would not merge — `design_pr` in the result) the Task
   stays open (`phase_task_complete: false`, with a `reason`): fix it (`behind_base` →
-  `sync-branch <n>`), then re-run the command.
+  `sync-branch <n>`; `review_stale` → re-run the review on the new head and record it), then
+  re-run the command.
 
 The **LLD-phase Task has no gate**: `lld-review` clean → `finish-lld` merges its design PR
 (`references/epics.md`).
@@ -111,32 +112,56 @@ PR the pipeline merges itself is skipped):
 
 The same workflow runs `mark-feedback-received --pr <n>` when real feedback lands on an
 open gate PR, flipping Pipeline Status to `Feedback Received`. Visibility only — live PR
-content decides whether there is something to address. `mark-feedback-addressed
-<issue>` flips it back (step 5 below).
+content decides whether there is something to address. `mark-feedback-addressed <issue>`
+flips it back; **the orchestrator runs it, never the agent** ("Addressing gate feedback").
 
 ## Addressing gate feedback
 
 Spawn a **fresh** agent of the owning stage (`sdlc:product` or `sdlc:architecture`, Opus)
 — never a resumed one; a gate can sit open for days. Its prompt carries the issue's full
 body/comments, the doc's current content, every unresolved thread's text with its
-anchored diff hunk, and every plain PR comment after the cutoff marker. Instruct it to:
+anchored diff hunk, and every plain PR comment after the cutoff marker. The doc and the PR
+depend on the issue: an Epic's Architecture-phase/revision Task's feedback is on its **design
+PR** `issue-<n>` → `epic-<e>` and the doc is `docs/sdlc/epic-<e>/architecture.md`; a
+Product-Roadmap Task's or standing child's is on its gate PR `issue-<n>` → `main` and the doc
+is `docs/sdlc/issue-<n>/<doc>.md`. Either way the fix lands on `origin/issue-<n>`, which
+updates the open PR (no new PR). Instruct the agent to:
 
-1. Revise the gated doc (`docs/sdlc/issue-<n>/<doc>.md`, or `docs/sdlc/epic-<e>/<doc>.md` for an
-   Epic's Architecture-phase/revision Task) for each piece of feedback from either channel,
-   or state in its reply why something should not be applied — never ignore it silently.
-2. Commit and push to `origin/issue-<n>` (updates the open gate PR; no new PR).
+1. Revise the gated doc for each piece of feedback from either channel, or state in its reply
+   why something should not be applied — never ignore it silently.
+2. Commit and push to `origin/issue-<n>`.
 3. Reply to and resolve each addressed **review thread**: `python3 "$SDLC" resolve-thread
    --thread-id <id> --reply "<summary of the change>"`.
 4. Post one reply **on the PR** covering the plain comments, ending with
    `<!-- gate-comments-processed: <ISO8601 of this comment> -->`.
-5. Post one short **issue** comment (`post-comment <n> --role <its role> --body-file <f>`) naming what was addressed and the new commit SHA,
-   then, as the last action, run `python3 "$SDLC" mark-feedback-addressed <issue>`.
+5. Post one short **issue** comment (`post-comment <n> --role <its role> --body-file <f>`)
+   naming what was addressed and the new commit SHA, then end with `SDLC-RESULT` outcome
+   `done` ("feedback addressed and pushed"). Anything it could not finish is `blocked` /
+   `needs-human` / `failed`. It never runs `mark-feedback-addressed`: that is yours.
+
+**Then you:** on `done`, `transition <n> --expect-stage <the gated doc's stage>` (it verifies
+the push and that the doc is where the gate expects it, and re-syncs the branch); only on
+`ready: true` run `python3 "$SDLC" mark-feedback-addressed <n>`, which returns the issue to
+`Awaiting Human Review`. On any other outcome leave the status at `Feedback Received` and
+handle the outcome as usual (`SKILL.md`, "After the subagent returns").
 
 **Escalation valve**: if the same thread or the same point survives three revisions
 without the human accepting it, dispatch the context-reset replacement for revisions 4–6
 (`references/rework.md`, "Context-reset replacement") with the thread's text, the doc
 SHA and the class of the objection — not the prior agent's rationale. If the sixth
 revision still doesn't land it, `mark-needs-human`.
+
+## Merging a gate PR for the operator
+
+`merge-gate <pr> --issue <n> --stage product|architecture --operator-confirmed` merges an
+open gate PR (Gate A's `issue-<n>` → `main`, or a design PR held for the human). **Run it
+only when the operator explicitly tells you to merge that gate PR** — never on your own
+judgement, never because feedback looks resolved; without `--operator-confirmed` it refuses.
+It also refuses (exit 0) a PR that is not the issue's open gate, a branch behind its base
+(`behind_base` → `sync-branch <n>`, wait for fresh checks, re-run) and required checks that
+are not green. A design PR and a Roadmap Task's gate squash-merge; a standing child's or
+parentless issue's merges as a merge commit; the branch is never deleted. It does not pass
+the gate: `next-action` (or the Action) then returns `pass-gate` for the merged PR.
 
 ## Passing a gate
 
@@ -153,6 +178,10 @@ python3 "$SDLC" pass-gate <n> \
 - On a **phase-Task** it claims nothing: an Architecture-phase/revision Task closes once
   `epic-<n>/architecture.md` is on `epic-<n>`; a Product-Roadmap Task closes. Continue into
   Step 1's next survey.
+- A human may merge an Architecture-phase Task's design PR **before any gate opened**
+  (there is no gate marker). `next-action` returns `pass-gate` with the design PR as
+  `gate_pr` (and `finish-lld` for an LLD-phase Task's); `open-gate` refuses such a PR and
+  names the command. Run what it returns.
 - Pass `next-action`'s `issue`/`gate_pr`/`stage` fields verbatim. `--stage` is the
   gate's owning doc-stage (the doc approved), never the stage you are heading to; the
   command cross-checks it against the gate marker and refuses on mismatch.

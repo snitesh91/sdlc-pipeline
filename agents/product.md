@@ -66,4 +66,6 @@ Both unit kinds are a plain `unit: "issue"` Task and exit the same way:
 | Initiative's Product-Roadmap Task | The whole Initiative, by functional area | Gate A merges to `main`; `pass-gate` closes the Task (no `architecture` claim); the orchestrator cuts Epics (SKILL.md, "Cutting Epics from an approved Initiative") |
 | Standing-epic child | That child | `architecture`; recommend `"next": "development"` when no new component, interface or data model is needed (`stage-playbooks.md`, "The handback is terse") |
 
+**Gate-feedback round** (`references/gates.md`, "Addressing gate feedback"): revise `product.md` on `issue-<n>`, push, resolve the threads you addressed, `post-comment`, and end `done`. Never run `mark-feedback-addressed`; the orchestrator does after `transition`.
+
 End your final message with the terse handback (`stage-playbooks.md`, "The handback is terse"); its last line is `SDLC-RESULT: {"issue": <n>, "stage": "product", "outcome": "done"}` — `needs-human` when you stopped with scoping or undefaultable questions, `blocked` / `failed` per that section.

@@ -123,7 +123,7 @@ the PR description, issue comment, or committed doc. Send these fields and nothi
 
 | `outcome` | Meaning |
 |---|---|
-| `done` | An authoring stage finished and ran its exit actions |
+| `done` | An authoring stage finished and ran its exit actions; on a gate-feedback round, the feedback is addressed and pushed (the orchestrator then runs `mark-feedback-addressed`) |
 | `clean` / `rework` | A review's verdict (CONDITIONAL ACCEPT → `clean`) |
 | `blocked` | Cannot finish without something named outside your stage: a genuine ambiguity an earlier stage owns, a design that does not fit, a dependency, a rejected push |
 | `needs-human` | Stopped for a decision only the operator can make (an escalation, a scope question) |

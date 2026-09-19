@@ -135,7 +135,9 @@ difference is minutes.
   conflict (resume `development`); never blindly retry.
 - `finish-lld` / `create-lld-tasks` returns `conflict` → the numbered doc is not on origin;
   re-run. `merge-design-pr` / `skip-gate` / `waive-gate` return `behind_base` → `sync-branch <n>`
-  (merges `origin/epic-<e>` into the phase-Task's branch), then re-run.
+  (merges `origin/epic-<e>` into the phase-Task's branch), then re-run. `review_stale` → the
+  design PR's doc changed after its review: re-run the review and `record-design-review`.
+  `merge-gate` returns `behind_base` the same way.
 - An `epic-<n>` ← `main` conflict (`close-epic`, `sync-branch --unit epic`) has no stage
   agent: resolve it yourself in the epic worktree, or dispatch a `development` agent for
   that one reconcile — never a child's tracked agent. A clean textual merge is not enough:

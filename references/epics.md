@@ -55,7 +55,10 @@ Task:                    development -> [pr-review] -> auto-merge into epic-<n> 
 3. When `architecture` or `lld` returns, `transition` raises the **design PR**
    `issue-<n>` → `epic-<n>` (`open-design-pr`, marked so it is never mistaken for a gate or
    development PR, no `Closes #`). `arch-review`/`lld-review` review on it and
-   `record-design-review` also comments the outcome there.
+   `record-design-review` also comments the outcome there and stamps the marker with the
+   PR head it reviewed (`sha:`); `merge-design-pr` refuses (`review_stale`) when the head moved
+   and the doc changed since, so re-run the review on the new head and record it again (a
+   base-only `sync-branch` merge does not count).
 4. The **pipeline merges the design PR** (`merge-design-pr`, squash, branch kept):
    `lld-review` clean always; `arch-review` clean only above the profile's skip threshold or
    where Gate B is waived — otherwise `open-gate` gates that same PR and the human merges it
