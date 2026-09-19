@@ -133,7 +133,9 @@ difference is minutes.
   merged; nothing to do.
 - `merge-pr` fails because GitHub reports the PR non-mergeable → treat as a sync
   conflict (resume `development`); never blindly retry.
-- `publish-doc`/`finish-lld` returns `conflict` → the doc is not on origin; re-run.
+- `finish-lld` / `create-lld-tasks` returns `conflict` → the numbered doc is not on origin;
+  re-run. `merge-design-pr` / `skip-gate` / `waive-gate` return `behind_base` → `sync-branch <n>`
+  (merges `origin/epic-<e>` into the phase-Task's branch), then re-run.
 - An `epic-<n>` ← `main` conflict (`close-epic`, `sync-branch --unit epic`) has no stage
   agent: resolve it yourself in the epic worktree, or dispatch a `development` agent for
   that one reconcile — never a child's tracked agent. A clean textual merge is not enough:
@@ -148,7 +150,7 @@ difference is minutes.
 - `worktree-add` result `diverged: true` → unpushed local commits; reconcile
   (`sync-branch`, or push/discard them) and resume. Never `git reset --hard`.
 - Nobody commits to `epic-<n>` by hand and no stage agent works in it; the control
-  plane writes it (`publish-doc`, Task PR merges, `close-epic`).
+  plane writes it (design-PR and Task-PR merges, `create-lld-tasks`, `close-epic`).
 - Every stage pushes its commits to `origin/<branch>` as it goes; never leave commits
   unpushed between stages.
 - **Keeping a branch current:** `transition` runs `sync-branch` before every stage

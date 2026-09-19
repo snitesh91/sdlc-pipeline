@@ -21,7 +21,7 @@ First, Read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md` and the "Epic 
   gone; a doc, script or CI job still pointing at the old shape.
 - **Passing but wrong** — a guard returning the right status for the wrong reason, an empty
   list where an error belonged, a redirect landing somewhere plausible but incorrect.
-- **Architecture conformance** — read the Epic's `architecture.md` in full and check every
+- **Architecture conformance** — read the Epic's `<docRoot>/epic-<n>/architecture.md` (on the branch you are in) in full and check every
   boundary, data-flow and component decision against the running system. A deviation that
   works is still a finding: name each place the system disagrees with the doc.
 

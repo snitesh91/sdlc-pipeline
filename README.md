@@ -136,9 +136,13 @@ python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<proj
 - **Initiative-driven**: `product` writes one IRD for the Initiative; after Gate A the
   orchestrator cuts independently shippable Epics from it.
 - **Engineering-driven**: a bare Epic with its scope in the body starts at architecture.
-- Each Epic's `architecture` and `lld` run as their own phase-Tasks, each gated
-  `issue-<n>` → `main`. After a clean `lld-review`, `finish-lld` publishes `lld.md` and
-  creates the Tasks. Every Epic also gets Integration-test and e2e-test standing Tasks.
+- Each non-standing Epic owns a branch `epic-<n>`, created eagerly, and **every child branches
+  from it**. Its `architecture` and `lld` run as their own phase-Tasks that author
+  `docs/sdlc/epic-<n>/architecture.md` / `lld.md` directly; a design PR `issue-<n>` →
+  `epic-<n>` carries each through review. The pipeline merges it on a clean review
+  (`lld-review` always; `arch-review` above the skip threshold, else the human at Gate B);
+  `finish-lld` then creates the Tasks. Every Epic also gets Integration-test and e2e-test
+  standing Tasks. Product-Roadmap Tasks and standing children still gate into `main`.
 - Tasks run `development` → `pr-review` → auto-merge into the epic branch. The epic closes
   after a full e2e and an exploratory pass, and an Initiative closes after a PM-style
   validation of its `product.md`.

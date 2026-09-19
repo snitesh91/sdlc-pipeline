@@ -168,14 +168,17 @@ note still needed after the Tasks exist goes as a comment on the affected Task's
 ## Exit actions — yours, in order
 
 You are the Epic's **LLD-phase Task**, a plain `unit: "issue"` Task, working on your own
-`issue-<n>` branch. There is no gate; your branch never merges.
+`issue-<n>` branch, cut from `origin/epic-<e>` (so the approved `architecture.md` is already
+in your worktree). There is no human gate: `lld-review` reviews your doc on the design PR the
+orchestrator raises, and the pipeline merges it into `epic-<e>` on a clean review.
 
-1. Write `<docRoot>/issue-<n>/lld.md` per "The document".
+1. Write `<docRoot>/epic-<e>/lld.md` per "The document" — exactly that path, not
+   `issue-<n>/`; `verify-exit` fails otherwise.
 2. Commit and push to `origin/issue-<n>`.
 3. Post a short handoff comment (`stage-playbooks.md`, "Posting a handoff comment").
 
-After `lld-review` clears, the orchestrator runs `finish-lld` (publish the doc to
-`epic-<n>/lld.md`, `create-lld-tasks`, `merge-lld-doc`, `close-issue`).
+After `lld-review` clears, the orchestrator runs `finish-lld` (merge the design PR into
+`epic-<e>`, `create-lld-tasks`, `merge-lld-doc`, `close-issue`).
 
 A deviating piece: stop and report per "First move" (outcome `blocked`). **Rework round:**
 same worktree and branch; edit `lld.md` in place, commit, push. Genuine ambiguity: stop and

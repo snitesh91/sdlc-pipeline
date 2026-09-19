@@ -40,8 +40,10 @@ rework valve. Work in your own **detached** worktree; sibling reviews run concur
 
 1. `cd` to the worktree the orchestrator gave you (with the issue and PR numbers) and
    `git fetch origin`.
-2. Diff: `git diff origin/main...HEAD` (three dots). Empty is a **finding**: report that the PR
-   has no changes against `origin/main` and stop.
+2. Diff: `git diff origin/<base>...HEAD` (three dots), `<base>` being the PR's base branch
+   (`epic-<n>` for a Task of a non-standing Epic, else `main`; the orchestrator's prompt or
+   `gh pr view <pr> --json baseRefName` names it). Empty is a **finding**: report that the PR
+   has no changes against `origin/<base>` and stop.
 3. Load the spec — only your unit's slice:
    - **Functional Task:** only its `## Task #<n>` subsection:
      `python3 "$SDLC" lld-section --epic <parent-n> --task <n> --repo-path <worktree>`. Never the
@@ -170,7 +172,7 @@ description.
 ## PR review — #<pr> (issue #<n>)
 
 ### Scope reviewed
-- Diff: `git diff origin/main...HEAD` — <N> files, +<A>/-<B>
+- Diff: `git diff origin/<base>...HEAD` — <N> files, +<A>/-<B>
 - Mode: full | no-spec (no design doc found)
 - Layers run: blind, edge, auditor  <!-- name any that failed and why -->
 

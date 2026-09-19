@@ -23,10 +23,12 @@ means there.
 
 ## Per-issue docs (the source of record)
 
-Each issue that runs a design stage gets `<docRoot>/issue-<n>/`, committed on branch
-`issue-<n>`. `publish-doc` publishes a phase-Task's doc to `<docRoot>/epic-<n>/` on the
-epic branch (`references/epics.md`, "Doc layout at the epic level"); a standing child's
-docs reach `main` with its squash-merge.
+A design stage's docs are committed on its branch `issue-<n>` at **one path**: a
+non-standing Epic's architecture/lld phase-Task writes `<docRoot>/epic-<n>/<doc>` (a revision
+edits `architecture.md` in place; the design PR merges it into `epic-<n>` —
+`references/epics.md`, "Doc layout at the epic level"); every other issue writes
+`<docRoot>/issue-<n>/<doc>`, which reaches `main` with its gate or squash-merge. Your prompt
+names the exact path.
 
 **Exactly three filenames exist:**
 
@@ -40,7 +42,7 @@ docs reach `main` with its squash-merge.
   findings live in the issue comment thread. `development`'s record is the **PR
   description** (what was built and why); its evidence is the `record-local-ci`
   attestations, pinned to a head SHA. Never commit self-reported pass/fail numbers.
-- Any other file under `<docRoot>/issue-<n>/` is a defect. If you think a fourth doc is
+- Any other file under your doc directory is a defect. If you think a fourth doc is
   needed, say so in your handoff; do not create it.
 - Write each doc so the next stage can work from it alone, without the comment history.
   A doc may hold your working checklist; never use alternate filenames.
@@ -62,8 +64,9 @@ docs reach `main` with its squash-merge.
   reachable with `git merge-base --is-ancestor <sha> origin/<branch>`. An unreachable
   SHA means a superseded draft. State which ref you resolved and how.
 - **To see what a commit changed**, use `git show <sha> --stat` or three-dot
-  `git diff origin/main...<branch>`. Never use a two-dot range: it attributes merged
-  `origin/main` commits to the branch.
+  `git diff origin/<base>...<branch>` (`<base>` = `epic-<n>` for a child of a non-standing
+  Epic, else `main`). Never use a two-dot range: it attributes merged base commits to the
+  branch.
 - **A stale citation in a doc about to merge is a real finding**, not a nit.
 - **When `sync-branch` pulls a sibling's work onto a branch whose docs cite that
   sibling's files, re-check those citations before the PR merges.** Nothing re-checks

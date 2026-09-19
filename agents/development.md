@@ -84,7 +84,8 @@ delta. Keep it a readable description of the change, not a transcript. Your evid
 
 ## Scope containment
 
-Before you finish, review every file in `git diff origin/main...HEAD` and trace each to a line
+Before you finish, review every file in `git diff origin/<base>...HEAD` (`<base>` = your PR's
+base: `epic-<n>` for a Task of a non-standing Epic, else `main`) and trace each to a line
 of the design. A file you cannot trace does not belong in this PR.
 
 - No opportunistic refactoring, no "while I'm here" cleanups, no unrelated improvements.

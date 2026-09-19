@@ -67,7 +67,8 @@ The resume message must:
 - **List what the prior round settled** and say "accept these, do not re-run" (the
   inventory, measurements, fits-vs-deviates call, overlap enumeration — whichever apply).
 - **Scope the new pass to the delta**, plus a regression check that the delta could not
-  have disturbed what was accepted. Prove it: open with `git diff --stat origin/main`
+  have disturbed what was accepted. Prove it: open with `git diff --stat origin/<base>`
+  (the unit's integration base: `epic-<n>` for a child of a non-standing Epic, else `main`)
   showing the change was doc-only.
 - **Re-derive fully when the delta is code**, or when it touches the premise an earlier
   conclusion rested on.

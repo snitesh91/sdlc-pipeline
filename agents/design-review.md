@@ -84,7 +84,7 @@ CLEAN | REWORK — <one line>
 
 ## The confidence marker
 
-`skip-gate` reads `<!-- arch-review-confidence: N -->` (0–100) and skips Gate B on a clean verdict above the threshold (`references/gates.md`, "Gate B confidence skip"). Score it this way:
+`skip-gate` reads `<!-- arch-review-confidence: N -->` (0–100) and, on a clean verdict above the threshold, skips Gate B — for an Epic's phase-Task it merges the design PR itself (`references/gates.md`, "Gate B confidence skip"). Score it this way:
 
 - **N = your confidence the design is implementable as written without a human catching something first** — not polish, not a hedge against everything you cannot guarantee.
 - Meaningful only on a **clean** verdict. If you found anything, report low confidence.
@@ -94,7 +94,7 @@ CLEAN | REWORK — <one line>
 
 ## Exit actions — yours, performed as your last step
 
-The orchestrator has already posted `start-comment <n> --role arch-review|lld-review`. After posting your comment, **always** run, on every verdict:
+The orchestrator has already posted `start-comment <n> --role arch-review|lld-review`. For an Epic's phase-Task you review the **design PR** (`issue-<n>` → `epic-<e>`; its number is in your prompt) and the doc at `<docRoot>/epic-<e>/<doc>`; read the diff with `git diff origin/epic-<e>...origin/issue-<n>`. You stay read-only on git and on the PR: `record-design-review` posts your outcome to the PR for you. After posting your comment, **always** run, on every verdict:
 
 ```bash
 python3 "$SDLC" record-design-review <n> --role arch-review|lld-review --outcome clean|rework \
@@ -107,13 +107,13 @@ The orchestrator then routes:
 
 **`arch-review`**
 - **Clean, profile waives Gate B** (standing child) → `waive-gate <n> --stage architecture` (`gates.md`, "Waived gates"), straight into `development`.
-- **Clean, confidence > threshold** → `skip-gate` (`gates.md`, "Gate B confidence skip"). Standing child: straight into `development`. Architecture-phase or revision Task: `skip-gate --repo-path <p>` publishes `epic-<n>/architecture.md` and closes the Task.
-- **Clean, confidence ≤ threshold or marker missing** → orchestrator opens Gate B and parks the unit. Never set Stage to `Development` directly.
+- **Clean, confidence > threshold** → `skip-gate` (`gates.md`, "Gate B confidence skip"). Standing child: straight into `development`. Architecture-phase or revision Task: `skip-gate --repo-path <p>` merges the design PR into `epic-<n>` and closes the Task.
+- **Clean, confidence ≤ threshold or marker missing** → orchestrator opens Gate B (the human merges the design PR) and parks the unit. Never set Stage to `Development` directly.
 - **Fixable design issue** → resume the `architecture` agent; re-review. Counts toward the `arch-review ↔ architecture` valve.
 - **Requirements-level problem** → resume the `product` agent instead.
 
 **`lld-review`**
-- **Clean, any confidence** → **no gate, ever.** The orchestrator runs `finish-lld <lld-task-n> --epic <epic-n> --repo-path <p>` (publish `lld.md` → `create-lld-tasks` → `merge-lld-doc` → `close-issue`; SKILL.md, "Cutting an Epic's phase-Tasks"). Never `claim`, `skip-gate` or `open-gate` here.
+- **Clean, any confidence** → **no gate, ever.** The orchestrator runs `finish-lld <lld-task-n> --epic <epic-n> --repo-path <p>` (merge the design PR into `epic-<n>` → `create-lld-tasks` → `merge-lld-doc` → `close-issue`; SKILL.md, "Cutting an Epic's phase-Tasks"). Never `claim`, `skip-gate` or `open-gate` here.
 - **Fixable design or carving issue** → resume the `lld` agent; re-review. Valve pairing `lld-review ↔ lld`.
 - **Doesn't fit the Epic's design** → architecture deviation escalation (`references/epics.md`, "Architecture deviation escalation"), as if `lld` had found it.
 

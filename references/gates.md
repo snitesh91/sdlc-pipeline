@@ -7,7 +7,10 @@ automatic code-PR merge (`references/operations.md`).
   Initiative's Product-Roadmap Task, or a standing child's / parentless issue's own
   `product.md`. Gate B gates an Epic's Architecture-phase or Architecture revision Task,
   or a standing child's / parentless issue's own `architecture.md`.
-- **Each gate is a small doc-only PR, always `issue-<n>` → `main`.** Merging it is the
+- **Each gate is a small doc-only PR.** A standing child's / parentless issue's / Initiative
+  Product-Roadmap Task's is `issue-<n>` → `main`; a non-standing Epic's Architecture-phase or
+  revision Task gates its **design PR** `issue-<n>` → `epic-<n>` (raised by `transition`,
+  `references/epics.md`, "How a non-standing Epic runs") — no second PR. Merging it is the
   approval; any review comment on it is feedback to address before that merge.
 
 Whether a gate needs a human is the profile's call ("Waived gates"). A standing child
@@ -21,11 +24,15 @@ What passing/skipping does depends on the issue:
 
 - Standing child or parentless issue → claims `development`.
 - **Phase-Task** (child of an Initiative or a non-standing Epic) → claims no stage. An
-  Architecture-phase/revision Task has its `architecture.md` published to
-  `epic-<n>/architecture.md` and is closed (`phase_task_complete: true`); a
-  Product-Roadmap Task just closes. If the publish is not verified on origin the Task
-  stays open (`phase_task_complete: false`, with a `reason`) — fix it, then
-  `publish-doc <n> --doc architecture.md` and `close-issue <n>`.
+  Architecture-phase/revision Task's design PR is merged into `epic-<n>` (by the human, or by
+  `skip-gate`/`waive-gate` through `merge-design-pr`) and the Task closes
+  (`phase_task_complete: true`); a Product-Roadmap Task just closes. If `architecture.md`
+  is not on `epic-<n>` (or the design PR would not merge — `design_pr` in the result) the Task
+  stays open (`phase_task_complete: false`, with a `reason`): fix it (`behind_base` →
+  `sync-branch <n>`), then re-run the command.
+
+The **LLD-phase Task has no gate**: `lld-review` clean → `finish-lld` merges its design PR
+(`references/epics.md`).
 
 ### Gate A WIP cap
 
@@ -46,7 +53,8 @@ What passing/skipping does depends on the issue:
 
 The orchestrator opens it itself (not a subagent) once the doc is committed and pushed
 to `origin/issue-<n>` — for Gate B, once `arch-review` passed clean on that commit. Docs
-are always authored on `issue-<n>`, never committed to `epic-<n>` directly.
+are always authored on `issue-<n>` (at `epic-<n>/architecture.md` for an Epic's phase-Task),
+never committed to `epic-<n>` directly.
 
 ```bash
 python3 "$SDLC" open-gate <n> \
@@ -55,7 +63,10 @@ python3 "$SDLC" open-gate <n> \
   # --repo-path optional: the branch's live worktree is auto-resolved
 ```
 
-- It writes the PR body, sets `Awaiting Human Review`, posts the issue comment. You
+- It writes the PR body (or, for an Epic's Architecture-phase/revision Task, reuses its
+  design PR and posts a `gate-comments-processed` cutoff on it, so the reviewer's earlier
+  comments are not read as human feedback), sets `Awaiting Human Review`, posts the issue
+  comment. You
   choose `--summary` and `--doc`/`--next-stage`
   (A: `product.md` → `architecture`; B: `architecture.md` → `development`; on a
   phase-Task `--next-stage` is required but nominal).
@@ -68,9 +79,8 @@ python3 "$SDLC" open-gate <n> \
   rule) and carries **no `Closes #<n>`** — it must not close the issue.
 - **Merging** — a standing child's or parentless issue's gate PR is **never squashed and
   never deletes the branch** (`issue-<n>` lives on; a squash makes the next
-  `sync-branch` a phantom diff). A phase-Task's gate PR **may be squashed**, but do not
-  delete its branch before `pass-gate` runs — `architecture.md` is published from
-  `origin/issue-<n>`.
+  `sync-branch` a phantom diff). A phase-Task's gate PR **may be squashed**; do not delete
+  its branch before `pass-gate` runs (`merge-design-pr` never does).
 - **Never delete, force-reset or abandon a per-issue branch while its issue is open.**
   Until the final development PR merges, the later-stage docs (`architecture.md`,
   review rework, `lld.md`) exist only on `issue-<n>`; losing the branch loses them.
@@ -86,10 +96,12 @@ check one gate alone: `python3 "$SDLC" check-gate <issue-number>`.
 ## Real-time backstop
 
 `.github/workflows/gate-auto-advance.yml` runs `auto-pass-gate --pr <n>` the instant a
-human closes a gate PR (`issue-<n>` head, `main` base only):
+human closes a gate PR (`issue-<n>` head; `main` base, or an `epic-<n>` base carrying a
+`design-pr` marker — a design PR is a gate only while its issue is awaiting review, so the
+PR the pipeline merges itself is skipped):
 
 - **Merged** → Stage advances but is **not claimed** (no `In Progress`, no start
-  comment); a phase-Task is published and closed as `pass-gate` would. `next-action`
+  comment); a phase-Task is closed as `pass-gate` would. `next-action`
   proceeds from the advanced fields.
 - **Closed without merge** → `needs-human` (see "Edge cases").
 - If the Action didn't run (missing `SDLC_GH_TOKEN`, workflow disabled), `next-action`
@@ -109,7 +121,8 @@ Spawn a **fresh** agent of the owning stage (`sdlc:product` or `sdlc:architectur
 body/comments, the doc's current content, every unresolved thread's text with its
 anchored diff hunk, and every plain PR comment after the cutoff marker. Instruct it to:
 
-1. Revise `docs/sdlc/issue-<n>/<doc>.md` for each piece of feedback from either channel,
+1. Revise the gated doc (`docs/sdlc/issue-<n>/<doc>.md`, or `docs/sdlc/epic-<e>/<doc>.md` for an
+   Epic's Architecture-phase/revision Task) for each piece of feedback from either channel,
    or state in its reply why something should not be applied — never ignore it silently.
 2. Commit and push to `origin/issue-<n>` (updates the open gate PR; no new PR).
 3. Reply to and resolve each addressed **review thread**: `python3 "$SDLC" resolve-thread
@@ -134,10 +147,11 @@ python3 "$SDLC" pass-gate <n> \
   --gate-pr <gate-pr-number> --stage product   # --repo-path optional
 ```
 
-- It merges `origin/main` into `issue-<n>`, pushes, sets the next Stage and claims it —
-  continue straight into that stage's delegation.
-- On a **phase-Task** it claims nothing: an Architecture-phase/revision Task publishes
-  `epic-<n>/architecture.md` and closes; a Product-Roadmap Task closes. Continue into
+- It merges the gate's base into `issue-<n>` (`origin/main`; `origin/epic-<n>` for an Epic's
+  phase-Task), pushes, sets the next Stage and claims it — continue straight into that
+  stage's delegation.
+- On a **phase-Task** it claims nothing: an Architecture-phase/revision Task closes once
+  `epic-<n>/architecture.md` is on `epic-<n>`; a Product-Roadmap Task closes. Continue into
   Step 1's next survey.
 - Pass `next-action`'s `issue`/`gate_pr`/`stage` fields verbatim. `--stage` is the
   gate's owning doc-stage (the doc approved), never the stage you are heading to; the
@@ -156,11 +170,13 @@ a number — `skip-gate` reports the threshold it applied.
   ```bash
   python3 "$SDLC" skip-gate <n> \
     --stage architecture --confidence <N> --summary "<one sentence: what arch-review checked and confirmed sound>" \
-    [--repo-path <p>]   # used only for a phase-Task's publish
+    [--repo-path <p>]   # used only for a phase-Task's design PR merge
   ```
   Standing child / parentless issue: Stage → `Development`, score recorded, re-claimed
-  for `development` — continue immediately. Architecture-phase/revision Task: publishes
-  `epic-<n>/architecture.md` and closes — continue into Step 1's next survey.
+  for `development` — continue immediately. Architecture-phase/revision Task: merges its
+  design PR into `epic-<n>` (needs the recorded clean `arch-review`) and closes — continue
+  into Step 1's next survey. The pipeline is the merge owner here; a confidence at or below
+  the bar leaves the PR open for the human's merge (`open-gate`).
 - **Confidence ≤ threshold, marker missing, or findings present** → open Gate B. A
   missing marker counts as below threshold — never 0, never a guess.
 - Only Gate B can be skipped; `skip-gate --stage product` refuses.
@@ -177,7 +193,7 @@ On a **clean `product-review`** (Gate A) or **clean `arch-review`** (Gate B):
   python3 "$SDLC" waive-gate <n> --stage product|architecture --summary "<one sentence>"
   ```
   It refuses when the profile still requires a human. It claims the next stage (a
-  phase-Task instead completes as `skip-gate` does) and leaves a
+  phase-Task instead merges its design PR and completes as `skip-gate` does) and leaves a
   `<!-- gate-waived: <stage>:<profile> -->` marker as the audit trail.
 
 ## Edge cases
@@ -190,5 +206,6 @@ On a **clean `product-review`** (Gate A) or **clean `arch-review`** (Gate B):
   gate PR or require re-approval. Exception: a deviation from an Epic's design runs a
   fresh Gate B on an Architecture revision Task (`references/epics.md`, "Architecture
   deviation escalation").
-- Never `--delete-branch` when merging a standing child's or parentless issue's gate PR.
-  Never delete `epic-<n>`.
+- Never `--delete-branch` when merging a standing child's or parentless issue's gate PR,
+  or a design PR. Never delete `epic-<n>` while its Epic is open (`close-epic`'s merge is the
+  one deletion).

@@ -56,7 +56,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # pass-gate merges origin/main into the gate branch and pushes
+          fetch-depth: 0  # pass-gate merges the gate's base (main, or epic-<n> for a design PR) into the gate branch and pushes
           token: ${{ secrets.SDLC_GH_TOKEN }}
       - uses: actions/checkout@v4
         with:

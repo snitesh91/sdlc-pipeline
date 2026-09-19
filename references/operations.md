@@ -84,6 +84,11 @@ this pipeline opens in the configured repo: `development` opens a draft; after a
 adversarial `pr-review` and green CI, `merge-pr` marks it ready and squash-merges it. The
 human gates on product/architecture are separate and unaffected.
 
+- **A phase-Task's design PR** (`issue-<n>` → `epic-<n>`, docs only) merges with
+  `merge-design-pr` (directly, or inside `skip-gate`/`waive-gate`/`finish-lld`) after
+  `lld-review` records clean, or `arch-review` records clean above the skip threshold /
+  under a profile that waives Gate B; otherwise the human merges it at Gate B. It runs no
+  code checks, keeps the branch, and never closes the Task. `merge-pr` refuses a phase-Task.
 - Merge only with `merge-pr`, run by the orchestrator after `pr-review` records clean — a
   reviewer never merges the diff it reviewed. It posts the audit-trail comment on the PR
   and "Merged via #<n>" on the issue, and closes a child merged into an epic branch.
@@ -132,9 +137,10 @@ as a shortcut, never skipping a check `merge-pr` enforces:
    freshness gate (`sync-branch` first when behind on anything but docs).
 2. Read each affected PR's real state (`gh pr view <pr> --json state,mergedAt`); a
    `MERGED` PR needs no second merge.
-3. Squash, never a merge commit, in an ephemeral worktree on `origin/main`:
-   `git merge --squash origin/issue-<n>`, `git commit -m "<title> (Closes #<n>)"`,
-   `git push origin main`. Never force-push `main`; reconcile forward.
+3. Squash, never a merge commit, in an ephemeral worktree on `origin/<base>` (`epic-<n>` for
+   a Task of a non-standing Epic, else `main`): `git merge --squash origin/issue-<n>`,
+   `git commit -m "<title> (Closes #<n>)"`, `git push origin <base>`. Never force-push
+   `main`; reconcile forward.
 4. Once the API is back: close the PR with the audit-trail comment `merge-pr` would post,
    close the issue with "Merged via #<pr>", delete the branch, and set its terminal
    fields (`close-issue`). Record the outage and what was merged by hand.
