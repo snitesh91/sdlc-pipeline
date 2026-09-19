@@ -4090,6 +4090,8 @@ def test_worktree_add_first_touch_child_branches_off_epic_branch():
         **_wt_list_main(),
         ("git", "-C", ".", "fetch", "origin"): "",
         ("git", "-C", ".", "branch", "-r", "--list", "origin/issue-185"): "",
+        ("git", "-C", ".", "show-ref", "--verify", "--quiet",
+         "refs/remotes/origin/epic-110"): "",
         ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-dev-185", "-b", "issue-185",
          "origin/epic-110"): "",
     })

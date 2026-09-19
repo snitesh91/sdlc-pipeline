@@ -53,28 +53,48 @@ def _upstream(repo, branch):
     return _git("rev-parse", f"origin/{branch}", cwd=repo).strip()
 
 
-# --- integration_base: phase-Task vs functional Task --------------------------
+# --- integration_base: every child of a non-standing Epic uses its branch ----
 
-@pytest.mark.parametrize("stage,expected", [
-    ("architecture", "main"), ("lld", "main"),
-    ("development", "epic-9"), ("pr-review", "epic-9"), (None, "epic-9"),
-])
-def test_integration_base_sends_phase_tasks_to_main_and_functional_tasks_to_the_epic(
-        stage, expected):
+@pytest.mark.parametrize("stage", ["architecture", "lld", "development", "pr-review", None])
+def test_integration_base_sends_every_child_of_a_non_standing_epic_to_the_epic_branch(stage):
     gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": stage})
-    assert s.integration_base(gh, 10) == expected
+    assert s.integration_base(gh, 10) == "epic-9"
 
 
-def test_integration_base_keeps_a_standing_epics_child_on_main():
-    gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "development"},
+def test_integration_base_keeps_an_initiatives_roadmap_task_and_parentless_issues_on_main():
+    gh = FakeGh([{"number": 6, "labels": ["type:initiative"]},
+                 {"number": 7, "labels": ["type:task"], "parent": 6, "stage": "product"},
+                 {"number": 8, "labels": ["type:task"], "stage": "product"}])
+    assert s.integration_base(gh, 7) == "main"
+    assert s.integration_base(gh, 8) == "main"
+
+
+@pytest.mark.parametrize("stage", ["architecture", "development", None])
+def test_integration_base_keeps_a_standing_epics_child_on_main_at_every_stage(stage):
+    gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": stage},
                epic_labels=("type:epic", "epic:standing"))
     assert s.integration_base(gh, 10) == "main"
 
 
-def test_worktree_add_cuts_a_phase_task_from_main_without_base(repo):
+def test_worktree_add_cuts_a_phase_task_from_the_epic_branch_creating_it_when_absent(repo):
     gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "architecture"})
+    assert not _git("ls-remote", "--heads", "origin", "epic-9", cwd=repo).strip()
     result = s.cmd_worktree_add(gh, 10, repo_path=str(repo))
-    assert result["base"] == "origin/main"
+    assert result["base"] == "origin/epic-9"
+    assert _git("ls-remote", "--heads", "origin", "epic-9", cwd=repo).strip()
+
+
+def test_worktree_add_cuts_a_phase_task_from_the_current_epic_tip(repo):
+    gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "lld"})
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/architecture.md", "# arch\n")
+    wt = s.cmd_worktree_add(gh, 10, repo_path=str(repo))["path"]
+    assert (Path(wt) / DOC / "epic-9" / "architecture.md").read_text() == "# arch\n"
+
+
+def test_worktree_add_keeps_a_product_roadmap_task_and_standing_child_on_main(repo):
+    gh = FakeGh([{"number": 6, "labels": ["type:initiative"]},
+                 {"number": 7, "labels": ["type:task"], "parent": 6, "stage": "product"}])
+    assert s.cmd_worktree_add(gh, 7, repo_path=str(repo))["base"] == "origin/main"
 
 
 def test_worktree_add_explicit_base_still_overrides(repo):
@@ -84,16 +104,18 @@ def test_worktree_add_explicit_base_still_overrides(repo):
     assert result["base"] == "origin/epic-9"
 
 
-def test_sync_branch_reconciles_a_phase_task_with_main_before_the_epic_branch_exists(repo):
+def test_sync_branch_reconciles_a_phase_task_with_the_epic_branch(repo):
     gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "architecture"})
     wt = s.cmd_worktree_add(gh, 10, repo_path=str(repo))["path"]
+    _push_doc_branch(repo, "epic-9", "epic-note.md", "moved\n")
     result = s.cmd_sync_branch(gh, wt, 10)
-    assert result["base"] == "main" and result["synced"] is True
+    assert result["base"] == "epic-9" and result["synced"] is True
+    assert (Path(wt) / "epic-note.md").exists()
 
 
 # --- cut-phase-tasks ----------------------------------------------------------
 
-def test_cut_phase_tasks_creates_stages_blocks_and_stands_up_the_arch_worktree(repo):
+def test_cut_phase_tasks_creates_stages_blocks_and_stands_up_the_epic_and_arch_worktrees(repo):
     gh = _tree()
 
     result = s.cmd_cut_phase_tasks(gh, 9, repo_path=str(repo))
@@ -101,8 +123,8 @@ def test_cut_phase_tasks_creates_stages_blocks_and_stands_up_the_arch_worktree(r
     arch, lld = result["architecture_task"], result["lld_task"]
     assert result["ok"] is True and result["failed_step"] is None
     assert result["completed_steps"] == [
-        "architecture.create-issue", "architecture.set-stage", "lld.create-issue",
-        "lld.set-stage", "add-blocked-by", "worktree-add"]
+        "epic-worktree", "architecture.create-issue", "architecture.set-stage",
+        "lld.create-issue", "lld.set-stage", "add-blocked-by", "worktree-add"]
     assert (gh.issues[arch]["title"], gh.issues[lld]["title"]) == ("Architecture phase", "LLD phase")
     for n in (arch, lld):
         assert gh.issues[n]["parent"] == 9
@@ -113,7 +135,10 @@ def test_cut_phase_tasks_creates_stages_blocks_and_stands_up_the_arch_worktree(r
         assert (gh.issues[n]["priority"], gh.issues[n]["effort"]) == ("Medium", "Medium")
     assert gh.issues[arch]["status"] == "todo"  # set by create-issue, never claimed
     assert gh.blocked_by(lld) == [arch]
-    assert result["steps"]["worktree-add"]["base"] == "origin/main"
+    assert result["steps"]["worktree-add"]["base"] == "origin/epic-9"
+    epic_wt = result["steps"]["epic-worktree"]
+    assert epic_wt["branch"] == "epic-9" and Path(epic_wt["path"]).is_dir()
+    assert _git("ls-remote", "--heads", "origin", "epic-9", cwd=repo).strip()
     assert "skill_dir" not in result
 
 
@@ -132,6 +157,7 @@ def test_cut_phase_tasks_is_idempotent(repo):
     assert second["steps"]["add-blocked-by"]["added"] is False
     assert gh.blocked_by(second["lld_task"]) == [second["architecture_task"]]
     assert second["steps"]["worktree-add"]["created"] is False
+    assert second["steps"]["epic-worktree"]["created"] is False
 
 
 def test_cut_phase_tasks_finishes_a_half_cut_epic_without_duplicating(repo):
@@ -169,13 +195,15 @@ def test_cut_phase_tasks_refuses_anything_but_a_non_standing_epic(labels):
 def test_cut_phase_tasks_stops_at_the_first_failed_step(monkeypatch):
     gh = _tree()
     monkeypatch.setattr(s, "cmd_set_stage", _boom("set-stage"))
-    monkeypatch.setattr(s, "cmd_worktree_add", _must_not_run("worktree-add"))
+    monkeypatch.setattr(s, "cmd_worktree_add",
+                        lambda *a, unit="issue", **k: {"path": "/wt"} if unit == "epic"
+                        else _must_not_run("worktree-add")())
 
     result = s.cmd_cut_phase_tasks(gh, 9)
 
     assert result["ok"] is False
     assert result["failed_step"] == "architecture.set-stage"
-    assert result["completed_steps"] == ["architecture.create-issue"]
+    assert result["completed_steps"] == ["epic-worktree", "architecture.create-issue"]
     assert "set-stage exploded" in result["error"]
     assert result["lld_task"] is None
     assert [i["title"] for i in gh.issues.values()] == ["issue 9", "Architecture phase"]
@@ -298,7 +326,7 @@ def test_finish_lld_refuses_a_task_of_another_epic():
 
 # --- open-arch-revision -------------------------------------------------------
 
-def test_open_arch_revision_cuts_a_staged_task_off_main_and_blocks_the_units(repo):
+def test_open_arch_revision_cuts_a_staged_task_off_the_epic_branch_and_blocks_the_units(repo):
     gh = _tree({"number": 12, "labels": ["type:task"], "parent": 9, "stage": "development"},
                {"number": 13, "labels": ["type:task"], "parent": 9, "stage": "development"})
 
@@ -309,7 +337,8 @@ def test_open_arch_revision_cuts_a_staged_task_off_main_and_blocks_the_units(rep
     assert result["ok"] is True and result["failed_step"] is None
     assert gh.issues[rev]["title"] == "Architecture revision: cache layer"
     assert gh.issues[rev]["stage"] == "architecture" and gh.issues[rev]["parent"] == 9
-    assert result["steps"]["worktree-add"]["base"] == "origin/main"
+    assert result["steps"]["worktree-add"]["base"] == "origin/epic-9"
+    assert result["steps"]["epic-worktree"]["branch"] == "epic-9"
     assert gh.blocked_by(12) == [rev] and gh.blocked_by(13) == [rev]
 
     again = s.cmd_open_arch_revision(gh, 9, "Architecture revision: cache layer", "x",
@@ -321,7 +350,8 @@ def test_open_arch_revision_cuts_a_staged_task_off_main_and_blocks_the_units(rep
 def test_open_arch_revision_blocks_nothing_when_the_worktree_is_refused(monkeypatch):
     gh = _tree({"number": 12, "labels": ["type:task"], "parent": 9})
     monkeypatch.setattr(s, "cmd_worktree_add",
-                        lambda *a, **k: {"diverged": True, "reason": "diverged"})
+                        lambda *a, unit="issue", **k: {"path": "/wt"} if unit == "epic"
+                        else {"diverged": True, "reason": "diverged"})
 
     result = s.cmd_open_arch_revision(gh, 9, "t", "b", blocks=[12])
 
@@ -344,7 +374,7 @@ def test_start_stage_adds_the_worktree_before_claiming(repo, monkeypatch):
     assert order == ["cmd_worktree_add", "cmd_claim"]
     assert result["claimed"] is True and result["ok"] is True
     assert Path(result["path"]).is_dir()
-    assert result["steps"]["worktree-add"]["base"] == "origin/main"
+    assert result["steps"]["worktree-add"]["base"] == "origin/epic-9"
     assert gh.issues[10]["status"] == "in-progress"
 
 
@@ -395,7 +425,7 @@ def test_transition_into_arch_review_verifies_syncs_and_posts_the_start_comment(
     assert result["ready"] is True and result["stopped_at"] is None
     assert result["verified_stage"] == "architecture"
     assert result["completed_steps"] == ["verify-exit", "sync-branch", "start-comment"]
-    assert result["steps"]["sync-branch"]["base"] == "main"
+    assert result["steps"]["sync-branch"]["base"] == "epic-9"
     assert _upstream(repo, "issue-10")  # sync pushed the branch
     assert any("arch-review stage starting" in c for c in gh.comments_on(10))
 
@@ -541,6 +571,7 @@ def test_cli_transition_exits_0_on_a_sync_conflict_and_1_on_an_unverified_exit(m
 
 def test_cli_cut_phase_tasks_reports_an_operational_failure_with_exit_1(monkeypatch):
     gh = _tree()
+    monkeypatch.setattr(s, "cmd_worktree_add", lambda *a, **k: {"path": "/wt"})
     monkeypatch.setattr(s, "cmd_create_issue", _boom("create-issue"))
     code, out = _cli(monkeypatch, gh, ["cut-phase-tasks", "9"])
     assert code == 1

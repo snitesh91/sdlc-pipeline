@@ -872,9 +872,9 @@ PHASE_TASK_STAGES = frozenset({"architecture", "arch-review", "lld", "lld-review
 
 
 def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
-    """Branch this unit integrates into: `epic-<parent>` for a functional Task of a
-    non-standing Epic, else `main` (epics, parentless issues, standing/Initiative
-    children, phase-Tasks)."""
+    """Branch this unit integrates into: `epic-<parent>` for every child of a non-standing
+    Epic (phase-Tasks included), else `main` (epics, parentless issues, standing/Initiative
+    children)."""
     if unit == "epic":
         return "main"
     # `parent` exists only in `issue_list`'s GraphQL; `gh issue view --json` has no such field.
@@ -888,8 +888,6 @@ def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
     parent_number = parent["number"]
     parent_entry = issues.get(parent_number)
     if parent_entry is not None and (is_epic_standing(parent_entry) or is_initiative(parent_entry)):
-        return "main"
-    if parent_entry is not None and is_epic(parent_entry) and current_stage(entry) in PHASE_TASK_STAGES:
         return "main"
     return epic_branch(parent_number)
 
@@ -1778,7 +1776,13 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
         # None, not 0: the old local ref is discarded unmeasured.
         synced = {"synced_to_origin": True, "behind_before": None}
     else:
-        base = base or f"origin/{integration_base(gh, number, unit)}"
+        if base is None:
+            base_branch = integration_base(gh, number, unit)
+            # A pre-existing Epic may have no branch yet; cut it before its child's.
+            if base_branch != "main" and not origin_branch_exists(repo_path, base_branch,
+                                                                   runner=runner):
+                ensure_branch_on_origin(repo_path, base_branch, runner=runner)
+            base = f"origin/{base_branch}"
         _add_fresh_worktree(repo_path, path, branch, base, runner)
         if unit == "epic":
             # An epic branch is shared: every branch-writing command resolves it
@@ -4462,31 +4466,35 @@ def _add_blocked_by_once(gh: GitHub, issue: int, dep: int) -> dict:
 def cmd_cut_phase_tasks(gh: GitHub, epic: int, arch_body: Optional[str] = None,
                         lld_body: Optional[str] = None, repo_path: str = ".",
                         runner: Runner = _default_runner) -> dict:
-    """Create (or reuse by title) and stage a non-standing Epic's Architecture- and
-    LLD-phase Tasks, block LLD on Architecture, and add the Architecture worktree off
-    `origin/main`. Returns `architecture_task`, `lld_task` plus the step record."""
+    """Stand up a non-standing Epic's branch `epic-<n>` and its worktree, create (or reuse
+    by title) and stage its Architecture- and LLD-phase Tasks, block LLD on Architecture,
+    and add the Architecture worktree off `origin/epic-<n>`. Returns `architecture_task`,
+    `lld_task` plus the step record."""
     issues = {i["number"]: i for i in gh.issue_list()}
     refusal = _not_a_phased_epic(issues, epic)
     if refusal:
         return {"epic": epic, "refused": True, "reason": refusal}
     seq = StepSequence()
-    arch = _ensure_staged_task(
+    seq.run("epic-worktree", lambda: cmd_worktree_add(
+        gh, epic, unit="epic", repo_path=repo_path, runner=runner), failed=_worktree_refused)
+    arch = None if seq.stopped else _ensure_staged_task(
         seq, gh, issues, epic, "architecture", "Architecture phase",
         arch_body or f"Architecture-phase Task for Epic #{epic}: `architecture` -> "
-                     f"`arch-review` -> Gate B; publishes `epic-{epic}/architecture.md`.",
+                     f"`arch-review`; authors `epic-{epic}/architecture.md`, merged into "
+                     f"`epic-{epic}` by its design PR.",
         "architecture")
     lld = arch and _ensure_staged_task(
         seq, gh, issues, epic, "lld", "LLD phase",
-        lld_body or f"LLD-phase Task for Epic #{epic}: `lld` -> `lld-review`; publishes "
-                    f"`epic-{epic}/lld.md`, from which the Epic's Tasks are created.",
+        lld_body or f"LLD-phase Task for Epic #{epic}: `lld` -> `lld-review`; authors "
+                    f"`epic-{epic}/lld.md`, merged into `epic-{epic}` by its design PR, "
+                    f"from which the Epic's Tasks are created.",
         "lld")
     if lld:
         a, l = arch["issue"], lld["issue"]
         if arch["open"]:
             seq.run("add-blocked-by", lambda: _add_blocked_by_once(gh, l, a))
             seq.run("worktree-add", lambda: cmd_worktree_add(
-                gh, a, repo_path=repo_path, runner=runner, base="origin/main"),
-                failed=_worktree_refused)
+                gh, a, repo_path=repo_path, runner=runner), failed=_worktree_refused)
         else:
             seq.run("add-blocked-by", lambda: {"issue": l, "blocked_on": a, "added": False,
                                                "reason": "Architecture-phase Task is closed"})
@@ -4497,9 +4505,10 @@ def cmd_cut_phase_tasks(gh: GitHub, epic: int, arch_body: Optional[str] = None,
 def cmd_open_arch_revision(gh: GitHub, epic: int, title: str, body: str,
                            blocks: Optional[list] = None, repo_path: str = ".",
                            runner: Runner = _default_runner) -> dict:
-    """Cut an Architecture revision phase-Task under a non-standing Epic: create (or
-    reuse an open one by title), stage `architecture`, worktree off `origin/main`,
-    then block each unit in `blocks` on it. Returns `revision_task`."""
+    """Cut an Architecture revision phase-Task under a non-standing Epic: ensure `epic-<n>`
+    and its worktree, create (or reuse an open one by title), stage `architecture`,
+    worktree off `origin/epic-<n>`, then block each unit in `blocks` on it.
+    Returns `revision_task`."""
     if not title.startswith("Architecture revision"):
         title = f"Architecture revision: {title}"
     issues = {i["number"]: i for i in gh.issue_list()}
@@ -4507,12 +4516,13 @@ def cmd_open_arch_revision(gh: GitHub, epic: int, title: str, body: str,
     if refusal:
         return {"epic": epic, "refused": True, "reason": refusal}
     seq = StepSequence()
-    task = _ensure_staged_task(seq, gh, issues, epic, "revision", title, body,
-                               "architecture", open_only=True)
+    seq.run("epic-worktree", lambda: cmd_worktree_add(
+        gh, epic, unit="epic", repo_path=repo_path, runner=runner), failed=_worktree_refused)
+    task = None if seq.stopped else _ensure_staged_task(
+        seq, gh, issues, epic, "revision", title, body, "architecture", open_only=True)
     if task:
         seq.run("worktree-add", lambda: cmd_worktree_add(
-            gh, task["issue"], repo_path=repo_path, runner=runner, base="origin/main"),
-            failed=_worktree_refused)
+            gh, task["issue"], repo_path=repo_path, runner=runner), failed=_worktree_refused)
     for unit in blocks or []:
         seq.run(f"add-blocked-by:{unit}",
                 lambda unit=unit: _add_blocked_by_once(gh, unit, task["issue"]))
