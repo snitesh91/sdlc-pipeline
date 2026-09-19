@@ -525,8 +525,8 @@ class GitHub:
     def pr_ready(self, number: int):
         self._run(["gh", "pr", "ready", str(number), "--repo", self.repo])
 
-    def pr_merge(self, number: int, delete_branch: bool = True):
-        argv = ["gh", "pr", "merge", str(number), "--repo", self.repo, "--squash"]
+    def pr_merge(self, number: int, delete_branch: bool = True, method: str = "squash"):
+        argv = ["gh", "pr", "merge", str(number), "--repo", self.repo, f"--{method}"]
         if delete_branch:
             argv.append("--delete-branch")
         self._run(argv)
@@ -704,11 +704,12 @@ _EPIC_RECONCILED_MARKER = re.compile(r"<!--\s*epic-reconciled:\s*(\d+)\s*(?:@[^>
 # Persists sync-branch conflicts so `cmd_pairing_counts` can rebuild the strike count.
 _SYNC_CONFLICT_MARKER = re.compile(r"<!--\s*sync-conflict:\s*(\S+)\s*(?:@[^>]*?)?-->")
 
-# `<!-- design-review-outcome: clean|rework:<role> @ <ISO8601> -->`; lets the
-# design-review escalation valve be counted from the thread, not session memory.
+# `<!-- design-review-outcome: clean|rework:<role> [same-class:true] [sha:<head>] @ <ISO8601> -->`;
+# lets the design-review escalation valve be counted from the thread, not session memory, and
+# names the design PR head a review covered.
 _DESIGN_REVIEW_OUTCOME_MARKER = re.compile(
     r"<!--\s*design-review-outcome:\s*(\w+):(\S+?)(?:\s+same-class:(true|false))?"
-    r"\s*(?:@[^>]*?)?-->")
+    r"(?:\s+sha:([0-9a-fA-F]{7,40}))?\s*(?:@[^>]*?)?-->")
 
 # A non-standing Epic's architecture/lld phase-Task raises one PR `issue-<n>` -> `epic-<e>`.
 # The body marker (`<stage>:<issue>`) tells it from a gate or development PR; the issue-comment
@@ -1276,10 +1277,31 @@ def run_cap_state(epic: int, run_id: Optional[str]) -> Optional[dict]:
     return state
 
 
+def run_completed(state: Optional[dict]) -> list:
+    """Units driven to a terminal state under `state`'s run id in any Epic's state file:
+    one `--run-id` spans an Initiative's Epics and shares the cap across them."""
+    if not state:
+        return []
+    done = list(state.get("terminal", []))
+    try:
+        names = sorted(os.listdir(_run_state_dir()))
+    except OSError:
+        return done
+    for name in names:
+        try:
+            with open(os.path.join(_run_state_dir(), name)) as f:
+                other = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(other, dict) and other.get("run_id") == state.get("run_id"):
+            done.extend(n for n in other.get("terminal", []) if n not in done)
+    return done
+
+
 def run_cap_reached(state: Optional[dict]) -> bool:
     """Whether this run already drove `MAX_TASKS_PER_RUN` units to a terminal state (0 = never)."""
     return bool(state) and MAX_TASKS_PER_RUN > 0 \
-        and len(state.get("terminal", [])) >= MAX_TASKS_PER_RUN
+        and len(run_completed(state)) >= MAX_TASKS_PER_RUN
 
 
 def record_terminal_unit(gh: WorkItemProvider, issue: int) -> Optional[dict]:
@@ -1310,10 +1332,88 @@ def record_terminal_unit(gh: WorkItemProvider, issue: int) -> Optional[dict]:
             "terminal_count": len(state["terminal"]), "cap": MAX_TASKS_PER_RUN}
 
 
-def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> dict:
+PHASE_TASK_TITLES = {"architecture": "Architecture phase", "lld": "LLD phase"}
+
+
+def epic_lacks_phase_tasks(all_issues: list, epic: int) -> bool:
+    """Whether a non-standing Epic still needs `cut-phase-tasks`: it has no non-Epic child,
+    or only one of its two phase-Tasks (a half-made cut). By issueType and titles, never labels."""
+    kids = [i for i in all_issues if (i.get("parent") or {}).get("number") == epic
+            and not is_epic(i)]
+    if not kids:
+        return True
+    titles = {k["title"] for k in kids}
+    return (PHASE_TASK_TITLES["architecture"] in titles) != (PHASE_TASK_TITLES["lld"] in titles)
+
+
+def _epic_wait_reason(gh: GitHub, epic_issue: dict) -> Optional[str]:
+    """Why an open Epic cannot be run yet (`legacy`, or `blocked by #n`), else None."""
+    if is_epic_legacy(epic_issue):
+        return "not driven (legacy profile)"
+    blockers = gh.blocked_by(epic_issue["number"])
+    return f"blocked by {', '.join(f'#{n}' for n in blockers)}" if blockers else None
+
+
+def _initiative_epic_step(gh: GitHub, all_issues: list, initiative: int,
+                          skip: list) -> Optional[dict]:
+    """The Initiative loop's next move: `cut-phase-tasks` or `run-epic` for the lowest-numbered
+    open, unblocked cut Epic not in `skip`; None when no Epic can run."""
+    epics = sorted((i for i in all_issues if i["state"] == "OPEN" and is_epic(i)
+                    and (i.get("parent") or {}).get("number") == initiative),
+                   key=lambda i: i["number"])
+    for e in epics:
+        n = e["number"]
+        if n in skip or _epic_wait_reason(gh, e):
+            continue
+        base = {"epic": n, "initiative": initiative, "unit": "epic"}
+        if not is_epic_standing(e) and epic_lacks_phase_tasks(all_issues, n):
+            return {"action": "cut-phase-tasks", **base,
+                    "reason": f"Epic #{n} has no phase-Tasks: run `cut-phase-tasks {n} "
+                              f"--repo-path <p>`, then `next-action {initiative}` again"}
+        return {"action": "run-epic", **base,
+                "reason": f"Epic #{n} is the first open, unblocked Epic of Initiative "
+                          f"#{initiative}: run its Step 1-3 loop (`next-action {n}` with "
+                          f"this --run-id), then return to the Initiative"}
+    return None
+
+
+def _open_epics_reason(gh: GitHub, cut_epics: list, skip: list) -> str:
+    """The Initiative `none` reason for open Epics that cannot run: each one's actual state."""
+    open_epics = sorted((i for i in cut_epics if i["state"] != "CLOSED"),
+                        key=lambda i: i["number"])
+    states = [f"#{e['number']} " + ("parked this run" if e["number"] in skip
+                                     else _epic_wait_reason(gh, e) or "runnable")
+              for e in open_epics]
+    closed = len(cut_epics) - len(open_epics)
+    return (f"{len(open_epics)} cut Epic(s) open, none runnable now: {'; '.join(states)}"
+            + (f" ({closed} closed)" if closed else "") + ".")
+
+
+def _merged_design_action(gh: GitHub, issue: dict, epic: int) -> Optional[dict]:
+    """The completion action for an architecture/lld phase-Task whose design PR a human
+    merged before any gate opened: `pass-gate` (architecture) or `finish-lld` (lld)."""
+    stage = current_stage(issue)
+    # Only a claimed unit: a gate-pending one is `pass-gate`'s, an unclaimed one has no PR yet.
+    if stage not in DESIGN_STAGE_REVIEW or pipeline_status(issue) != "in-progress":
+        return None
+    found = find_design_pr(gh.issue_view(issue["number"]).get("comments", []))
+    if not found or found[0] != stage \
+            or gh.pr_view(found[1], fields="state").get("state") != "MERGED":
+        return None
+    base = {"issue": issue["number"], "unit": "issue", "design_pr": found[1]}
+    if stage == "architecture":
+        return {"action": "pass-gate", **base, "gate_pr": found[1], "stage": stage}
+    return {"action": "finish-lld", **base, "epic": epic}
+
+
+def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
+                       skip_epics: Optional[list] = None) -> dict:
     """Pick the next action among the named Epic's/Initiative's open non-Epic children: `skip` |
-    `resume` | `pass-gate` | `address-gate-feedback` | `route` | `delegate` | `stop-at-cap` | `none`.
-    Raises GhError when `epic` is not an Epic or Initiative. Caps gate only fresh work."""
+    `resume` | `pass-gate` | `finish-lld` | `address-gate-feedback` | `route` | `delegate` |
+    `stop-at-cap` | `none`; an Initiative with no such child walks its open Epics: `cut-phase-tasks`
+    | `run-epic` (`skip_epics` parks stalled ones). Raises GhError when `epic` is neither.
+    Caps gate only fresh work."""
+    skip_epics = skip_epics or []
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
     epic_issue = by_number.get(epic)
@@ -1346,7 +1446,7 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
     def none_result() -> dict:
         if deferred_by_run_cap:
             # Never `none`: "run is full" must not read as "epic has nothing left".
-            completed = list(cap_state.get("terminal", []))
+            completed = run_completed(cap_state)
             return {"action": "stop-at-cap", "epic": epic, "cap": MAX_TASKS_PER_RUN,
                     "completed": completed,
                     "reason": f"this run has driven {len(completed)} unit(s) to a terminal "
@@ -1379,8 +1479,7 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
                 result["reason"] = ("every cut Epic is closed -- ready for initiative-close "
                                     "validation (SKILL.md, \"Closing an Initiative\").")
             elif cut_epics:
-                result["reason"] = (f"{sum(1 for i in cut_epics if i['state'] != 'CLOSED')} "
-                                    f"cut Epic(s) still open.")
+                result["reason"] = _open_epics_reason(gh, cut_epics, skip_epics)
             elif roadmap_tasks and all(i["state"] == "CLOSED" for i in roadmap_tasks):
                 result["reason"] = ("Product-Roadmap Task closed -- cut Epics from the "
                                     "approved product.md next (SKILL.md, \"Cutting Epics "
@@ -1389,6 +1488,14 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
                 result["reason"] = ("no Product-Roadmap Task yet -- cut it next (SKILL.md, "
                                     "\"Cutting an Initiative's Product-Roadmap Task\").")
         return result
+
+    # A human may merge a design PR before its gate opens; that is a finished stage, not a
+    # dead session to resume.
+    if is_epic(epic_issue) and not is_epic_standing(epic_issue):
+        for issue in sorted(children, key=sort_key):
+            merged = _merged_design_action(gh, issue, epic)
+            if merged:
+                return merged
 
     # Crash-recovery: the unit's own open children only.
     in_progress = [i for i in children if pipeline_status(i) == "in-progress"]
@@ -1442,6 +1549,12 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None) -> d
         return {"action": "delegate", "issue": issue["number"], "unit": "issue",
                 "stage": stage}
 
+    if is_initiative(epic_issue) and epic_issue["state"] == "OPEN" and not deferred_by_run_cap:
+        step = _initiative_epic_step(gh, all_issues, epic, skip_epics)
+        if step and at_cap:
+            deferred_by_run_cap.append(step["epic"])
+        elif step:
+            return step
     return none_result()
 
 
@@ -1449,7 +1562,8 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     """`next-action`: `decide_next_action` plus `cap_enforced` (true only with a
     `--run-id` and a nonzero cap), which describes the invocation, not the decision."""
     run_id = getattr(args, "run_id", None)
-    result = decide_next_action(gh, args.epic, run_id=run_id)
+    result = decide_next_action(gh, args.epic, run_id=run_id,
+                                skip_epics=getattr(args, "skip_epic", None))
     if "issue" in result:
         note_in_flight(args.epic, run_id,
                        {result["issue"]: result.get("stage") or result["action"]})
@@ -2080,7 +2194,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
             "skipped": [], "cap_enforced": cap_enforced}
     if run_cap_reached(cap_state):
         # The cap must close this lane too, or overflow just moves here from next-action.
-        completed = list(cap_state.get("terminal", []))
+        completed = run_completed(cap_state)
         return {**base, "stop_at_cap": True, "cap": MAX_TASKS_PER_RUN, "completed": completed,
                 "note": f"run has driven {len(completed)} unit(s) to a terminal state, at "
                         f"the maxTasksPerRun cap of {MAX_TASKS_PER_RUN} -- no new work is "
@@ -2438,19 +2552,22 @@ def cmd_record_design_review(gh: GitHub, issue: int, role: str, outcome: str,
         headline += " **Same defect class as an earlier round — escalation candidate.**"
     same_class_field = " same-class:true" if same_class_recurrence else ""
     # The review lives on the design PR too; posted first so a failure here leaves no evidence
-    # marker behind and a re-run is safe.
-    design_pr = None
+    # marker behind and a re-run is safe. The marker names the PR head it covered.
+    design_pr, sha_field = None, ""
     if role in DESIGN_STAGE_REVIEW.values():
         found = find_design_pr(gh.issue_view(issue).get("comments", []))
         if found and DESIGN_STAGE_REVIEW[found[0]] == role:
             design_pr = found[1]
             gh.pr_comment(design_pr, f"{headline} {summary}")
+            head = gh.pr_view(design_pr, fields="headRefOid").get("headRefOid")
+            sha_field = f" sha:{head}" if head else ""
     gh.issue_comment(issue, f"{headline} {summary}\n\n"
                              f"<!-- design-review-outcome: {outcome}:{role}"
-                             f"{same_class_field} @ {timestamp} -->")
+                             f"{same_class_field}{sha_field} @ {timestamp} -->")
     return {"issue": issue, "unit": "issue", "role": role,
             "outcome": outcome, "same_class_recurrence": same_class_recurrence,
-            "recorded": True, **({"design_pr": design_pr} if design_pr else {})}
+            "recorded": True, **({"design_pr": design_pr} if design_pr else {}),
+            **({"reviewed_sha": sha_field.split(":")[1]} if sha_field else {})}
 
 
 def _post_start_comment(gh: GitHub, issue: int, role: str):
@@ -2637,6 +2754,16 @@ def last_design_review_outcome(comments: list, role: str) -> Optional[tuple]:
     return found
 
 
+def last_design_review_sha(comments: list, role: str) -> Optional[str]:
+    """The PR head SHA the latest `role` outcome marker names, or None."""
+    sha = None
+    for c in comments:
+        for m in _DESIGN_REVIEW_OUTCOME_MARKER.finditer(c.get("body", "")):
+            if m.group(2) == role:
+                sha = m.group(4)
+    return sha
+
+
 def missing_design_review_evidence(comments: list, role: str) -> list:
     """Problems blocking a design PR's merge: no recorded `role` outcome, or one that is not
     `clean`. Empty = the review is on record as clean."""
@@ -2738,21 +2865,47 @@ def _epic_lld_is_numbered_copy(repo_path: str, issue: int, epic: int, runner: Ru
     return is_numbered_copy(src, dest)
 
 
+def _design_review_stale(gh: GitHub, issue: int, stage: str, epic: int, comments: list,
+                         head: Optional[str]) -> Optional[dict]:
+    """A refusal when the recorded clean review does not cover the design PR's head: it names
+    another SHA and the doc changed since (a base-only sync merge leaves the doc alone)."""
+    role = DESIGN_STAGE_REVIEW[stage]
+    reviewed = last_design_review_sha(comments, role)
+    rerun = (f"re-run the `{role}` review on the current head and `record-design-review "
+             f"{issue} --role {role} --outcome clean`, then merge again")
+    if reviewed is None:
+        return {"review_stale": True, "head_sha": head,
+                "reason": f"the recorded `{role}` outcome names no reviewed head SHA -- {rerun}"}
+    if head is None or head.startswith(reviewed) or reviewed.startswith(head):
+        return None
+    doc = f"{DOC_ROOT}/epic-{epic}/{stage}.md"
+    try:
+        changed = gh.files_since(reviewed, issue_branch(issue))
+    except GhError:
+        changed = None  # the reviewed commit is gone from the branch
+    if changed is not None and len(changed) < 300 and doc not in changed:
+        return None
+    return {"review_stale": True, "reviewed_sha": reviewed, "head_sha": head,
+            "reason": f"the design PR head moved since `{role}` reviewed it "
+                      f"({reviewed[:10]} -> {head[:10]}) and `{doc}` changed -- {rerun}"}
+
+
 def cmd_merge_design_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
                         runner: Runner = _default_runner, gate_cleared: bool = False) -> dict:
     """Squash-merge a phase-Task's design PR into its epic branch once its review is on record
     as clean; never closes the Task and never deletes its branch. `lld-review` clean always
     merges; `arch-review` only above the skip threshold or where Gate B is waived
     (`gate_cleared` = skip-gate/waive-gate already decided that). Refuses (exit 0) when behind
-    the epic branch (`sync-branch` first), on missing/`rework` evidence, or when the epic's
-    numbered lld.md would be reverted. An already-MERGED PR returns `already_merged`."""
+    the epic branch (`sync-branch` first), on missing/`rework` evidence, when the PR head moved
+    since the review (`review_stale`), or when the epic's numbered lld.md would be reverted.
+    An already-MERGED PR returns `already_merged`."""
     result = {"pr": pr_number, "issue": issue, "merged": False}
     parent = phase_task_parent(gh, issue)
     if parent is None or parent["kind"] != "epic":
         return {**result, "reason": f"#{issue} is not a non-standing Epic's phase-Task -- "
                                      f"only its design PR is merged by merge-design-pr"}
     base = epic_branch(parent["number"])
-    pr = gh.pr_view(pr_number, fields="state,mergedAt,headRefName,baseRefName,body")
+    pr = gh.pr_view(pr_number, fields="state,mergedAt,headRefName,baseRefName,body,headRefOid")
     marker = _DESIGN_PR_BODY_MARKER.search(pr.get("body") or "")
     if (not marker or int(marker.group(2)) != issue or pr.get("headRefName") != issue_branch(issue)
             or pr.get("baseRefName") != base):
@@ -2772,6 +2925,9 @@ def cmd_merge_design_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str =
     if missing:
         return {**result, "missing_evidence": missing,
                 "reason": f"#{issue} cannot merge its design PR: {'; '.join(missing)}"}
+    stale = _design_review_stale(gh, issue, stage, parent["number"], comments, pr.get("headRefOid"))
+    if stale:
+        return {**result, **stale}
     behind = gh.branch_behind_by(issue_branch(issue), base=base)
     if behind:
         return {**result, "behind_base": behind,
@@ -2834,6 +2990,11 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
             raise GhError(f"#{issue} has no {stage} design PR to gate -- run `transition "
                           f"{issue} --expect-stage arch-review` (or `open-design-pr {issue}`) first")
         pr_number = found[1]
+        if gh.pr_view(pr_number, fields="state").get("state") == "MERGED":
+            return {"issue": issue, "refused": True, "design_pr": pr_number,
+                    "reason": f"design PR #{pr_number} is already merged into `{base}` (a human "
+                              f"merged it) -- there is no gate to open; run `pass-gate {issue} "
+                              f"--gate-pr {pr_number} --stage {stage}`"}
         # Reviewer comments made before the gate opened are not human feedback.
         gh.pr_comment(pr_number,
             f"Human review requested: merging this PR into `{base}` approves `{doc}`; leave "
@@ -3200,13 +3361,24 @@ def _complete_phase_task(gh: GitHub, repo_path: Optional[str], issue: int, stage
     return {**result, "phase_task_complete": True, "closed": True, "worktree": closed["worktree"]}
 
 
+def _merged_design_pr(gh: GitHub, comments: list, pr: int) -> Optional[tuple]:
+    """`(stage, pr)` when `pr` is the issue's design PR and it is already MERGED: a human
+    merged it before any gate opened, so there is no gate-pr marker to check against."""
+    found = find_design_pr(comments)
+    if found and found[1] == pr and gh.pr_view(pr, fields="state").get("state") == "MERGED":
+        return found
+    return None
+
+
 def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: str,
                    runner: Runner = _default_runner, live: bool = True) -> dict:
     """Pass a merged gate: reconcile the branch with its integration base, then claim the next stage
     (`live`) or only advance Stage (`live=False`, CI). Refuses a `stage`/`gate_pr` that
-    disagrees with the issue's gate-pr marker; a phase-Task is closed instead."""
+    disagrees with the issue's gate-pr marker (or, when no gate opened, its design PR that a
+    human merged early); a phase-Task is closed instead."""
     issue_data = gh.issue_view(issue)
-    found = find_gate_pr(issue_data.get("comments", []))
+    found = (find_gate_pr(issue_data.get("comments", []))
+             or _merged_design_pr(gh, issue_data.get("comments", []), gate_pr))
     if not found:
         raise GhError(f"issue #{issue} has no gate-pr marker in its comments -- cannot verify "
                        f"which stage this gate belongs to")
@@ -3349,6 +3521,67 @@ class _NotAGate(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+def cmd_merge_gate(gh: GitHub, pr_number: int, issue: int, stage: str,
+                   operator_confirmed: bool = False) -> dict:
+    """Merge an open human-review gate PR (Gate A's `issue-<n>` -> `main`, or a design PR held
+    for the human) because the operator said to. Refuses (exit 0) without `operator_confirmed`,
+    for a PR that is no open gate of `issue`/`stage`, when behind its base (`behind_base`) or
+    without green required checks. A design PR and a Roadmap Task's gate squash; a standing or
+    parentless issue's merges as a merge commit; the branch is always kept. `pass-gate`
+    (next-action, or the Action) then finishes the bookkeeping."""
+    result = {"pr": pr_number, "issue": issue, "stage": stage, "merged": False}
+    if not operator_confirmed:
+        return {**result, "refused": True,
+                "reason": "merge-gate merges a human-review gate PR only when the operator "
+                          "explicitly said to; re-run with --operator-confirmed after they did"}
+    pr = gh.pr_view(pr_number, fields="number,headRefName,baseRefName,state,mergedAt,body")
+    if pr.get("state") == "MERGED":
+        return {**result, "already_merged": True, "next": _pass_gate_hint(issue, pr_number, stage)}
+    if pr.get("state") != "OPEN":
+        return {**result, "refused": True,
+                "reason": f"PR #{pr_number} is closed without merging -- a human decision"}
+    try:
+        matched, marker_stage, _status = _match_open_gate(gh, pr, pr_number)
+    except _NotAGate as e:
+        return {**result, "refused": True, "reason": f"not an open gate PR: {e.reason}"}
+    if matched != issue or marker_stage != stage:
+        return {**result, "refused": True,
+                "reason": f"PR #{pr_number} is #{matched}'s {marker_stage} gate, not #{issue}'s "
+                          f"{stage} gate"}
+    head, base = pr["headRefName"], pr["baseRefName"]
+    behind = gh.branch_behind_by(head, base=base)
+    if behind:
+        return {**result, "behind_base": behind,
+                "reason": f"branch {head} is {behind} commit(s) behind {base} -- run "
+                          f"sync-branch {issue}, wait for fresh checks, then re-run"}
+    view = gh.pr_view(pr_number, "comments,headRefOid")
+    checks_state, missing = merge_gate_status(gh.pr_files(pr_number), gh.pr_checks(pr_number),
+                                              view.get("comments", []), view.get("headRefOid"))
+    if checks_state != "passed":
+        return {**result, "checks": checks_state, "missing_required_workflows": missing,
+                "reason": f"PR #{pr_number} checks not passed (status={checks_state})"
+                          + (f"; no passing check or attestation from: {', '.join(missing)}"
+                             if missing else "")}
+    design = bool(_DESIGN_PR_BODY_MARKER.search(pr.get("body") or ""))
+    method = "squash" if design or phase_task_parent(gh, issue) is not None else "merge"
+    try:
+        gh.pr_merge(pr_number, delete_branch=False, method=method)
+    except GhError:
+        # GitHub can answer 5xx after the merge already landed; only a PR still open failed.
+        if gh.pr_view(pr_number, fields="state").get("state") != "MERGED":
+            raise
+    gh.pr_comment(pr_number, "Merged by the pipeline at the operator's explicit instruction.")
+    gh.issue_comment(issue,
+        f"✅ Gate PR #{pr_number} merged into `{base}` at the operator's instruction.\n\n"
+        f"<!-- gate-merged: {stage}:{pr_number} @ {_utc_now_marker()} -->")
+    return {**result, "merged": True, "method": method, "base": base, "design_pr": design,
+            "next": _pass_gate_hint(issue, pr_number, stage)}
+
+
+def _pass_gate_hint(issue: int, pr: int, stage: str) -> str:
+    return f"pass-gate {issue} --gate-pr {pr} --stage {stage} (next-action returns it)"
 
 
 def _match_open_gate(gh: GitHub, pr: dict, pr_number: int) -> tuple:
@@ -4115,10 +4348,11 @@ def issue_field_values(priority: Optional[str] = None, effort: Optional[str] = N
 
 def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: list,
                      type_name: str = "Task", priority: Optional[str] = None,
-                     effort: Optional[str] = None) -> dict:
+                     effort: Optional[str] = None, blocked_by: Optional[list] = None) -> dict:
     """Create an issue with its native Issue Type (mandatory), parent link, Pipeline Status
-    `todo`, and Priority/Effort when configured. Inputs are validated before creating; a
-    later step failing returns `ok: False` naming the created issue."""
+    `todo`, Priority/Effort when configured, and a native `blockedBy` edge on each of
+    `blocked_by` (how Epics are ordered). Inputs are validated before creating; a later step
+    failing returns `ok: False` naming the created issue."""
     known = sorted({*KNOWN_ISSUE_TYPES, *ISSUE_TYPE_IDS})
     if type_name not in known:
         raise GhError(f"--type {type_name!r} is not an issue type (one of {known})")
@@ -4141,9 +4375,12 @@ def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: lis
         steps.append(("set_priority", lambda n: gh.set_priority_field(n, fields["priority"])))
     if "effort" in fields:
         steps.append(("set_effort", lambda n: gh.set_effort_field(n, fields["effort"])))
+    for dep in blocked_by or []:
+        steps.append((f"add_blocked_by:{dep}", lambda n, dep=dep: _add_blocked_by_once(gh, n, dep)))
     number = gh.issue_create(title, body, labels)
     result = {"issue": number, "parent": parent, "type": type_name,
-              "pipeline_status": "todo", **fields}
+              "pipeline_status": "todo", **fields,
+              **({"blocked_by": list(blocked_by)} if blocked_by else {})}
     # The issue now exists: report failures with its number rather than raising,
     # so the caller repairs it instead of retrying into a duplicate.
     for i, (name, step) in enumerate(steps):
@@ -4151,13 +4388,15 @@ def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: lis
             step(number)
         except GhError as e:
             todo = ", ".join(n for n, _ in steps[i:])
+            edges = "".join(f" add-blocked-by {number} --on {dep};" for dep in blocked_by or []
+                            if f"add_blocked_by:{dep}" in [n for n, _ in steps[i:]])
             return {**result, "ok": False, "complete": False, "failed_step": name,
                     "error": str(e),
                     "reason": f"issue #{number} was created but {name} failed ({todo} not "
                               f"done). Do NOT re-run create-issue -- that duplicates it. Run "
                               f"`repair-issue {number} --parent {parent} --type {type_name}"
                               + "".join(f" --{k} {v}" for k, v in fields.items())
-                              + "` and continue."}
+                              + "` and" + (f" then{edges}" if edges else "") + " continue."}
     return result
 
 
@@ -4230,8 +4469,9 @@ def cmd_repair_issue(gh: WorkItemProvider, number: int, parent: Optional[int] = 
 
 def cmd_audit_issues(gh: WorkItemProvider, epic: Optional[int] = None) -> dict:
     """Read-only: open issues in the Initiative/Epic trees (plus parentless ones), or only
-    `epic`'s subtree when given, missing issueType, parent (Tasks and other non-containers), Priority, Effort or
-    Pipeline Status; each with a `repair-issue` command."""
+    `epic`'s (or an Initiative's) subtree when given, missing issueType, parent (Tasks and other
+    non-containers), Priority, Effort or Pipeline Status, each with a `repair-issue` command;
+    and open non-standing Epics with no phase-Tasks, with the `cut-phase-tasks` command."""
     issues = gh.issue_list()
     by_number = {i["number"]: i for i in issues}
     children: dict = {}
@@ -4263,12 +4503,19 @@ def cmd_audit_issues(gh: WorkItemProvider, epic: Optional[int] = None) -> dict:
         # An Epic/Initiative's Pipeline Status is cleared while its Tasks carry the work.
         if pipeline_status(i) is None and not container:
             missing.append("Pipeline Status")
+        repairs = []
         if missing:
             repair = f"repair-issue {n}" + (" --parent <P>" if "parent" in missing else "")
             if "issueType" in missing and not inferred_issue_type(i):
                 repair += " --type <T>"
+            repairs.append(repair)
+        if (is_epic(i) and not is_epic_legacy(i) and not is_epic_standing(i)
+                and epic_lacks_phase_tasks(issues, n)):
+            missing = [*missing, "phase-Tasks"]
+            repairs.append(f"cut-phase-tasks {n} --repo-path <p>")
+        if missing:
             found.append({"issue": n, "title": i["title"], "missing": missing,
-                          "repair": repair})
+                          "repair": "; ".join(repairs)})
     return {"issues": found, "count": len(found)}
 
 
@@ -4867,7 +5114,11 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("next-action")
     p.add_argument("epic", type=int, help="The epic to drive")
     p.add_argument("--run-id", default=None,
-                    help="This run's id; enables the maxTasksPerRun cap (omit = no cap)")
+                    help="This run's id; enables the maxTasksPerRun cap, shared across an "
+                         "Initiative's Epics (omit = no cap)")
+    p.add_argument("--skip-epic", type=int, action="append", default=[],
+                    help="Initiative only: park this Epic for this run (repeatable), e.g. one "
+                         "waiting on a human, so the loop moves to the next runnable Epic")
     p.set_defaults(func=lambda a: cmd_next_action(get_work_item_provider(), a))
     p = sub.add_parser("list-ready-for-review",
                         help="Children whose handed-off draft PR awaits review this round")
@@ -5006,6 +5257,15 @@ def main(argv: Optional[list] = None) -> int:
                     help="Any path inside the repository (phase-Tasks only)")
     p.set_defaults(func=lambda a: cmd_waive_gate(get_work_item_provider(), a.issue, a.stage,
                                                  a.summary, repo_path=a.repo_path))
+    p = sub.add_parser("merge-gate",
+                        help="Merge an open gate PR at the operator's explicit instruction")
+    p.add_argument("pr", type=int)
+    p.add_argument("--issue", type=int, required=True)
+    p.add_argument("--stage", required=True, choices=sorted(HUMAN_GATE_TOGGLES))
+    p.add_argument("--operator-confirmed", action="store_true",
+                    help="The operator explicitly told you to merge this gate PR")
+    p.set_defaults(func=lambda a: cmd_merge_gate(get_work_item_provider(), a.pr, a.issue,
+                                                 a.stage, a.operator_confirmed))
     p = sub.add_parser("auto-pass-gate")
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--repo-path", default=".")
@@ -5140,9 +5400,12 @@ def main(argv: Optional[list] = None) -> int:
                     help="Native Issue Type, mandatory on every issue (default Task)")
     p.add_argument("--priority", default=None, help="Default: pipeline.issueDefaults.priority")
     p.add_argument("--effort", default=None, help="Default: pipeline.issueDefaults.effort")
+    p.add_argument("--blocked-by", type=int, action="append", default=[], dest="blocked_by",
+                    help="Native blockedBy edge on this open issue (repeatable); orders "
+                         "an Initiative's Epics")
     p.set_defaults(func=lambda a: cmd_create_issue(get_work_item_provider(), a.title, a.body,
                                                     a.parent, a.labels, a.type_name,
-                                                    a.priority, a.effort))
+                                                    a.priority, a.effort, a.blocked_by))
     p = sub.add_parser("mark-blocked")
     p.add_argument("issue", type=int)
     p.add_argument("--dep", type=int, required=True)
@@ -5166,9 +5429,13 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("list-needs-human")
     p.set_defaults(func=lambda a: cmd_list_needs_human(get_work_item_provider()))
     p = sub.add_parser("audit-issues",
-                        help="Open pipeline issues missing issueType/parent/Priority/Effort/Status")
-    p.add_argument("--epic", type=int, default=None, help="Only this Epic's subtree (the whole repo when omitted)")
-    p.set_defaults(func=lambda a: cmd_audit_issues(get_work_item_provider(), a.epic))
+                        help="Open pipeline issues missing issueType/parent/Priority/Effort/Status, and Epics with no phase-Tasks")
+    scope = p.add_mutually_exclusive_group()
+    scope.add_argument("--epic", type=int, default=None, help="Only this Epic's subtree (the whole repo when omitted)")
+    scope.add_argument("--initiative", type=int, default=None,
+                       help="Only this Initiative's tree: its Epics and their children")
+    p.set_defaults(func=lambda a: cmd_audit_issues(get_work_item_provider(),
+                                                    a.epic if a.epic is not None else a.initiative))
     p = sub.add_parser("repair-issue",
                         help="Set an existing issue's missing parent/type/status/Priority/Effort")
     p.add_argument("issue", type=int)

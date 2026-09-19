@@ -30,6 +30,7 @@ class FakeGh:
                     for n, p in (prs or {}).items()}
         self.behind: dict = {}      # head branch -> commits it is behind its base
         self.merges: list = []      # (pr, delete_branch) in call order
+        self.merge_methods: list = []
         self.repo = None            # a clone: pr_merge really lands the PR, path_on_ref reads origin
         self.refs: set = set()      # (path, ref) path_on_ref reports when `repo` is unset
         for i in issues:
@@ -138,7 +139,26 @@ class FakeGh:
         return n
 
     def pr_view(self, n, fields=""):
-        return self.prs[n]
+        """Shaped like `gh pr view --json`: comments are `{"body": ...}` and the head has an oid."""
+        pr = dict(self.prs[n])
+        pr["comments"] = [c if isinstance(c, dict) else {"body": c} for c in pr.get("comments", [])]
+        if self.repo is not None and pr.get("headRefName"):
+            _git("fetch", "-q", "origin", cwd=self.repo)
+            head = subprocess.run(["git", "rev-parse", f"origin/{pr['headRefName']}"],
+                                  cwd=self.repo, capture_output=True, text=True)
+            if head.returncode == 0:
+                pr["headRefOid"] = head.stdout.strip()
+        return pr
+
+    def pr_files(self, n):
+        return self.prs[n].get("files", [])
+
+    def pr_checks(self, n):
+        return self.prs[n].get("checks", [])
+
+    def files_since(self, sha, branch):
+        _git("fetch", "-q", "origin", cwd=self.repo)
+        return _git("diff", "--name-only", sha, f"origin/{branch}", cwd=self.repo).split()
 
     def pr_comment(self, n, body):
         self.prs[n]["comments"].append(body)
@@ -147,8 +167,9 @@ class FakeGh:
         return [{"number": n, **p} for n, p in self.prs.items()
                 if p.get("headRefName") == branch and p.get("state", "OPEN") == "OPEN"]
 
-    def pr_merge(self, n, delete_branch=True):
+    def pr_merge(self, n, delete_branch=True, method="squash"):
         self.merges.append((n, delete_branch))
+        self.merge_methods.append(method)
         pr = self.prs[n]
         if self.repo is not None:
             _land_pr(self.repo, pr["headRefName"], pr["baseRefName"])

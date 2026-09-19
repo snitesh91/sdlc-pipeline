@@ -5139,9 +5139,9 @@ def test_decide_next_action_initiative_gate_a_passed_epics_still_open():
     cut_epic = _issue(42, parent=40, labels=["type:epic"], state="OPEN")
     runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative, roadmap_task, cut_epic])})
     gh = GitHub(runner=runner)
+    runner.responses.update(_no_blockers_responses(42))
     result = decide_next_action(gh, 40)
-    assert result["action"] == "none"
-    assert "still open" in result["reason"]
+    assert (result["action"], result["epic"]) == ("cut-phase-tasks", 42)
 
 
 def test_decide_next_action_initiative_gate_a_passed_all_epics_closed():
@@ -5887,7 +5887,7 @@ def test_audit_issues_never_flags_a_parentless_epic_or_initiative_but_flags_a_ta
                     _full(12, issue_type="Task", labels=["type:task"]),
                     _full(13, issue_type="Bug")])
     flagged = {i["issue"]: i["missing"] for i in cmd_audit_issues(tree)["issues"]}
-    assert flagged == {12: ["parent"], 13: ["parent"]}
+    assert flagged == {7: ["phase-Tasks"], 12: ["parent"], 13: ["parent"]}
 
 
 def test_audit_issues_repair_hint_asks_only_for_what_cannot_be_inferred():
@@ -5965,7 +5965,7 @@ def test_resolve_thread_reports_a_failed_resolve_after_replying():
 @pytest.mark.parametrize("argv, fn, expected", [
     (["create-issue", "--title", "t", "--body", "b", "--parent", "9", "--type", "Bug",
       "--priority", "High", "--effort", "Low"], "cmd_create_issue",
-     ("t", "b", 9, [], "Bug", "High", "Low")),
+     ("t", "b", 9, [], "Bug", "High", "Low", [])),
     (["audit-issues", "--epic", "7"], "cmd_audit_issues", (7,)),
     (["resolve-thread", "--thread-id", "PRRT_1", "--reply", "ok"], "cmd_resolve_thread",
      ("PRRT_1", "ok")),

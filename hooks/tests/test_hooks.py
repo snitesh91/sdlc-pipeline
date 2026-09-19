@@ -115,6 +115,8 @@ DENIED = [
 
 ALLOWED = [
     'python3 "$SDLC" merge-pr 12 --issue 5',
+    'python3 "$SDLC" merge-gate 40 --issue 5 --stage product --operator-confirmed',
+    'python3 "$SDLC" mark-feedback-addressed 5',
     'python3 "$SDLC" open-dev-pr 5 --title t --body "gh pr merge 5 && git rebase main" --summary s',
     'python3 /x/scripts/sdlc_next.py handoff-to-pr-review 5 --pr 9 --summary "use gh api graphql"',
     "gh issue view 5 --comments",
@@ -159,6 +161,9 @@ def test_guard_allows(sdlc_repo, command):
 def test_guard_reason_names_control_plane_command(sdlc_repo):
     assert "merge-pr" in guard("gh pr merge 3", sdlc_repo)
     assert "merge-design-pr" in guard("gh pr merge 3", sdlc_repo)
+    reason = guard("gh pr merge 3", sdlc_repo)
+    assert "merge-gate" in reason and "--operator-confirmed" in reason
+    assert "operator explicitly said" in reason
     assert "open-design-pr" in guard("gh pr create --base x", sdlc_repo)
     assert "create-issue" in guard("gh issue create -t x", sdlc_repo)
     assert "set-stage" in guard("gh issue edit 5 --add-label bug", sdlc_repo)
@@ -243,6 +248,13 @@ ROLE_DENIED = [
     ("sdlc:design-review", CP + "open-design-pr 5", "orchestrator"),
     ("sdlc:architecture", CP + "open-design-pr 5", "orchestrator"),
     ("sdlc:lld", CP + "merge-design-pr 40 --issue 5", "orchestrator"),
+    ("sdlc:architecture", CP + "merge-gate 40 --issue 5 --stage architecture --operator-confirmed",
+     "orchestrator"),
+    ("sdlc:product", CP + "merge-gate 40 --issue 5 --stage product --operator-confirmed",
+     "orchestrator"),
+    ("sdlc:architecture", CP + "mark-feedback-addressed 5", "orchestrator"),
+    ("sdlc:product", CP + "mark-feedback-addressed 5", "orchestrator"),
+    ("sdlc:architecture", CP + "cut-phase-tasks 9 --repo-path /w", "orchestrator"),
     ("sdlc:pr-review", CP + "claim 5 --role pr-review", "orchestrator"),
     ("sdlc:exploratory", "echo $(" + CP + "close-epic 9)", "orchestrator"),
     ("sdlc:initiative-close", CP + "close-initiative 1", "orchestrator"),

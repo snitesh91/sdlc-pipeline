@@ -138,7 +138,9 @@ def test_record_design_review_also_comments_on_the_design_pr(repo):
     [comment] = gh.prs[pr]["comments"]
     assert "structure holds" in comment and "no findings" in comment
     assert "design-review-outcome" not in comment  # the marker is the issue thread's alone
-    assert "<!-- design-review-outcome: clean:arch-review @ " in gh.comments_on(10)[-1]
+    head = _git("rev-parse", "origin/issue-10", cwd=repo).strip()
+    assert f"<!-- design-review-outcome: clean:arch-review sha:{head} @ " in gh.comments_on(10)[-1]
+    assert result["reviewed_sha"] == head
 
 
 def test_record_design_review_leaves_a_pr_comment_only_where_a_design_pr_exists(repo):
