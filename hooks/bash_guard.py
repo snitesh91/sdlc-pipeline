@@ -3,12 +3,15 @@ limit each `sdlc:<role>` agent to its role's control-plane commands.
 
 Only the leading command words of each shell segment (command substitutions and
 `sh -c`/`eval` scripts included) are inspected, so argument text never triggers a deny.
+
+The main thread is guarded only while it drives a run (see `main_thread_guarded`); an
+`sdlc:<role>` agent is always guarded.
 """
 import os
 import re
 import shlex
 
-from _common import emit, read_input, repo_config, run, sdlc_role
+from _common import emit, load_json, read_input, repo_config, run, run_states, sdlc_role
 
 SDLC = 'python3 "$SDLC"'
 # Wrapper -> its options that consume the next word; `timeout` also takes a duration.
@@ -54,6 +57,10 @@ ROLE_COMMANDS = {
 }
 REVIEW_ROLES = {"product-review", "design-review", "pr-review"}
 CONTROL_PLANE_REFS = {"$SDLC", "${SDLC}"}
+
+# A run's state file is written by `next-action --run-id` and never deleted, so "live" means
+# written within this window (the orchestrator rewrites it as units start and finish).
+RUN_LIVE_SECONDS = 8 * 3600
 
 REASONS = {
     "graphql": f"Hand-run GraphQL is blocked: the control plane owns GitHub reads and writes. Use {SDLC} <command> (next-action, check-gate, pr-checks, resolve-thread, audit-issues, ...).",
@@ -323,15 +330,29 @@ def verdict(command: str, role: str = ""):
     return None
 
 
+def main_thread_guarded(config: dict, session_id: str) -> bool:
+    """Whether the main thread's hand-run mutations are denied: only while this session
+    drives a run, i.e. it has a fresh run-state file. `guard.mainThread: "always"` guards
+    every session; an unknown session id (no run can be matched) stays guarded."""
+    if (config.get("guard") or {}).get("mainThread") == "always" or not session_id:
+        return True
+    return bool(run_states(config, session_id, max_age=RUN_LIVE_SECONDS))
+
+
 def main() -> int:
     data = read_input()
     if data.get("tool_name") != "Bash":
         return 0
     command = (data.get("tool_input") or {}).get("command")
-    if not isinstance(command, str) or not repo_config(data.get("cwd") or os.getcwd()):
+    config_path = repo_config(data.get("cwd") or os.getcwd())
+    if not isinstance(command, str) or not config_path:
+        return 0
+    role = sdlc_role(data.get("agent_type"))
+    if not role and not main_thread_guarded(load_json(config_path),
+                                            str(data.get("session_id") or "")):
         return 0
     try:
-        key = verdict(command, sdlc_role(data.get("agent_type")))
+        key = verdict(command, role)
     except ValueError:  # unbalanced quotes etc. -- let the shell report it
         return 0
     if key:

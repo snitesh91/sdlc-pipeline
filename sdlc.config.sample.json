@@ -5,6 +5,9 @@
   "tokenPath": "~/.github-token",
   "tokenEnv": "SDLC_GH_TOKEN",
   "requirementsDir": "docs/requirements",
+  "guard": {
+    "mainThread": "run-live"
+  },
   "humanAssignee": "maintainer",
   "parallelism": {
     "devLane": 1,

@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import time
 
 CONFIG_NAME = "sdlc-pipeline.config.json"
 CONFIG_DIRS = ("", ".config", ".claude")  # same lookup places as sdlc_next.py
@@ -56,15 +57,19 @@ def load_json(path: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def run_states(config: dict, session_id: str) -> list:
+def run_states(config: dict, session_id: str, max_age: float = None) -> list:
     """This session's control-plane run states, newest first; the directory is found as
-    sdlc_next.py's `_run_state_dir` finds it."""
+    sdlc_next.py's `_run_state_dir` finds it. With `max_age` (seconds), only files written
+    that recently: nothing deletes a state file when its run ends."""
     worktrees = ((config.get("pipeline") or {}).get("worktrees") or {})
     root = os.environ.get("SDLC_RUNS_DIR") or os.path.join(worktrees.get("root", "/tmp"),
                                                            ".sdlc-runs")
     try:
         paths = sorted((os.path.join(root, n) for n in os.listdir(root) if n.endswith(".json")),
                        key=os.path.getmtime, reverse=True)
+        if max_age is not None:
+            now = time.time()
+            paths = [p for p in paths if now - os.path.getmtime(p) <= max_age]
     except OSError:
         return []
     states = [load_json(p) for p in paths]

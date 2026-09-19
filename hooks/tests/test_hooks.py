@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 import pytest
 
@@ -41,12 +42,14 @@ def run_hook(name, payload, env=None):
     return proc
 
 
-def guard(command, cwd, agent_type=None):
+def guard(command, cwd, agent_type=None, session=None, runs=None):
     payload = {"tool_name": "Bash", "tool_input": {"command": command}, "tool_use_id": "t1",
                "cwd": cwd}
+    if session:
+        payload["session_id"] = session
     if agent_type:
         payload.update(agent_id="a1", agent_type=agent_type)
-    proc = run_hook("bash_guard.py", payload)
+    proc = run_hook("bash_guard.py", payload, env={"SDLC_RUNS_DIR": str(runs)} if runs else None)
     assert proc.returncode == 0, proc.stderr
     if not proc.stdout.strip():
         return None
@@ -147,9 +150,16 @@ ALLOWED = [
 ]
 
 
+@pytest.fixture
+def live(tmp_path):
+    """Guard kwargs for a main thread whose session drives a run (a fresh run-state file)."""
+    _run_state(tmp_path / "runs", "sess")
+    return {"session": "sess", "runs": tmp_path / "runs"}
+
+
 @pytest.mark.parametrize("command", DENIED)
-def test_guard_denies(sdlc_repo, command):
-    reason = guard(command, sdlc_repo)
+def test_guard_denies(sdlc_repo, live, command):
+    reason = guard(command, sdlc_repo, **live)
     assert reason and reason.startswith("sdlc guard: ")
 
 
@@ -170,6 +180,79 @@ def test_guard_reason_names_control_plane_command(sdlc_repo):
     assert "resolve-thread" in guard("gh api graphql -f query='mutation { resolveReviewThread }'", sdlc_repo)
     assert "start-stage" in guard("git worktree add /tmp/x", sdlc_repo)
     assert "sync-branch" in guard("git rebase main", sdlc_repo)
+
+
+# --- the main thread is guarded only while it drives a run -------------------------------
+
+MAIN_THREAD_WRITES = [
+    "gh api graphql -f query='mutation { resolveReviewThread(input:{threadId:\"T\"}) { thread { id } } }'",
+    "gh api -X PATCH repos/o/r/issues/5 -f state=closed",
+    "gh issue edit 5 --add-label foo",
+    "gh pr merge 12 --squash",
+    "git worktree add /tmp/x -b issue-5",
+    "git push --force origin issue-5",
+    "git rebase origin/main",
+]
+OTHER_SESSION = "another-session"
+
+
+@pytest.mark.parametrize("command", MAIN_THREAD_WRITES)
+def test_main_thread_without_a_run_is_not_guarded(tmp_path, sdlc_repo, command):
+    runs = tmp_path / "runs"
+    assert guard(command, sdlc_repo, session="sess", runs=runs) is None  # no state dir at all
+    _run_state(runs, OTHER_SESSION)  # another session's run does not count
+    assert guard(command, sdlc_repo, session="sess", runs=runs) is None
+
+
+@pytest.mark.parametrize("command", MAIN_THREAD_WRITES)
+def test_main_thread_with_a_live_run_is_guarded(sdlc_repo, live, command):
+    assert "sdlc guard: " in guard(command, sdlc_repo, **live)
+
+
+@pytest.mark.parametrize("command", MAIN_THREAD_WRITES)
+@pytest.mark.parametrize("live_run", [False, True])
+def test_stage_agents_are_guarded_with_or_without_a_run(tmp_path, sdlc_repo, command, live_run):
+    if live_run:
+        _run_state(tmp_path / "runs", "sess")
+    for agent in ("sdlc:development", "sdlc:pr-review", "sdlc:lld"):
+        assert "sdlc guard: " in guard(command, sdlc_repo, agent, session="sess",
+                                       runs=tmp_path / "runs")
+
+
+def test_stage_agent_role_limits_apply_without_a_run(tmp_path, sdlc_repo):
+    kw = {"session": "sess", "runs": tmp_path / "runs"}
+    assert "orchestrator" in guard(CP + "set-stage 5 --stage development", sdlc_repo,
+                                   "sdlc:development", **kw)
+    assert "read-only on the branch" in guard("git commit -am fix", sdlc_repo, "sdlc:pr-review", **kw)
+    assert guard(CP + "open-dev-pr 5 --title t --body b --summary s", sdlc_repo,
+                 "sdlc:development", **kw) is None
+    # the main thread with no run keeps every command too
+    assert guard(CP + "set-stage 5 --stage development", sdlc_repo, **kw) is None
+
+
+def test_a_run_state_nothing_has_touched_for_a_day_is_not_live(tmp_path, sdlc_repo):
+    # Nothing deletes a state file when its run ends; a stale one must not guard the session forever.
+    runs = tmp_path / "runs"
+    _run_state(runs, "sess")
+    kw = {"session": "sess", "runs": runs}
+    assert "sdlc guard: " in guard("gh pr merge 3", sdlc_repo, **kw)
+    old = time.time() - 24 * 3600
+    os.utime(runs / "epic-9.json", (old, old))
+    assert guard("gh pr merge 3", sdlc_repo, **kw) is None
+    os.utime(runs / "epic-9.json", (time.time() - 7 * 3600,) * 2)  # a long stage agent, still live
+    assert "sdlc guard: " in guard("gh pr merge 3", sdlc_repo, **kw)
+
+
+def test_an_unknown_session_stays_guarded(sdlc_repo):
+    assert "sdlc guard: " in guard("gh pr merge 3", sdlc_repo)
+
+
+def test_guard_main_thread_always_restores_the_unconditional_guard(tmp_path):
+    cwd = _git_repo(tmp_path / "always", {"repo": "o/r", "guard": {"mainThread": "always"}})
+    kw = {"session": "sess", "runs": tmp_path / "runs"}
+    assert "sdlc guard: " in guard("gh pr merge 3", cwd, **kw)
+    cwd = _git_repo(tmp_path / "runlive", {"repo": "o/r", "guard": {"mainThread": "run-live"}})
+    assert guard("gh pr merge 3", cwd, **kw) is None
 
 
 def test_guard_noop_outside_sdlc_repo(plain_repo, tmp_path):
