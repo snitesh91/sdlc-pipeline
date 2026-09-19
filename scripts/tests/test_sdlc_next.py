@@ -6091,10 +6091,17 @@ def test_audit_issues_repair_hint_asks_only_for_what_cannot_be_inferred():
                      21: "repair-issue 21 --parent <P>"}
 
 
-def test_audit_issues_epic_scope_is_that_tree_plus_parentless_issues():
+def test_audit_issues_epic_scope_is_only_that_subtree():
+    # Regression: parentless issues elsewhere in the repo were flagged under --epic too.
     from sdlc_next import cmd_audit_issues
     flagged = {i["issue"] for i in cmd_audit_issues(_audit_tree(), epic=2)["issues"]}
-    assert flagged == {4, 5, 10}
+    assert flagged == {4}
+
+
+def test_audit_issues_without_epic_still_flags_parentless_issues():
+    from sdlc_next import cmd_audit_issues
+    flagged = {i["issue"] for i in cmd_audit_issues(_audit_tree())["issues"]}
+    assert {5, 10} <= flagged
 
 
 def test_audit_issues_skips_unconfigured_priority_and_effort(monkeypatch):
@@ -6466,3 +6473,11 @@ def test_show_config_cli_reports_the_plugin_version(tmp_path):
     out = subprocess.check_output([sys.executable, script, "show-config"], text=True,
                                   env={**os.environ, "SDLC_CONFIG": str(cfg), "GITHUB_TOKEN": "x"})
     assert json.loads(out)["plugin"]["version"]
+
+
+def test_missing_token_error_names_the_configured_token_env(monkeypatch, capsys):
+    import sdlc_next
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(sdlc_next, "TOKEN_ENV", "MY_GH_TOKEN")
+    assert sdlc_next.main(["list-needs-human"]) == 1
+    assert "tokenEnv ($MY_GH_TOKEN)" in json.loads(capsys.readouterr().out)["error"]

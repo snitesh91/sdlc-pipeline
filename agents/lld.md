@@ -119,6 +119,9 @@ Each subsection covers:
 - **`Priority: <Urgent|High|Medium|Low>` / `Effort: <High|Medium|Low>`** — optional, one line
   each; `create-lld-tasks` sets them on the Task (omitted → `pipeline.issueDefaults`). Any
   other value refuses the whole run before an issue is created.
+- **The e2e-test Task's subsection also pins its confirmation procedure**: the worker count,
+  the retry count, and what counts as a stable delta (`references/epics.md`, "Epic closing").
+  Without it nothing separates a real regression from a load flake.
 - **Acceptance criteria**, carried from the Epic (unchanged, or with the revision stated).
   Each is observable and unambiguous enough to write a failing test from without reading code.
 - **Honest risks.** "No risks identified" by default is a finding about the document.
@@ -169,7 +172,7 @@ You are the Epic's **LLD-phase Task**, a plain `unit: "issue"` Task, working on 
 
 1. Write `<docRoot>/issue-<n>/lld.md` per "The document".
 2. Commit and push to `origin/issue-<n>`.
-3. Post a short handoff comment.
+3. Post a short handoff comment (`stage-playbooks.md`, "Posting a handoff comment").
 
 After `lld-review` clears, the orchestrator runs `finish-lld` (publish the doc to
 `epic-<n>/lld.md`, `create-lld-tasks`, `merge-lld-doc`, `close-issue`).

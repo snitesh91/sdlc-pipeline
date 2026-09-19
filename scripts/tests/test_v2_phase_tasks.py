@@ -521,9 +521,10 @@ def test_close_issue_releases_the_issue_worktree(repo):
 def test_close_epic_sets_the_terminal_fields_when_it_merges():
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
     gh.issues[9]["comments"] = [
-        "<!-- epic-verification: e2e:9 @ 2026-09-15T00:00:00Z -->",
-        "<!-- epic-verification: exploratory:9 @ 2026-09-15T00:01:00Z -->"]
+        "<!-- epic-verification: e2e:9 sha:abc1234 @ 2026-09-15T00:00:00Z -->",
+        "<!-- epic-verification: exploratory:9 sha:abc1234 @ 2026-09-15T00:01:00Z -->"]
     merged = []
+    gh.files_since = lambda sha, branch: []
     gh.branch_behind_by = lambda branch, base="main": 0
     gh.pr_list_for_branch = lambda branch: []
     gh.pr_create = lambda **kw: 38

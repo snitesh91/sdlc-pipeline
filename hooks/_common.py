@@ -77,10 +77,19 @@ def plugin_root() -> str:
 
 
 def plugin_data_dir() -> str:
-    """Hook state lives here, never in the driven repo's tree (the control plane refuses dirty trees)."""
-    return os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.join(
-        os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
-        "plugins", "data", "sdlc")
+    """Hook state lives here, never in the driven repo's tree (the control plane refuses dirty trees).
+
+    Hooks get $CLAUDE_PLUGIN_DATA; a Bash call (`sdlc_metrics.py`) does not, so an installed
+    plugin derives the same `<plugin>-<marketplace>` directory from its cache path."""
+    env = os.environ.get("CLAUDE_PLUGIN_DATA")
+    if env:
+        return env
+    parts = os.path.normpath(plugin_root()).split(os.sep)
+    if len(parts) > 5 and parts[-4] == "cache" and parts[-5] == "plugins":
+        plugins_dir = os.sep.join(parts[:-4])
+        return os.path.join(plugins_dir, "data", f"{parts[-2]}-{parts[-3]}")
+    return os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
+                        "plugins", "data", "sdlc")
 
 
 def policy_file() -> dict:

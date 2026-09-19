@@ -59,7 +59,7 @@ Both unit kinds are a plain `unit: "issue"` Task and exit the same way:
 
 1. Work on `issue-<n>` in the worktree your prompt names.
 2. Write `<docRoot>/issue-<n>/product.md`. Commit, push.
-3. Post the handoff comment: doc pointer, summary, Effort, priority line, any proposed split.
+3. Post the handoff comment (`stage-playbooks.md`, "Posting a handoff comment"): doc pointer, summary, Effort, priority line, any proposed split.
 
 | Unit | Document covers | After a clean `product-review` |
 |---|---|---|

@@ -56,9 +56,10 @@ sdlc.config.sample.json          config template
 4. **Copy the workflow**: `workflows/gate-auto-advance.yml` → `<repo>/.github/workflows/`.
    Set the Actions secret `SDLC_GH_TOKEN` (classic PAT) and the Actions variable
    `SDLC_PIPELINE_REF` to the same tag `.claude/settings.json` pins (defaults to `main`).
-5. **Token**: point the config's `tokenPath` at a file holding a classic PAT (`ghp_`);
-   fine-grained PATs cannot read check-runs or write the custom fields. The SessionStart
-   hook exports it as `GITHUB_TOKEN` unless you already set one.
+5. **Token**: point the config's `tokenPath` at a file holding a classic PAT (`ghp_`), or name an
+   env var in `tokenEnv`; fine-grained PATs cannot read check-runs or write the custom fields.
+   The SessionStart hook exports the `tokenEnv` var, else the `tokenPath` file, as
+   `GITHUB_TOKEN`, overriding any ambient one, and warns when it is not a `ghp_` token.
 6. Optional: a repo-specific `<docRoot>/_templates/{product,architecture}.template.md`
    overrides the plugin's templates.
 7. Start a run with `sdlc-run <initiative-or-epic-number> [claude args]`: it launches `claude`
@@ -80,11 +81,11 @@ They are stdlib Python, and they fail open on internal errors.
 
 | Hook | Enforces |
 |---|---|
-| `SessionStart` | Exports `$SDLC` and `GITHUB_TOKEN` (from `tokenPath`) for every Bash call; warns when no token is available; suggests `rtk init` if `rtk` is absent; flags a session model off the policy's orchestrator model; after a compaction, restates this session's run (epic, run-id, units in flight) |
-| `PreToolUse` (Bash) | Denies hand-run `gh api graphql`, `gh issue create/edit/close/reopen`, `gh pr create/merge/ready/close`, mutating `gh api`, `git worktree add` (except `--detach`), force-push and rebase, naming the `python3 "$SDLC"` command to use instead; limits each `sdlc:<role>` agent to its role's control-plane commands and review roles to no git writes. Only each segment's leading words count |
+| `SessionStart` | Exports `$SDLC` and `GITHUB_TOKEN` (from `tokenEnv` / `tokenPath`) for every Bash call; warns when no token is available; suggests `rtk init` if `rtk` is absent; flags a session model off the policy's orchestrator model; after a compaction, restates this session's run (epic, run-id, units in flight) |
+| `PreToolUse` (Bash) | Denies hand-run `gh api graphql`, `gh issue create/edit/close/reopen`, `gh pr create/merge/ready/close`, mutating `gh api`, `git worktree add` (except `--detach`), force-push and rebase, naming the `python3 "$SDLC"` command to use instead; limits each `sdlc:<role>` agent to its role's control-plane commands (`post-comment` only with its own `--role`) and review roles to no git writes. Only each segment's leading words count |
 | `PreToolUse` (Agent) | Sets every `sdlc:*` agent's `model` from `hooks/model_policy.json` (overridable per role by `pipeline.models` / `pipeline.fanout`); denies nested stages and fan-out a role may not do or has exhausted; lets the policy's `explore` roles (`development`, `lld`) launch a read-only `Explore` search |
 | `SubagentStart` | Gives each `sdlc:*` agent `$SDLC`, `docRoot`, `requirementsDir`, the references path and the `SDLC-RESULT` format |
-| `SubagentStop` | An `sdlc:*` agent cannot stop until its final message ends with `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "done\|clean\|rework\|blocked\|needs-human\|failed"}` (optional `"next"`/`"why"`: a standing child's recommended next stage); records every finished agent's metrics |
+| `SubagentStop` | An `sdlc:*` agent cannot stop until its final message ends with `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "done\|clean\|rework\|blocked\|needs-human\|failed"}` (optional `"next"`/`"why"`: a standing child's recommended next stage); and, for `product`/`architecture`/`lld` finishing `done`, until its handoff went out via `post-comment`; records every finished agent's metrics |
 | `SessionEnd` | Records the orchestrator's (main thread's) metrics |
 
 ## Tunables
@@ -97,6 +98,7 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `parallelism.devLane` / `.prReview` / `.designLane` | 1 / 1 / 1 | Lane caps; set a lane above 1 to fan it out |
 | `parallelism.maxTasksPerRun` | 0 (unlimited) | Units driven to a terminal state per run |
 | `docRoot` / `requirementsDir` / `tokenPath` | — | Doc tree, requirements docs (IRDs), PAT file |
+| `tokenEnv` | unset | Env var holding the PAT; wins over `tokenPath` |
 | `pipeline.classification.*` | `{}` (sample: `type:initiative` / `type:epic` / `type:task` labels) | The only way an issue is an Initiative, Epic or Task |
 | `pipeline.profiles` | `legacy`, `standing`, `"*"` | Epic behaviour by label: `driven`, `epicLevelPhase`, `childrenNeedArchitectedEpic`, `closes`, `gates.*` |
 | `pipeline.labels.*` | `epic:standing` / `epic:legacy` / `epic:architected` | Epic labels |
@@ -116,7 +118,8 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 ## Metrics
 
 The `SubagentStop` and `SessionEnd` hooks append one JSON line per finished agent to
-`$CLAUDE_PLUGIN_DATA/metrics/<owner>__<repo>.jsonl` (never the driven repo's tree): per-model
+`$CLAUDE_PLUGIN_DATA/metrics/<owner>__<repo>.jsonl` (never the driven repo's tree; `sdlc_metrics.py`,
+run from Bash where that variable is unset, derives the same `<plugin>-<marketplace>` directory): per-model
 tokens, estimated cost (prices in `hooks/_metrics.py`), duration, turns, tool calls, peak
 context (the largest single request), the `SDLC-RESULT` issue/stage/outcome, and the
 control-plane run id (`next-action --run-id`) when the session drives one. `--by route`

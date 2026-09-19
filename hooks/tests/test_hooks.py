@@ -220,6 +220,9 @@ ROLE_ALLOWED = [
     ("sdlc:architecture", CP + "cite docs/a.md --line 3"),
     ("sdlc:architecture", CP + "--help"),
     ("sdlc:lld", "git commit -m 'lld' && git push origin issue-5"),
+    ("sdlc:product", CP + "post-comment 5 --role product --body-file /tmp/c.md"),
+    ("sdlc:architecture", CP + "post-comment 5 --body-file /tmp/c.md --role=architecture"),
+    ("sdlc:lld", CP + "post-comment 5 --role lld --body-file /tmp/c.md"),
 ]
 ROLE_DENIED = [
     ("sdlc:development", CP + "set-stage 5 --stage pr-review", "orchestrator"),
@@ -238,6 +241,11 @@ ROLE_DENIED = [
     ("sdlc:initiative-close", CP + "close-initiative 1", "orchestrator"),
     ("sdlc:development", CP + "route 5 --to merge --reason r", "orchestrator"),
     ("sdlc:design-review", CP + "waive-gate 5 --stage architecture --summary s", "orchestrator"),
+    ("sdlc:product", CP + "post-comment 5 --role architecture --body-file f", "only your own stage"),
+    ("sdlc:lld", CP + "post-comment 5 --body-file f", "only your own stage"),
+    ("sdlc:design-review", CP + "post-comment 5 --role lld --body-file f", "orchestrator"),
+    ("sdlc:development", CP + "post-comment 5 --role development --body-file f", "orchestrator"),
+    ("sdlc:pr-review", CP + "post-comment 5 --role pr-review --body-file f", "orchestrator"),
     ("sdlc:pr-review", "git commit -am fix", "read-only on the branch"),
     ("sdlc:pr-review", "git push origin issue-5", "read-only on the branch"),
     ("sdlc:design-review", "git -C /w merge origin/main", "read-only on the branch"),
@@ -325,6 +333,81 @@ def test_subagent_stop_blocks(tmp_path, sdlc_repo, text, problem):
     assert problem in proc.stderr and "SDLC-RESULT: {" in proc.stderr
 
 
+POST_CMD = 'python3 "$SDLC" post-comment 5 --role {role} --body-file /tmp/c.md'
+DONE = 'SDLC-RESULT: {{"issue": 5, "stage": "{role}", "outcome": "{outcome}"}}'
+
+
+def _post_lines(role, ok=True, resume_after=False, cmd=None, tid="p1"):
+    lines = [
+        {"type": "assistant", "message": {"id": "m9", "role": "assistant", "content": [
+            {"type": "tool_use", "id": tid, "name": "Bash",
+             "input": {"command": cmd or POST_CMD.format(role=role)}}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tid, "is_error": not ok,
+             "content": '{"issue": 5, "role": "%s", "posted": true}' % role if ok
+             else '{"error": "not claimed"}'}]}},
+    ]
+    if resume_after:
+        lines.append({"type": "user", "message": {"role": "user", "content": "rework this"}})
+    return lines
+
+
+def stop_role(tmp_path, cwd, role, outcome="done", lines=(), agent_type=None):
+    entries = [{"type": "user", "message": {"role": "user", "content": "do the stage"}}, *lines,
+               {"type": "assistant", "message": {"id": "mf", "role": "assistant", "content": [
+                   {"type": "text", "text": DONE.format(role=role, outcome=outcome)}]}}]
+    tpath = tmp_path / "agent.jsonl"
+    tpath.write_text("\n".join(json.dumps(x) for x in entries) + "\n")
+    tpath = str(tpath)
+    return run_hook("subagent_stop.py", {
+        "agent_id": "a1", "agent_type": agent_type or f"sdlc:{role}",
+        "agent_transcript_path": tpath, "stop_hook_active": False, "cwd": cwd})
+
+
+@pytest.mark.parametrize("role", ["product", "architecture", "lld"])
+def test_authoring_stage_done_without_a_posted_handoff_is_blocked(tmp_path, sdlc_repo, role):
+    proc = stop_role(tmp_path, sdlc_repo, role)
+    assert proc.returncode == 2
+    assert f"post-comment 5 --role {role}" in proc.stderr
+
+
+@pytest.mark.parametrize("role", ["product", "architecture", "lld"])
+def test_authoring_stage_done_with_a_posted_handoff_stops(tmp_path, sdlc_repo, role):
+    assert stop_role(tmp_path, sdlc_repo, role, lines=_post_lines(role)).returncode == 0
+
+
+def test_a_failed_or_wrong_role_post_does_not_count(tmp_path, sdlc_repo):
+    assert stop_role(tmp_path, sdlc_repo, "product",
+                     lines=_post_lines("product", ok=False)).returncode == 2
+    assert stop_role(tmp_path, sdlc_repo, "product",
+                     lines=_post_lines("lld")).returncode == 2
+
+
+def test_a_post_from_before_a_resume_message_does_not_count(tmp_path, sdlc_repo):
+    lines = _post_lines("product", resume_after=True)
+    assert stop_role(tmp_path, sdlc_repo, "product", lines=lines).returncode == 2
+    assert stop_role(tmp_path, sdlc_repo, "product",
+                     lines=[*lines, *_post_lines("product", tid="p2")]).returncode == 0
+
+
+@pytest.mark.parametrize("outcome", ["needs-human", "blocked", "failed", "rework"])
+def test_only_a_done_outcome_needs_the_handoff_comment(tmp_path, sdlc_repo, outcome):
+    assert stop_role(tmp_path, sdlc_repo, "product", outcome=outcome).returncode == 0
+
+
+@pytest.mark.parametrize("agent_type", ["sdlc:development", "sdlc:pr-review", "sdlc:design-review"])
+def test_other_roles_are_not_held_to_a_handoff_comment(tmp_path, sdlc_repo, agent_type):
+    assert stop_role(tmp_path, sdlc_repo, "product", agent_type=agent_type).returncode == 0
+
+
+def test_the_handoff_check_fails_open_on_an_unreadable_transcript(sdlc_repo):
+    proc = run_hook("subagent_stop.py", {
+        "agent_type": "sdlc:product", "cwd": sdlc_repo, "stop_hook_active": False,
+        "last_assistant_message": DONE.format(role="product", outcome="done"),
+        "agent_transcript_path": "/nonexistent/x.jsonl"})
+    assert proc.returncode == 0
+
+
 def test_subagent_stop_reads_only_final_turn(tmp_path, sdlc_repo):
     # The earlier turn's valid line must not satisfy a final turn that lacks one.
     assert stop(tmp_path, sdlc_repo, "waiting for CI").returncode == 2
@@ -369,13 +452,61 @@ def test_session_start_wires_token_from_config(tmp_path):
     run_hook("session_start.py", {"cwd": repo}, env={"CLAUDE_ENV_FILE": str(env_file)})
     content = env_file.read_text()
     assert "export GITHUB_TOKEN=" in content and "ghp_secret" not in content
-    # The env file is sourced before each Bash call: it reads the file, but an operator-set token wins.
+    # The env file is sourced before each Bash call: the configured file overrides an ambient token.
     probe = f"{content}\nprintf %s \"$GITHUB_TOKEN\""
     clean_env = {k: v for k, v in os.environ.items() if k != "GITHUB_TOKEN"}
     assert subprocess.run(["bash", "-c", probe], capture_output=True, text=True,
                           env=clean_env).stdout == "ghp_secret"
     assert subprocess.run(["bash", "-c", probe], capture_output=True, text=True,
-                          env={**clean_env, "GITHUB_TOKEN": "ghp_mine"}).stdout == "ghp_mine"
+                          env={**clean_env, "GITHUB_TOKEN": "github_pat_stray"}).stdout == "ghp_secret"
+
+
+def _token_probe(tmp_path, config, env, ambient=None):
+    repo = _git_repo(tmp_path / "r", {"repo": "o/r", **config})
+    env_file = tmp_path / "env.sh"
+    proc = run_hook("session_start.py", {"cwd": repo}, env={"CLAUDE_ENV_FILE": str(env_file), **env})
+    clean_env = {k: v for k, v in os.environ.items() if k != "GITHUB_TOKEN"}
+    clean_env.pop("MY_GH_TOKEN", None)
+    clean_env.update(env)
+    if ambient:
+        clean_env["GITHUB_TOKEN"] = ambient
+    out = subprocess.run(["bash", "-c", f'{env_file.read_text()}\nprintf %s "$GITHUB_TOKEN"'],
+                         capture_output=True, text=True, env=clean_env).stdout
+    ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"] if proc.stdout else ""
+    return out, ctx
+
+
+def test_token_env_beats_token_path_and_ambient(tmp_path):
+    token = tmp_path / "tok"
+    token.write_text("ghp_file\n")
+    out, ctx = _token_probe(tmp_path, {"tokenPath": str(token), "tokenEnv": "MY_GH_TOKEN"},
+                            {"MY_GH_TOKEN": "ghp_env"}, ambient="github_pat_stray")
+    assert out == "ghp_env" and "classic PAT" not in ctx
+
+
+def test_token_env_falls_back_to_token_path_when_unset(tmp_path):
+    token = tmp_path / "tok"
+    token.write_text("ghp_file\n")
+    out, _ = _token_probe(tmp_path, {"tokenPath": str(token), "tokenEnv": "MY_GH_TOKEN"}, {},
+                          ambient="github_pat_stray")
+    assert out == "ghp_file"
+
+
+def test_token_env_alone_works_without_token_file(tmp_path):
+    out, _ = _token_probe(tmp_path, {"tokenEnv": "MY_GH_TOKEN"}, {"MY_GH_TOKEN": "ghp_env"})
+    assert out == "ghp_env"
+
+
+def test_session_start_warns_when_configured_token_is_not_classic(tmp_path):
+    _, ctx = _token_probe(tmp_path, {"tokenEnv": "MY_GH_TOKEN"}, {"MY_GH_TOKEN": "github_pat_x"})
+    assert "not a classic PAT" in ctx
+
+
+def test_session_start_ignores_an_invalid_token_env_name(tmp_path):
+    token = tmp_path / "tok"
+    token.write_text("ghp_file\n")
+    out, _ = _token_probe(tmp_path, {"tokenPath": str(token), "tokenEnv": "x; rm -rf /"}, {})
+    assert out == "ghp_file"
 
 
 @pytest.mark.parametrize("token_path", ["tok", "~/tok"])

@@ -72,6 +72,7 @@ REPO = CONFIG["repo"]
 _OWNER, _NAME = REPO.split("/", 1)
 DOC_ROOT = CONFIG["docRoot"]
 TOKEN_PATH = CONFIG["tokenPath"]
+TOKEN_ENV = CONFIG.get("tokenEnv")
 STAGE_AFTER_GATE = {"product": "architecture", "architecture": "development"}
 
 # Lane caps: how many units of one epic run concurrently, one worktree each.
@@ -503,6 +504,17 @@ class GitHub:
                           "--jq", ".behind_by"])
         return int(out.strip())
 
+    def branch_head_sha(self, branch: str) -> str:
+        """Head commit of `branch`, GitHub-side."""
+        return self._run(["gh", "api", f"repos/{self.repo}/branches/{branch}",
+                          "--jq", ".commit.sha"]).strip()
+
+    def files_since(self, sha: str, branch: str) -> list:
+        """Files changed on `branch` since `sha` (REST compare; capped at 300 files)."""
+        out = self._run(["gh", "api", f"repos/{self.repo}/compare/{sha}...{branch}",
+                          "--jq", ".files[]?.filename"])
+        return [line for line in out.splitlines() if line.strip()]
+
     def base_delta_files(self, head: str, base: str = "main") -> list:
         """Files `base` changed since its merge-base with `head` (REST compare). GitHub
         returns at most 300 files; callers treat a delta at that cap as truncated."""
@@ -679,9 +691,10 @@ _STAGE_ROUTE_MARKER = re.compile(r"<!--\s*stage-route:\s*(\S+?)->(\S+?)\s*(?:@[^
 _PR_REVIEW_OUTCOME_MARKER = re.compile(
     r"<!--\s*pr-review-outcome:\s*(\w+):(\d+)(?:\s+same-class:(true|false))?"
     r"\s*(?:@[^>]*?)?-->")
-# `<!-- epic-verification: e2e|exploratory:<epic> @ <ISO8601> -->`; must be newer
-# than the last `epic-reconciled` marker to count.
-_EPIC_VERIFICATION_MARKER = re.compile(r"<!--\s*epic-verification:\s*(\w+):(\d+)\s*(?:@[^>]*?)?-->")
+# `<!-- epic-verification: e2e|exploratory:<epic> sha:<tested head> @ <ISO8601> -->`; must be
+# newer than the last `epic-reconciled` marker, and its sha must be current, to count.
+_EPIC_VERIFICATION_MARKER = re.compile(
+    r"<!--\s*epic-verification:\s*(\w+):(\d+)(?:\s+sha:([0-9a-fA-F]{7,40}))?\s*(?:@[^>]*?)?-->")
 
 _EPIC_RECONCILED_MARKER = re.compile(r"<!--\s*epic-reconciled:\s*(\d+)\s*(?:@[^>]*?)?-->")
 
@@ -938,9 +951,10 @@ def missing_pipeline_evidence(comments: list) -> list:
     return problems
 
 
-def missing_epic_verification(comments: list) -> list:
+def missing_epic_verification(comments: list, stale_since: Optional[Callable] = None) -> list:
     """Problems with an epic's e2e + exploratory closing evidence; evidence older than
-    the last `origin/main` reconcile counts as missing. Empty = complete."""
+    the last `origin/main` reconcile counts as missing. `stale_since(sha)` returns a problem
+    when the epic branch moved on from the tested `sha` with code changes. Empty = complete."""
     problems = []
     reconciled = None
     for idx, c in enumerate(comments):
@@ -950,25 +964,69 @@ def missing_epic_verification(comments: list) -> list:
     for idx, c in enumerate(comments):
         m = _EPIC_VERIFICATION_MARKER.search(c.get("body", ""))
         if m:
-            seen[m.group(1)] = idx
+            seen[m.group(1)] = (idx, m.group(3))
     for kind, label in (("e2e", "full e2e suite"),
                          ("exploratory", "exploratory pass")):
         if kind not in seen:
             problems.append(f"no `{kind}` closing-verification evidence ({label} never recorded)")
-        elif reconciled is not None and seen[kind] < reconciled:
+        elif reconciled is not None and seen[kind][0] < reconciled:
             problems.append(f"the `{kind}` evidence predates the last `origin/main` reconcile of "
                             f"the epic branch -- it describes a different tree; re-run it")
+        elif stale_since is not None:
+            sha = seen[kind][1]
+            reason = (f"was recorded without a tested head sha -- re-run and re-record it"
+                      if not sha else stale_since(sha))
+            if reason:
+                problems.append(f"the `{kind}` evidence {reason}")
     return problems
 
 
-def cmd_record_epic_verification(gh: GitHub, epic: int, kind: str, summary: str) -> dict:
-    """Post one half (`e2e` | `exploratory`) of an epic's closing verification marker."""
+def _epic_evidence_stale(gh, branch: str) -> Callable:
+    """`stale_since` for `missing_epic_verification`: flags code changes on `branch` after `sha`."""
+    def check(sha: str) -> Optional[str]:
+        try:
+            files = gh.files_since(sha, branch)
+        except GhError:
+            return (f"names a tested head ({sha[:10]}) that `{branch}` cannot be compared "
+                    f"against -- re-run and re-record it")
+        if len(files) >= 300 or not all(_is_doc_path(p) for p in files):
+            return (f"tested `{branch}` at {sha[:10]}, but code has landed since -- it "
+                    f"describes a different tree; re-run it and re-record")
+        return None
+    return check
+
+
+def _epic_unattested_suites(gh, branch: str) -> list:
+    """Required local-CI suites the epic PR (whose changes vs `main` cover them) still lacks
+    a passing check or an attestation for at the epic branch head; needed before the merge."""
+    files = gh.base_delta_files("main", base=branch)
+    head = gh.branch_head_sha(branch)
+    existing = gh.pr_list_for_branch(branch)
+    checks, comments = [], []
+    if existing:
+        number = existing[0]["number"]
+        checks = gh.pr_checks(number)
+        comments = gh.pr_view(number, "comments,headRefOid").get("comments", [])
+    if len(files) >= 300:
+        files = [p for spec in REQUIRED_WORKFLOWS for p in spec["prefixes"]]
+    missing = set(missing_required_workflows(files, checks, comments, head))
+    return [spec["suite"] for spec in REQUIRED_WORKFLOWS
+            if spec["workflow"] in missing and spec.get("suite")]
+
+
+def cmd_record_epic_verification(gh: GitHub, epic: int, kind: str, summary: str,
+                                 sha: Optional[str] = None) -> dict:
+    """Post one half (`e2e` | `exploratory`) of an epic's closing verification marker, stamped
+    with the tested epic-branch head (`sha`, default: the branch head now)."""
+    if sha is not None and not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
+        raise GhError(f"--sha must be a 7-40 char hex commit id, got {sha!r}")
+    sha = sha or gh.branch_head_sha(epic_branch(epic))
     timestamp = _utc_now_marker()
     label = "Full e2e suite" if kind == "e2e" else "Exploratory pass"
     gh.issue_comment(epic,
-        f"🧪 {label} — closing verification for #{epic}. {summary}\n\n"
-        f"<!-- epic-verification: {kind}:{epic} @ {timestamp} -->")
-    return {"epic": epic, "kind": kind, "recorded": True}
+        f"🧪 {label} — closing verification for #{epic} at `{sha[:10]}`. {summary}\n\n"
+        f"<!-- epic-verification: {kind}:{epic} sha:{sha} @ {timestamp} -->")
+    return {"epic": epic, "kind": kind, "sha": sha, "recorded": True}
 
 
 def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
@@ -1004,12 +1062,15 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
             f"<!-- epic-reconciled: {epic} @ {timestamp} -->")
         return _with_workspace(
             {"epic": epic, "merged": False, "branch": branch, "reconciled": behind,
+             "unattested_suites": _epic_unattested_suites(gh, branch),
              "reason": f"picked up {behind} commit(s) from main -- run the closing "
                        f"verification against the reconciled branch, then re-run close-epic"},
             ws)
-    missing = missing_epic_verification(gh.issue_view(epic).get("comments", []))
+    missing = missing_epic_verification(gh.issue_view(epic).get("comments", []),
+                                        _epic_evidence_stale(gh, branch))
     if missing:
         return {"epic": epic, "merged": False, "branch": branch, "missing_verification": missing,
+                "unattested_suites": _epic_unattested_suites(gh, branch),
                 "reason": f"closing verification incomplete: {'; '.join(missing)}"}
     existing = gh.pr_list_for_branch(branch)
     if existing:
@@ -1645,7 +1706,7 @@ def plugin_version_info(runner: Runner = _default_runner) -> dict:
 
 def cmd_show_config(runner: Runner = _default_runner) -> dict:
     """Effective config (`pipeline` block over defaults) plus the running plugin version."""
-    return {"repo": REPO, "docRoot": DOC_ROOT, "tokenPath": TOKEN_PATH,
+    return {"repo": REPO, "docRoot": DOC_ROOT, "tokenPath": TOKEN_PATH, "tokenEnv": TOKEN_ENV,
             "requirementsDir": CONFIG.get("requirementsDir"),
             "parallelism": {**_PARALLELISM,
                             "devLane": DEV_LANE_PARALLELISM,
@@ -2299,6 +2360,37 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
             "evidence_lines": len(evidence.splitlines()), "attested": True}
 
 
+# Authoring stages that hand off with a free-text comment; `post-comment` is their only path.
+POST_COMMENT_ROLES = ("product", "architecture", "lld")
+
+
+def cmd_post_comment(gh: WorkItemProvider, issue: int, role: str, body_file: str) -> dict:
+    """Post an authoring stage's handoff comment, tagged with a `role-comment` marker that
+    `subagent_stop` looks for. Refused unless `issue` is at `role` and claimed (in-progress, or
+    its gate open while the stage revises on feedback)."""
+    if role not in POST_COMMENT_ROLES:
+        raise GhError(f"role must be one of {POST_COMMENT_ROLES}, got {role!r}")
+    try:
+        with io.open(os.path.expanduser(body_file), encoding="utf-8") as fh:
+            body = fh.read().strip()
+    except OSError as exc:
+        raise GhError(f"--body-file must be a readable file holding the comment text: {exc}")
+    if not body:
+        raise GhError("--body-file is empty -- a handoff comment must say something")
+    if len(body) > HANDOFF_CAP:
+        return {"refused": True,
+                "reason": f"the comment is {len(body):,} chars, over the {HANDOFF_CAP:,}-char "
+                          f"handoff cap (references/stage-playbooks.md, \"Comment size is a "
+                          f"contract\"); trim it and re-run"}
+    info = gh.issue_view(issue)
+    stage, status = current_stage(info), pipeline_status(info)
+    if stage != role or status not in ("in-progress", *GATE_PENDING_STATUSES):
+        raise GhError(f"#{issue} is at Stage {stage!r} / status {status!r}, not claimed at "
+                      f"{role!r} -- post-comment only serves the stage that holds the claim")
+    gh.issue_comment(issue, f"{body}\n\n<!-- role-comment: {role} @ {_utc_now_marker()} -->")
+    return {"issue": issue, "role": role, "posted": True}
+
+
 DESIGN_REVIEW_ROLES = ("product-review", "arch-review", "lld-review")
 
 
@@ -2451,6 +2543,26 @@ _GATE_PR_BODY = (
     '{next_stage}. Do NOT use Closes/Fixes here — the tracking issue stays open until the '
     'final code PR merges.'
 )
+
+
+def phase_gate_title(gh: WorkItemProvider, issue: int, title: str) -> str:
+    """`title` with the parent's title appended when `issue` is a phase-Task (an Initiative's
+    Product-Roadmap Task, or a non-standing Epic's architecture/lld/revision Task), whose fixed
+    titles would otherwise make every gate PR read alike."""
+    parent = (gh.issue_epic_info(issue).get("parent") or {}).get("number")
+    if parent is None:
+        return title
+    parent_info = gh.issue_epic_info(parent)
+    kind = classify_unit_from_issue(parent_info)
+    if kind == "epic":
+        stage = STAGE_FIELD_NAMES.get(gh.issue_fields(issue).get("Stage"))
+        if is_epic_standing(parent_info) or stage not in PHASE_TASK_STAGES:
+            return title
+    elif kind != "initiative":
+        return title
+    base = re.sub(r"\s+phase$", "", title, flags=re.IGNORECASE)
+    parent_title = gh.issue_view(parent)["title"]
+    return base if parent_title.lower() in base.lower() else f"{base} - {parent_title}"
 
 
 def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, doc: str,
@@ -3912,8 +4024,8 @@ def cmd_repair_issue(gh: WorkItemProvider, number: int, parent: Optional[int] = 
 
 
 def cmd_audit_issues(gh: WorkItemProvider, epic: Optional[int] = None) -> dict:
-    """Read-only: open issues in the Initiative/Epic trees (or `epic`'s tree), plus parentless
-    ones, missing issueType, parent (Tasks and other non-containers), Priority, Effort or
+    """Read-only: open issues in the Initiative/Epic trees (plus parentless ones), or only
+    `epic`'s subtree when given, missing issueType, parent (Tasks and other non-containers), Priority, Effort or
     Pipeline Status; each with a `repair-issue` command."""
     issues = gh.issue_list()
     by_number = {i["number"]: i for i in issues}
@@ -3923,7 +4035,7 @@ def cmd_audit_issues(gh: WorkItemProvider, epic: Optional[int] = None) -> dict:
             children.setdefault(i["parent"]["number"], []).append(i["number"])
     stack = [epic] if epic is not None else [
         i["number"] for i in issues if is_initiative(i) or is_epic(i)]
-    scope = {i["number"] for i in issues if not i.get("parent")}
+    scope = set() if epic is not None else {i["number"] for i in issues if not i.get("parent")}
     seen: set = set()
     while stack:
         n = stack.pop()
@@ -4400,6 +4512,27 @@ def cmd_open_arch_revision(gh: GitHub, epic: int, title: str, body: str,
     return seq.report(epic=epic, revision_task=task and task["issue"])
 
 
+def cmd_file_closing_delta(gh: GitHub, epic: int, title: str, body: str,
+                           priority: Optional[str] = None, effort: Optional[str] = None,
+                           start: bool = False, repo_path: str = ".",
+                           runner: Runner = _default_runner) -> dict:
+    """File a closing-run finding as a `Bug` child of a non-standing Epic. It stays `unstaged`
+    (full lane) unless `start`, the operator-authorised close-blocker lane: then stage
+    `development` and `start-stage` it. Returns `delta_issue`."""
+    refusal = _not_a_phased_epic({i["number"]: i for i in gh.issue_list()}, epic)
+    if refusal:
+        return {"epic": epic, "refused": True, "reason": refusal}
+    seq = StepSequence()
+    created = seq.run("create-issue", lambda: cmd_create_issue(
+        gh, title, body, epic, [], "Bug", priority, effort))
+    number = (created or seq.steps.get("create-issue") or {}).get("issue")
+    if start and created:
+        seq.run("set-stage", lambda: cmd_set_stage(gh, number, "development"))
+        seq.run("start-stage", lambda: cmd_start_stage(gh, number, "development", "issue",
+                                                       repo_path, runner=runner))
+    return seq.report(epic=epic, delta_issue=number)
+
+
 def cmd_finish_lld(gh: GitHub, lld_task: int, epic: int, repo_path: str = ".",
                    runner: Runner = _default_runner) -> dict:
     """After a clean `lld-review`: publish-doc lld.md -> create-lld-tasks ->
@@ -4498,10 +4631,17 @@ def comment_cap_refusal(args) -> Optional[dict]:
                       f"contract\"); trim it and re-run"}
 
 
+def _open_gate_cli(a) -> dict:
+    gh = get_work_item_provider()
+    return cmd_open_gate(gh, a.repo_path, a.issue, phase_gate_title(gh, a.issue, a.title),
+                         a.doc, a.next_stage, a.summary)
+
+
 def main(argv: Optional[list] = None) -> int:
     if not os.environ.get("GITHUB_TOKEN"):
+        source = f"tokenEnv (${TOKEN_ENV}) or " if TOKEN_ENV else ""
         print(json.dumps({"error": "GITHUB_TOKEN not set — the sdlc plugin's SessionStart hook "
-                                    f"exports it from tokenPath ({TOKEN_PATH}); start a new "
+                                    f"exports it from {source}tokenPath ({TOKEN_PATH}); start a new "
                                     "session in the driven repo, or prefix the call with "
                                     f"GITHUB_TOKEN=$(cat {TOKEN_PATH})"}))
         return 1
@@ -4587,6 +4727,14 @@ def main(argv: Optional[list] = None) -> int:
                     help="Finding repeats an earlier round's defect class (escalation signal)")
     p.set_defaults(func=lambda a: cmd_record_design_review(
         get_work_item_provider(), a.issue, a.role, a.outcome, a.summary, a.same_class_recurrence))
+    p = sub.add_parser("post-comment",
+                        help="Post a product/architecture/lld stage's handoff comment from a file")
+    p.add_argument("issue", type=int)
+    p.add_argument("--role", required=True, choices=list(POST_COMMENT_ROLES))
+    p.add_argument("--body-file", required=True,
+                    help="File holding the comment text (<= 2,000 chars)")
+    p.set_defaults(func=lambda a: cmd_post_comment(
+        get_work_item_provider(), a.issue, a.role, a.body_file))
     p = sub.add_parser("check-gate")
     p.add_argument("issue", type=int)
     p.set_defaults(func=lambda a: cmd_check_gate(get_work_item_provider(), a))
@@ -4617,8 +4765,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--doc", required=True, choices=["product.md", "architecture.md"])
     p.add_argument("--next-stage", required=True)
     p.add_argument("--summary", required=True)
-    p.set_defaults(func=lambda a: cmd_open_gate(
-        get_work_item_provider(), a.repo_path, a.issue, a.title, a.doc, a.next_stage, a.summary))
+    p.set_defaults(func=lambda a: _open_gate_cli(a))
     p = sub.add_parser("pass-gate")
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
@@ -4799,7 +4946,7 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_list_needs_human(get_work_item_provider()))
     p = sub.add_parser("audit-issues",
                         help="Open pipeline issues missing issueType/parent/Priority/Effort/Status")
-    p.add_argument("--epic", type=int, default=None, help="Only this Epic's tree (+ parentless)")
+    p.add_argument("--epic", type=int, default=None, help="Only this Epic's subtree (the whole repo when omitted)")
     p.set_defaults(func=lambda a: cmd_audit_issues(get_work_item_provider(), a.epic))
     p = sub.add_parser("repair-issue",
                         help="Set an existing issue's missing parent/type/status/Priority/Effort")
@@ -4821,7 +4968,10 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("epic", type=int)
     p.add_argument("--kind", required=True, choices=["e2e", "exploratory"])
     p.add_argument("--summary", required=True)
-    p.set_defaults(func=lambda a: cmd_record_epic_verification(get_work_item_provider(), a.epic, a.kind, a.summary))
+    p.add_argument("--sha", default=None,
+                    help="Epic-branch head that was tested (default: the branch head now)")
+    p.set_defaults(func=lambda a: cmd_record_epic_verification(
+        get_work_item_provider(), a.epic, a.kind, a.summary, a.sha))
     p = sub.add_parser("check-epics-closeable")
     p.set_defaults(func=lambda a: cmd_check_epics_closeable(get_work_item_provider()))
     p = sub.add_parser("close-initiative",
@@ -4880,6 +5030,20 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--repo-path", default=".", help="The shared main checkout")
     p.set_defaults(func=lambda a: cmd_open_arch_revision(
         get_work_item_provider(), a.epic, a.title, a.body, a.blocks, a.repo_path))
+    p = sub.add_parser("file-closing-delta",
+                        help="File a closing-run finding as a Bug child of the Epic")
+    p.add_argument("epic", type=int)
+    p.add_argument("--title", required=True)
+    p.add_argument("--body", required=True)
+    p.add_argument("--priority", default=None, help="Default: pipeline.issueDefaults.priority")
+    p.add_argument("--effort", default=None,
+                    help="High | Medium | Low (default: pipeline.issueDefaults.effort)")
+    p.add_argument("--start", action="store_true",
+                    help="Close-blocker lane (operator-authorised): stage development and start it")
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.set_defaults(func=lambda a: cmd_file_closing_delta(
+        get_work_item_provider(), a.epic, a.title, a.body, a.priority, a.effort, a.start,
+        a.repo_path))
     p = sub.add_parser("start-stage", help="worktree-add, then claim")
     p.add_argument("number", type=int)
     p.add_argument("--role", required=True, choices=sorted({*STAGE_OPTION_IDS, *RETIRED_ROLES}))

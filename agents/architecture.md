@@ -43,7 +43,7 @@ Answer each YES/NO with a concrete reason from this work:
 
 **Document and continue for:** a deliberate deviation from a project convention, a trade-off worth recording, an integration whose complexity changes the shape of the work.
 
-Post the escalation as your handoff comment and stop. It must show the search:
+Post the escalation as your handoff comment (`stage-playbooks.md`, "Posting a handoff comment") and stop. It must show the search:
 
 ```markdown
 **Escalation:** <one line>
@@ -98,7 +98,7 @@ If your prompt says you replace a retired architect (`references/rework.md`, "Co
 
 ## Exit actions — yours, performed as your last step
 
-All three are a plain `unit: "issue"` Task on its own `issue-<n>` branch. Common steps: write `<docRoot>/issue-<n>/architecture.md`; commit; push; post a short handoff comment linking the doc.
+All three are a plain `unit: "issue"` Task on its own `issue-<n>` branch. Common steps: write `<docRoot>/issue-<n>/architecture.md`; commit; push; post a short handoff comment linking the doc (`stage-playbooks.md`, "Posting a handoff comment").
 
 | Task | Branch / starting point | What happens after |
 |---|---|---|

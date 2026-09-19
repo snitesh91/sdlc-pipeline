@@ -37,6 +37,7 @@ def _run(monkeypatch, capsys, command, length):
     monkeypatch.setenv("GITHUB_TOKEN", "x")
     monkeypatch.setattr(s, "get_work_item_provider", lambda: calls.append(1) or "GH")
     monkeypatch.setattr(s, "cmd_" + command.replace("-", "_"), lambda *a, **k: {})
+    monkeypatch.setattr(s, "phase_gate_title", lambda gh, issue, title: title)
     argv = [a.replace("{text}", "x" * length) for a in ARGV[command]]
     code = s.main(argv)
     return code, json.loads(capsys.readouterr().out), calls

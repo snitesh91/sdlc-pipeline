@@ -43,6 +43,9 @@ READ_ONLY_COMMANDS = {"show-config", "lld-section", "pairing-counts", "pr-checks
                       "verify-citations", "audit-issues", "check-gate",
                       "check-initiative-closeable"}
 ROLE_COMMANDS = {
+    "product": {"post-comment"},
+    "architecture": {"post-comment"},
+    "lld": {"post-comment"},
     "product-review": {"record-design-review"},
     "design-review": {"record-design-review"},
     "development": {"open-dev-pr", "record-local-ci", "handoff-to-pr-review"},
@@ -68,6 +71,7 @@ REASONS = {
     "rebase": f"Never rebase a pipeline branch: use {SDLC} sync-branch <n> (merges the base).",
     "orchestrator-only": "That control-plane command is the orchestrator's: report it in your "
                          "SDLC-RESULT/handoff; the orchestrator runs it.",
+    "post-comment-role": f"post-comment serves only your own stage: pass --role <your role> ({SDLC} post-comment <n> --role <r> --body-file <f>).",
     "review-git-write": "Review roles are read-only on the branch: describe the fix in your "
                         "review; the owning stage applies it.",
 }
@@ -268,11 +272,23 @@ def control_plane_command(words: list):
     return next((w for w in words[i + 1:] if not w.startswith("-")), "")
 
 
+def _flag_value(words: list, flag: str):
+    """The value of `--flag v` / `--flag=v` in `words`, or None."""
+    for i, w in enumerate(words):
+        if w == flag and i + 1 < len(words):
+            return words[i + 1]
+        if w.startswith(flag + "="):
+            return w.split("=", 1)[1]
+    return None
+
+
 def check_role(words: list, role: str):
     """A stage agent's limits: its role's control-plane commands; reviewers never write git."""
     cmd = control_plane_command(words)
     if cmd and cmd not in READ_ONLY_COMMANDS | ROLE_COMMANDS.get(role, set()):
         return "orchestrator-only"
+    if cmd == "post-comment" and _flag_value(words, "--role") != role:
+        return "post-comment-role"
     if role in REVIEW_ROLES and words[0] == "git":
         sub, rest = _git_sub(words[1:])
         if (sub in ("commit", "push", "merge") or (sub == "reset" and "--hard" in rest)

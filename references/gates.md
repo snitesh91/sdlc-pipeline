@@ -59,7 +59,9 @@ python3 "$SDLC" open-gate <n> \
   choose `--summary` and `--doc`/`--next-stage`
   (A: `product.md` → `architecture`; B: `architecture.md` → `development`; on a
   phase-Task `--next-stage` is required but nominal).
-- **PR title = the issue's title verbatim plus which doc it gates.** Never write "Gate",
+- **PR title = the issue's title verbatim plus which doc it gates.** `open-gate` appends the
+  parent's title to a phase-Task's (`Product Roadmap - <initiative>`, `Architecture - <epic>`,
+  `LLD - <epic>`), so gates from different epics read apart. Never write "Gate",
   "Gate A/B" or a bare "A"/"B" in PR titles, issue comments or commit messages — that
   shorthand is internal to this skill.
 - The gate PR is **ready for review, not draft** (a scoped exception to the draft-PR
@@ -114,7 +116,7 @@ anchored diff hunk, and every plain PR comment after the cutoff marker. Instruct
    --thread-id <id> --reply "<summary of the change>"`.
 4. Post one reply **on the PR** covering the plain comments, ending with
    `<!-- gate-comments-processed: <ISO8601 of this comment> -->`.
-5. Post one short **issue** comment naming what was addressed and the new commit SHA,
+5. Post one short **issue** comment (`post-comment <n> --role <its role> --body-file <f>`) naming what was addressed and the new commit SHA,
    then, as the last action, run `python3 "$SDLC" mark-feedback-addressed <issue>`.
 
 **Escalation valve**: if the same thread or the same point survives three revisions

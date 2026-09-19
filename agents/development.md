@@ -135,8 +135,11 @@ cycle.
   table-cleaning suite, confirm the *effective* DB name ends in `_test`. Never copy a DB-name
   override from an arbitrary Makefile target to make a suite run. If the effective DB is not a
   `_test` one, stop and report; do not run.
-- A command that can outlast the tool timeout: `run_in_background` plus an in-turn `Monitor`
-  wait, or an explicit ≥600s timeout.
+- A command that can outlast the tool timeout (a full integration or e2e run): start it with
+  `run_in_background`, its output going to a log that ends with a sentinel line
+  (`…; echo SUITE_EXIT=$? >> <log>`), and wait on the sentinel with `Monitor` in-turn. The process
+  outlives a forced handback: on a resume, poll the log for the sentinel — never re-launch
+  while one is live; kill it by PID first if you must abandon it. Else an explicit ≥600s timeout.
 - **Never run the full e2e suite on a normal task** — over an hour, exceeds a tool call's
   timeout, contends for shared ports and Docker stacks. It is the standing e2e-test Task's job.
   If you believe a normal task cannot be validated without it, say so in your handoff and stop.
@@ -152,6 +155,9 @@ cycle.
     `src/modules/<domain>/`), pass the matching `test/<domain>` paths to the runner's own path
     filter. A diff touching shared code (`src/common`, a migration, anything cross-domain) runs
     the package's full integration suite.
+- **An e2e spec you add tears down what it creates** (books, users, uploads) in `afterAll` or a
+  fixture with teardown, so a later spec's list or count assertion never sees it. A shared
+  helper that leaks records is fixed in the helper, not per spec.
 - **Port/adapter implementations project field-by-field.** An export/data-portability adapter,
   or any port shaping data for an external consumer, lists the fields it exposes — never
   returns a raw entity or bare `find()`/`findOne()` result, which leaks every column added

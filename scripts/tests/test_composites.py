@@ -566,3 +566,48 @@ def test_cut_phase_tasks_rerun_after_a_failed_type_write_reuses_the_half_made_ta
     assert first["ok"] is False and first["failed_step"] == "architecture.create-issue"
     assert second["ok"] is True and second["architecture_task"] == failed[0]
     assert [i["title"] for i in gh.issues.values()].count("Architecture phase") == 1
+
+
+# --- file-closing-delta ---------------------------------------------------------
+
+def _delta_ready(monkeypatch):
+    monkeypatch.setattr(s, "cmd_worktree_add", lambda *a, **k: {"path": "/wt"})
+    return _tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
+
+
+def test_file_closing_delta_makes_an_unstaged_bug_child_of_the_epic(monkeypatch):
+    gh = _delta_ready(monkeypatch)
+
+    result = s.cmd_file_closing_delta(gh, 9, "Images 500 in dev", "body", effort="Low")
+
+    n = result["delta_issue"]
+    i = gh.issues[n]
+    assert (result["ok"], i["parent"], i["issue_type"], i["stage"], i["effort"]) == (
+        True, 9, "Bug", None, "Low")
+    assert i["status"] == "todo" and result["completed_steps"] == ["create-issue"]
+
+
+def test_file_closing_delta_start_stages_development_and_claims_it(monkeypatch):
+    gh = _delta_ready(monkeypatch)
+
+    result = s.cmd_file_closing_delta(gh, 9, "Blocker", "body", start=True)
+
+    i = gh.issues[result["delta_issue"]]
+    assert result["completed_steps"] == ["create-issue", "set-stage", "start-stage"]
+    assert (i["stage"], i["status"]) == ("development", "in-progress")
+
+
+def test_file_closing_delta_refuses_a_standing_epic_and_an_unknown_effort(monkeypatch):
+    gh = _tree(epic_labels=("type:epic", "epic:standing"))
+    assert s.cmd_file_closing_delta(gh, 9, "t", "b")["refused"] is True
+    gh = _delta_ready(monkeypatch)
+    result = s.cmd_file_closing_delta(gh, 9, "t", "b", effort="Small")
+    assert (result["ok"], result["failed_step"], result["delta_issue"]) == (False, "create-issue", None)
+    assert "Effort" in result["error"] and not [n for n in gh.issues if n > 10]
+
+
+def test_cli_file_closing_delta(monkeypatch):
+    gh = _delta_ready(monkeypatch)
+    code, out = _cli(monkeypatch, gh, ["file-closing-delta", "9", "--title", "t", "--body", "b",
+                                       "--effort", "High"])
+    assert code == 0 and gh.issues[out["delta_issue"]]["effort"] == "High"

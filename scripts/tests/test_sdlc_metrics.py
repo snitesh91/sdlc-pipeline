@@ -153,3 +153,32 @@ def test_backfill_takes_the_repo_from_the_session_cwd(store, projects, capsys):
     m.main(["backfill", "--projects-dir", str(projects)])
     # conftest points $SDLC_CONFIG at the sample config, whose repo is owner/repo.
     assert len(m.load_records("owner/repo")) == 2
+
+
+def _installed_root(tmp_path, monkeypatch):
+    root = tmp_path / "cfg" / "plugins" / "cache" / "mkt" / "sdlc" / "0.2.0"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(root))
+    return tmp_path / "cfg" / "plugins" / "data" / "sdlc-mkt"
+
+
+def test_a_bash_call_reads_the_store_the_hooks_wrote(tmp_path, monkeypatch):
+    # Regression: hooks get $CLAUDE_PLUGIN_DATA, Bash does not; `report` read an empty
+    # `data/sdlc` while the hooks wrote `data/<plugin>-<marketplace>`, so every total was zero.
+    import _metrics
+    data = _installed_root(tmp_path, monkeypatch)
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(data))
+    _metrics.append(_rec("o1", "development", 2.0, epic=9, run_id="r-1", repo="o/r"))
+    monkeypatch.delenv("CLAUDE_PLUGIN_DATA")
+    assert m.report(m.load_records("o/r"), run="r-1")["totals"]["runs"] == 1
+
+
+def test_data_dir_prefers_the_env_var_and_falls_back_outside_a_cache(tmp_path, monkeypatch):
+    import _common
+    _installed_root(tmp_path, monkeypatch)
+    monkeypatch.setenv("CLAUDE_PLUGIN_DATA", "/explicit")
+    assert _common.plugin_data_dir() == "/explicit"
+    monkeypatch.delenv("CLAUDE_PLUGIN_DATA")
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path / "checkout"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg2"))
+    assert _common.plugin_data_dir() == str(tmp_path / "cfg2" / "plugins" / "data" / "sdlc")

@@ -106,6 +106,8 @@ Rules for any run:
 - A normal Task has no integration or e2e suite to re-run — not a finding. On the standing
   Integration-test Task's PR run the integration suite; on the standing e2e-test Task's PR run
   the full e2e suite from the workspace root — both under the decision above.
+- A PR that adds or changes an e2e spec: check that every record the spec creates is torn
+  down. A leak is a finding: it breaks other specs' list and count assertions in a full run.
 - Before any truncating or table-cleaning suite, confirm the *effective* DB name ends in
   `_test`; never copy a DB-name override from an arbitrary Makefile target. Not a `_test` DB:
   stop and report; do not run.

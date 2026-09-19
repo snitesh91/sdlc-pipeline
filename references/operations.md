@@ -3,7 +3,7 @@
 ## Repo access
 
 - `GITHUB_TOKEN` must be set for every `gh` and control-plane call; the SessionStart
-  hook exports it from the config's `tokenPath`.
+  hook exports it from the config's `tokenEnv` var, else `tokenPath`, overriding any ambient one.
 - The token must be a **classic** PAT (`ghp_`); fine-grained PATs cannot read check-runs
   or write the custom Stage/Pipeline Status fields.
 - `gh` reads and comments work; issue creation is `create-issue` only ("Issue taxonomy").
@@ -20,7 +20,7 @@ from `pipeline.classification` (label-based by default: `type:initiative` /
 
 Every issue the pipeline creates goes through `create-issue --parent <n> --title ..
 --body .. --type <T> [--priority <P>] [--effort <E>]` — the orchestrator's command.
-Before creating it refuses an unknown or unprovisioned type and an invalid Priority/Effort. It then sets the Issue Type
+Before creating it refuses an unknown or unprovisioned type and an invalid Priority/Effort (Effort: `High`/`Medium`/`Low`). It then sets the Issue Type
 (mandatory), the parent link, Pipeline Status `Todo`, and Priority and Effort (flag,
 else `pipeline.issueDefaults`; skipped when the field isn't configured), and adds the
 classification label itself. A post-create failure returns `ok: false` naming the issue:
@@ -29,7 +29,8 @@ run the `repair-issue` command its `reason` gives, never re-run. `repair-issue <
 (type inferred from the classification label; an Epic/Initiative's Pipeline Status is
 left cleared) and never overwrites a value. Under a non-standing Epic follow with `set-stage`
 (Tasks from `create-lld-tasks` are staged by `merge-lld-doc`). `audit-issues [--epic
-<n>]` lists open issues missing any of these fields, each with its `repair` command; an
+<n>]` lists open issues missing any of these fields (with `--epic`, only that Epic's
+subtree), each with its `repair` command; an
 Epic or Initiative is never flagged for lacking a parent.
 
 | Field | Values | Rules |

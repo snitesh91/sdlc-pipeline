@@ -150,11 +150,11 @@ deviation escalation".
 
 Run from the driven repo's root; everything project-specific is in its `sdlc-pipeline.config.json`.
 
-- **SessionStart** exports `$SDLC` (the control plane) and `GITHUB_TOKEN` (from the config's `tokenPath`). If it reports the token missing, get it from the operator first; relay its optional `rtk init` hint once, never block on it. After a compaction it restates the run you were driving; on an off-policy session model it tells you to have the operator restart with `sdlc-run <n>`.
+- **SessionStart** exports `$SDLC` (the control plane) and `GITHUB_TOKEN` (from the config's `tokenEnv` var, else `tokenPath`, overriding any ambient one). If it reports the token missing, get it from the operator first; relay its optional `rtk init` hint once, never block on it. After a compaction it restates the run you were driving; on an off-policy session model it tells you to have the operator restart with `sdlc-run <n>`.
 - **PreToolUse (Bash)** denies hand-run GitHub mutations, GraphQL, `git worktree add` (except `--detach`), force-push and rebase, and limits each stage agent to its role's commands. A denial names the `python3 "$SDLC"` command to run instead — run it; never work around the guard.
 - **PreToolUse (Agent)** sets every `sdlc:*` agent's `model` from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (config `pipeline.models` / `pipeline.fanout` override it), caps review fan-out, and lets only its `explore` roles launch a read-only `Explore` search. It denies an `sdlc:design-review` prompt lacking the header when the two review roles' models differ.
 - **SubagentStart** gives each `sdlc:*` agent `$SDLC`, `docRoot`, `requirementsDir`, the references path and the `SDLC-RESULT` format.
-- **SubagentStop** keeps an `sdlc:*` agent running until its final message ends with an `SDLC-RESULT` line. It and **SessionEnd** record each agent's tokens, cost, tool calls and peak context (README, "Metrics"). Never record metrics yourself.
+- **SubagentStop** keeps an `sdlc:*` agent running until its final message ends with an `SDLC-RESULT` line (`product`/`architecture`/`lld` finishing `done` also need a successful `post-comment` this round). It and **SessionEnd** record each agent's tokens, cost, tool calls and peak context (README, "Metrics"). Never record metrics yourself.
 
 ## Deterministic control plane
 
@@ -174,6 +174,7 @@ failure.
 | `cut-phase-tasks <epic> [--arch-body TEXT] [--lld-body TEXT] --repo-path <p>` | Create + stage both phase-Tasks, LLD blocked by Architecture, Architecture worktree; idempotent → `architecture_task`, `lld_task` |
 | `finish-lld <lld-task-n> --epic <e> --repo-path <p>` | `publish-doc --doc lld.md` → `create-lld-tasks` → `merge-lld-doc` → `close-issue` → `completed_steps`, `failed_step`, per-step results |
 | `open-arch-revision <epic> --title TEXT --body TEXT [--blocks N ...] --repo-path <p>` | `create-issue` + `set-stage architecture` + worktree + `add-blocked-by` per `--blocks` unit → `revision_task` |
+| `file-closing-delta <epic> --title TEXT --body TEXT [--priority P] [--effort E] [--start --repo-path <p>]` | A closing-run finding as a `Bug` child of the Epic; `--start` (operator-authorised close-blocker lane) also stages `development` and `start-stage`s it → `delta_issue` |
 
 `worktree-add`/`sync-branch` auto-detect `origin/main` as the base for any phase-Task;
 `--base` is an override only.
@@ -191,13 +192,13 @@ failure.
 | `set-stage <n> --stage <s>` / `add-blocked-by <n> --on <dep>` / `create-issue --parent <n> --type <T>` / `repair-issue <n> [--parent <p>] [--type <T>]` | Stage a unit / order units / the only issue-creation path / fill an existing issue's missing fields |
 | `publish-doc <n> --doc <d>` / `create-lld-tasks <epic> --repo-path <p>` / `merge-lld-doc <epic-n>` / `close-issue <n> [--repo-path <p>]` | The steps inside `finish-lld`; `close-issue` is the orchestrator's close (terminal fields + worktree release) |
 | `open-gate` / `check-gate` / `pass-gate` / `skip-gate` / `waive-gate` | Gates (`references/gates.md`); on a phase-Task pass/skip close it instead of claiming a next stage |
-| `open-dev-pr` / `handoff-to-pr-review` / `record-pr-review` / `record-local-ci` / `record-design-review <n> --role <r> --outcome clean\|rework` | Stage-agent exit actions (their agent files own them) |
+| `open-dev-pr` / `handoff-to-pr-review` / `record-pr-review` / `record-local-ci` / `record-design-review <n> --role <r> --outcome clean\|rework` / `post-comment <n> --role <r> --body-file <f>` | Stage-agent exit actions (their agent files own them); `post-comment` is `product`/`architecture`/`lld`'s handoff comment |
 | `pr-checks <pr>` / `merge-pr <pr> --issue <n>` | CI status / the only merge gate (refuses behind-base; reports `config_changed`; on an already-merged PR only finishes the bookkeeping, `recovered: true`) |
 | `mark-blocked` / `mark-needs-human` / `pause-for-epic-regate <n> --epic <e> --gate-pr <pr> [--found-by <stage>]` | Park a unit (first two release its worktree) |
 | `pairing-counts <n>` / `show-config` | Valve strike counts + thresholds / effective tunables and the running `plugin` version (read once per invocation) |
 | `list-needs-human` / `check-epics-closeable` / `audit-issues [--epic <n>]` | End-of-invocation sweeps |
 | `resolve-thread --thread-id <id> [--reply TEXT]` | Reply to and resolve a gate PR review thread (`references/gates.md`) |
-| `close-epic <n>` / `record-epic-verification <n> --kind e2e\|exploratory` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
+| `close-epic <n>` / `record-epic-verification <n> --kind e2e\|exploratory [--sha S]` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
 | `check-initiative-closeable <n>` / `record-initiative-verification <n> --summary` / `close-initiative <n>` | "Closing an Initiative" |
 | `auto-pass-gate` / `mark-feedback-received` / `mark-feedback-addressed` / `mark-todo` / `mark-issue-closed` | CI-triggered paths only — never run them yourself |
 

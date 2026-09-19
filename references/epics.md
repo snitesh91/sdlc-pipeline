@@ -243,21 +243,32 @@ never reaches `main`; publish it). Remaining items: closing verification, then t
 **`close-epic <n>` is two calls; every refusal is a structured exit-0 result.**
 
 1. First call: refuses on open children (`open_children`); otherwise reconciles
-   `epic-<n>` with `origin/main` and stops.
-2. Run the closing verification against the reconciled tree; record each half.
-3. Second call: refuses on missing evidence (`missing_verification`) or failing
-   integration-PR checks; otherwise merges `epic-<n>` to `main`.
+   `epic-<n>` with `origin/main` and stops. Its result lists `unattested_suites`: the
+   required local-CI suites the epic's changes cover that have no attestation at the epic head yet.
+2. Run the closing verification against the reconciled tree; record each half. Also run
+   every suite in `unattested_suites`.
+3. Second call: refuses on missing or stale evidence (`missing_verification`) or failing
+   integration-PR checks; otherwise merges `epic-<n>` to `main`. The epic PR exists only
+   from this call, so attest each suite right after it (`record-local-ci --pr <pr>` on the
+   epic head) and call again.
 4. `teardown-epic-stack <n>` (no-op unless provisioned).
+
+**Preflight the machine before the first e2e run.** An exhausted Docker VM makes a run
+unrecordable (`Page crashed`, `ENOSPC`, container OOM kills). Check `docker system df`, VM disk
+use (under ~80%) and host free memory; prune build cache and stop stale stacks first; restart
+the frontend container between e2e chunks. A run with crash-class failures is an environment
+failure: fix it and re-run, never record it.
 
 **Closing verification — two runs in parallel, both by the pipeline**: the **full e2e
 suite** (against the epic's stack, built from the reconciled branch) and an
 **exploratory pass** (`sdlc:exploratory`). The agents return verdicts; **you** record each
-half with `record-epic-verification <n> --kind e2e|exploratory --summary "..."` (the
+half with `record-epic-verification <n> --kind e2e|exploratory --summary "..."` (it stamps the
+tested epic-branch head; `--sha` names an earlier tested head; the
 exploratory summary is the findings comment the agent returned) — an agent never records
 it. Run both in the epic branch's
 worktree (`worktree-add <n> --unit epic`), never the main checkout. Evidence older than the last
-`origin/main` reconcile counts as missing. **Never record a verification you did not run
-clean.**
+`origin/main` reconcile, or predating code that landed on `epic-<n>` since its stamped head,
+counts as missing. **Never record a verification you did not run clean.**
 
 **With `epicClose.auto` on, escalate instead of closing when:**
 
@@ -286,12 +297,14 @@ e2e-test Task's `## Task` subsection — two single zero-retry runs are not a co
 passes the *fits* test ("Architecture deviation escalation") may skip `lld` and go
 straight to `set-stage <n> --stage development` against the epic branch; without the
 operator's say-so it runs the full lane. **Any non-docs change to `epic-<n>` after the
-reconcile invalidates both closing verifications** — re-run both; the CLI only notices a
-`main` reconcile. A docs-only change invalidates neither.
+tested head invalidates both closing verifications** — `close-epic` refuses the stale record;
+re-run both and re-record. A docs-only change invalidates neither.
 
 **Every manual-testing finding is its own `Bug` child of the epic**
-(`create-issue --parent <epic> --type Bug`), never folded into the closing comment. It is
-`unstaged` under a non-standing Epic — route it like a Blocker. Closing waits for it.
+(`file-closing-delta <epic> --title .. --body .. [--priority P] [--effort High|Medium|Low]`),
+never folded into the closing comment. It is `unstaged` under a non-standing Epic — route it
+like a Blocker, or add `--start` (operator-authorised close-blocker lane) to stage `development`
+and start it in one call. Closing waits for it.
 
 **Standing epics never get this check** — empty for now is not done.
 

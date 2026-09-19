@@ -1,7 +1,9 @@
-"""SubagentStop: an sdlc:* stage agent must end its final message with an SDLC-RESULT line;
+"""SubagentStop: an sdlc:* stage agent must end its final message with an SDLC-RESULT line, and
+a product/architecture/lld agent finishing `done` must have posted its handoff via post-comment;
 every agent that finishes in an sdlc repo gets a metrics record."""
 import json
 import os
+import re
 import sys
 
 import _metrics
@@ -9,6 +11,8 @@ from _common import (RESULT_FORMAT, load_json, message_text, read_input, repo_co
                      run_states, sdlc_result, sdlc_role)
 
 TAIL_BYTES = 2_000_000
+COMMENT_ROLES = ("product", "architecture", "lld")
+POST_COMMENT_RE = re.compile(r"post-comment\b.*--role[ =]+[\"']?(\w[\w-]*)")
 
 
 def last_assistant_text(path: str):
@@ -44,6 +48,54 @@ def last_assistant_text(path: str):
     return "\n".join(reversed([p for p in parts if p]))
 
 
+def _blocks(entry: dict) -> list:
+    msg = entry.get("message") if isinstance(entry.get("message"), dict) else {}
+    content = msg.get("content")
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def posted_handoff(path: str, role: str):
+    """Whether the agent's current round ran a successful `post-comment --role <role>`.
+
+    A round starts at the last user turn that is not a tool result (a resume message counts).
+    Returns None when the transcript is unreadable (the caller fails open).
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - TAIL_BYTES))
+            raw = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    lines = raw.splitlines()[1 if size > TAIL_BYTES else 0:]
+    entries = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    start = 0
+    for i, entry in enumerate(entries):
+        msg = entry.get("message") if isinstance(entry.get("message"), dict) else {}
+        if (msg.get("role") or entry.get("type")) == "user" and not any(
+                b.get("type") == "tool_result" for b in _blocks(entry)):
+            start = i
+    calls = set()
+    for entry in entries[start:]:
+        for block in _blocks(entry):
+            if block.get("type") == "tool_use" and block.get("name") == "Bash":
+                m = POST_COMMENT_RE.search(str((block.get("input") or {}).get("command", "")))
+                if m and m.group(1) == role:
+                    calls.add(block.get("id"))
+            elif block.get("type") == "tool_result" and block.get("tool_use_id") in calls:
+                if not block.get("is_error") and '"posted": true' in message_text(block.get("content")):
+                    return True
+    return False
+
+
 def record(data: dict, config: dict, final_text) -> None:
     """Append this agent's metrics record; never affects the stop decision."""
     try:
@@ -71,6 +123,16 @@ def main() -> int:
         if problem:
             print(f"sdlc: {problem}. Finish your stage's exit actions now if any are undone, "
                   f"then end your final message with exactly one line:\n{RESULT_FORMAT}",
+                  file=sys.stderr)
+            return 2
+        role = sdlc_role(data.get("agent_type"))
+        result = sdlc_result(text)[0] if text is not None else None
+        path = data.get("agent_transcript_path") or ""
+        if (role in COMMENT_ROLES and result and result.get("outcome") == "done" and path
+                and posted_handoff(path, role) is False):
+            print(f"sdlc: no handoff comment was posted this round. Write it to a file (<= 2,000 "
+                  f"chars) and run python3 \"$SDLC\" post-comment {result['issue']} --role {role} "
+                  f"--body-file <file>, then end your final message with the same SDLC-RESULT line.",
                   file=sys.stderr)
             return 2
     record(data, load_json(config_path), text if isinstance(text, str) else None)

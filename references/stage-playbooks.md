@@ -153,6 +153,15 @@ requirements. Keep comments to a pointer plus a summary.
 - A fresh session must be able to tell from comments plus docs where a crashed run
   stopped.
 
+### Posting a handoff comment
+
+`product`, `architecture` and `lld` post theirs with
+`python3 "$SDLC" post-comment <n> --role <your role> --body-file <file>` — write the text to a
+file first. It tags the comment for you, refuses an over-cap body or an issue you do not hold,
+and is the only way these roles comment. The stop hook refuses a `done` finish until it has
+succeeded this round, so a rework or gate-feedback round posts again. Review roles and
+`development` use their `record-*` / `handoff-to-pr-review` commands instead.
+
 ### Comment size is a contract
 
 - **Stage handoff comment: ≤ 2,000 characters.** Say what changed, where the doc/commit
@@ -167,8 +176,8 @@ requirements. Keep comments to a pointer plus a summary.
 - Don't restate the document, the diff, or the previous round. If you have more to say
   than the cap allows, you have found a class: state it once, give two exemplars and the
   sweep that finds the rest. Cut the "what I checked and found fine" inventory first.
-- The control plane refuses an over-cap `--summary` / `--reason` / `--reply`; check a
-  comment you post yourself with `wc -c`.
+- The control plane refuses an over-cap `--summary` / `--reason` / `--reply` / `post-comment`
+  body; check any other comment you post yourself with `wc -c`.
 
 Each handoff comment ends with the hidden marker
 `<!-- stage-transition: <from-role>-><to-role> @ <ISO8601> -->`. The script posts it
