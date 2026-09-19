@@ -35,7 +35,7 @@ Epic or Initiative is never flagged for lacking a parent.
 
 | Field | Values | Rules |
 |---|---|---|
-| Stage | `Product` / `Architecture` / `Development` / `Testing` / `PR Review` / `LLD` | Sole source of `current_stage()`. Set by `claim`, `set-stage`, `route`, `merge-lld-doc`; `open-dev-pr` sets `PR Review`. `arch-review`/`lld-review` write no value of their own. `Testing` is retired (only read, for issues stranded there). `next-action` sets `default_stage()` on first sight: `product` for an Initiative's child or parentless issue. A standing child gets none — `next-action` returns `route`. A non-standing Epic's children get **no** default (phase-Tasks via `set-stage`, Tasks via `merge-lld-doc`; a late Stage-less child is reported `unstaged`). Cleared on close, and on the Epic when it becomes `epic:architected`. |
+| Stage | `Product` / `Architecture` / `Development` / `Testing` / `PR Review` / `LLD` | Sole source of `current_stage()`. Set by `claim` (inside `start-stage`, `pass-gate`, `skip-gate`, `waive-gate`), `set-stage`, `route`, `merge-lld-doc`; `open-dev-pr` sets `PR Review`. `arch-review`/`lld-review` write no value of their own. `Testing` is retired (only read, for issues stranded there). `next-action` sets `default_stage()` on first sight: `product` for an Initiative's child or parentless issue. A standing child gets none — `next-action` returns `route`. A non-standing Epic's children get **no** default (phase-Tasks via `set-stage`, Tasks via `merge-lld-doc`; a late Stage-less child is reported `unstaged`). Cleared on close, and on the Epic when it becomes `epic:architected`. |
 | Pipeline Status | `Todo` / `In Progress` / `Awaiting Human Review` / `Feedback Received` / `Needs Human` / `Done` | `In Progress` = claimed by a live run (crash-recovery marker). `Awaiting Human Review` / `Feedback Received` = paused at an open gate (both gate-pending). `Needs Human` = only the operator can decide. `Todo` is set by `create-issue` (and the workflow on open), and on a unit parked or advanced unclaimed; `Done` on close. Blocked is not a value — it is derived from `blockedBy`. |
 | Type | `Task` / `Bug` / `Feature` / `Epic` / `Initiative` | Mandatory; a defect is type `Bug`, never a `Task` with a label. Routing ignores it. |
 | Priority | `Urgent` / `High` / `Medium` / `Low` | Set by `create-issue`; empty = `Medium`. Orders children. |
@@ -79,8 +79,8 @@ naming its replacement. Never leave two open PRs for one change.
 
 ## PRs merge automatically — no human review gate
 
-Standing, narrow exception to the draft-PR rule in `~/.claude/CLAUDE.md`, scoped to PRs
-this pipeline opens in the configured repo: `development` opens a draft; after a clean
+Standing, narrow exception to any draft-PR rule in the operator's global `CLAUDE.md`, scoped
+to PRs this pipeline opens in the configured repo: `development` opens a draft; after a clean
 adversarial `pr-review` and green CI, `merge-pr` marks it ready and squash-merges it. The
 human gates on product/architecture are separate and unaffected.
 

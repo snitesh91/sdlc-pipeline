@@ -314,8 +314,13 @@ ROLE_ALLOWED = [
     ("sdlc:product", CP + "post-comment 5 --role product --body-file /tmp/c.md"),
     ("sdlc:architecture", CP + "post-comment 5 --body-file /tmp/c.md --role=architecture"),
     ("sdlc:lld", CP + "post-comment 5 --role lld --body-file /tmp/c.md"),
+    ("sdlc:product", CP + "resolve-thread --thread-id T1 --reply 'applied'"),
+    ("sdlc:architecture", CP + "resolve-thread --thread-id T1"),
 ]
 ROLE_DENIED = [
+    ("sdlc:lld", CP + "resolve-thread --thread-id T1 --reply r", "orchestrator"),
+    ("sdlc:development", CP + "resolve-thread --thread-id T1", "orchestrator"),
+    ("sdlc:product", CP + "mark-feedback-addressed 5", "orchestrator"),
     ("sdlc:development", CP + "set-stage 5 --stage pr-review", "orchestrator"),
     ("sdlc:development", CP + "merge-pr 9 --issue 5", "orchestrator"),
     ("sdlc:pr-review", CP + "merge-pr 9 --issue 5", "orchestrator"),
@@ -751,10 +756,25 @@ def test_agent_guard_denies_nested_stage(tmp_path, sdlc_repo):
         out["permissionDecisionReason"]
 
 
-@pytest.mark.parametrize("parent", ["sdlc:pr-review", "sdlc:product-review", "sdlc:development"])
-def test_agent_guard_denies_fanout_where_not_allowed(tmp_path, sdlc_repo, parent):
+@pytest.mark.parametrize("parent,reason", [
+    ("sdlc:pr-review", "single pass"), ("sdlc:product-review", "single pass"),
+    ("sdlc:development", "only the read-only Explore"), ("sdlc:exploratory", "no subagents")])
+def test_agent_guard_denies_fanout_where_not_allowed(tmp_path, sdlc_repo, parent, reason):
     out = launch(sdlc_repo, tmp_path, "general-purpose", parent=("p1", parent))
-    assert out["permissionDecision"] == "deny" and "single pass" in out["permissionDecisionReason"]
+    assert out["permissionDecision"] == "deny" and reason in out["permissionDecisionReason"]
+
+
+def test_agent_guard_sets_stage_models_for_a_non_sdlc_parent(tmp_path, sdlc_repo):
+    """A continuous-mode cycle agent (not an sdlc:* agent) launches stages like the main thread."""
+    parent = ("cycle-1", "general-purpose")
+    assert forced_model(launch(sdlc_repo, tmp_path, "sdlc:development", model="opus",
+                               parent=parent)) == "sonnet"
+    assert forced_model(launch(sdlc_repo, tmp_path, "sdlc:pr-review", model=None,
+                               parent=parent)) == "opus"
+    out = launch(sdlc_repo, tmp_path, "sdlc:design-review", model="sonnet", parent=parent,
+                 prompt="ROLE: lld-review ISSUE: 6\nReview")
+    assert forced_model(out) == "opus"
+    assert launch(sdlc_repo, tmp_path, "general-purpose", parent=parent) is None
 
 
 def test_agent_guard_lets_explore_roles_launch_explore_only(tmp_path, sdlc_repo):
@@ -812,6 +832,7 @@ def test_subagent_start_tells_sdlc_agents_where_things_are(sdlc_repo):
     assert out["hookEventName"] == "SubagentStart" and len(ctx.splitlines()) <= 8
     assert "$SDLC=/plug/scripts/sdlc_next.py" in ctx and 'python3 "$SDLC"' in ctx
     assert "docRoot=docs/sdlc" in ctx and "/plug/references" in ctx
+    assert "docTemplates=_templates" in ctx
     assert 'SDLC-RESULT: {"issue": <n>' in ctx
 
 

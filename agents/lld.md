@@ -84,6 +84,11 @@ Before carving, Read `${CLAUDE_PLUGIN_ROOT}/references/epics.md`, "How to size t
 bounded concern, one shippable PR; split on footprint collision or concern boundary, never on
 effort; never below a shippable slice). In addition:
 
+- **Always carve the Epic's two standing Tasks**, `Integration-test` and `e2e-test`
+  (`references/epics.md`, "`lld` specifies the Tasks"), specified like functional Tasks:
+  each `Depends on:` every functional Task whose surfaces it proves, owns the integration /
+  e2e coverage unit tests cannot, and carries its own `## Footprint` (the test trees it
+  adds to). An Epic with no `e2e-test` Task has no closing verification to cite.
 - A Task that only makes sense after another's design settles is a dependency: sequence it
   with a `Depends on: <KEY>` line. A split whose footprints still overlap produces the
   collision this document exists to prevent.

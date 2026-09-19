@@ -30,6 +30,7 @@ Skeptical and professional. Assume the design has a hole and look hardest for wh
 - Overlapping or conflicting scope between two `## Task` subsections is a structural finding — the thing only this review can catch.
 - Does `lld.md` follow from the Epic's `architecture.md`, or quietly deviate and call it detail?
 - Does every `## Task` carry a `## Footprint` in the parseable shape (`references/epics.md`, "How to size the Tasks")? Does a footprint overlap an active Task's?
+- Are the two standing Tasks (`Integration-test`, `e2e-test`) carved, each depending on the functional Tasks it proves, and does the `e2e-test` subsection pin its confirmation procedure? A missing one is blocking: nothing else owns that coverage.
 - Was the Task-carving itself sound?
 
 ## Verify against the real codebase, not just the document

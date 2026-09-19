@@ -17,25 +17,25 @@ If the block is **absent and the issue is thin** (one-line body, no thread settl
 
 ## 2. Read the vision doc
 
-Read the repo's product-vision/strategy doc (path from the repo's config; ask if you cannot find it referenced). If it does not exist, do not hunt for it or interview anyone: note the gap once in your handoff and proceed from the scope decisions. Do not block on it or re-raise it on later runs.
+Read the repo's product-vision/strategy doc (its path is named in the driven repo's `CLAUDE.md` / `AGENTS.md`, where repo-specific facts live). If neither names one, do not hunt for it or interview anyone: note the gap once in your handoff and proceed from the scope decisions. Do not block on it or re-raise it on later runs.
 
 ## 3. Desk research, scaled to the work
 
 - **Market:** is this worth doing, and what must it be to be worth doing — demand signal, adjacent product patterns, public data.
-- **Competitive:** feature-level comparison against 3–5 *direct* competitors. The repo's config may carry a curated list — a starting point, not a ceiling.
+- **Competitive:** feature-level comparison against 3–5 *direct* competitors. The repo's `CLAUDE.md` / `AGENTS.md` may name a curated list — a starting point, not a ceiling.
 - Sources are desk research only (competitor docs/pricing, app-store reviews, UX benchmarks, industry reports, public datasets). You have no access to real users; never write as if you do.
 - Scale effort by judgment: a trivial narrow change needs little or none; a new capability needs the real version. State in the handoff, in one line, how much you did and why that was proportionate.
 - Fold findings into the requirement language. No "research findings" section and no source citations in the document, except an external limit's vendor citation (`design-doc-rules.md`, "Document altitude").
 
 ## 4. Write `product.md`
 
-Start from the repo's `<docRoot>/_templates/product.template.md` if it exists, else `${CLAUDE_PLUGIN_ROOT}/templates/product.template.md`, and read the repo's worked-example IRD (`<requirements-dir>/IRD-*.md`) first. Follow `design-doc-rules.md`, "Document altitude" exactly (observable behaviour not technology, nothing about the pipeline, no hedging layer, detail inline, no system flow diagram). Additionally:
+Start from the repo's `<docRoot>/<docTemplates>/product.template.md` if it exists, else `${CLAUDE_PLUGIN_ROOT}/templates/product.template.md`, and read the repo's worked-example IRD (`<requirements-dir>/IRD-*.md`) first. Follow `design-doc-rules.md`, "Document altitude" exactly (observable behaviour not technology, nothing about the pipeline, no hedging layer, detail inline, no system flow diagram). Additionally:
 
 - **A technology ruling you are handed** → record the *constraint behind it* under Constraints; pass the ruling itself to `architecture` in your handoff comment.
 - **Say each fact once.** Pick the one section that owns a fact (a shape, a numeric limit), state it there in full, and refer to it elsewhere in a clause. Before handoff, grep the doc for its own distinctive nouns and numbers; a fact in three sections you did not deliberately cross-reference is a restatement — compress it.
 - **Mockup:** whenever User Experience describes a new or materially changed screen or flow, include a low-fidelity ASCII mockup under User Experience — structure only (boxes, labels, layout, sequence), no styling. Skip it for backend-only work.
 - **An Initiative's `product.md` is organised by functional area, never by Epic.** Epics are cut by the orchestrator after Gate A.
-- The repo is **pre-launch**: no backward-compatibility requirements and no migration hedging unless there is a real product reason.
+- When the repo's `CLAUDE.md` / `AGENTS.md` says it is **pre-launch**: no backward-compatibility requirements and no migration hedging unless there is a real product reason. Otherwise compatibility is a requirement like any other.
 - **Your analysis is a hypothesis.** A requirement resting on an unverified premise says so in one clause, and the verification becomes an acceptance criterion or an Open Question. Never write "this will work", "this is proven" or "this will solve the problem" — in the document or the handoff.
 - **Open Questions:** ranked by how much the answer changes the work, each with why it matters and a stated default. A question you cannot default your way past → stop and report it (`stage-playbooks.md`, "Rework and blockers").
 - **Acceptance criteria:** each must be testable — a failing test can be written from it without reading code. State required behaviour, not implementation: "an operator can add a notification destination without a deployment", not "the `channels` array in `alerting.config.ts` accepts a new entry".

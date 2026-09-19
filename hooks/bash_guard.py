@@ -46,8 +46,9 @@ READ_ONLY_COMMANDS = {"show-config", "lld-section", "pairing-counts", "pr-checks
                       "verify-citations", "audit-issues", "check-gate",
                       "check-initiative-closeable"}
 ROLE_COMMANDS = {
-    "product": {"post-comment"},
-    "architecture": {"post-comment"},
+    # `resolve-thread`: a gate-feedback round replies on the stage's own gate PR threads.
+    "product": {"post-comment", "resolve-thread"},
+    "architecture": {"post-comment", "resolve-thread"},
     "lld": {"post-comment"},
     "product-review": {"record-design-review"},
     "design-review": {"record-design-review"},

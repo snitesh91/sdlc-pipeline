@@ -191,7 +191,7 @@ Run from the driven repo's root; everything project-specific is in its `sdlc-pip
 - **SessionStart** exports `$SDLC` (the control plane) and `GITHUB_TOKEN` (from the config's `tokenEnv` var, else `tokenPath`, overriding any ambient one). If it reports the token missing, get it from the operator first; relay its optional `rtk init` hint once, never block on it. After a compaction it restates the run you were driving; on an off-policy session model it tells you to have the operator restart with `sdlc-run <n>`.
 - **PreToolUse (Bash)** denies hand-run GitHub mutations, GraphQL, `git worktree add` (except `--detach`), force-push and rebase, and limits each stage agent to its role's commands. A denial names the `python3 "$SDLC"` command to run instead — run it; never work around the guard.
 - **PreToolUse (Agent)** sets every `sdlc:*` agent's `model` from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (config `pipeline.models` / `pipeline.fanout` override it), caps review fan-out, and lets only its `explore` roles launch a read-only `Explore` search. It denies an `sdlc:design-review` prompt lacking the header when the two review roles' models differ.
-- **SubagentStart** gives each `sdlc:*` agent `$SDLC`, `docRoot`, `requirementsDir`, the references path and the `SDLC-RESULT` format.
+- **SubagentStart** gives each `sdlc:*` agent `$SDLC`, `docRoot`, `requirementsDir`, `docTemplates`, the references path and the `SDLC-RESULT` format.
 - **SubagentStop** keeps an `sdlc:*` agent running until its final message ends with an `SDLC-RESULT` line (`product`/`architecture`/`lld` finishing `done` also need a successful `post-comment` this round). It and **SessionEnd** record each agent's tokens, cost, tool calls and peak context (README, "Metrics"). Never record metrics yourself.
 
 ## Deterministic control plane
@@ -238,11 +238,11 @@ an override only.
 | `mark-blocked` / `mark-needs-human` / `pause-for-epic-regate <n> --epic <e> --gate-pr <pr> [--found-by <stage>]` | Park a unit (first two release its worktree) |
 | `pairing-counts <n>` / `show-config` | Valve strike counts + thresholds / effective tunables and the running `plugin` version (read once per invocation) |
 | `list-needs-human` / `check-epics-closeable` / `audit-issues [--epic <n>\|--initiative <n>]` | End-of-invocation sweeps; `audit-issues` also flags open Epics with no phase-Tasks, with the `cut-phase-tasks` repair |
-| `resolve-thread --thread-id <id> [--reply TEXT]` | Reply to and resolve a gate PR review thread (`references/gates.md`) |
+| `resolve-thread --thread-id <id> [--reply TEXT]` | Reply to and resolve a gate PR review thread; the gate-feedback agent runs it for the threads it addressed (`references/gates.md`) |
 | `close-epic <n>` / `record-epic-verification <n> --kind e2e\|exploratory [--sha S]` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
-| `check-initiative-closeable <n>` / `record-initiative-verification <n> --summary` / `close-initiative <n>` | "Closing an Initiative" |
+| `check-initiative-closeable <n>` / `record-initiative-verification <n> --outcome met\|unmet --summary` / `close-initiative <n>` | "Closing an Initiative" |
 | `mark-feedback-addressed <n>` | Yours, after a gate-feedback agent finished and `transition` verified its push (`references/gates.md`, "Addressing gate feedback"); never the agent's |
-| `auto-pass-gate` / `mark-feedback-received` / `mark-todo` / `mark-issue-closed` | CI-triggered paths only — never run them yourself |
+| `auto-pass-gate` / `mark-todo` / `mark-issue-closed` / `mark-feedback-received` | CI-triggered paths only — never run them yourself (the shipped workflow runs the first three; `mark-feedback-received` only if the driven repo wires a comment trigger) |
 
 Branch-writing commands never write in the main checkout; `--repo-path` is any path
 inside the repo. Never check out a pipeline branch in the main checkout.
@@ -356,11 +356,11 @@ closed:
 1. `python3 "$SDLC" check-initiative-closeable <initiative>`.
 2. Delegate `sdlc:initiative-close`: it starts the delivered application and validates
    it against every requirement in the Initiative's `product.md`, and always records
-   `record-initiative-verification`, met or not.
-3. **All met** → `python3 "$SDLC" close-initiative <initiative>` (one call — an
-   Initiative has no branch).
-4. **Anything not met** → file the gap (a Task against the relevant Epic, or judge it
-   out of scope and say why) and stop; re-run from step 2 once fixed.
+   `record-initiative-verification --outcome met|unmet`.
+3. **All met** (`clean`) → `python3 "$SDLC" close-initiative <initiative>` (one call — an
+   Initiative has no branch). It refuses while the latest record is `unmet`.
+4. **Anything not met** (`rework`) → file the gap (a Task against the relevant Epic, or
+   judge it out of scope and say why) and stop; re-run from step 2 once fixed.
 
 No human gate here — Gate A already approved `product.md`.
 
@@ -435,7 +435,12 @@ The agent must *have* (not necessarily be pasted):
 4. The worktree: "Work in `<worktree-path>` (`<worktrees.root>/<devPrefix><n>`, default
    `/tmp/sdlc-dev-<n>`) — `cd` there before any git command. Never touch the main
    checkout for anything on this unit." For `development` add: small local commits, one
-   push before `open-dev-pr`; if a push is rejected, stop and report.
+   push before `open-dev-pr`; if a push is rejected, stop and report. **For `pr-review`**
+   the worktree is its own detached one, never the unit's development worktree (its
+   mutation probe must not touch the tree a resumed `development` continues in): make it
+   with `git -C <repo-root> fetch origin && git -C <repo-root> worktree add --detach
+   <worktrees.root>/<reviewPrefix><n> origin/issue-<n>` and remove it when the review ends
+   (`references/parallelism.md`, "Parallel PR review").
 5. For any review computing a diff: `git fetch origin` first and diff against `origin/`
    refs, never a local branch.
 6. Any command that can outlast the default tool timeout needs `run_in_background` or
@@ -525,8 +530,10 @@ its place:
   change, saying why in `--reason`; never after `pr-review` bounced it.
 - Otherwise the default next stage.
 
-To skip ahead: `transition <n> --expect-stage <its Stage>` (at pickup, nothing to verify),
-then `route <n> --to <stage> --reason "<one line>"`, then Step 2 with `--role <stage>`. To skip
+To skip ahead after a stage returns: `transition <n> --expect-stage <the stage just
+finished>`, then `route <n> --to <stage> --reason "<one line>"`, then Step 2 with
+`--role <stage>`. At pickup the child has no Stage and nothing to verify: go straight to
+`route` (or to Step 2 with `--role product` when it needs the full flow). To skip
 `pr-review`: `verify-exit <n> --expect-stage pr-review --pr <pr>`, `route <n> --to merge`,
 then `merge-pr` (the route marker is its evidence). `route` only moves forward; when a
 later stage finds an open product decision, `set-stage <n> --stage product` and run a
