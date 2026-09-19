@@ -5206,20 +5206,63 @@ def test_check_initiative_closeable_rejects_non_initiative():
 def test_missing_initiative_verification_detects_absence_and_presence():
     from sdlc_next import missing_initiative_verification
     assert missing_initiative_verification([]) != []
+    # A marker from before outcomes were recorded reads as met.
     assert missing_initiative_verification(
         [{"body": "<!-- initiative-verification: requirements:40 @ 2026-09-14T00:00:00Z -->"}]) == []
+    assert missing_initiative_verification(
+        [{"body": "<!-- initiative-verification: requirements:40 outcome:met @ 2026-09-14T00:00:00Z -->"}]) == []
 
 
-def test_record_initiative_verification_posts_marked_comment():
+def test_an_unmet_initiative_verification_is_not_closing_evidence():
+    """Regression: a recorded `unmet` outcome must block the close; a later `met` clears it."""
+    from sdlc_next import missing_initiative_verification
+    unmet = {"body": "<!-- initiative-verification: requirements:40 outcome:unmet @ 2026-09-14T00:00:00Z -->"}
+    met = {"body": "<!-- initiative-verification: requirements:40 outcome:met @ 2026-09-15T00:00:00Z -->"}
+    problems = missing_initiative_verification([unmet])
+    assert problems and "unmet" in problems[0]
+    assert missing_initiative_verification([met, unmet]) != []   # the latest record wins
+    assert missing_initiative_verification([unmet, met]) == []
+
+
+@pytest.mark.parametrize("outcome", ["met", "unmet"])
+def test_record_initiative_verification_posts_marked_comment(outcome):
     from sdlc_next import GitHub, cmd_record_initiative_verification
     runner = ScriptedRunner()
     runner.prefix_responses = {("gh", "issue", "comment", "40"): ""}
     gh = GitHub(runner=runner)
-    result = cmd_record_initiative_verification(gh, 40, "Every requirement in product.md checked live.")
-    assert result == {"initiative": 40, "kind": "requirements", "recorded": True}
+    result = cmd_record_initiative_verification(
+        gh, 40, "Every requirement in product.md checked live.", outcome)
+    assert result == {"initiative": 40, "kind": "requirements", "outcome": outcome,
+                      "recorded": True}
     comment_call = next(c for c in runner.calls if c[:3] == ["gh", "issue", "comment"])
     body = comment_call[comment_call.index("--body") + 1]
-    assert "<!-- initiative-verification: requirements:40 @" in body
+    assert f"<!-- initiative-verification: requirements:40 outcome:{outcome} @" in body
+
+
+def test_record_initiative_verification_refuses_an_unknown_outcome():
+    from sdlc_next import GitHub, GhError, cmd_record_initiative_verification
+    runner = ScriptedRunner()
+    gh = GitHub(runner=runner)
+    with pytest.raises(GhError, match="outcome must be one of"):
+        cmd_record_initiative_verification(gh, 40, "s", "partial")
+    assert runner.calls == []
+
+
+def test_close_initiative_refuses_on_an_unmet_verification():
+    from sdlc_next import GitHub, cmd_close_initiative
+    initiative = _issue(40, labels=["type:initiative"])
+    e1 = _issue(41, parent=40, labels=["type:epic"], state="CLOSED")
+    runner = ScriptedRunner({
+        tuple(_list_argv()): _list_response([initiative, e1]),
+        ("gh", "issue", "view", "40", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": "<!-- initiative-verification: requirements:40 "
+                                              "outcome:unmet @ 2026-09-14T00:00:00Z -->"}]}),
+    })
+    gh = GitHub(runner=runner)
+    result = cmd_close_initiative(gh, 40)
+    assert result["closed"] is False and "unmet" in result["reason"]
+    assert not any(c[:3] == ["gh", "issue", "close"] for c in runner.calls)
 
 
 def test_close_initiative_refuses_when_not_closeable():

@@ -80,7 +80,10 @@ def main() -> int:
     policy = model_policy(load_json(config))
     child = sdlc_role(tool_input.get("subagent_type"))
     header = prompt_header(tool_input.get("prompt"))
-    if not data.get("agent_id"):
+    # The parent is a stage agent only for an `sdlc:*` agent type; the main thread and a
+    # non-sdlc subagent (continuous mode's cycle agent) both launch stages as an orchestrator.
+    parent = sdlc_role(data.get("agent_type")) if data.get("agent_id") else ""
+    if not parent:
         if not child:
             return 0
         role = child
@@ -91,9 +94,6 @@ def main() -> int:
                      "ISSUE: <n>`; the two roles run at different models.")
                 return 0
         set_model(tool_input, policy["models"].get(role))
-        return 0
-    parent = sdlc_role(data.get("agent_type"))
-    if not parent:
         return 0
     if child:
         deny(f"a stage agent never launches another stage (sdlc:{child}); report it in your "
@@ -108,7 +108,12 @@ def main() -> int:
             return 0
     fanout = policy["fanout"].get(parent) or {}
     if not fanout.get("allowed"):
-        deny(f"{parent} reviews in a single pass; work the axes yourself.")
+        if parent in policy["fanout"]:
+            deny(f"{parent} reviews in a single pass; work the axes yourself.")
+        elif parent in policy["explore"]:
+            deny(f"{parent} may launch only the read-only Explore agent; do the rest yourself.")
+        else:
+            deny(f"{parent} launches no subagents; do the work yourself.")
         return 0
     limit = int(fanout.get("maxChildren") or 0)
     if not claim_slot(str(data["agent_id"]), limit):

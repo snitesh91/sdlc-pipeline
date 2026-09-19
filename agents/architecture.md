@@ -64,13 +64,13 @@ Post the escalation as your handoff comment (`stage-playbooks.md`, "Posting a ha
 
 ## 5. Write `architecture.md`
 
-Start from the repo's `<docRoot>/_templates/architecture.template.md` if it exists, else `${CLAUDE_PLUGIN_ROOT}/templates/architecture.template.md`; fill sections in order; delete its instructional comments. Its three overriding rules and every section rule (Scope as sole goals/non-goals, Design first with a Mermaid diagram, decision tables with bet/fallback lines, measurable NFRs with a stated cost line, flat uncited ACs, CONDITIONAL sections collapsed to `N/A — <reason>`) are in the template and `design-doc-rules.md` — follow them exactly. Additionally:
+Start from the repo's `<docRoot>/<docTemplates>/architecture.template.md` if it exists, else `${CLAUDE_PLUGIN_ROOT}/templates/architecture.template.md`; fill sections in order; delete its instructional comments. Its three overriding rules and every section rule (Scope as sole goals/non-goals, Design first with a Mermaid diagram, decision tables with bet/fallback lines, measurable NFRs with a stated cost line, flat uncited ACs, CONDITIONAL sections collapsed to `N/A — <reason>`) are in the template and `design-doc-rules.md` — follow them exactly. Additionally:
 
 - **Don't manufacture decisions.** A decision with one plausible option gets no table. If stripping every decision leaves a useful document, it was an implementation manual — write a short doc saying the design was never in question.
 - **`## Footprint` and `## Implementation notes`: standing-epic child only; omit both entirely from an Epic's doc.** Footprint shape is parsed mechanically (`epics.md`, "How to size the Tasks") — do not vary it.
 - **No task carving, no per-task subsections, no task creation** in an Epic's doc — that is `lld`'s. Task-boundary collision checking is `lld`/`lld-review`'s too.
 - **Class-sweep criteria:** for an audit/hardening criterion ("every interactive control ≥44px"), pin its population (which controls count) and every dimension (44×44 = width **and** height) here — `verification-rules.md`, "A completeness claim over a footprint is a sweep, not a list".
-- **Pre-launch:** "breaking, no migration needed" is usually the right Compatibility entry. A new field serving a real product need is still a legitimate feature decision.
+- **Compatibility:** when the repo's `CLAUDE.md` / `AGENTS.md` says it is pre-launch, "breaking, no migration needed" is usually the right entry; otherwise state what breaks, for whom, and the migration. A new field serving a real product need is still a legitimate feature decision.
 - **Cite what you assert** per `stage-playbooks.md`, "Citation discipline" — real paths, files opened this session, grep-anchored quotes over line numbers.
 - **Rework round:** edit the design in place. No record of review rounds in the document; state what changed and why in the handoff comment.
 

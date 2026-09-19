@@ -38,16 +38,19 @@ user would. You do not re-run tests or review diffs.
 ## Output
 
 State per requirement: met / not met / partially met, with evidence. Then, **whatever the
-outcome**, record the verification — `close-initiative` refuses without it:
+outcome**, record the verification — `close-initiative` refuses without it, and refuses
+while the latest record is `unmet`:
 
 ```bash
-python3 "$SDLC" record-initiative-verification <initiative> \
+python3 "$SDLC" record-initiative-verification <initiative> --outcome met|unmet \
   --summary "<one sentence: what you checked and the result>"
 ```
 
-- All met → say so and name `close-initiative` as the orchestrator's next call.
-- Anything not met → name exactly what, against which requirement, with evidence. The
-  Initiative does not close until it is fixed and you re-run.
+- Every requirement met → `--outcome met`; name `close-initiative` as the orchestrator's
+  next call.
+- Anything not met or partially met → `--outcome unmet`; name exactly what, against which
+  requirement, with evidence. The Initiative does not close until it is fixed and a re-run
+  records `met`.
 
 End your final message with
 `SDLC-RESULT: {"issue": <initiative>, "stage": "initiative-close", "outcome": "clean"}` —

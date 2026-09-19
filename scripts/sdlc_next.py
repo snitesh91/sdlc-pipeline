@@ -1111,26 +1111,42 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
 
 
 _INITIATIVE_VERIFICATION_MARKER = re.compile(
-    r"<!--\s*initiative-verification:\s*(\w+):(\d+)\s*(?:@[^>]*?)?-->")
+    r"<!--\s*initiative-verification:\s*(\w+):(\d+)(?:\s+outcome:(\w+))?\s*(?:@[^>]*?)?-->")
+INITIATIVE_VERIFICATION_OUTCOMES = ("met", "unmet")
 
 
 def missing_initiative_verification(comments: list) -> list:
-    """Problems with an Initiative's closing evidence (one `requirements` marker).
-    No ordering check: an Initiative has no branch of its own."""
-    seen = any(_INITIATIVE_VERIFICATION_MARKER.search(c.get("body", "")) for c in comments)
-    if seen:
-        return []
-    return ["no `requirements` closing-verification evidence (a PM-role pass "
-            "validating the delivered app against product.md was never recorded)"]
+    """Problems with an Initiative's closing evidence: no `requirements` marker, or the latest
+    one recorded `unmet`. No ordering check: an Initiative has no branch of its own."""
+    latest = None
+    for c in comments:
+        m = _INITIATIVE_VERIFICATION_MARKER.search(c.get("body", ""))
+        if m:
+            latest = m.group(3) or "met"
+    if latest is None:
+        return ["no `requirements` closing-verification evidence (a PM-role pass "
+                "validating the delivered app against product.md was never recorded)"]
+    if latest != "met":
+        return ["the latest `requirements` verification recorded outcome `unmet` -- fix the "
+                "gaps it names, re-run initiative-close, and record a `met` outcome"]
+    return []
 
 
-def cmd_record_initiative_verification(gh: GitHub, initiative: int, summary: str) -> dict:
-    """Post an Initiative's `requirements` closing-verification marker."""
+def cmd_record_initiative_verification(gh: GitHub, initiative: int, summary: str,
+                                       outcome: str = "met") -> dict:
+    """Post an Initiative's `requirements` closing-verification marker with its outcome;
+    `close-initiative` refuses while the latest one is `unmet`."""
+    if outcome not in INITIATIVE_VERIFICATION_OUTCOMES:
+        raise GhError(f"outcome must be one of {INITIATIVE_VERIFICATION_OUTCOMES}, got {outcome!r}")
     timestamp = _utc_now_marker()
+    verdict = "every requirement met" if outcome == "met" else "requirements NOT met"
     gh.issue_comment(initiative,
-        f"🧪 Requirements validation — closing verification for #{initiative}. {summary}\n\n"
-        f"<!-- initiative-verification: requirements:{initiative} @ {timestamp} -->")
-    return {"initiative": initiative, "kind": "requirements", "recorded": True}
+        f"🧪 Requirements validation — closing verification for #{initiative}: {verdict}. "
+        f"{summary}\n\n"
+        f"<!-- initiative-verification: requirements:{initiative} outcome:{outcome} "
+        f"@ {timestamp} -->")
+    return {"initiative": initiative, "kind": "requirements", "outcome": outcome,
+            "recorded": True}
 
 
 def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
@@ -5467,11 +5483,13 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("initiative", type=int)
     p.set_defaults(func=lambda a: cmd_close_initiative(get_work_item_provider(), a.initiative))
     p = sub.add_parser("record-initiative-verification",
-                        help="Record an Initiative's closing verification")
+                        help="Record an Initiative's closing verification and its outcome")
     p.add_argument("initiative", type=int)
+    p.add_argument("--outcome", required=True, choices=list(INITIATIVE_VERIFICATION_OUTCOMES),
+                   help="met = every requirement validated; unmet blocks close-initiative")
     p.add_argument("--summary", required=True)
     p.set_defaults(func=lambda a: cmd_record_initiative_verification(
-        get_work_item_provider(), a.initiative, a.summary))
+        get_work_item_provider(), a.initiative, a.summary, a.outcome))
     p = sub.add_parser("check-initiative-closeable",
                         help="Whether every Epic of the Initiative is closed")
     p.add_argument("initiative", type=int)

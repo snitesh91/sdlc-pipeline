@@ -15,8 +15,9 @@ def main() -> int:
     emit("SubagentStart", additionalContext="\n".join([
         f'sdlc: run the control plane as python3 "$SDLC" <cmd> in Bash; '
         f'$SDLC={os.path.join(root, "scripts", "sdlc_next.py")}.',
-        f"sdlc: docRoot={config.get('docRoot')}, requirementsDir={config.get('requirementsDir')} "
-        f"(relative to the repo root).",
+        f"sdlc: docRoot={config.get('docRoot')}, requirementsDir={config.get('requirementsDir')}, "
+        f"docTemplates={(config.get('pipeline') or {}).get('docTemplates') or '_templates'} "
+        f"(relative to the repo root; docTemplates to docRoot).",
         f"sdlc: ${{CLAUDE_PLUGIN_ROOT}} is {root}; its references are "
         f"{os.path.join(root, 'references')}.",
         f"sdlc: your final message's last line is {RESULT_FORMAT}",

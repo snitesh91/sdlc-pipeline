@@ -145,10 +145,10 @@ source of record: that is the committed docs, the commits, and the issue body fo
 requirements. Keep comments to a pointer plus a summary.
 
 - **The start comment is mandatory:** `🚧 Picking this up — <role> stage starting.`,
-  posted before delegating, every time, by a script and never hand-typed. `claim` /
-  `start-stage` / `pass-gate` post it for the roles they claim. For a review role, the
-  orchestrator posts it with `transition <n> --expect-stage <role>` or
-  `start-comment <n> --role <role>`. Never post it twice.
+  posted before delegating, every time, by a script and never hand-typed. `claim` (inside
+  `start-stage`, `pass-gate`, `skip-gate` and `waive-gate`) posts it for the role it
+  claims. For a review role, the orchestrator posts it with `transition <n>
+  --expect-stage <role>` or `start-comment <n> --role <role>`. Never post it twice.
 - Comment per milestone, not per step. Post at least one comment per stage (the
   handoff) and at most one per genuine milestone.
 - Link to the doc; don't paste it. Give a few sentences plus the doc path and commit SHA.

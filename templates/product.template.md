@@ -1,7 +1,8 @@
 <!--
-Template for <docRoot>/epic-<n>/product.md (a normal epic's own product phase)
-or <docRoot>/issue-<n>/product.md (a standing-epic child) -- the product stage's
-requirements document.
+Template for <docRoot>/issue-<n>/product.md -- the product stage's requirements
+document, written by an Initiative's Product-Roadmap Task (covering the whole
+Initiative, by functional area) or by a standing-epic child (covering itself). An
+Epic has no product.md of its own.
 
 This document is an IRD -- an initial requirements document, in the same house style as
 the repo's existing requirements documents (<requirements-dir>/IRD-*.md). Read the repo's
@@ -112,7 +113,7 @@ Delete this comment block before committing the real document.
 ## Acceptance Criteria
 
 <!-- Literal checklist, every item independently testable and written so a failing test can
-     be derived from it without reading any code. The testing stage works from this list
+     be derived from it without reading any code. The architecture and development stages work from this list
      directly. Number them AC1.. and group under a bold line per functional area when the
      list runs long. -->
 

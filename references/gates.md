@@ -108,17 +108,21 @@ PR the pipeline merges itself is skipped):
 - If the Action didn't run (missing `SDLC_GH_TOKEN`, workflow disabled), `next-action`
   detects the merge itself.
 
-## Real-time feedback visibility
+## Feedback visibility
 
-The same workflow runs `mark-feedback-received --pr <n>` when real feedback lands on an
-open gate PR, flipping Pipeline Status to `Feedback Received`. Visibility only — live PR
-content decides whether there is something to address. `mark-feedback-addressed <issue>`
-flips it back; **the orchestrator runs it, never the agent** ("Addressing gate feedback").
+`Feedback Received` is a visibility flip only: live PR content (unresolved threads, plain
+comments after the cutoff marker) decides whether there is something to address, and
+`next-action` reads that itself. The shipped workflow does not set it — a comment-triggered
+job runs a runner on every comment in the repo, so it was dropped; a driven repo that wants
+the flip wires its own `issue_comment` / `pull_request_review` trigger to
+`mark-feedback-received --pr <n> --author <login> --body <text>`. `mark-feedback-addressed
+<issue>` flips it back (a no-op flip when nothing set it); **the orchestrator runs it, never
+the agent** ("Addressing gate feedback").
 
 ## Addressing gate feedback
 
-Spawn a **fresh** agent of the owning stage (`sdlc:product` or `sdlc:architecture`, Opus)
-— never a resumed one; a gate can sit open for days. Its prompt carries the issue's full
+Spawn a **fresh** agent of the owning stage (`sdlc:product` or `sdlc:architecture`) —
+never a resumed one; a gate can sit open for days. Its prompt carries the issue's full
 body/comments, the doc's current content, every unresolved thread's text with its
 anchored diff hunk, and every plain PR comment after the cutoff marker. The doc and the PR
 depend on the issue: an Epic's Architecture-phase/revision Task's feedback is on its **design
@@ -131,8 +135,9 @@ updates the open PR (no new PR). Instruct the agent to:
    why something should not be applied — never ignore it silently.
 2. Commit and push to `origin/issue-<n>`.
 3. Reply to and resolve each addressed **review thread**: `python3 "$SDLC" resolve-thread
-   --thread-id <id> --reply "<summary of the change>"`.
-4. Post one reply **on the PR** covering the plain comments, ending with
+   --thread-id <id> --reply "<summary of the change>"` (the Bash guard allows it to these
+   two roles).
+4. Post one reply **on the PR** covering the plain comments (`gh pr comment`), ending with
    `<!-- gate-comments-processed: <ISO8601 of this comment> -->`.
 5. Post one short **issue** comment (`post-comment <n> --role <its role> --body-file <f>`)
    naming what was addressed and the new commit SHA, then end with `SDLC-RESULT` outcome

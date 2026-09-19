@@ -21,7 +21,7 @@ ARGV = {
     "record-epic-verification": ["record-epic-verification", "9", "--kind", "e2e",
                                  "--summary", "{text}"],
     "record-initiative-verification": ["record-initiative-verification", "1",
-                                       "--summary", "{text}"],
+                                       "--outcome", "met", "--summary", "{text}"],
     "mark-needs-human": ["mark-needs-human", "5", "--reason", "{text}"],
     "resolve-thread": ["resolve-thread", "--thread-id", "T", "--reply", "{text}"],
     "route": ["route", "5", "--to", "development", "--reason", "{text}"],

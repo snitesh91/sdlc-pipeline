@@ -268,8 +268,9 @@ never reaches `main`; merge its design PR). Remaining items: closing verificatio
 
 **`close-epic <n>` is two calls; every refusal is a structured exit-0 result.**
 
-1. First call: refuses on open children (`open_children`); otherwise reconciles
-   `epic-<n>` with `origin/main` and stops. Its result lists `unattested_suites`: the
+1. First call: refuses on open children (`open_children`); otherwise, when `epic-<n>` is
+   behind `origin/main`, reconciles it and stops (`reconciled`); when already current it
+   goes straight to the evidence check below. Either result lists `unattested_suites`: the
    required local-CI suites the epic's changes cover that have no attestation at the epic head yet.
 2. Run the closing verification against the reconciled tree; record each half. Also run
    every suite in `unattested_suites`.
@@ -287,7 +288,11 @@ failure: fix it and re-run, never record it.
 
 **Closing verification — two runs in parallel, both by the pipeline**: the **full e2e
 suite** (against the epic's stack, built from the reconciled branch) and an
-**exploratory pass** (`sdlc:exploratory`). The agents return verdicts; **you** record each
+**exploratory pass** (`sdlc:exploratory`). The e2e run is a fresh `sdlc:development` agent
+dispatched into the epic worktree with a run-only brief — run the suite (and every suite in
+`unattested_suites`) to a captured output file, fix nothing, report the result; when the
+reconcile picked up nothing, cite the e2e-test Task's `record-local-ci` attestation instead of
+running again (SKILL.md, "The lifecycle model"). The agents return verdicts; **you** record each
 half with `record-epic-verification <n> --kind e2e|exploratory --summary "..."` (it stamps the
 tested epic-branch head; `--sha` names an earlier tested head; the
 exploratory summary is the findings comment the agent returned) — an agent never records

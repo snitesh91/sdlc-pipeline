@@ -30,7 +30,11 @@ committing.
 
 Builds on [`product.md`](./product.md).
 
-<!-- 2-3 sentences, plain language, no paths or identifiers. What the design is and
+<!-- The line above: a standing-epic child links its own product.md beside this file;
+     an Initiative-driven Epic links the Initiative's IRD (<docRoot>/issue-<roadmap-task>/
+     product.md on main); an engineering-driven Epic drops the line -- its scope is the
+     issue body.
+     Then 2-3 sentences, plain language, no paths or identifiers. What the design is and
      what it turns on. The first and sometimes only thing a reviewer reads. -->
 > [!TIP]
 > **TL;DR:** ...
@@ -57,7 +61,8 @@ Builds on [`product.md`](./product.md).
      Constraints live here as bullets, not as their own section -- externally fixed
      things only (budget, runtime, platform, legal), plus one line on how much freedom
      the design actually has, since that is what makes an obvious call defensible.
-     This repo is PRE-LAUNCH: backward compatibility is not a constraint. -->
+     Backward compatibility is a constraint only if the repo's CLAUDE.md / AGENTS.md
+     says it has shipped; a pre-launch repo has none. -->
 
 - ...
 
@@ -130,9 +135,10 @@ flowchart LR
 
 ## 8. Compatibility and rollout
 
-<!-- One or two lines. Whether it breaks anything and for whom; pre-launch, "breaking,
-     no migration" is usually the right answer. Phases only if there genuinely are
-     phases, each with its exit condition. -->
+<!-- One or two lines. Whether it breaks anything and for whom; in a pre-launch repo
+     (per its CLAUDE.md / AGENTS.md) "breaking, no migration" is usually the right
+     answer, otherwise name the migration. Phases only if there genuinely are phases,
+     each with its exit condition. -->
 
 ## 9. Risks
 
