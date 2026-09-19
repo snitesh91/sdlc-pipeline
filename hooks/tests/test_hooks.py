@@ -158,6 +158,8 @@ def test_guard_allows(sdlc_repo, command):
 
 def test_guard_reason_names_control_plane_command(sdlc_repo):
     assert "merge-pr" in guard("gh pr merge 3", sdlc_repo)
+    assert "merge-design-pr" in guard("gh pr merge 3", sdlc_repo)
+    assert "open-design-pr" in guard("gh pr create --base x", sdlc_repo)
     assert "create-issue" in guard("gh issue create -t x", sdlc_repo)
     assert "set-stage" in guard("gh issue edit 5 --add-label bug", sdlc_repo)
     assert "resolve-thread" in guard("gh api graphql -f query='mutation { resolveReviewThread }'", sdlc_repo)
@@ -211,6 +213,7 @@ ROLE_ALLOWED = [
     ("sdlc:pr-review", CP + "record-pr-review 5 --pr 9 --outcome clean --summary s"),
     ("sdlc:pr-review", "git restore src/a.ts && git status"),
     ("sdlc:design-review", CP + "record-design-review 5 --role lld-review --outcome clean --summary s"),
+    ("sdlc:design-review", CP + "record-design-review 5 --role arch-review --outcome rework --summary s --same-class-recurrence"),
     ("sdlc:product-review", CP + "record-design-review 5 --role product-review --outcome rework --summary s"),
     ("sdlc:exploratory", CP + "show-config"),
     ("sdlc:initiative-close", CP + "check-initiative-closeable 1"),
@@ -236,6 +239,10 @@ ROLE_DENIED = [
     ("sdlc:lld", 'SDLC=x; "$SDLC" finish-lld 5 --epic 9 --repo-path /w', "orchestrator"),
     ("sdlc:lld", "python3 -u /p/scripts/sdlc_next.py close-issue 5", "orchestrator"),
     ("sdlc:design-review", CP + "skip-gate 5 --stage architecture --confidence 90 --summary s", "orchestrator"),
+    ("sdlc:design-review", CP + "merge-design-pr 40 --issue 5", "orchestrator"),
+    ("sdlc:design-review", CP + "open-design-pr 5", "orchestrator"),
+    ("sdlc:architecture", CP + "open-design-pr 5", "orchestrator"),
+    ("sdlc:lld", CP + "merge-design-pr 40 --issue 5", "orchestrator"),
     ("sdlc:pr-review", CP + "claim 5 --role pr-review", "orchestrator"),
     ("sdlc:exploratory", "echo $(" + CP + "close-epic 9)", "orchestrator"),
     ("sdlc:initiative-close", CP + "close-initiative 1", "orchestrator"),

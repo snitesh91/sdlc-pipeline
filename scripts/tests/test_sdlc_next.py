@@ -1307,6 +1307,10 @@ def test_record_design_review_refuses_same_class_recurrence_on_a_clean_verdict()
                                  "lld-review", "clean", "s", same_class_recurrence=True)
 
 
+_ISSUE_VIEW_9 = ("gh", "issue", "view", "9", "--repo", REPO,
+                 "--json", "number,title,labels,body,state,comments")
+
+
 def test_record_design_review_embeds_the_same_class_marker_and_pairing_counts_reads_it_back():
     # same_class_recurrence=True must produce a marker cmd_pairing_counts counts.
     from sdlc_next import GitHub, cmd_record_design_review, cmd_pairing_counts, REPO
@@ -1316,7 +1320,7 @@ def test_record_design_review_embeds_the_same_class_marker_and_pairing_counts_re
         def issue_comment(self, issue, body):
             posted["body"] = body
 
-    gh = RecordingGitHub(runner=ScriptedRunner({}))
+    gh = RecordingGitHub(runner=ScriptedRunner({_ISSUE_VIEW_9: json.dumps({"comments": []})}))
     result = cmd_record_design_review(gh, 9, "lld-review", "rework", "same miss again",
                                       same_class_recurrence=True)
     assert result["same_class_recurrence"] is True
@@ -1341,7 +1345,7 @@ def test_record_design_review_without_the_flag_leaves_same_class_count_at_zero()
         def issue_comment(self, issue, body):
             posted["body"] = body
 
-    gh = RecordingGitHub(runner=ScriptedRunner({}))
+    gh = RecordingGitHub(runner=ScriptedRunner({_ISSUE_VIEW_9: json.dumps({"comments": []})}))
     cmd_record_design_review(gh, 9, "lld-review", "rework", "a fresh defect")
     assert "same-class" not in posted["body"]
 
@@ -2265,6 +2269,7 @@ def test_open_gate_targets_main_from_issue_branch():
     gh_runner = ScriptedRunner({
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
         status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
+        **dict([_epic_check(9)]),  # parentless: not an Epic's phase-Task
     })
     gh_runner.prefix_responses = {
         ("gh", "pr", "create"): "https://github.com/owner/repo/pull/41\n",
@@ -2970,56 +2975,6 @@ def test_resolve_repo_path_explicit_wins_and_falls_back_to_dot():
     assert resolve_repo_path(None, "issue-9", runner=runner) == "."
 
 
-# --- _publish_doc: decisions read origin/<epic>; merged only after a post-push fetch confirms ---
-
-_SRC_DOC = "docs/sdlc/issue-185/lld.md"
-_DEST_DOC = "docs/sdlc/epic-110/lld.md"
-
-
-def _publish_git(commit_sha="deadbeef", origin_blob_before="blobOLD", origin_blob_after="blobNEW",
-                 src_blob="blobNEW", path="/epic-110"):
-    """Scripted git for one `_publish_doc` run in the epic worktree at `path`,
-    including the post-push verification fetch and blob read."""
-    r = ScriptedRunner({
-        ("git", "-C", path, "fetch", "origin"): "",
-        ("git", "-C", path, "rev-parse", "--verify", "--quiet", f"origin/issue-185:{_SRC_DOC}"):
-            src_blob + "\n",
-        ("git", "-C", path, "status", "--porcelain"): "",
-        ("git", "-C", path, "diff", "--name-only", "origin/epic-110...epic-110"): "",
-        ("git", "-C", path, "checkout", "-B", "epic-110", "origin/epic-110"): "",
-        ("git", "-C", path, "update-index", "--add", "--cacheinfo",
-         f"100644,{src_blob},{_DEST_DOC}"): "",
-        ("git", "-C", path, "commit", "-m", "docs(sdlc): publish issue-185 lld.md to epic-110"): "",
-        ("git", "-C", path, "checkout", "HEAD", "--", _DEST_DOC): "",
-        ("git", "-C", path, "rev-parse", "HEAD"): commit_sha + "\n",
-        ("git", "-C", path, "push", "origin", "epic-110"): "",
-    })
-    # Blob texts without numbered Task headings: the origin doc is never a numbered copy.
-    r.prefix_responses[("git", "-C", path, "cat-file", "blob")] = "# lld\n"
-    # The origin blob is read twice: before (decide) and after the push (verify).
-    blobs = iter([origin_blob_before, origin_blob_after, origin_blob_after])
-    key = ("git", "-C", path, "rev-parse", "--verify", "--quiet", f"origin/epic-110:{_DEST_DOC}")
-    base_call = r.__call__
-
-    def call(argv):
-        if tuple(argv) == key:
-            r.calls.append(argv)
-            return next(blobs) + "\n"
-        return base_call(argv)
-    r.call = call
-    return r
-
-
-class _Dispatch:
-    """Wrap a ScriptedRunner whose `.call` attribute overrides `__call__`."""
-    def __init__(self, r):
-        self.r = r
-        self.calls = r.calls
-
-    def __call__(self, argv):
-        return self.r.call(argv)
-
-
 def _advance_to_development_responses(number):
     """Scripted field writes `merge-lld-doc` makes once the doc is on origin (Stage ->
     Development, Pipeline Status Todo). Returns (responses, stage_argv, status_argv)."""
@@ -3037,125 +2992,6 @@ def _advance_to_development_responses(number):
         status_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": number}}}}),
     }
     return responses, stage_argv, status_argv
-
-
-def _publish(runner, gh=None):
-    from sdlc_next import GitHub, _publish_doc
-    gh = gh or GitHub(runner=ScriptedRunner({}))
-    return _publish_doc(gh, "/epic-110", 185, "epic-110", _SRC_DOC, "origin/issue-185", runner,
-                        dest_doc_path=_DEST_DOC, doc_label="lld.md")
-
-
-def test_publish_doc_loop_happy_path_commits_and_pushes_to_epic_branch():
-    runner = _Dispatch(_publish_git())
-    result = _publish(runner)
-    assert result == {"issue": 185, "merged": True, "epic_branch": "epic-110",
-                      "commit": "deadbeef", "verified_on_origin": True, "attempts": 1}
-    # Doc-only: the source branch is never merged, only its one doc blob staged.
-    assert ["git", "-C", "/epic-110", "merge", "origin/issue-185"] not in runner.calls
-    # Replayed from origin's tip, never from whatever the local branch held.
-    assert ["git", "-C", "/epic-110", "checkout", "-B", "epic-110", "origin/epic-110"] in runner.calls
-    # Verified after the push: a second fetch precedes the success report.
-    push_i = runner.calls.index(["git", "-C", "/epic-110", "push", "origin", "epic-110"])
-    assert ["git", "-C", "/epic-110", "fetch", "origin"] in runner.calls[push_i + 1:]
-
-
-def test_publish_doc_loop_idempotent_noop_when_origin_already_has_the_doc():
-    runner = _Dispatch(_publish_git(origin_blob_before="blobNEW"))
-    result = _publish(runner)
-    assert result == {"issue": 185, "merged": False, "epic_branch": "epic-110",
-                      "reason": "up-to-date", "verified_on_origin": True}
-    assert not any(c[3] in ("push", "commit") for c in runner.calls)
-
-
-def test_publish_doc_loop_regression_local_tree_holding_the_doc_is_not_up_to_date():
-    # A local tree holding the doc (from a rejected push) is not "up-to-date": blobs are compared on origin.
-    inner = _publish_git(commit_sha="c0ffee")
-    # The stale local doc-only commit shows up as an unpushed diff on exactly the doc path.
-    inner.responses[("git", "-C", "/epic-110", "diff", "--name-only",
-                     "origin/epic-110...epic-110")] = _DEST_DOC + "\n"
-    runner = _Dispatch(inner)
-    result = _publish(runner)
-    assert result["merged"] is True and result["verified_on_origin"] is True
-    assert result["commit"] == "c0ffee"
-    assert ["git", "-C", "/epic-110", "push", "origin", "epic-110"] in runner.calls
-
-
-def test_publish_doc_loop_refuses_to_reset_unpushed_non_doc_work_on_the_epic_branch():
-    inner = _publish_git()
-    inner.responses[("git", "-C", "/epic-110", "diff", "--name-only",
-                     "origin/epic-110...epic-110")] = "src/other.ts\n" + _DEST_DOC + "\n"
-    runner = _Dispatch(inner)
-    result = _publish(runner)
-    assert result["merged"] is False
-    assert "src/other.ts" in result["reason"] and "refusing to reset" in result["reason"]
-    assert not any(c[3] in ("push", "commit") for c in runner.calls)
-
-
-def test_publish_doc_loop_push_rejected_twice_reports_conflict_never_success():
-    # Push refused on both attempts: a structured conflict saying the doc is NOT on origin.
-    from sdlc_next import GhError
-    inner = _publish_git()
-    push_argv = ("git", "-C", "/epic-110", "push", "origin", "epic-110")
-    base_call = inner.call
-
-    def call(argv):
-        if tuple(argv) == push_argv:
-            inner.calls.append(argv)
-            raise GhError("command failed (1): git push\n ! [rejected]  epic-110 -> epic-110 "
-                          "(non-fast-forward)\nUpdates were rejected because the remote "
-                          "contains work that you do not have locally.")
-        return base_call(argv)
-    inner.call = call
-    runner = _Dispatch(inner)
-    result = _publish(runner)
-    assert result["merged"] is False and result["conflict"] is True
-    assert "NOT on origin/epic-110" in result["reason"]
-    assert sum(1 for c in runner.calls if tuple(c) == push_argv) == 2
-    # Each attempt replays from origin's (re-fetched) tip.
-    assert sum(1 for c in runner.calls
-               if c == ["git", "-C", "/epic-110", "checkout", "-B", "epic-110", "origin/epic-110"]) == 2
-
-
-def test_publish_doc_loop_push_accepted_but_origin_lacks_blob_is_not_reported_merged():
-    # A push that exits 0 is not success until origin shows the blob.
-    runner = _Dispatch(_publish_git(origin_blob_after="blobSOMETHINGELSE"))
-    result = _publish(runner)
-    assert result["merged"] is False and result["conflict"] is True
-    assert "does not carry" in result["reason"]
-
-
-def test_publish_doc_loop_noop_when_no_doc_on_source_branch():
-    # No doc blob on origin/issue-<n> -- structured no-op, not a crash.
-    runner = ScriptedRunner({("git", "-C", "/epic-110", "fetch", "origin"): ""})
-    runner.fail_on = {("git", "-C", "/epic-110", "rev-parse", "--verify", "--quiet",
-                       f"origin/issue-185:{_SRC_DOC}")}
-    result = _publish(runner)
-    assert result["merged"] is False
-    assert "no lld.md" in result["reason"]
-
-
-def test_publish_doc_noop_for_standing_epic_child():
-    # A standing epic's child integrates into main: no-op, no git touched.
-    from sdlc_next import GitHub, cmd_publish_doc
-    epic = _epic(94, labels=["epic:standing"])
-    child = _issue(300, stage="architecture", parent=94)
-    gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([epic, child])}))
-    runner = ScriptedRunner({})
-    result = cmd_publish_doc(gh, "/whatever", 300, "architecture.md", runner=runner)
-    assert result["merged"] is False
-    assert "epic:standing" in result["reason"]
-    assert runner.calls == []
-
-
-def test_publish_doc_noop_for_parentless_issue():
-    from sdlc_next import GitHub, cmd_publish_doc
-    gh = GitHub(runner=ScriptedRunner({tuple(_list_argv()): _list_response([_issue(300)])}))
-    runner = ScriptedRunner({})
-    result = cmd_publish_doc(gh, "/whatever", 300, "architecture.md", runner=runner)
-    assert result["merged"] is False
-    assert "no parent epic" in result["reason"]
-    assert runner.calls == []
 
 
 def test_next_action_picks_a_development_task_by_sort_key():
@@ -4530,6 +4366,7 @@ def test_verify_exit_citations_ok_true_when_stage_record_all_resolve(tmp_path):
         fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
             {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "LLD"},
         ]}}}}}),
+        **dict([_epic_check(9)]),  # parentless: docs stay under issue-<n>/
     })
     git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
     gh = GitHub(runner=gh_runner)
@@ -4552,6 +4389,7 @@ def test_verify_exit_citations_ok_false_fails_overall_result_positive_control(tm
         fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
             {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "LLD"},
         ]}}}}}),
+        **dict([_epic_check(9)]),  # parentless: docs stay under issue-<n>/
     })
     git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
     gh = GitHub(runner=gh_runner)
@@ -4586,6 +4424,7 @@ def test_verify_exit_citations_scoped_to_own_record_ignores_other_docs(tmp_path)
         fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
             {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "LLD"},
         ]}}}}}),
+        **dict([_epic_check(9)]),  # parentless: docs stay under issue-<n>/
     })
     git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
     gh = GitHub(runner=gh_runner)
@@ -4641,6 +4480,7 @@ def test_verify_exit_omits_citations_ok_when_stage_record_file_is_absent(tmp_pat
         fields_argv: json.dumps({"data": {"repository": {"issue": {"issueFieldValues": {"nodes": [
             {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Stage"}, "name": "Architecture"},
         ]}}}}}),
+        **dict([_epic_check(92)]),  # parentless: docs stay under issue-<n>/
     })
     git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
     gh = GitHub(runner=gh_runner)
@@ -4978,9 +4818,9 @@ def test_merge_epic_lld_doc_completes_the_epics_own_design_phase():
 
 
 def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
-    """Wiring smoke test: cut an Epic and its phase-Tasks, publish, merge-lld-doc against one mocked GitHub."""
+    """Wiring smoke test: cut an Epic and its phase-Tasks, then merge-lld-doc against one mocked GitHub."""
     from sdlc_next import (GitHub, cmd_worktree_add, cmd_create_issue, cmd_set_stage,
-                            cmd_add_blocked_by, cmd_publish_doc, cmd_merge_lld_doc,
+                            cmd_add_blocked_by, cmd_merge_lld_doc,
                             ISSUE_TYPE_IDS, _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
                             _SET_ISSUE_TYPE_MUTATION, _ADD_SUB_ISSUE_MUTATION,
                             _ADD_BLOCKED_BY_MUTATION, _DELETE_ISSUE_FIELD_VALUE_MUTATION,
@@ -5019,7 +4859,7 @@ def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
     a41c, r41c = _epic_check(41, parent=40, labels=["type:epic"])
     gh_responses[a41c] = r41c
 
-    # 2. Cut the Architecture-phase Task #43 (worktree-add needs an explicit base).
+    # 2. Cut the Architecture-phase Task #43.
     gh_responses[("gh", "api", "repos/owner/repo/issues", "-f", "title=Architecture phase",
                   "-f", "body=Epic #41's architecture.md.", "-f", "labels[]=type:task")] = \
         json.dumps({"number": 43})
@@ -5101,52 +4941,17 @@ def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
         ("git", "-C", ".", "fetch", "origin"): "",
         ("git", "-C", ".", "branch", "-r", "--list", "origin/issue-43"): "",
         ("git", "-C", ".", "worktree", "add", "/tmp/sdlc-dev-43", "-b", "issue-43",
-         "origin/main"): "",
+         "origin/epic-41"): "",
     })
-    arch_wt_result = cmd_worktree_add(gh, 43, unit="issue", runner=arch_wt_runner, base="origin/main")
+    arch_wt_result = cmd_worktree_add(gh, 43, unit="issue", runner=arch_wt_runner,
+                                      base="origin/epic-41")
     assert arch_wt_result["path"] == "/tmp/sdlc-dev-43"
-    assert arch_wt_result["base"] == "origin/main"
+    assert arch_wt_result["base"] == "origin/epic-41"
 
     lld_task_result = cmd_create_issue(gh, "LLD phase", "Epic #41's lld.md.",
                                        parent=41, labels=["type:task"], type_name="Task")
     assert lld_task_result == {"issue": 44, "parent": 41, "type": "Task", **_CREATED_FIELDS}
     assert cmd_add_blocked_by(gh, 44, 43) == {"issue": 44, "blocked_on": 43, "added": True}
-
-    # 4. Publish architecture.md onto epic-41; the dest blob is read twice (absent, then verified).
-    publish_git_runner = ScriptedRunner({
-        **_live_wt("epic-41", path="/epic-41"),
-        ("git", "-C", "/epic-41", "fetch", "origin"): "",
-        ("git", "-C", "/epic-41", "rev-parse", "--verify", "--quiet",
-         "origin/issue-43:docs/sdlc/issue-43/architecture.md"): "aaa1111\n",
-        ("git", "-C", "/epic-41", "status", "--porcelain"): "",
-        ("git", "-C", "/epic-41", "diff", "--name-only", "origin/epic-41...epic-41"): "",
-        ("git", "-C", "/epic-41", "checkout", "-B", "epic-41", "origin/epic-41"): "",
-        ("git", "-C", "/epic-41", "update-index", "--add", "--cacheinfo",
-         "100644,aaa1111,docs/sdlc/epic-41/architecture.md"): "",
-        ("git", "-C", "/epic-41", "show-ref", "--verify", "--quiet",
-         "refs/remotes/origin/epic-41"): "",
-        ("git", "-C", "/epic-41", "commit", "-m",
-         "docs(sdlc): publish issue-43 architecture.md to epic-41"): "",
-        ("git", "-C", "/epic-41", "checkout", "HEAD", "--",
-         "docs/sdlc/epic-41/architecture.md"): "",
-        ("git", "-C", "/epic-41", "rev-parse", "HEAD"): "deadbeef\n",
-        ("git", "-C", "/epic-41", "push", "origin", "epic-41"): "",
-    })
-    dest_key = ("git", "-C", "/epic-41", "rev-parse", "--verify", "--quiet",
-                "origin/epic-41:docs/sdlc/epic-41/architecture.md")
-    dest_blobs = iter(["", "aaa1111\n"])
-    base_call = publish_git_runner.__call__
-
-    def _dest_aware_call(argv):
-        if tuple(argv) == dest_key:
-            publish_git_runner.calls.append(argv)
-            return next(dest_blobs)
-        return base_call(argv)
-    publish_git_runner.call = _dest_aware_call
-    publish_result = cmd_publish_doc(gh, "/epic-41", 43, "architecture.md",
-                                     runner=_Dispatch(publish_git_runner))
-    assert publish_result["merged"] is True
-    assert publish_result["epic_branch"] == "epic-41"
 
     task_result = cmd_create_issue(gh, "Task: parse WhatsApp payload", "Carved by epic-41's lld.",
                                     parent=41, labels=["type:task"], type_name="Task")
@@ -5530,7 +5335,7 @@ def test_cmd_lld_section_raises_when_epic_lld_missing():
     argv = ("git", "-C", "/repo", "show", "origin/epic-430:docs/sdlc/epic-430/lld.md")
     runner = ScriptedRunner({})
     runner.fail_on = {argv}
-    with pytest.raises(GhError, match="is the epic's lld published"):
+    with pytest.raises(GhError, match="is the epic's lld merged"):
         cmd_lld_section("/repo", 430, 501, runner=runner)
 
 
@@ -5873,6 +5678,7 @@ def _verify_exit_pr_runners(tmp_path, comments, stage_field_value="PR Review", p
         ("gh", "pr", "view", str(pr), "--repo", "owner/repo",
          "--json", "isDraft,headRefName,baseRefName"):
             json.dumps({"isDraft": True, "headRefName": "issue-9", "baseRefName": "main"}),
+        **dict([_epic_check(9)]),  # parentless: not an Epic's phase-Task
     })
     git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})
     return gh_runner, git_runner

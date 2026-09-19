@@ -9,26 +9,12 @@ from pathlib import Path
 import pytest
 
 import sdlc_next as s
-from tests.test_v2_phase_tasks import (DOC, FakeGh, _CARVED_LLD, _git, _origin_file,
-                                       _push_doc_branch, repo)  # noqa: F401 (fixture)
+from tests.test_v2_phase_tasks import (DOC, FakeGh, _CARVED_LLD, _advance_origin,  # noqa: F401
+                                       _design_branch, _ensure_epic_branch, _git, _open_design,
+                                       _origin_file, _push_doc_branch, _review, repo)
 
 
-class Gh(FakeGh):
-    """FakeGh plus the reads `verify-exit` needs."""
-
-    def __init__(self, issues, prs=None):
-        super().__init__(issues)
-        self.prs = prs or {}
-
-    def issue_fields(self, n):
-        return self._node(n)["fields"]
-
-    def pr_view(self, n, fields=""):
-        return self.prs[n]
-
-    def pr_list_for_branch(self, branch, state="open"):
-        return [{"number": n, **p} for n, p in self.prs.items()
-                if p.get("headRefName") == branch and p.get("state", "OPEN") == "OPEN"]
+Gh = FakeGh  # kept as the name this file's trees were written against
 
 
 def _tree(*extra, epic_labels=("type:epic",)):
@@ -213,18 +199,27 @@ def test_cut_phase_tasks_stops_at_the_first_failed_step(monkeypatch):
 
 def _lld_tree():
     return _tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"},
-                 {"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"})
+                 {"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld",
+                  "status": "in-progress"})
 
 
-def test_finish_lld_publishes_creates_advances_and_closes(repo):
+def _lld_ready(gh, repo, text=_CARVED_LLD, review="clean"):
+    """LLD Task #11 as `transition` leaves it: doc on issue-11, design PR open, review recorded."""
+    pr = _open_design(gh, repo, 11, "lld.md", text)
+    _review(gh, 11, "lld-review", review)
+    return pr
+
+
+def test_finish_lld_merges_the_design_pr_creates_advances_and_closes(repo):
     gh = _lld_tree()
-    _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", _CARVED_LLD)
+    pr = _lld_ready(gh, repo)
 
     result = s.cmd_finish_lld(gh, 11, 9, repo_path=str(repo))
 
     assert result["ok"] is True and result["failed_step"] is None
-    assert result["completed_steps"] == ["publish-doc", "create-lld-tasks", "merge-lld-doc",
+    assert result["completed_steps"] == ["merge-design-pr", "create-lld-tasks", "merge-lld-doc",
                                          "close-issue"]
+    assert gh.merges == [(pr, False)]
     tasks = result["steps"]["create-lld-tasks"]["tasks"]
     assert {gh.issues[n]["stage"] for n in tasks.values()} == {"development"}
     assert "epic:architected" in gh.issues[9]["labels"]
@@ -235,23 +230,42 @@ def test_finish_lld_publishes_creates_advances_and_closes(repo):
 
 def test_finish_lld_rerun_keeps_the_numbered_epic_doc(repo):
     gh = _lld_tree()
-    _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", _CARVED_LLD)
+    _lld_ready(gh, repo)
     s.cmd_finish_lld(gh, 11, 9, repo_path=str(repo))
     numbered = _upstream(repo, "epic-9")
 
     again = s.cmd_finish_lld(gh, 11, 9, repo_path=str(repo))
 
-    assert again["steps"]["publish-doc"]["reason"] == "up-to-date"
+    assert again["steps"]["merge-design-pr"]["already_merged"] is True
+    assert len(gh.merges) == 1
     assert _upstream(repo, "epic-9") == numbered  # nothing reverted, nothing re-numbered
 
 
-def test_publish_doc_still_publishes_a_changed_lld_over_a_numbered_one(repo):
+def test_a_second_lld_pr_carrying_the_unnumbered_original_never_reverts_the_numbering(repo):
+    """An LLD revision cut before `create-lld-tasks` numbered the doc must not undo it."""
     gh = _lld_tree()
+    pr = _open_design(gh, repo, 11, "lld.md", _CARVED_LLD)
+    _review(gh, 11, "lld-review")
     numbered = s.number_task_headings(_CARVED_LLD, {"skeleton-health": 12, "greet-endpoint": 13})
-    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", numbered)
-    _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", _CARVED_LLD + "More.\n")
+    _advance_origin(repo, "epic-9", f"{DOC}/epic-9/lld.md", numbered)
 
-    result = s.cmd_publish_doc(gh, str(repo), 11, "lld.md")
+    result = s.cmd_merge_design_pr(gh, pr, 11, str(repo))
+
+    assert result["up_to_date"] is True and result["merged"] is False
+    assert gh.merges == [] and gh.prs[pr]["state"] == "OPEN"
+    assert _origin_file(repo, "epic-9", f"{DOC}/epic-9/lld.md") == numbered
+
+
+def test_a_changed_lld_still_merges_over_a_numbered_one(repo):
+    """Positive control for the numbering guard: real edits are not swallowed."""
+    gh = _lld_tree()
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", _CARVED_LLD)
+    pr = _open_design(gh, repo, 11, "lld.md", _CARVED_LLD + "More.\n")
+    _review(gh, 11, "lld-review")
+    numbered = s.number_task_headings(_CARVED_LLD, {"skeleton-health": 12, "greet-endpoint": 13})
+    _advance_origin(repo, "epic-9", f"{DOC}/epic-9/lld.md", numbered)
+
+    result = s.cmd_merge_design_pr(gh, pr, 11, str(repo))
 
     assert result["merged"] is True
     assert _origin_file(repo, "epic-9", f"{DOC}/epic-9/lld.md").endswith("More.\n")
@@ -260,7 +274,7 @@ def test_publish_doc_still_publishes_a_changed_lld_over_a_numbered_one(repo):
 def test_units_finish_lld_and_a_regate_park_are_never_audited_as_missing_status(repo):
     # Every open non-container unit keeps a Pipeline Status: the audit flags only real gaps.
     gh = _lld_tree()
-    _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", _CARVED_LLD)
+    _lld_ready(gh, repo)
     tasks = s.cmd_finish_lld(gh, 11, 9, repo_path=str(repo))["steps"]["create-lld-tasks"]["tasks"]
     paused = min(tasks.values())
     s.cmd_pause_for_epic_regate(gh, paused, 9, 77)
@@ -271,24 +285,35 @@ def test_units_finish_lld_and_a_regate_park_are_never_audited_as_missing_status(
     assert gh.issues[paused]["status"] == "todo"
 
 
-def test_finish_lld_never_closes_the_task_when_the_publish_is_not_verified(repo, monkeypatch):
-    gh = _lld_tree()  # no lld.md on issue-11: nothing to publish
+def test_finish_lld_never_closes_the_task_when_no_design_pr_was_opened(repo, monkeypatch):
+    gh = _lld_tree()
     monkeypatch.setattr(s, "cmd_create_lld_tasks", _must_not_run("create-lld-tasks"))
     monkeypatch.setattr(s, "cmd_close_issue", _must_not_run("close-issue"))
 
     result = s.cmd_finish_lld(gh, 11, 9, repo_path=str(repo))
 
-    assert result["failed_step"] == "publish-doc" and result["completed_steps"] == []
+    assert result["failed_step"] == "merge-design-pr" and result["completed_steps"] == []
     assert result["ok"] is True  # a structured refusal: exit 0
-    assert "nothing to publish" in result["reason"]
-    assert list(result["steps"]) == ["publish-doc"]
+    assert "no design PR marker" in result["reason"]
+    assert list(result["steps"]) == ["merge-design-pr"]
     assert gh.issues[11]["state"] == "OPEN"
+
+
+def test_finish_lld_stops_before_creating_tasks_when_the_review_is_not_clean(repo, monkeypatch):
+    gh = _lld_tree()
+    pr = _lld_ready(gh, repo, review="rework")
+    monkeypatch.setattr(s, "cmd_create_lld_tasks", _must_not_run("create-lld-tasks"))
+
+    result = s.cmd_finish_lld(gh, 11, 9, repo_path=str(repo))
+
+    assert result["failed_step"] == "merge-design-pr"
+    assert "not `clean`" in result["reason"]
+    assert gh.merges == [] and gh.prs[pr]["state"] == "OPEN"
 
 
 def test_finish_lld_stops_when_create_lld_tasks_fails(monkeypatch):
     gh = _lld_tree()
-    monkeypatch.setattr(s, "cmd_publish_doc",
-                        lambda *a, **k: {"merged": True, "verified_on_origin": True})
+    monkeypatch.setattr(s, "_merge_design_pr_of", lambda *a, **k: {"merged": True})
     monkeypatch.setattr(s, "cmd_create_lld_tasks",
                         lambda *a, **k: {"committed": "abc", "pushed": False, "conflict": True,
                                          "tasks": {"k": 12}, "reason": "push rejected"})
@@ -298,14 +323,13 @@ def test_finish_lld_stops_when_create_lld_tasks_fails(monkeypatch):
     result = s.cmd_finish_lld(gh, 11, 9)
 
     assert result["failed_step"] == "create-lld-tasks"
-    assert result["completed_steps"] == ["publish-doc"]
+    assert result["completed_steps"] == ["merge-design-pr"]
     assert result["reason"] == "push rejected" and result["closed"] is False
 
 
 def test_finish_lld_treats_nothing_left_to_create_as_done(monkeypatch):
     gh = _lld_tree()
-    monkeypatch.setattr(s, "cmd_publish_doc",
-                        lambda *a, **k: {"merged": False, "verified_on_origin": True})
+    monkeypatch.setattr(s, "_merge_design_pr_of", lambda *a, **k: {"already_merged": True})
     monkeypatch.setattr(s, "cmd_create_lld_tasks",
                         lambda *a, **k: {"committed": None, "pushed": False, "tasks": {}})
     monkeypatch.setattr(s, "cmd_merge_lld_doc",
@@ -416,18 +440,67 @@ def test_start_stage_development_claims_when_only_another_branch_has_a_pr(monkey
 
 # --- transition ---------------------------------------------------------------
 
-def test_transition_into_arch_review_verifies_syncs_and_posts_the_start_comment(repo):
+def _author_doc(gh, repo, issue, path, text="# design\n"):
+    """Stand up `issue`'s worktree and leave a committed, pushed doc there, as its agent does."""
+    wt = s.cmd_worktree_add(gh, issue, repo_path=str(repo))["path"]
+    target = Path(wt) / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    _git("add", path, cwd=wt)
+    _git("commit", "-qm", f"add {path}", cwd=wt)
+    _git("push", "-q", "origin", f"issue-{issue}", cwd=wt)
+    return wt
+
+
+def test_transition_into_arch_review_verifies_syncs_opens_the_design_pr_and_starts_review(repo):
     gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "architecture"})
-    wt = s.cmd_worktree_add(gh, 10, repo_path=str(repo))["path"]
+    wt = _author_doc(gh, repo, 10, f"{DOC}/epic-9/architecture.md")
 
     result = s.cmd_transition(gh, 10, "arch-review", repo_path=wt)
 
     assert result["ready"] is True and result["stopped_at"] is None
     assert result["verified_stage"] == "architecture"
-    assert result["completed_steps"] == ["verify-exit", "sync-branch", "start-comment"]
+    assert result["completed_steps"] == ["verify-exit", "sync-branch", "open-design-pr",
+                                         "start-comment"]
     assert result["steps"]["sync-branch"]["base"] == "epic-9"
+    pr = result["steps"]["open-design-pr"]["pr"]
+    assert (gh.prs[pr]["headRefName"], gh.prs[pr]["baseRefName"]) == ("issue-10", "epic-9")
     assert _upstream(repo, "issue-10")  # sync pushed the branch
     assert any("arch-review stage starting" in c for c in gh.comments_on(10))
+
+
+def test_transition_into_lld_review_opens_the_lld_design_pr(repo):
+    gh = _tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"})
+    wt = _author_doc(gh, repo, 11, f"{DOC}/epic-9/lld.md")
+
+    result = s.cmd_transition(gh, 11, "lld-review", repo_path=wt)
+
+    assert result["completed_steps"] == ["verify-exit", "sync-branch", "open-design-pr",
+                                         "start-comment"]
+    assert result["steps"]["open-design-pr"]["stage"] == "lld"
+
+
+def test_transition_stops_at_verify_exit_when_the_doc_is_at_the_old_issue_path(repo):
+    gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "architecture"})
+    wt = _author_doc(gh, repo, 10, f"{DOC}/issue-10/architecture.md")
+
+    result = s.cmd_transition(gh, 10, "arch-review", repo_path=wt)
+
+    assert result["stopped_at"] == "verify-exit" and result["ready"] is False
+    assert f"{DOC}/epic-9/architecture.md is missing" in result["reason"]
+    assert gh.prs == {}
+
+
+def test_transition_never_opens_a_design_pr_for_a_standing_child(repo):
+    gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "architecture"},
+               epic_labels=("type:epic", "epic:standing"))
+    wt = _author_doc(gh, repo, 10, f"{DOC}/issue-10/architecture.md")
+
+    result = s.cmd_transition(gh, 10, "arch-review", repo_path=wt)
+
+    assert result["completed_steps"] == ["verify-exit", "sync-branch", "start-comment"]
+    assert result["steps"]["sync-branch"]["base"] == "main"
+    assert gh.prs == {}
 
 
 def test_transition_after_a_non_review_stage_posts_no_start_comment(monkeypatch):

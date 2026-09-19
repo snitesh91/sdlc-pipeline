@@ -525,8 +525,11 @@ class GitHub:
     def pr_ready(self, number: int):
         self._run(["gh", "pr", "ready", str(number), "--repo", self.repo])
 
-    def pr_merge(self, number: int):
-        self._run(["gh", "pr", "merge", str(number), "--repo", self.repo, "--squash", "--delete-branch"])
+    def pr_merge(self, number: int, delete_branch: bool = True):
+        argv = ["gh", "pr", "merge", str(number), "--repo", self.repo, "--squash"]
+        if delete_branch:
+            argv.append("--delete-branch")
+        self._run(argv)
 
     def reply_review_thread(self, thread_id: str, body: str):
         self.graphql(_REPLY_REVIEW_THREAD_MUTATION, threadId=thread_id, body=body)
@@ -706,6 +709,14 @@ _SYNC_CONFLICT_MARKER = re.compile(r"<!--\s*sync-conflict:\s*(\S+)\s*(?:@[^>]*?)
 _DESIGN_REVIEW_OUTCOME_MARKER = re.compile(
     r"<!--\s*design-review-outcome:\s*(\w+):(\S+?)(?:\s+same-class:(true|false))?"
     r"\s*(?:@[^>]*?)?-->")
+
+# A non-standing Epic's architecture/lld phase-Task raises one PR `issue-<n>` -> `epic-<e>`.
+# The body marker (`<stage>:<issue>`) tells it from a gate or development PR; the issue-comment
+# marker (`<stage>:<pr>`) is how the commands find it again.
+_DESIGN_PR_BODY_MARKER = re.compile(r"<!--\s*design-pr:\s*(architecture|lld):(\d+)\s*-->")
+_DESIGN_PR_OPENED_MARKER = re.compile(
+    r"<!--\s*design-pr-opened:\s*(architecture|lld):(\d+)\s*(?:@[^>]*?)?-->")
+_ARCH_CONFIDENCE_MARKER = re.compile(r"<!--\s*arch-review-confidence:\s*(\d+)\s*-->")
 
 # `<!-- local-ci: <suite>:<pr> @ <sha> -->`: a locally run required suite. Counts
 # only when <sha> matches the PR head, so any later push invalidates it.
@@ -1094,7 +1105,8 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     # The PR's `Closes #<n>` closes the epic; set its terminal fields here too,
     # so a repo without the `issues: closed` Action job is not left unset.
     cmd_mark_issue_closed(gh, epic)
-    return {"epic": epic, "merged": True, "pr": pr_number, "branch": branch}
+    return {"epic": epic, "merged": True, "pr": pr_number, "branch": branch,
+            "worktree": release_worktree(branch, runner=runner, base_repo=repo_path)}
 
 
 _INITIATIVE_VERIFICATION_MARKER = re.compile(
@@ -1613,7 +1625,7 @@ def cmd_lld_section(repo_path: str, epic: int, task,
                         f"origin/{epic_branch(epic)}:{DOC_ROOT}/epic-{epic}/lld.md"])
     except GhError:
         raise GhError(f"cannot read {DOC_ROOT}/epic-{epic}/lld.md on "
-                       f"origin/{epic_branch(epic)} -- is the epic's lld published?")
+                       f"origin/{epic_branch(epic)} -- is the epic's lld merged?")
     section = slice_task_subsection(text, task)
     if section is None:
         label = f"#{task}" if str(task).isdigit() else f"{task}"
@@ -2408,7 +2420,9 @@ DESIGN_REVIEW_ROLES = ("product-review", "arch-review", "lld-review")
 def cmd_record_design_review(gh: GitHub, issue: int, role: str, outcome: str,
                              summary: str, same_class_recurrence: bool = False) -> dict:
     """Post the `design-review-outcome` marker for a design review role (`clean` |
-    `rework`, optional same-class flag) that `pairing-counts` reads. Returns `recorded`."""
+    `rework`, optional same-class flag) that `pairing-counts` reads, and -- for an
+    arch/lld-review of a phase-Task -- the same outcome as a comment on its design PR.
+    Returns `recorded` (+ `design_pr`)."""
     if role not in DESIGN_REVIEW_ROLES:
         raise GhError(f"role must be one of {DESIGN_REVIEW_ROLES}, got {role!r}")
     if outcome not in PR_REVIEW_OUTCOMES:
@@ -2423,12 +2437,20 @@ def cmd_record_design_review(gh: GitHub, issue: int, role: str, outcome: str,
     if same_class_recurrence:
         headline += " **Same defect class as an earlier round — escalation candidate.**"
     same_class_field = " same-class:true" if same_class_recurrence else ""
+    # The review lives on the design PR too; posted first so a failure here leaves no evidence
+    # marker behind and a re-run is safe.
+    design_pr = None
+    if role in DESIGN_STAGE_REVIEW.values():
+        found = find_design_pr(gh.issue_view(issue).get("comments", []))
+        if found and DESIGN_STAGE_REVIEW[found[0]] == role:
+            design_pr = found[1]
+            gh.pr_comment(design_pr, f"{headline} {summary}")
     gh.issue_comment(issue, f"{headline} {summary}\n\n"
                              f"<!-- design-review-outcome: {outcome}:{role}"
                              f"{same_class_field} @ {timestamp} -->")
     return {"issue": issue, "unit": "issue", "role": role,
             "outcome": outcome, "same_class_recurrence": same_class_recurrence,
-            "recorded": True}
+            "recorded": True, **({"design_pr": design_pr} if design_pr else {})}
 
 
 def _post_start_comment(gh: GitHub, issue: int, role: str):
@@ -2576,25 +2598,252 @@ def phase_gate_title(gh: WorkItemProvider, issue: int, title: str) -> str:
     return base if parent_title.lower() in base.lower() else f"{base} - {parent_title}"
 
 
+# The design stages a non-standing Epic's phase-Task authors, and the review that follows each.
+DESIGN_STAGE_REVIEW = {"architecture": "arch-review", "lld": "lld-review"}
+
+
+def find_design_pr(comments: list) -> Optional[tuple]:
+    """`(stage, pr_number)` of the latest `design-pr-opened` marker in `comments`, or None."""
+    found = None
+    for c in comments:
+        for m in _DESIGN_PR_OPENED_MARKER.finditer(c.get("body", "")):
+            found = (m.group(1), int(m.group(2)))
+    return found
+
+
+def design_phase_epic(gh: WorkItemProvider, issue: int, stage: Optional[str]) -> Optional[int]:
+    """The Epic number when `issue` is a non-standing Epic's phase-Task authoring `stage`
+    (`architecture` | `lld`), else None: standing, parentless and Initiative issues keep
+    their own `issue-<n>` docs and `main` gate."""
+    if stage not in DESIGN_STAGE_REVIEW:
+        return None
+    parent = phase_task_parent(gh, issue)
+    return parent["number"] if parent and parent["kind"] == "epic" else None
+
+
+def design_doc_dir(epic: Optional[int], issue: int) -> str:
+    """Where `issue`'s design docs live: `<docRoot>/epic-<e>` for a non-standing Epic's
+    phase-Task (authored in place, merged into `epic-<e>`), else `<docRoot>/issue-<n>`."""
+    return f"{DOC_ROOT}/epic-{epic}" if epic is not None else f"{DOC_ROOT}/issue-{issue}"
+
+
+def last_design_review_outcome(comments: list, role: str) -> Optional[tuple]:
+    """`(comment_index, outcome)` of the latest `design-review-outcome` for `role`, or None."""
+    found = None
+    for idx, c in enumerate(comments):
+        for m in _DESIGN_REVIEW_OUTCOME_MARKER.finditer(c.get("body", "")):
+            if m.group(2) == role:
+                found = (idx, m.group(1))
+    return found
+
+
+def missing_design_review_evidence(comments: list, role: str) -> list:
+    """Problems blocking a design PR's merge: no recorded `role` outcome, or one that is not
+    `clean`. Empty = the review is on record as clean."""
+    outcome = last_design_review_outcome(comments, role)
+    if outcome is None:
+        return [f"no `{role}` outcome recorded (run `record-design-review <issue> --role "
+                f"{role} --outcome clean|rework`)"]
+    if outcome[1] != "clean":
+        return [f"the latest recorded `{role}` outcome is `{outcome[1]}`, not `clean` -- "
+                f"address the findings, re-run the review and record a clean outcome"]
+    return []
+
+
+def latest_arch_confidence(comments: list) -> Optional[int]:
+    """The confidence in the newest `arch-review-confidence` marker written since the
+    previous `arch-review` outcome (i.e. this round's), or None."""
+    outcomes = [idx for idx, c in enumerate(comments)
+                if any(m.group(2) == "arch-review"
+                       for m in _DESIGN_REVIEW_OUTCOME_MARKER.finditer(c.get("body", "")))]
+    floor = outcomes[-2] if len(outcomes) > 1 else -1
+    found = None
+    for idx, c in enumerate(comments):
+        for m in _ARCH_CONFIDENCE_MARKER.finditer(c.get("body", "")):
+            if idx > floor:
+                found = int(m.group(1))
+    return found
+
+
+def _arch_needs_human(gh: WorkItemProvider, issue: int, comments: list) -> list:
+    """Why an architecture design PR may NOT be merged by the pipeline alone (empty = it
+    may): the profile requires a human at Gate B and the latest confidence does not clear the
+    skip threshold."""
+    gates = _profile_for_issue(gh, issue)["gates"]
+    if not gates["requiresHumanGateB"]:
+        return []
+    confidence = latest_arch_confidence(comments)
+    if confidence is not None and confidence > gates["skipConfidenceThreshold"]:
+        return []
+    return [f"the profile requires a human at Gate B and arch-review confidence "
+            f"({confidence if confidence is not None else 'marker missing'}) does not exceed "
+            f"{gates['skipConfidenceThreshold']} -- open-gate and leave the PR for the human "
+            f"to merge into its epic branch"]
+
+
+_DESIGN_PR_BODY = (
+    "Design PR for #{issue}: `{doc}` of Epic #{epic}, reviewed on this PR by `{review}`. "
+    "It merges into `{base}`, never `main`. The pipeline merges it on a clean review "
+    "({who}). Do NOT use Closes/Fixes here: the phase-Task closes only after this merges."
+    "\n\n<!-- design-pr: {stage}:{issue} -->"
+)
+
+
+def cmd_open_design_pr(gh: GitHub, issue: int, runner: Runner = _default_runner) -> dict:
+    """Raise the design PR `issue-<n>` -> `epic-<e>` for a non-standing Epic's architecture
+    or lld phase-Task, once the stage has finished and its branch is pushed. Idempotent: an
+    open one is reused (`created: False`). Standing, parentless and Initiative issues are
+    refused (exit 0): their gate PR is `open-gate`'s. Returns `pr`, `created`, `base`."""
+    stage, _status = _stage_and_status(gh, issue)
+    epic = design_phase_epic(gh, issue, stage)
+    if epic is None:
+        return {"issue": issue, "refused": True,
+                "reason": f"#{issue} (Stage {stage!r}) is not a non-standing Epic's "
+                          f"architecture/lld phase-Task -- it has no design PR"}
+    base, doc = epic_branch(epic), f"{DOC_ROOT}/epic-{epic}/{stage}.md"
+    info = gh.issue_view(issue)
+    found = find_design_pr(info.get("comments", []))
+    if found and found[0] == stage:
+        state = gh.pr_view(found[1], fields="state").get("state")
+        if state in ("OPEN", "MERGED"):
+            return {"issue": issue, "pr": found[1], "created": False, "base": base,
+                    "stage": stage, "doc": doc, "pr_state": state,
+                    "reason": f"design PR #{found[1]} is already {state}"}
+    who = ("a human merges it at Gate B unless arch-review clears the confidence bar"
+           if stage == "architecture" else "no human gate")
+    pr_number = gh.pr_create(
+        base=base, head=issue_branch(issue),
+        title=f"{phase_gate_title(gh, issue, info['title'])} — {stage}.md for review (#{issue})",
+        body=_DESIGN_PR_BODY.format(issue=issue, doc=doc, epic=epic, review=DESIGN_STAGE_REVIEW[stage],
+                                    base=base, who=who, stage=stage),
+        draft=False)
+    gh.issue_comment(issue,
+        f"📄 Design PR #{pr_number} opened: `{issue_branch(issue)}` -> `{base}` for `{doc}`. "
+        f"`{DESIGN_STAGE_REVIEW[stage]}` reviews it there.\n\n"
+        f"<!-- design-pr-opened: {stage}:{pr_number} @ {_utc_now_marker()} -->")
+    return {"issue": issue, "pr": pr_number, "created": True, "base": base, "stage": stage,
+            "doc": doc}
+
+
+def _epic_lld_is_numbered_copy(repo_path: str, issue: int, epic: int, runner: Runner) -> bool:
+    """Whether `origin/epic-<e>`'s lld.md is `issue-<n>`'s after `create-lld-tasks` numbered
+    it: merging the branch's copy back would revert the numbering."""
+    doc = f"{DOC_ROOT}/epic-{epic}/lld.md"
+    try:
+        runner(["git", "-C", repo_path, "fetch", "origin"])
+        src = runner(["git", "-C", repo_path, "show", f"origin/{issue_branch(issue)}:{doc}"])
+        dest = runner(["git", "-C", repo_path, "show", f"origin/{epic_branch(epic)}:{doc}"])
+    except GhError:
+        return False
+    return is_numbered_copy(src, dest)
+
+
+def cmd_merge_design_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
+                        runner: Runner = _default_runner, gate_cleared: bool = False) -> dict:
+    """Squash-merge a phase-Task's design PR into its epic branch once its review is on record
+    as clean; never closes the Task and never deletes its branch. `lld-review` clean always
+    merges; `arch-review` only above the skip threshold or where Gate B is waived
+    (`gate_cleared` = skip-gate/waive-gate already decided that). Refuses (exit 0) when behind
+    the epic branch (`sync-branch` first), on missing/`rework` evidence, or when the epic's
+    numbered lld.md would be reverted. An already-MERGED PR returns `already_merged`."""
+    result = {"pr": pr_number, "issue": issue, "merged": False}
+    parent = phase_task_parent(gh, issue)
+    if parent is None or parent["kind"] != "epic":
+        return {**result, "reason": f"#{issue} is not a non-standing Epic's phase-Task -- "
+                                     f"only its design PR is merged by merge-design-pr"}
+    base = epic_branch(parent["number"])
+    pr = gh.pr_view(pr_number, fields="state,mergedAt,headRefName,baseRefName,body")
+    marker = _DESIGN_PR_BODY_MARKER.search(pr.get("body") or "")
+    if (not marker or int(marker.group(2)) != issue or pr.get("headRefName") != issue_branch(issue)
+            or pr.get("baseRefName") != base):
+        return {**result, "reason": f"PR #{pr_number} is not #{issue}'s design PR "
+                                     f"(`{issue_branch(issue)}` -> `{base}` with a design-pr marker)"}
+    stage = marker.group(1)
+    result.update({"stage": stage, "base": base})
+    if pr.get("state") == "MERGED":
+        return {**result, "already_merged": True}
+    if pr.get("state") != "OPEN":
+        return {**result, "reason": f"PR #{pr_number} was closed without merging -- a human "
+                                     f"decision; mark-needs-human"}
+    comments = gh.issue_view(issue).get("comments", [])
+    missing = missing_design_review_evidence(comments, DESIGN_STAGE_REVIEW[stage])
+    if not missing and stage == "architecture" and not gate_cleared:
+        missing = _arch_needs_human(gh, issue, comments)
+    if missing:
+        return {**result, "missing_evidence": missing,
+                "reason": f"#{issue} cannot merge its design PR: {'; '.join(missing)}"}
+    behind = gh.branch_behind_by(issue_branch(issue), base=base)
+    if behind:
+        return {**result, "behind_base": behind,
+                "reason": f"branch {issue_branch(issue)} is {behind} commit(s) behind {base} -- "
+                          f"run sync-branch {issue}, then re-run"}
+    if stage == "lld" and _epic_lld_is_numbered_copy(repo_path, issue, parent["number"], runner):
+        return {**result, "up_to_date": True,
+                "reason": f"`{base}` already carries this lld.md with its Tasks numbered -- "
+                          f"merging would revert the numbering, so nothing is merged"}
+    try:
+        gh.pr_merge(pr_number, delete_branch=False)
+    except GhError:
+        # GitHub can answer 5xx after the squash already landed; only a PR still open failed.
+        if gh.pr_view(pr_number, fields="state").get("state") != "MERGED":
+            raise
+    gh.pr_comment(pr_number, f"Auto-merged into `{base}` by the pipeline: "
+                              f"`{DESIGN_STAGE_REVIEW[stage]}` is recorded clean.")
+    gh.issue_comment(issue,
+        f"✅ Design PR #{pr_number} merged into `{base}` (`{DESIGN_STAGE_REVIEW[stage]}` clean); "
+        f"its branch `{issue_branch(issue)}` is kept until the Task closes.\n\n"
+        f"<!-- design-pr-merged: {stage}:{pr_number} @ {_utc_now_marker()} -->")
+    return {**result, "merged": True}
+
+
+def _merge_design_pr_of(gh: GitHub, issue: int, repo_path: Optional[str], runner: Runner,
+                        gate_cleared: bool = False) -> dict:
+    """`cmd_merge_design_pr` for the design PR recorded on `issue`'s thread; a structured
+    refusal when none was opened."""
+    found = find_design_pr(gh.issue_view(issue).get("comments", []))
+    if not found:
+        return {"issue": issue, "merged": False,
+                "reason": f"#{issue} has no design PR marker -- run `transition` (or "
+                          f"`open-design-pr {issue}`) after its stage finishes"}
+    return cmd_merge_design_pr(gh, found[1], issue, repo_path or ".", runner=runner,
+                               gate_cleared=gate_cleared)
+
+
 def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, doc: str,
                    next_stage: str, summary: str, runner: Runner = _default_runner) -> dict:
+    """Open a human-review gate: a new `issue-<n>` -> `main` PR, or -- for a non-standing Epic's
+    architecture phase-Task -- its already-open design PR into `epic-<e>` (no second PR)."""
     stage = doc.rsplit(".", 1)[0]
-    head, base = issue_branch(issue), "main"
+    epic = design_phase_epic(gh, issue, stage)
+    head, base = issue_branch(issue), "main" if epic is None else epic_branch(epic)
+    doc_path = f"{design_doc_dir(epic, issue)}/{doc}"
     # Cite the pushed head, not a local HEAD: the PR only contains what is on origin.
     repo_path = repo_path or "."
     runner(["git", "-C", repo_path, "fetch", "origin"])
     sha = runner(["git", "-C", repo_path, "rev-parse", f"origin/{head}"]).strip()
-    pr_number = gh.pr_create(
-        base=base, head=head,
-        title=f"{title} — {doc} for review (#{issue})",
-        body=_GATE_PR_BODY.format(issue=issue, next_stage=next_stage),
-        draft=False,
-    )
+    if epic is None:
+        pr_number = gh.pr_create(
+            base=base, head=head,
+            title=f"{title} — {doc} for review (#{issue})",
+            body=_GATE_PR_BODY.format(issue=issue, next_stage=next_stage),
+            draft=False,
+        )
+    else:
+        found = find_design_pr(gh.issue_view(issue).get("comments", []))
+        if not found or found[0] != stage:
+            raise GhError(f"#{issue} has no {stage} design PR to gate -- run `transition "
+                          f"{issue} --expect-stage arch-review` (or `open-design-pr {issue}`) first")
+        pr_number = found[1]
+        # Reviewer comments made before the gate opened are not human feedback.
+        gh.pr_comment(pr_number,
+            f"Human review requested: merging this PR into `{base}` approves `{doc}`; leave "
+            f"review comments on it to change something.\n\n"
+            f"<!-- gate-comments-processed: {_utc_now_marker()} -->")
     gh.set_pipeline_status_field(issue, "awaiting-human-review")
     timestamp = _utc_now_marker()
     doc_verb = "Requirements locked" if stage == "product" else "Design locked"
     comment = (
-        f"✅ {doc_verb} — see `{DOC_ROOT}/issue-{issue}/{doc}` (`{sha}`). {summary}\n\n"
+        f"✅ {doc_verb} — see `{doc_path}` (`{sha}`). {summary}\n\n"
         f"⏸️ Awaiting human review — see #{pr_number}. Merge it to approve and continue to "
         f"`{next_stage}`, or leave review comments on it for anything that needs to change "
         f"(leave it unmerged — the pipeline picks up your comments and revises the doc "
@@ -2685,7 +2934,7 @@ _PUSH_REJECTED_RE = re.compile(
 
 def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
                        runner: Runner = _default_runner) -> dict:
-    """Verify `epic-<n>/lld.md` is on `origin/epic-<n>`, advance every open, Stage-less
+    """Verify `epic-<n>/lld.md` is on `origin/epic-<n>` (merged there by the LLD-phase Task's design PR), advance every open, Stage-less
     Task child to `development`, and label the Epic architected. Idempotent.
     Returns `merged`, `verified_on_origin`, `advanced_tasks`."""
     epic_br = epic_branch(epic)
@@ -2697,7 +2946,7 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
                if blob is not None else None)
     if blob is None:
         return _with_workspace({"epic": epic, "merged": False,
-                "reason": f"no lld.md on origin/{epic_br} yet — lld has not pushed it"}, ws)
+                "reason": f"no lld.md on origin/{epic_br} yet — the LLD-phase design PR has not merged"}, ws)
     all_issues = {i["number"]: i for i in gh.issue_list()}
     tasks = [i for i in all_issues.values()
              if i["state"] == "OPEN" and i.get("parent") and i["parent"]["number"] == epic
@@ -2709,7 +2958,7 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
         gh.set_stage_field(number, "development")
         gh.set_pipeline_status_field(number, "todo")
         gh.issue_comment(number,
-            f"➡️ Epic #{epic}'s `lld-review` clean and `lld.md` published — Stage "
+            f"➡️ Epic #{epic}'s `lld-review` clean and `lld.md` merged — Stage "
             f"advanced to `development` (not claimed). `next-action` / "
             f"`list-parallel-ready` pick it up as a fresh unit.\n\n"
             f"<!-- stage-transition: lld-review->development @ {timestamp} -->")
@@ -2742,110 +2991,6 @@ def _blob_at(repo_path: str, ref: str, path: str, runner: Runner) -> Optional[st
                        f"{ref}:{path}"]).strip() or None
     except GhError:
         return None
-
-
-def _publish_doc(gh: GitHub, epic_path: str, issue: int, epic: str, src_doc_path: str,
-                 src_ref: str, runner: Runner, dest_doc_path: str,
-                 doc_label: str, attempts: int = 2) -> dict:
-    """Publish the doc blob at `src_ref:src_doc_path` to `dest_doc_path` on `origin/<epic>`,
-    deciding everything against origin, never the local tree. Retries a rejected push
-    once; reports `merged: true` only after verifying the blob on origin."""
-    runner(["git", "-C", epic_path, "fetch", "origin"])
-    src_blob = _blob_at(epic_path, src_ref, src_doc_path, runner)
-    if src_blob is None:
-        return {"issue": issue, "merged": False, "epic_branch": epic,
-                "reason": f"no {doc_label} on {src_ref} — nothing to publish"}
-    dest_blob = _blob_at(epic_path, f"origin/{epic}", dest_doc_path, runner)
-
-    def text(blob):
-        return runner(["git", "-C", epic_path, "cat-file", "blob", blob])
-    # A re-run after `create-lld-tasks` numbered the doc must not revert the numbering.
-    if dest_blob == src_blob or (dest_blob and doc_label == "lld.md"
-                                 and is_numbered_copy(text(src_blob), text(dest_blob))):
-        return {"issue": issue, "merged": False, "epic_branch": epic, "reason": "up-to-date",
-                "verified_on_origin": True}
-    if runner(["git", "-C", epic_path, "status", "--porcelain"]).strip():
-        return {"issue": issue, "merged": False, "epic_branch": epic,
-                "reason": f"epic worktree {epic_path} has uncommitted changes — refusing to "
-                          f"reset it; commit or stash them, then re-run"}
-    # A stale doc-only commit from a rejected attempt is safe to drop; anything else is not.
-    unpushed_files = runner(["git", "-C", epic_path, "diff", "--name-only",
-                             f"origin/{epic}...{epic}"]).split()
-    if any(f != dest_doc_path for f in unpushed_files):
-        return {"issue": issue, "merged": False, "epic_branch": epic,
-                "reason": f"local {epic} carries unpushed commits touching "
-                          f"{', '.join(f for f in unpushed_files if f != dest_doc_path)} — "
-                          f"refusing to reset it; push or discard them, then re-run"}
-    last_error = None
-    for attempt in range(1, attempts + 1):
-        runner(["git", "-C", epic_path, "checkout", "-B", epic, f"origin/{epic}"])
-        # Stage the existing blob at the new path via plumbing; no working-tree write needed.
-        runner(["git", "-C", epic_path, "update-index", "--add", "--cacheinfo",
-                f"100644,{src_blob},{dest_doc_path}"])
-        # No pathspec: `commit -- <path>` would read the (unwritten) working-tree file.
-        runner(["git", "-C", epic_path, "commit", "-m",
-                f"docs(sdlc): publish issue-{issue} {doc_label} to {epic}"])
-        # Materialize the committed file, or the worktree reads as a
-        # deletion and the next publish refuses it as uncommitted changes.
-        runner(["git", "-C", epic_path, "checkout", "HEAD", "--", dest_doc_path])
-        sha = git_rev_parse_head(epic_path, runner=runner)
-        try:
-            runner(["git", "-C", epic_path, "push", "origin", epic])
-        except GhError as e:
-            if not _PUSH_REJECTED_RE.search(str(e)):
-                raise
-            last_error = str(e).strip().splitlines()[-1] if str(e).strip() else str(e)
-            runner(["git", "-C", epic_path, "fetch", "origin"])
-            continue
-        runner(["git", "-C", epic_path, "fetch", "origin"])
-        if _blob_at(epic_path, f"origin/{epic}", dest_doc_path, runner) != src_blob:
-            return {"issue": issue, "merged": False, "epic_branch": epic, "conflict": True,
-                    "commit": sha,
-                    "reason": f"push to {epic} returned success but origin/{epic} does not "
-                              f"carry {dest_doc_path} at the published blob — refusing to report "
-                              f"merged; inspect origin/{epic} and re-run"}
-        return {"issue": issue, "merged": True, "epic_branch": epic, "commit": sha,
-                "verified_on_origin": True, "attempts": attempt}
-    return {"issue": issue, "merged": False, "epic_branch": epic, "conflict": True,
-            "reason": f"push to {epic} rejected {attempts}× in a row — the epic branch keeps "
-                      f"advancing under this command; {doc_label} is NOT on origin/{epic}. "
-                      f"Re-run once the branch is quiet. Last git error: {last_error}"}
-
-
-def cmd_publish_doc(gh: GitHub, repo_path: Optional[str], issue: int, doc: str,
-                    runner: Runner = _default_runner) -> dict:
-    """Publish a phase-Task's `<doc>` from its `issue-<n>` branch to its Epic's branch at
-    `epic-<n>/<doc>` and comment the link on the Epic. Refuses (exit 0) for a parentless
-    issue or a standing epic's child: there is no epic branch to publish to."""
-    issues = {i["number"]: i for i in gh.issue_list()}
-    entry = issues.get(issue)
-    if entry is None:
-        raise GhError(f"issue #{issue} not found in the repo issue list")
-    parent = entry.get("parent")
-    if not parent:
-        return {"issue": issue, "merged": False,
-                "reason": "issue has no parent epic — nothing to publish to"}
-    parent_number = parent["number"]
-    parent_entry = issues.get(parent_number)
-    if parent_entry is not None and is_epic_standing(parent_entry):
-        return {"issue": issue, "merged": False,
-                "reason": f"parent epic #{parent_number} is epic:standing — its children "
-                          f"integrate into main, not an epic branch"}
-    epic = epic_branch(parent_number)
-    src_doc_path = f"{DOC_ROOT}/issue-{issue}/{doc}"
-    dest_doc_path = f"{DOC_ROOT}/epic-{parent_number}/{doc}"
-    src_ref = f"origin/{issue_branch(issue)}"
-    with branch_lock(epic):
-        ensure_branch_on_origin(repo_path or ".", epic, runner=runner)
-        with BranchWorkspace(epic, repo_path, runner) as ws:
-            result = _publish_doc(gh, ws.path, issue, epic, src_doc_path, src_ref, runner,
-                                  dest_doc_path=dest_doc_path, doc_label=doc)
-    if result.get("merged"):
-        gh.issue_comment(parent_number,
-            f"📄 `{doc}` published — see `{dest_doc_path}` (`{result['commit']}`), from "
-            f"#{issue}'s own `{issue_branch(issue)}` branch.\n\n"
-            f"<!-- doc-published: {epic}:{result['commit']} @ {_utc_now_marker()} -->")
-    return _with_workspace(result, ws)
 
 
 def cmd_add_blocked_by(gh: GitHub, issue: int, dep: int) -> dict:
@@ -2935,7 +3080,7 @@ def task_type_name() -> str:
 
 def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
                           runner: Runner = _default_runner) -> dict:
-    """Create one Task per `## Task <KEY>` section of the Epic's published `lld.md`,
+    """Create one Task per `## Task <KEY>` section of the Epic's merged `lld.md`,
     renumber the headings, wire `Depends on:` as `blockedBy` edges, and push the doc.
     Idempotent: existing issues are matched back by their `task-key` marker."""
     epic_br = epic_branch(epic)
@@ -2944,8 +3089,8 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
     try:
         doc = runner(["git", "-C", repo_path, "show", f"origin/{epic_br}:{doc_path}"])
     except GhError:
-        raise GhError(f"cannot read {doc_path} on origin/{epic_br} -- publish the Epic's "
-                       f"lld.md first (publish-doc), then re-run create-lld-tasks")
+        raise GhError(f"cannot read {doc_path} on origin/{epic_br} -- merge the LLD-phase "
+                       f"Task's design PR first (merge-design-pr), then re-run create-lld-tasks")
     headings = parse_task_headings(doc)
     pending = [h for h in headings if h["key"]]
     result = {"epic": epic, "doc": doc_path, "created": [], "reused": [],
@@ -3033,17 +3178,19 @@ def phase_task_parent(gh: GitHub, issue: int) -> Optional[dict]:
 
 def _complete_phase_task(gh: GitHub, repo_path: Optional[str], issue: int, stage: str,
                          parent: dict, note: str, runner: Runner, markers: str = "") -> dict:
-    """Finish a phase-Task whose gate passed or was skipped: publish `architecture.md`
-    to the Epic branch (Epic parent only), then close the Task. It has no next stage;
-    stays open if the publish isn't verified on origin."""
+    """Finish a phase-Task whose gate passed or was skipped: for an Epic's Architecture-phase
+    Task, first confirm `architecture.md` is on `epic-<e>` (its design PR merged), then close
+    the Task. It has no next stage; stays open if the doc is not on the Epic branch."""
     result = {"issue": issue, "unit": "issue", "phase_task_complete": False,
               "parent": parent["number"]}
     if stage == "architecture" and parent["kind"] == "epic":
-        published = cmd_publish_doc(gh, repo_path, issue, "architecture.md", runner=runner)
-        result["publish"] = published
-        if not published.get("verified_on_origin"):
-            result["reason"] = ("architecture.md is not on the Epic branch -- the Task stays "
-                                "open; fix the publish and re-run publish-doc, then close-issue")
+        doc = f"{DOC_ROOT}/epic-{parent['number']}/architecture.md"
+        on_epic = gh.path_on_ref(doc, epic_branch(parent["number"]))
+        result["doc_on_epic_branch"] = on_epic
+        if not on_epic:
+            result["reason"] = (f"`{doc}` is not on `{epic_branch(parent['number'])}` -- the "
+                                f"design PR has not merged; the Task stays open. Merge-design-pr "
+                                f"(or the human's merge) must land first, then re-run")
             return result
     gh.issue_comment(issue,
         f"✅ {note}\n\nPhase-Task complete — closing it; its parent #{parent['number']} "
@@ -3055,7 +3202,7 @@ def _complete_phase_task(gh: GitHub, repo_path: Optional[str], issue: int, stage
 
 def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: str,
                    runner: Runner = _default_runner, live: bool = True) -> dict:
-    """Pass a merged gate: reconcile the branch with main, then claim the next stage
+    """Pass a merged gate: reconcile the branch with its integration base, then claim the next stage
     (`live`) or only advance Stage (`live=False`, CI). Refuses a `stage`/`gate_pr` that
     disagrees with the issue's gate-pr marker; a phase-Task is closed instead."""
     issue_data = gh.issue_view(issue)
@@ -3072,10 +3219,12 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
                        f"{actual_stage!r}, not stage={stage!r} -- pass next-action's own 'stage' "
                        f"field verbatim; it is the gate's owning doc-stage, not a target you pick")
     branch = issue_branch(issue)
-    # The gate merged into main, so reconcile the issue branch with main.
-    with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
-        git_reconcile_branch(ws.path, branch, base="main", runner=runner)
     parent = phase_task_parent(gh, issue)
+    # The gate merged into `main`, or into its Epic's branch for a phase-Task of a
+    # non-standing Epic (its design PR), so reconcile the issue branch with that.
+    base = epic_branch(parent["number"]) if parent and parent["kind"] == "epic" else "main"
+    with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
+        git_reconcile_branch(ws.path, branch, base=base, runner=runner)
     if parent is not None:
         return _with_workspace(_complete_phase_task(
             gh, repo_path, issue, stage, parent,
@@ -3109,7 +3258,8 @@ def _profile_for_issue(gh: GitHub, issue: int) -> dict:
 def cmd_skip_gate(gh: GitHub, issue: int, stage: str, confidence: int, summary: str,
                    repo_path: Optional[str] = None, runner: Runner = _default_runner) -> dict:
     """Skip Gate B when arch-review's confidence exceeds the profile's
-    `skipConfidenceThreshold`; claims `development`, or completes a phase-Task."""
+    `skipConfidenceThreshold`; claims `development`, or completes a phase-Task (an Epic's
+    Architecture-phase Task first merges its design PR into the epic branch)."""
     if stage != "architecture":
         raise GhError(f"only the architecture gate (Gate B) may be skipped, got stage={stage!r}")
     threshold = _profile_for_issue(gh, issue)["gates"]["skipConfidenceThreshold"]
@@ -3118,6 +3268,12 @@ def cmd_skip_gate(gh: GitHub, issue: int, stage: str, confidence: int, summary: 
                        f"{threshold} threshold required to skip Gate B")
     parent = phase_task_parent(gh, issue)
     if parent is not None:
+        if parent["kind"] == "epic":
+            merge = _merge_design_pr_of(gh, issue, repo_path, runner, gate_cleared=True)
+            if not (merge.get("merged") or merge.get("already_merged")):
+                return {"issue": issue, "unit": "issue", "phase_task_complete": False,
+                        "parent": parent["number"], "design_pr": merge,
+                        "reason": merge.get("reason", "the design PR did not merge")}
         return _complete_phase_task(
             gh, repo_path, issue, stage, parent,
             f"⚡ Gate B skipped — arch-review reported {confidence}% confidence (> "
@@ -3146,7 +3302,8 @@ _GATE_REVIEW = {"product": "product-review", "architecture": "arch-review"}
 def cmd_waive_gate(gh: GitHub, issue: int, stage: str, summary: str,
                    repo_path: Optional[str] = None, runner: Runner = _default_runner) -> dict:
     """Pass `stage`'s gate without a human when the profile's `requiresHumanGateA|B` is
-    false: claims the next stage, or completes a phase-Task. Raises when a human is required."""
+    false: claims the next stage, or completes a phase-Task (an Epic's Architecture-phase Task
+    first merges its design PR). Raises when a human is required."""
     toggle = HUMAN_GATE_TOGGLES.get(stage)
     if toggle is None:
         raise GhError(f"stage must be one of {sorted(HUMAN_GATE_TOGGLES)} (the doc the gate "
@@ -3160,6 +3317,12 @@ def cmd_waive_gate(gh: GitHub, issue: int, stage: str, summary: str,
     marker = f"<!-- gate-waived: {stage}:{profile['name']} -->\n"
     parent = phase_task_parent(gh, issue)
     if parent is not None:
+        if parent["kind"] == "epic" and stage == "architecture":
+            merge = _merge_design_pr_of(gh, issue, repo_path, runner, gate_cleared=True)
+            if not (merge.get("merged") or merge.get("already_merged")):
+                return {"issue": issue, "unit": "issue", "phase_task_complete": False,
+                        "parent": parent["number"], "design_pr": merge,
+                        "reason": merge.get("reason", "the design PR did not merge")}
         return _complete_phase_task(gh, repo_path, issue, stage, parent, note, runner,
                                     markers=marker)
     next_stage = STAGE_AFTER_GATE[stage]
@@ -3172,7 +3335,9 @@ def cmd_waive_gate(gh: GitHub, issue: int, stage: str, summary: str,
 
 
 _CLOSES_ISSUE_RE = re.compile(r"\bCloses #\d+", re.IGNORECASE)
-# Gate PRs are `issue-<n>` -> main; an `epic-<n>` head is the epic's integration PR, not a gate.
+# Gate PRs are `issue-<n>` -> main, or -- for a non-standing Epic's architecture phase-Task --
+# its design PR `issue-<n>` -> `epic-<e>` (recognised by its body marker). An `epic-<n>` head is
+# the epic's integration PR, never a gate.
 _GATE_BRANCH_RE = re.compile(rf"^{re.escape(ISSUE_BRANCH_PREFIX)}(?P<issue_n>\d+)$")
 # Bot logins end in "[bot]"; ignoring them stops a bot comment from looping the workflow.
 _BOT_AUTHOR_RE = re.compile(r"\[bot\]$")
@@ -3195,8 +3360,12 @@ def _match_open_gate(gh: GitHub, pr: dict, pr_number: int) -> tuple:
         raise _NotAGate(f"PR #{pr_number} head branch {pr.get('headRefName')!r} is not "
                          f"an issue-<n> branch")
     issue_number = int(m.group("issue_n"))
-    if pr.get("baseRefName") != "main":
-        raise _NotAGate(f"PR #{pr_number} base is {pr.get('baseRefName')!r}, not main")
+    design = _DESIGN_PR_BODY_MARKER.search(pr.get("body") or "")
+    if pr.get("baseRefName") != "main" and not (
+            design and int(design.group(2)) == issue_number
+            and (pr.get("baseRefName") or "").startswith(EPIC_BRANCH_PREFIX)):
+        raise _NotAGate(f"PR #{pr_number} base is {pr.get('baseRefName')!r}, not main or the "
+                        f"epic branch of a design PR")
 
     if _CLOSES_ISSUE_RE.search(pr.get("body") or ""):
         raise _NotAGate(f"PR #{pr_number} body contains 'Closes #' -- this is the "
@@ -3322,16 +3491,20 @@ def cmd_resolve_thread(gh: GitHub, thread_id: str, reply: Optional[str] = None) 
     return {"thread": thread_id, "replied": bool(reply), "resolved": True}
 
 
-def cmd_pause_for_epic_regate(gh: GitHub, issue: int, epic: int, gate_pr: int,
-                              found_by: str = "lld") -> dict:
-    """Park a unit waiting on its Epic's Architecture revision gate: Pipeline Status
-    `todo` (Stage kept) so it re-enters the normal loop once the gate merges.
-    `found_by` names the stage that hit the deviation in the pause comment."""
+def cmd_pause_for_epic_regate(gh: GitHub, issue: int, epic: int,
+                              gate_pr: Optional[int] = None, found_by: str = "lld") -> dict:
+    """Park a unit waiting on its Epic's Architecture revision: Pipeline Status `todo` (Stage
+    kept) so it re-enters the normal loop once the revision Task closes (its `blockedBy` edge
+    holds it until then). `gate_pr` is the revision's design/gate PR once it exists (it is
+    only raised after the revision's `architecture` stage finishes); `found_by` names the
+    stage that hit the deviation."""
     gh.set_pipeline_status_field(issue, "todo")
+    where = (f"see gate PR #{gate_pr}" if gate_pr is not None
+             else "its design PR opens once the revision's architecture stage finishes")
     gh.issue_comment(issue,
         f"⏸️ Paused — `{found_by}` found this doesn't fit epic #{epic}'s current "
-        f"architecture. Epic #{epic}'s architecture is being revised; see gate PR "
-        f"#{gate_pr}. This task resumes automatically once that gate merges.")
+        f"architecture. Epic #{epic}'s architecture is being revised; {where}. This task "
+        f"resumes automatically once the revision closes.")
     return {"issue": issue, "paused_for_epic_regate": epic, "gate_pr": gate_pr,
             "found_by": found_by}
 
@@ -3586,13 +3759,25 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
                     f"is posted, `list-ready-for-review` never queues this PR and "
                     f"`merge-pr` refuses it as missing_pipeline_evidence.")
             result["problems"] = problems
-    docs_dir = os.path.join(repo_path, DOC_ROOT, f"issue-{issue}")
+    # A non-standing Epic's phase-Task authors `epic-<e>/<doc>` in place (docs merge into the
+    # epic branch by its design PR); everything else keeps `issue-<n>/`.
+    epic = design_phase_epic(gh, issue, expect)
+    docs_rel = design_doc_dir(epic, issue)
+    docs_dir = os.path.join(repo_path, docs_rel)
+    result["docs_dir"] = docs_rel
     result["docs_present"] = sorted(os.listdir(docs_dir)) if os.path.isdir(docs_dir) else []
     # Only the completing stage's own record is re-checked, so an older doc's rotted
     # citation can't fail a later stage's exit.
     record_filename = STAGE_RECORD_FILENAMES.get(expect)
     if record_filename:
         record_path = os.path.join(docs_dir, record_filename)
+        if epic is not None and not os.path.isfile(record_path):
+            result["ok"] = False
+            result.setdefault(
+                "reason",
+                f"{docs_rel}/{record_filename} is missing on {issue_branch(issue)} -- a "
+                f"non-standing Epic's phase-Task authors the doc at exactly that path "
+                f"(not `issue-{issue}/`); write it there, commit and push.")
         if os.path.isfile(record_path):
             with open(record_path, "r") as f:
                 record_text = f.read()
@@ -3713,6 +3898,15 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
     behind a base delta that needs re-attest; otherwise carries the attestation forward.
     Idempotent: an already-MERGED PR only gets the post-merge bookkeeping (`recovered`).
     Stage/Pipeline Status are left to `mark-issue-closed` on the `issues: closed` event."""
+    entry = next((i for i in gh.issue_list() if i["number"] == issue), None)
+    if entry is not None and current_stage(entry) in DESIGN_STAGE_REVIEW:
+        parent = phase_task_parent(gh, issue)
+        if parent is not None and parent["kind"] == "epic":
+            # `_finalize_merged_pr` would close it before create-lld-tasks/merge-lld-doc ran.
+            return {"pr": pr_number, "issue": issue, "merged": False,
+                    "reason": f"#{issue} is a phase-Task: its PR is a design PR -- use "
+                              f"`merge-design-pr {pr_number} --issue {issue}` (skip-gate/"
+                              f"waive-gate/finish-lld run it), never merge-pr"}
     if gh.pr_view(pr_number, fields="state").get("state") == "MERGED":
         return _finalize_merged_pr(gh, pr_number, issue, repo_path, integration_base(gh, issue),
                                    gh.pr_files(pr_number), {"recovered": True})
@@ -4106,7 +4300,7 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
                         if not gh.path_on_ref(f"{DOC_ROOT}/epic-{epic['number']}/{name}", branch)]
         docs_line = (
             f"- [ ] {len(missing_docs)} epic doc(s) never reached `{branch}` "
-            f"({', '.join(f'`{d}`' for d in missing_docs)}) — merge their gate PRs before "
+            f"({', '.join(f'`{d}`' for d in missing_docs)}) — merge their design PRs before "
             "closing, or they stay reachable only on an unmerged phase-Task branch and never "
             "reach `main`\n"
             if missing_docs else
@@ -4552,17 +4746,18 @@ def cmd_file_closing_delta(gh: GitHub, epic: int, title: str, body: str,
 
 def cmd_finish_lld(gh: GitHub, lld_task: int, epic: int, repo_path: str = ".",
                    runner: Runner = _default_runner) -> dict:
-    """After a clean `lld-review`: publish-doc lld.md -> create-lld-tasks ->
-    merge-lld-doc -> close-issue, stopping before the close if anything earlier
-    failed. Returns `completed_steps`, `failed_step`, `steps`."""
+    """After a clean `lld-review`: merge-design-pr (lld.md into `epic-<n>`) ->
+    create-lld-tasks -> merge-lld-doc -> close-issue, stopping before the close if anything
+    earlier failed. Returns `completed_steps`, `failed_step`, `steps`."""
     parent = (gh.issue_epic_info(lld_task).get("parent") or {}).get("number")
     if parent != epic:
         return {"lld_task": lld_task, "epic": epic, "refused": True,
                 "reason": f"#{lld_task}'s parent is #{parent}, not Epic #{epic}"}
     seq = StepSequence()
-    seq.run("publish-doc", lambda: cmd_publish_doc(gh, repo_path, lld_task, "lld.md",
-                                                   runner=runner),
-            failed=lambda r: not r.get("verified_on_origin"))
+    # Already merged (a re-run) or a numbered lld.md the merge would revert both count as done.
+    seq.run("merge-design-pr", lambda: _merge_design_pr_of(gh, lld_task, repo_path, runner),
+            failed=lambda r: not (r.get("merged") or r.get("already_merged")
+                                  or r.get("up_to_date")))
     # Nothing to create (`tasks == {}`) is a completed earlier run, not a failure.
     seq.run("create-lld-tasks", lambda: cmd_create_lld_tasks(gh, epic, repo_path,
                                                              runner=runner),
@@ -4598,9 +4793,10 @@ _REVIEW_FOLLOWS_STAGE = {"product-review": "product", "arch-review": "architectu
 def cmd_transition(gh: GitHub, issue: int, expect_stage: str, pr: Optional[int] = None,
                    repo_path: Optional[str] = None, base: Optional[str] = None,
                    runner: Runner = _default_runner) -> dict:
-    """After a stage agent returns: verify-exit -> sync-branch -> start-comment (review
-    roles only). Stops at an unverified exit, a missing pr-review handoff marker, or a
-    sync conflict / missing base. Returns `ready`, `stopped_at`, `steps`."""
+    """After a stage agent returns: verify-exit -> sync-branch -> open-design-pr (a
+    non-standing Epic's architecture/lld phase-Task only) -> start-comment (review roles only).
+    Stops at an unverified exit, a missing pr-review handoff marker, or a sync conflict /
+    missing base. Returns `ready`, `stopped_at`, `steps`."""
     if expect_stage == "pr-review" and pr is None:
         raise GhError("transition --expect-stage pr-review needs --pr: the handoff-marker "
                       "check only runs with the PR in hand")
@@ -4612,6 +4808,9 @@ def cmd_transition(gh: GitHub, issue: int, expect_stage: str, pr: Optional[int] 
     seq.run("sync-branch", lambda: cmd_sync_branch(gh, repo_path, issue, runner=runner,
                                                    base=base),
             failed=lambda r: not r.get("synced"))
+    if not seq.stopped and design_phase_epic(gh, issue, verify_stage) is not None:
+        seq.run("open-design-pr", lambda: cmd_open_design_pr(gh, issue, runner=runner),
+                failed=lambda r: not r.get("pr"))
     if expect_stage in REVIEW_ROLES:
         seq.run("start-comment", lambda: cmd_start_comment(gh, issue, expect_stage))
     return seq.report(failed_key="stopped_at", issue=issue, expect_stage=expect_stage,
@@ -4796,7 +4995,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--confidence", type=int, required=True)
     p.add_argument("--summary", required=True)
     p.add_argument("--repo-path", default=None,
-                    help="Any path inside the repository (Architecture-phase Tasks only)")
+                    help="Any path inside the repository (an Epic's Architecture-phase Task only)")
     p.set_defaults(func=lambda a: cmd_skip_gate(get_work_item_provider(), a.issue, a.stage, a.confidence, a.summary, repo_path=a.repo_path))
     p = sub.add_parser("waive-gate",
                         help="Pass a gate without a human when the profile waives it")
@@ -4838,7 +5037,8 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("pause-for-epic-regate")
     p.add_argument("issue", type=int)
     p.add_argument("--epic", type=int, required=True)
-    p.add_argument("--gate-pr", type=int, required=True)
+    p.add_argument("--gate-pr", type=int, default=None,
+                    help="The revision's design/gate PR, once it exists")
     p.add_argument("--found-by", default="lld",
                     help="Stage that hit the deviation (lld, development, pr-review, ...)")
     p.set_defaults(func=lambda a: cmd_pause_for_epic_regate(get_work_item_provider(), a.issue, a.epic, a.gate_pr, a.found_by))
@@ -4887,18 +5087,22 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_sync_branch(get_work_item_provider(), a.repo_path,
                                                    a.issue, a.unit, base=a.base))
     p = sub.add_parser("merge-lld-doc",
-                        help="Verify lld.md is published, stage its Tasks, mark the Epic architected")
+                        help="Verify lld.md is merged into the epic branch, stage its Tasks, mark the Epic architected")
     p.add_argument("epic", type=int, help="The Epic")
     p.add_argument("--repo-path", default=None,
                     help=repo_path_help)
     p.set_defaults(func=lambda a: cmd_merge_lld_doc(get_work_item_provider(), a.repo_path, a.epic))
-    p = sub.add_parser("publish-doc",
-                        help="Publish a phase-Task's doc onto its Epic's branch")
-    p.add_argument("issue", type=int, help="The phase-Task")
-    p.add_argument("--doc", required=True, help="e.g. architecture.md or lld.md")
-    p.add_argument("--repo-path", default=None,
-                    help=repo_path_help)
-    p.set_defaults(func=lambda a: cmd_publish_doc(get_work_item_provider(), a.repo_path, a.issue, a.doc))
+    p = sub.add_parser("open-design-pr",
+                        help="Raise a phase-Task's design PR issue-<n> -> epic-<e> (transition runs it)")
+    p.add_argument("issue", type=int, help="The architecture/lld phase-Task")
+    p.set_defaults(func=lambda a: cmd_open_design_pr(get_work_item_provider(), a.issue))
+    p = sub.add_parser("merge-design-pr",
+                        help="Merge a phase-Task's design PR into its epic branch once its review is clean")
+    p.add_argument("pr", type=int)
+    p.add_argument("--issue", type=int, required=True, help="The phase-Task")
+    p.add_argument("--repo-path", default=".", help="Any path inside the repository")
+    p.set_defaults(func=lambda a: cmd_merge_design_pr(get_work_item_provider(), a.pr, a.issue,
+                                                       a.repo_path))
     p = sub.add_parser("add-blocked-by",
                         help="Add a native blockedBy edge (no other side effect)")
     p.add_argument("issue", type=int)
@@ -5031,7 +5235,7 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_cut_phase_tasks(
         get_work_item_provider(), a.epic, a.arch_body, a.lld_body, a.repo_path))
     p = sub.add_parser("finish-lld",
-                        help="publish-doc -> create-lld-tasks -> merge-lld-doc -> close-issue")
+                        help="merge-design-pr -> create-lld-tasks -> merge-lld-doc -> close-issue")
     p.add_argument("lld_task", type=int, help="The LLD-phase Task")
     p.add_argument("--epic", type=int, required=True)
     p.add_argument("--repo-path", required=True, help="Any path inside the repository")

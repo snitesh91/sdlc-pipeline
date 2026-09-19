@@ -23,9 +23,15 @@ class FakeGh:
     """The subset of `WorkItemProvider` these flows touch, backed by a dict.
     Unimplemented methods raise AttributeError, so new calls fail loudly."""
 
-    def __init__(self, issues: list):
+    def __init__(self, issues: list, prs: dict = None):
         self.issues = {}
         self.blocked: dict = {}
+        self.prs = {n: {"state": "OPEN", "isDraft": False, "body": "", "comments": [], **p}
+                    for n, p in (prs or {}).items()}
+        self.behind: dict = {}      # head branch -> commits it is behind its base
+        self.merges: list = []      # (pr, delete_branch) in call order
+        self.repo = None            # a clone: pr_merge really lands the PR, path_on_ref reads origin
+        self.refs: set = set()      # (path, ref) path_on_ref reports when `repo` is unset
         for i in issues:
             self.issues[i["number"]] = {
                 "title": f"issue {i['number']}", "state": "OPEN", "labels": [],
@@ -123,6 +129,45 @@ class FakeGh:
     def comments_on(self, n):
         return self.issues[n]["comments"]
 
+    # --- pull requests ---
+
+    def pr_create(self, base, head, title, body, draft=False):
+        n = max(self.prs, default=100) + 1
+        self.prs[n] = {"baseRefName": base, "headRefName": head, "title": title, "body": body,
+                       "isDraft": draft, "state": "OPEN", "comments": []}
+        return n
+
+    def pr_view(self, n, fields=""):
+        return self.prs[n]
+
+    def pr_comment(self, n, body):
+        self.prs[n]["comments"].append(body)
+
+    def pr_list_for_branch(self, branch, state="open"):
+        return [{"number": n, **p} for n, p in self.prs.items()
+                if p.get("headRefName") == branch and p.get("state", "OPEN") == "OPEN"]
+
+    def pr_merge(self, n, delete_branch=True):
+        self.merges.append((n, delete_branch))
+        pr = self.prs[n]
+        if self.repo is not None:
+            _land_pr(self.repo, pr["headRefName"], pr["baseRefName"])
+        pr["state"], pr["mergedAt"] = "MERGED", "2026-09-19T00:00:00Z"
+
+    def _run(self, argv):
+        """Any raw git/gh call a command makes through the provider: nothing to report."""
+        return ""
+
+    def branch_behind_by(self, head, base="main"):
+        return self.behind.get(head, 0)
+
+    def path_on_ref(self, path, ref="main"):
+        if self.repo is None:
+            return (path, ref) in self.refs
+        _git("fetch", "-q", "origin", cwd=self.repo)
+        return subprocess.run(["git", "cat-file", "-e", f"origin/{ref}:{path}"],
+                              cwd=self.repo, capture_output=True).returncode == 0
+
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
@@ -145,11 +190,12 @@ def repo(tmp_path, monkeypatch):
     return clone
 
 
-def _push_doc_branch(clone, branch: str, path: str, text: str, merge_to_main: bool = False):
-    """Push `branch` = origin/main + one doc commit, leaving the clone on `main`
+def _push_doc_branch(clone, branch: str, path: str, text: str, merge_to_main: bool = False,
+                     base: str = "main"):
+    """Push `branch` = origin/<base> + one doc commit, leaving the clone on `main`
     (write commands refuse a branch held by the main checkout)."""
     _git("fetch", "-q", "origin", cwd=clone)
-    _git("checkout", "-q", "-B", branch, "origin/main", cwd=clone)
+    _git("checkout", "-q", "-B", branch, f"origin/{base}", cwd=clone)
     target = clone / path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text)
@@ -159,6 +205,45 @@ def _push_doc_branch(clone, branch: str, path: str, text: str, merge_to_main: bo
     if merge_to_main:
         _git("push", "-q", "origin", f"{branch}:main", cwd=clone)
     _git("checkout", "-q", "main", cwd=clone)
+
+
+def _ensure_epic_branch(clone, epic: int = 9):
+    """`origin/epic-<n>` exists (cut from main), as `cut-phase-tasks` leaves it."""
+    _git("fetch", "-q", "origin", cwd=clone)
+    if not _git("ls-remote", "--heads", "origin", f"epic-{epic}", cwd=clone).strip():
+        _git("push", "-q", "origin", f"origin/main:refs/heads/epic-{epic}", cwd=clone)
+
+
+def _design_branch(clone, issue: int, doc: str, text: str, epic: int = 9):
+    """`issue-<n>` as its stage agent leaves it: cut from `epic-<e>`, the doc authored at
+    `docs/sdlc/epic-<e>/<doc>`, committed and pushed."""
+    _ensure_epic_branch(clone, epic)
+    _push_doc_branch(clone, f"issue-{issue}", f"{DOC}/epic-{epic}/{doc}", text, base=f"epic-{epic}")
+
+
+def _open_design(gh, clone, issue: int, doc: str, text: str, epic: int = 9) -> int:
+    """A phase-Task's branch plus its open design PR; returns the PR number."""
+    gh.repo = clone
+    _design_branch(clone, issue, doc, text, epic)
+    return s.cmd_open_design_pr(gh, issue)["pr"]
+
+
+def _review(gh, issue: int, role: str, outcome: str = "clean", confidence=None):
+    """What a design review leaves on the thread (its confidence marker, then the outcome)."""
+    if confidence is not None:
+        gh.issue_comment(issue, f"Design review.\n\n<!-- arch-review-confidence: {confidence} -->")
+    s.cmd_record_design_review(gh, issue, role, outcome, "checked the design")
+
+
+def _land_pr(clone, head: str, base: str):
+    """What GitHub does on a squash-merge: the head's content lands on `origin/<base>`."""
+    _git("fetch", "-q", "origin", cwd=clone)
+    _git("checkout", "-q", "-B", "_land", f"origin/{base}", cwd=clone)
+    _git("merge", "-q", "--squash", f"origin/{head}", cwd=clone)
+    _git("commit", "-qm", f"squash {head} into {base}", "--allow-empty", cwd=clone)
+    _git("push", "-q", "origin", f"_land:{base}", cwd=clone)
+    _git("checkout", "-q", "main", cwd=clone)
+    _git("branch", "-qD", "_land", cwd=clone)
 
 
 def _origin_file(clone, ref: str, path: str) -> str:
@@ -176,27 +261,6 @@ def _v2_tree(*extra):
 
 # --- the epic branch must exist on origin -----------------------------------
 
-def test_publish_doc_creates_the_epic_branch_on_origin_when_nothing_has(repo):
-    gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9})
-    _push_doc_branch(repo, "issue-10", f"{DOC}/issue-10/architecture.md", "# arch\n")
-
-    result = s.cmd_publish_doc(gh, str(repo), 10, "architecture.md")
-
-    assert result["merged"] is True
-    assert _origin_file(repo, "epic-9", f"{DOC}/epic-9/architecture.md") == "# arch\n"
-
-
-def test_publish_doc_pushes_an_epic_branch_that_exists_only_locally(repo):
-    gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9})
-    _push_doc_branch(repo, "issue-10", f"{DOC}/issue-10/architecture.md", "# arch\n")
-    _git("branch", "epic-9", "origin/main", cwd=repo)
-
-    result = s.cmd_publish_doc(gh, str(repo), 10, "architecture.md")
-
-    assert result["merged"] is True
-    assert _origin_file(repo, "epic-9", f"{DOC}/epic-9/architecture.md") == "# arch\n"
-
-
 def test_worktree_add_for_a_fresh_epic_pushes_the_epic_branch(repo):
     gh = _v2_tree()
 
@@ -205,40 +269,16 @@ def test_worktree_add_for_a_fresh_epic_pushes_the_epic_branch(repo):
     assert _git("ls-remote", "--heads", "origin", "epic-9", cwd=repo).strip()
 
 
-# --- cross-path publish commits and leaves the tree clean --------------------
-
-def test_publish_doc_publishes_two_cross_path_docs_through_a_live_epic_worktree(repo, tmp_path):
-    gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9},
-                  {"number": 11, "labels": ["type:task"], "parent": 9})
-    _git("push", "-q", "origin", "main:refs/heads/epic-9", cwd=repo)
-    _git("fetch", "-q", "origin", cwd=repo)
-    epic_wt = tmp_path / "wt" / "sdlc-epic-9"
-    _git("worktree", "add", "-q", str(epic_wt), "-B", "epic-9", "origin/epic-9", cwd=repo)
-    _push_doc_branch(repo, "issue-10", f"{DOC}/issue-10/architecture.md", "# arch\n")
-    _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", "# lld\n")
-
-    arch = s.cmd_publish_doc(gh, str(repo), 10, "architecture.md")
-    lld = s.cmd_publish_doc(gh, str(repo), 11, "lld.md")
-
-    assert arch["merged"] is True
-    assert lld["merged"] is True
-    assert _origin_file(repo, "epic-9", f"{DOC}/epic-9/architecture.md") == "# arch\n"
-    assert _origin_file(repo, "epic-9", f"{DOC}/epic-9/lld.md") == "# lld\n"
-    assert _git("status", "--porcelain", cwd=epic_wt) == ""
-    assert (epic_wt / DOC / "epic-9" / "lld.md").read_text() == "# lld\n"
-
-
-def test_epic_announces_lld_md_once_across_publish_doc_and_merge_lld_doc(repo):
+def test_epic_announces_the_design_phase_once_when_lld_md_is_on_the_epic_branch(repo):
     gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"},
                   {"number": 13, "labels": ["type:task"], "parent": 9})
-    _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", "# lld\n")
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", "# lld\n")
 
-    s.cmd_publish_doc(gh, str(repo), 11, "lld.md")
     merged = s.cmd_merge_lld_doc(gh, str(repo), 9)
+    s.cmd_merge_lld_doc(gh, str(repo), 9)
 
     assert merged["advanced_tasks"] == [13]
-    announcements = [c for c in gh.comments_on(9) if "`lld.md` published" in c]
-    assert len(announcements) == 1
+    assert len([c for c in gh.comments_on(9) if "design phase" in c]) == 1
 
 
 # --- a phase-Task's gate finishes the Task -----------------------------------
@@ -272,42 +312,46 @@ def test_pass_gate_on_an_initiative_roadmap_task_closes_it_instead_of_claiming(r
     assert gh.issues[7]["stage"] is None
 
 
-def test_pass_gate_on_an_architecture_phase_task_publishes_then_closes(repo):
+def test_pass_gate_on_an_architecture_phase_task_closes_it_once_the_design_pr_merged(repo):
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "architecture",
-                   "status": "awaiting-human-review",
-                   "comments": ["<!-- gate-pr: architecture:12 -->"]})
-    _push_doc_branch(repo, "issue-10", f"{DOC}/issue-10/architecture.md", "# arch\n",
-                     merge_to_main=True)
+                   "status": "in-progress"})
+    pr = _open_design(gh, repo, 10, "architecture.md", "# arch\n")
+    s.cmd_open_gate(gh, str(repo), 10, "Architecture phase", "architecture.md", "development", "ok")
+    gh.pr_merge(pr, delete_branch=False)  # the human's squash-merge into epic-9
 
-    result = s.cmd_pass_gate(gh, str(repo), 10, 12, "architecture")
+    result = s.cmd_pass_gate(gh, str(repo), 10, pr, "architecture")
 
-    assert result["phase_task_complete"] is True
+    assert result["phase_task_complete"] is True and result["doc_on_epic_branch"] is True
     assert _origin_file(repo, "epic-9", f"{DOC}/epic-9/architecture.md") == "# arch\n"
     assert gh.issues[10]["state"] == "CLOSED"
-    assert any("`architecture.md` published" in c for c in gh.comments_on(9))
+    assert gh.issues[10]["status"] == "done"
 
 
-def test_pass_gate_on_an_architecture_phase_task_stays_open_when_nothing_to_publish(repo):
+def test_pass_gate_on_an_architecture_phase_task_stays_open_when_the_doc_is_not_on_the_epic(repo):
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "architecture",
                    "status": "awaiting-human-review",
                    "comments": ["<!-- gate-pr: architecture:12 -->"]})
-    _push_doc_branch(repo, "issue-10", f"{DOC}/issue-10/notes.md", "no arch doc\n",
-                     merge_to_main=True)
+    _ensure_epic_branch(repo)
+    _design_branch(repo, 10, "notes.md", "no arch doc\n")
+    gh.repo = repo
 
     result = s.cmd_pass_gate(gh, str(repo), 10, 12, "architecture")
 
     assert result["phase_task_complete"] is False
+    assert "design PR has not merged" in result["reason"]
     assert gh.issues[10]["state"] == "OPEN"
 
 
-def test_skip_gate_on_an_architecture_phase_task_publishes_then_closes(repo):
+def test_skip_gate_on_an_architecture_phase_task_merges_the_design_pr_then_closes(repo):
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "architecture",
                    "status": "in-progress"})
-    _push_doc_branch(repo, "issue-10", f"{DOC}/issue-10/architecture.md", "# arch\n")
+    pr = _open_design(gh, repo, 10, "architecture.md", "# arch\n")
+    _review(gh, 10, "arch-review", confidence=99)
 
     result = s.cmd_skip_gate(gh, 10, "architecture", 99, "clean", repo_path=str(repo))
 
     assert result["phase_task_complete"] is True
+    assert gh.merges == [(pr, False)]  # the issue branch is kept until the Task closes
     assert _origin_file(repo, "epic-9", f"{DOC}/epic-9/architecture.md") == "# arch\n"
     assert gh.issues[10]["state"] == "CLOSED"
     assert gh.issues[10]["status"] == "done"
@@ -409,8 +453,7 @@ def test_merge_lld_doc_cites_the_epic_branch_commit_and_a_rerun_is_not_merged(re
     """The Epic comment cites the epic-branch commit; a no-op re-run reports not merged."""
     gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"},
                   {"number": 13, "labels": ["type:task"], "parent": 9})
-    _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", "# lld\n")
-    s.cmd_publish_doc(gh, str(repo), 11, "lld.md")
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", "# lld\n")
 
     first = s.cmd_merge_lld_doc(gh, str(repo), 9)
     rerun = s.cmd_merge_lld_doc(gh, str(repo), 9)
@@ -422,25 +465,6 @@ def test_merge_lld_doc_cites_the_epic_branch_commit_and_a_rerun_is_not_merged(re
     assert rerun["merged"] is False
     assert rerun["verified_on_origin"] is True
     assert rerun["advanced_tasks"] == []
-
-
-def test_pass_gate_on_an_architecture_phase_task_after_a_squash_merged_gate(repo):
-    """pass-gate still publishes when the phase-Task's gate PR was squash-merged."""
-    gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "architecture",
-                   "status": "awaiting-human-review",
-                   "comments": ["<!-- gate-pr: architecture:12 -->"]})
-    doc_path = f"{DOC}/issue-10/architecture.md"
-    _push_doc_branch(repo, "issue-10", doc_path, "# arch\n")
-    (repo / doc_path).parent.mkdir(parents=True, exist_ok=True)
-    (repo / doc_path).write_text("# arch\n")
-    _git("add", doc_path, cwd=repo)
-    _git("commit", "-qm", "Architecture phase (#12) squashed", cwd=repo)
-    _git("push", "-q", "origin", "main", cwd=repo)
-
-    result = s.cmd_pass_gate(gh, str(repo), 10, 12, "architecture")
-
-    assert result["phase_task_complete"] is True
-    assert _origin_file(repo, "epic-9", f"{DOC}/epic-9/architecture.md") == "# arch\n"
 
 
 def test_check_epics_closeable_checklist_counts_closed_children_not_merged():
@@ -539,10 +563,11 @@ def test_close_epic_sets_the_terminal_fields_when_it_merges():
     gh.pr_ready = lambda n: None
     gh.pr_merge = lambda n: merged.append(n)
 
-    result = s.cmd_close_epic(gh, 9)
+    result = s.cmd_close_epic(gh, 9, runner=lambda argv: "")
 
     assert result["merged"] is True and merged == [38]
     assert gh.issues[9]["status"] == "done"
+    assert result["worktree"] == {"released": False, "reason": "no worktree"}
 
 
 # --- a resumed worktree is brought up to origin -------------------------------
@@ -850,9 +875,9 @@ def test_create_lld_tasks_refuses_an_invalid_priority_before_creating_any_task(r
     assert set(gh.issues) == before
 
 
-def test_create_lld_tasks_refuses_when_the_epic_lld_is_not_published(repo):
+def test_create_lld_tasks_refuses_when_the_epic_lld_is_not_merged(repo):
     gh = _v2_tree()
-    with pytest.raises(s.GhError, match="publish the Epic's lld.md first"):
+    with pytest.raises(s.GhError, match="merge the LLD-phase Task's design PR first"):
         s.cmd_create_lld_tasks(gh, 9, repo_path=str(repo))
 
 
@@ -860,8 +885,7 @@ def test_merge_lld_doc_epic_still_advances_the_tasks_it_finds(repo):
     """merge-lld-doc still advances every Stage-less Task under the Epic."""
     gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"},
                   {"number": 13, "labels": ["type:task"], "parent": 9})
-    _push_doc_branch(repo, "issue-11", f"{DOC}/issue-11/lld.md", "# lld\n")
-    s.cmd_publish_doc(gh, str(repo), 11, "lld.md")
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", "# lld\n")
 
     merged = s.cmd_merge_lld_doc(gh, str(repo), 9)
 
