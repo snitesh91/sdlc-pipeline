@@ -63,10 +63,11 @@ task:       development -> [pr-review] -> auto-merge into epic-<n> -> CLOSED
   **Legacy profile** (`driven: false`): skipped entirely, Tasks included.
 - **Every Epic has two standing Tasks** (Integration-test, e2e-test), specified by `lld`,
   running after every functional Task merges.
-- **Epic close does not re-run what they proved on the same tree:** when `close-epic`'s
-  reconcile with `main` picked up nothing, the `record-epic-verification --kind e2e`
-  record cites the e2e-test Task's local-CI attestation instead of a fresh run; if it
-  picked up commits, run the suite. The exploratory pass always runs.
+- **Epic close does not run the full e2e suite:** the e2e-test Task owns that evidence, so
+  `close-epic` requires only the exploratory pass (`record-epic-verification --kind e2e`
+  is still accepted, informational). GitHub Actions results never gate the epic merge
+  (a passing check still satisfies a required suite; a failed or never-started one is
+  ignored); the required suites' `record-local-ci` attestations at the epic head remain.
 - **`product-review` follows every `product`** unless a standing child is routed past it:
   a blocker bounces `product`; clean goes to Gate A (waived when the profile sets
   `requiresHumanGateA: false` — `references/gates.md`, "Waived gates"). Reviews have no Stage value of their own.
@@ -343,8 +344,8 @@ Every result except `skip`/`none`/`stop-at-cap` carries `unit`: `"issue"`, or `"
   (run each flagged issue's `repair` command, filling any `<P>`/`<T>`; never re-create
   it). All feed Step 4.
 - **When `check-epics-closeable` names an epic and `pipeline.epicClose.auto` is on**,
-  close it yourself: `close-epic` (reconciles) → run both closing verifications →
-  record each only if it ran clean → `close-epic` again (merges) →
+  close it yourself: `close-epic` (reconciles) → run the exploratory pass →
+  record it only if it ran clean → `close-epic` again (merges) →
   `teardown-epic-stack <n>`. Escalate instead on the cases in "What you decide". Full
   mechanics: `references/epics.md`, "Epic closing". With the toggle off, just report it.
 

@@ -88,7 +88,7 @@ effort; never below a shippable slice). In addition:
   (`references/epics.md`, "`lld` specifies the Tasks"), specified like functional Tasks:
   each `Depends on:` every functional Task whose surfaces it proves, owns the integration /
   e2e coverage unit tests cannot, and carries its own `## Footprint` (the test trees it
-  adds to). An Epic with no `e2e-test` Task has no closing verification to cite.
+  adds to). An Epic with no `e2e-test` Task has no e2e evidence at all (epic close no longer runs its own).
 - A Task that only makes sense after another's design settles is a dependency: sequence it
   with a `Depends on: <KEY>` line. A split whose footprints still overlap produces the
   collision this document exists to prevent.

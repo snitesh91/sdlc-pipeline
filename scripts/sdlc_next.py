@@ -961,8 +961,14 @@ def missing_pipeline_evidence(comments: list) -> list:
     return problems
 
 
+# Closing evidence `close-epic` requires. The full e2e suite is not one: every Epic has its own
+# standing e2e-test Task, which owns that evidence. `record-epic-verification --kind e2e`
+# is still accepted (informational), it just no longer gates the merge.
+EPIC_CLOSE_REQUIRED_EVIDENCE = (("exploratory", "exploratory pass"),)
+
+
 def missing_epic_verification(comments: list, stale_since: Optional[Callable] = None) -> list:
-    """Problems with an epic's e2e + exploratory closing evidence; evidence older than
+    """Problems with an epic's exploratory closing evidence; evidence older than
     the last `origin/main` reconcile counts as missing. `stale_since(sha)` returns a problem
     when the epic branch moved on from the tested `sha` with code changes. Empty = complete."""
     problems = []
@@ -975,8 +981,7 @@ def missing_epic_verification(comments: list, stale_since: Optional[Callable] = 
         m = _EPIC_VERIFICATION_MARKER.search(c.get("body", ""))
         if m:
             seen[m.group(1)] = (idx, m.group(3))
-    for kind, label in (("e2e", "full e2e suite"),
-                         ("exploratory", "exploratory pass")):
+    for kind, label in EPIC_CLOSE_REQUIRED_EVIDENCE:
         if kind not in seen:
             problems.append(f"no `{kind}` closing-verification evidence ({label} never recorded)")
         elif reconciled is not None and seen[kind][0] < reconciled:
@@ -1006,6 +1011,13 @@ def _epic_evidence_stale(gh, branch: str) -> Callable:
     return check
 
 
+def _passing_checks(checks: list) -> list:
+    """Epic close ignores GitHub Actions results except as positive evidence: a passing check
+    still satisfies its required suite, but a failed, pending or never-started run (e.g. Actions
+    disabled or out of budget) neither blocks the merge nor counts. Attestations remain."""
+    return [c for c in checks if c.get("bucket") == "pass"]
+
+
 def _epic_unattested_suites(gh, branch: str) -> list:
     """Required local-CI suites the epic PR (whose changes vs `main` cover them) still lacks
     a passing check or an attestation for at the epic branch head; needed before the merge."""
@@ -1015,7 +1027,7 @@ def _epic_unattested_suites(gh, branch: str) -> list:
     checks, comments = [], []
     if existing:
         number = existing[0]["number"]
-        checks = gh.pr_checks(number)
+        checks = _passing_checks(gh.pr_checks(number))
         comments = gh.pr_view(number, "comments,headRefOid").get("comments", [])
     if len(files) >= 300:
         files = [p for spec in REQUIRED_WORKFLOWS for p in spec["prefixes"]]
@@ -1066,15 +1078,15 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         timestamp = _utc_now_marker()
         gh.issue_comment(epic,
             f"🔄 Reconciled `{branch}` with `origin/main` ({behind} commit(s) picked up). "
-            f"Closing verification must now run against **this** tree — the full e2e suite and "
-            f"an exploratory pass, in parallel. Evidence recorded before this point describes a "
+            f"Closing verification must now run against **this** tree — the exploratory pass. "
+            f"Evidence recorded before this point describes a "
             f"different tree and will not be accepted.\n\n"
             f"<!-- epic-reconciled: {epic} @ {timestamp} -->")
         return _with_workspace(
             {"epic": epic, "merged": False, "branch": branch, "reconciled": behind,
              "unattested_suites": _epic_unattested_suites(gh, branch),
-             "reason": f"picked up {behind} commit(s) from main -- run the closing "
-                       f"verification against the reconciled branch, then re-run close-epic"},
+             "reason": f"picked up {behind} commit(s) from main -- run the exploratory pass "
+                       f"against the reconciled branch, then re-run close-epic"},
             ws)
     missing = missing_epic_verification(gh.issue_view(epic).get("comments", []),
                                         _epic_evidence_stale(gh, branch))
@@ -1091,7 +1103,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
             title=f"{detail['title']} — epic integration (#{epic})",
             body=f"Integration of every child of #{epic}.\n\nCloses #{epic}",
             draft=True)
-    checks = gh.pr_checks(pr_number)
+    checks = _passing_checks(gh.pr_checks(pr_number))
     # Comments + head SHA let a fresh `local-ci` attestation satisfy a required suite.
     view = gh.pr_view(pr_number, "comments,headRefOid")
     status, missing_checks = merge_gate_status(

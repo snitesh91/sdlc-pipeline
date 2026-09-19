@@ -49,7 +49,7 @@ def test_evidence_goes_stale_when_code_lands_after_the_tested_head():
     result = s.cmd_close_epic(gh, 9)
     assert result["merged"] is False
     assert any("code has landed since" in p for p in result["missing_verification"])
-    assert len(result["missing_verification"]) == 2
+    assert len(result["missing_verification"]) == 1
 
 
 def test_docs_only_commits_after_the_tested_head_keep_the_evidence_valid():
@@ -103,8 +103,62 @@ def test_docs_only_epics_need_no_suite_attestation():
 
 def test_evidence_older_than_a_main_reconcile_is_still_rejected():
     # Control that holds before and after the sha stamp: the reconcile rule is unchanged.
-    gh = _epic(["<!-- epic-verification: e2e:9 @ 2026-09-15T00:00:00Z -->",
+    gh = _epic(["<!-- epic-verification: exploratory:9 @ 2026-09-15T00:00:00Z -->",
                 "<!-- epic-reconciled: 9 @ 2026-09-16T00:00:00Z -->"])
     result = s.cmd_close_epic(gh, 9)
     assert any("predates the last `origin/main` reconcile" in p
                for p in result["missing_verification"])
+
+
+def _ready_epic(comments, checks, delta=("backend/a.ts",), attested=True):
+    gh = _epic(comments, delta=delta, pr=38)
+    gh.pr_checks = lambda n: list(checks)
+    body = [{"body": f"<!-- local-ci: backend:38 @ {HEAD} -->"}] if attested else []
+    gh.pr_view = lambda n, fields="": {"comments": body, "headRefOid": HEAD}
+    gh.pr_files = lambda n: list(delta)
+    gh.pr_ready = lambda n: None
+    gh.merged = []
+    gh.pr_merge = lambda n: gh.merged.append(n)
+    return gh
+
+
+def test_the_full_e2e_record_is_not_required_to_close():
+    # Regression: close-epic refused with "no `e2e` closing-verification evidence" although the
+    # e2e-test Task owns that evidence. Only the exploratory half is required now.
+    gh = _ready_epic([_marks()[1]], checks=[])
+    result = s.cmd_close_epic(gh, 9)
+    assert result["merged"] is True and gh.merged == [38]
+
+
+def test_the_exploratory_record_is_still_required_to_close():
+    # Positive control: dropping the e2e half must not drop the exploratory one.
+    result = s.cmd_close_epic(_ready_epic([_marks()[0]], checks=[]), 9)
+    assert result["merged"] is False
+    assert any("`exploratory` closing-verification evidence" in p
+               for p in result["missing_verification"])
+
+
+def test_a_failed_github_actions_check_does_not_block_epic_close():
+    # Regression: a never-started Actions run (spending limit) reads as a failed check.
+    failed = [{"bucket": "fail", "name": "Doc reference accuracy",
+               "workflow": "Documentation Accuracy Check"}]
+    gh = _ready_epic([_marks()[1]], checks=failed)
+    assert s.cmd_close_epic(gh, 9)["merged"] is True
+
+
+def test_a_pending_github_actions_check_does_not_block_epic_close():
+    gh = _ready_epic([_marks()[1]], checks=[{"bucket": "pending", "workflow": "Backend CI"}])
+    assert s.cmd_close_epic(gh, 9)["merged"] is True
+
+
+def test_a_required_suite_with_no_attestation_still_blocks_epic_close():
+    # Positive control: only Actions results were dropped; local-CI attestations still gate.
+    gh = _ready_epic([_marks()[1]], checks=[], attested=False)
+    result = s.cmd_close_epic(gh, 9)
+    assert result["merged"] is False and result["checks"] == "missing-checks"
+
+
+def test_a_passing_github_actions_check_still_satisfies_a_required_suite():
+    passing = [{"bucket": "pass", "workflow": "Backend CI"}]
+    gh = _ready_epic([_marks()[1]], checks=passing, attested=False)
+    assert s.cmd_close_epic(gh, 9)["merged"] is True

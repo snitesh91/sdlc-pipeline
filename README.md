@@ -150,7 +150,7 @@ python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<proj
   `finish-lld` then creates the Tasks. Every Epic also gets Integration-test and e2e-test
   standing Tasks. Product-Roadmap Tasks and standing children still gate into `main`.
 - Tasks run `development` → `pr-review` → auto-merge into the epic branch. The epic closes
-  after a full e2e and an exploratory pass, and an Initiative closes after a PM-style
+  after an exploratory pass (the full e2e is owned by the epic's e2e-test Task), and an Initiative closes after a PM-style
   validation of its `product.md`.
 - Issue tracking sits behind a `WorkItemProvider` interface, and GitHub is the only
   implementation. Code hosting is GitHub.
