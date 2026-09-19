@@ -52,7 +52,12 @@ class FakeGh:
         return [self._node(n) for n in sorted(self.issues)]
 
     def issue_view(self, n):
-        return {**self._node(n), "comments": [{"body": b} for b in self.issues[n]["comments"]]}
+        """Shaped like `gh issue view --json`: no `fields`/`parent`/`issueType`."""
+        node = {k: v for k, v in self._node(n).items() if k in ("number", "title", "state", "body", "labels")}
+        return {**node, "comments": [{"body": b} for b in self.issues[n]["comments"]]}
+
+    def issue_fields(self, n):
+        return self._node(n)["fields"]
 
     def issue_epic_info(self, n):
         node = self._node(n)

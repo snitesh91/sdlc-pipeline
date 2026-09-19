@@ -2360,6 +2360,14 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
             "evidence_lines": len(evidence.splitlines()), "attested": True}
 
 
+def _stage_and_status(gh: WorkItemProvider, issue: int) -> tuple:
+    """`(Stage slug, Pipeline Status slug)` of one issue, read from `issue_fields`:
+    `issue_view` carries no field values."""
+    fields = gh.issue_fields(issue)
+    return (STAGE_FIELD_NAMES.get(fields.get("Stage")),
+            PIPELINE_STATUS_FIELD_NAMES.get(fields.get("Pipeline Status")))
+
+
 # Authoring stages that hand off with a free-text comment; `post-comment` is their only path.
 POST_COMMENT_ROLES = ("product", "architecture", "lld")
 
@@ -2382,8 +2390,7 @@ def cmd_post_comment(gh: WorkItemProvider, issue: int, role: str, body_file: str
                 "reason": f"the comment is {len(body):,} chars, over the {HANDOFF_CAP:,}-char "
                           f"handoff cap (references/stage-playbooks.md, \"Comment size is a "
                           f"contract\"); trim it and re-run"}
-    info = gh.issue_view(issue)
-    stage, status = current_stage(info), pipeline_status(info)
+    stage, status = _stage_and_status(gh, issue)
     if stage != role or status not in ("in-progress", *GATE_PENDING_STATUSES):
         raise GhError(f"#{issue} is at Stage {stage!r} / status {status!r}, not claimed at "
                       f"{role!r} -- post-comment only serves the stage that holds the claim")

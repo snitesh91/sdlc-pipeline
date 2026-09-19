@@ -40,6 +40,14 @@ def test_refused_unless_the_issue_is_claimed_at_that_role(tmp_path, stage, statu
     assert gh.comments_on(5) == []
 
 
+def test_reads_stage_and_status_from_issue_fields_not_issue_view(tmp_path):
+    """Regression: `gh issue view` has no `fields`, so reading them there always saw
+    Stage None / status None and refused every claimed stage."""
+    gh = _gh("lld", "in-progress")
+    assert "fields" not in gh.issue_view(5)
+    assert s.cmd_post_comment(gh, 5, "lld", _body(tmp_path))["posted"] is True
+
+
 def test_refuses_a_review_role_and_an_empty_or_missing_file(tmp_path):
     gh = _gh()
     with pytest.raises(s.GhError, match="role must be"):
