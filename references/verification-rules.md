@@ -19,6 +19,10 @@ halves; the completeness-sweep rule governs both `architecture.md` and `lld.md`)
     or the repo's clean target); or
   - after the build, assert the expected artifact exists and is newer than the sources
     (`test -f dist/main.js && find dist -newer src -type f | head -1`).
+- **Integration/IT tests run against compiled `dist`.** When a diff changes a DTO, a route,
+  or anything OpenAPI-visible, clear stale output (`rm -rf dist *.tsbuildinfo`) and rebuild
+  before the integration/IT tier — a green run over a stale `dist` exercises the old code and
+  proves nothing.
 
 ## Establish a number by running the thing, not by modelling it
 

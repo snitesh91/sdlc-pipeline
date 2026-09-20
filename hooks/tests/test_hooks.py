@@ -697,7 +697,8 @@ def test_agent_guard_forces_stage_model_and_keeps_other_fields(tmp_path, sdlc_re
                                    "prompt": "do it", "description": "d",
                                    "run_in_background": True}
     assert forced_model(launch(sdlc_repo, tmp_path, "sdlc:pr-review", model=None)) == "opus"
-    assert launch(sdlc_repo, tmp_path, "sdlc:lld", model="sonnet") is None  # already right
+    assert forced_model(launch(sdlc_repo, tmp_path, "sdlc:lld", model="sonnet")) == "opus"
+    assert launch(sdlc_repo, tmp_path, "sdlc:lld", model="opus") is None  # already right
 
 
 def test_agent_guard_config_overrides_the_policy(tmp_path):
@@ -725,6 +726,7 @@ def _parent_transcript(tmp_path, agent_id, prompt):
 
 
 def test_agent_guard_forces_fanout_model(tmp_path, sdlc_repo):
+    _parent_transcript(tmp_path, "p1", "ROLE: arch-review ISSUE: 5\nReview")
     out = launch(sdlc_repo, tmp_path, "general-purpose", model="opus",
                  parent=("p1", "sdlc:design-review"))
     assert forced_model(out) == "sonnet" and out["updatedInput"]["prompt"] == "do it"
@@ -785,6 +787,9 @@ def test_agent_guard_lets_explore_roles_launch_explore_only(tmp_path, sdlc_repo)
 
 
 def test_agent_guard_enforces_max_children(tmp_path, sdlc_repo):
+    # arch-review and lld-review now cap at different totals, so the role must be resolvable.
+    _parent_transcript(tmp_path, "p1", "ROLE: arch-review ISSUE: 5\nReview")
+    _parent_transcript(tmp_path, "p2", "ROLE: arch-review ISSUE: 6\nReview")
     parent = ("p1", "sdlc:design-review")
     assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)) == "sonnet"
     assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)) == "sonnet"
@@ -794,9 +799,20 @@ def test_agent_guard_enforces_max_children(tmp_path, sdlc_repo):
     assert forced_model(other) == "sonnet"
 
 
+def test_agent_guard_lld_review_caps_at_four(tmp_path, sdlc_repo):
+    _parent_transcript(tmp_path, "p1", "ROLE: lld-review ISSUE: 5\nReview")
+    parent = ("p1", "sdlc:design-review")
+    for _ in range(4):
+        assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)) == "sonnet"
+    out = launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)
+    assert out["permissionDecision"] == "deny" and "at most 4" in out["permissionDecisionReason"]
+
+
 def test_agent_guard_counts_parallel_launches_exactly(tmp_path, sdlc_repo):
+    _parent_transcript(tmp_path, "p9", "ROLE: arch-review ISSUE: 5\nReview")
     payload = json.dumps({"tool_name": "Agent", "cwd": sdlc_repo, "agent_id": "p9",
                           "agent_type": "sdlc:design-review",
+                          "transcript_path": str(tmp_path / "s.jsonl"),
                           "tool_input": {"subagent_type": "general-purpose", "prompt": "x"}})
     env = {**os.environ, "CLAUDE_PLUGIN_DATA": str(tmp_path / "data")}
     procs = [subprocess.Popen([sys.executable, os.path.join(HOOKS, "agent_guard.py")],
@@ -807,6 +823,7 @@ def test_agent_guard_counts_parallel_launches_exactly(tmp_path, sdlc_repo):
 
 
 def test_agent_guard_expires_stale_slots(tmp_path, sdlc_repo):
+    _parent_transcript(tmp_path, "p1", "ROLE: arch-review ISSUE: 5\nReview")
     slots = tmp_path / "data" / "fanout"
     slots.mkdir(parents=True)
     (slots / "p1").write_text("2")

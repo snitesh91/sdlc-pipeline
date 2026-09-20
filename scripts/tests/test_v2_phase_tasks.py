@@ -888,10 +888,11 @@ def test_create_lld_tasks_repairs_a_crash_between_create_and_push(repo):
 
 def test_create_lld_tasks_refuses_an_invalid_priority_before_creating_any_task(repo):
     gh = _v2_tree()
-    doc = _CARVED_LLD.replace("Priority: High", "Priority: Critical")
+    # `Nonsense` is neither a valid Priority nor an accepted alias (unlike Critical/Blocker).
+    doc = _CARVED_LLD.replace("Priority: High", "Priority: Nonsense")
     _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", doc)
     before = set(gh.issues)
-    with pytest.raises(s.GhError, match="Priority 'Critical' is not a configured option"):
+    with pytest.raises(s.GhError, match="Priority 'Nonsense' is not a configured option"):
         s.cmd_create_lld_tasks(gh, 9, repo_path=str(repo))
     assert set(gh.issues) == before
 

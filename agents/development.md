@@ -124,6 +124,13 @@ cycle.
 - **Delegate broad search.** A cross-file sweep ("where is X", "what calls Y", mapping a
   directory) goes to a read-only `Explore` subagent; act on its conclusion. `Read` directly
   only a file you already know you need.
+- **Host is macOS zsh.** Quote globs so zsh does not expand them (`grep -F "x" 'src/**'`);
+  there is no BSD `sed -i` in-place — use the `Edit` tool, never a `python`/`sed` patch
+  script. Read with `offset`/`limit`, not whole files; send sweeps to `Explore`. Filter a
+  suite's stdout to summary and failure lines before reading it back (`… | tail -n 40`,
+  `grep -E 'FAIL|✕|passed|failed'`), never scroll thousands of lines.
+- **Test environment.** Reuse the run's existing test-env helper script if the orchestrator
+  prompt names one; do not rebuild the network / Postgres / volumes by hand.
 
 - Use the repo's own lint/build/test commands from its `CLAUDE.md`/`AGENTS.md`, in the
   environment it mandates — inside its container when it says so, never the host equivalent.
@@ -144,7 +151,9 @@ cycle.
 - **Never run the full e2e suite on a normal task** — over an hour, exceeds a tool call's
   timeout, contends for shared ports and Docker stacks. It is the standing e2e-test Task's job.
   If you believe a normal task cannot be validated without it, say so in your handoff and stop.
-- **When the integration suite is yours** (not a normal functional Task): on a large
+- **When the integration suite is yours** (not a normal functional Task): a new integration
+  spec the LLD mandates is written and run together with the specs its change impacts — the
+  whole IT suite runs only as this Task's final backstop, never per edit. On a large
   multi-file refactor, finish the coherent change set before running it, then fix failures in
   one pass. The standing Integration-test Task may scope an intermediate run before its final
   full pass:
@@ -168,10 +177,16 @@ cycle.
   belongs in the design doc / PR description, not the code. `pr-review` blocks on bloat.
 - **A code comment stating a guarantee is true for every input, or names what it excludes**
   (truncation, common-shape-only, best-effort) in the same sentence.
-- **Commits and pushes.** Small logical local commits. Push **once per cycle**: once
-  immediately before `open-dev-pr`, and on a rework round once after all fix commits, before
-  re-handing off — each push re-triggers `pull_request` CI. Push mid-cycle only to hand off to
-  a human or unblock a teammate. A rejected push: stop and report; never work around it.
+- **Commits and pushes.** You are not a review role, so the guard lets you run ordinary git
+  in your worktree — `git commit`, `git stash`, `git checkout`, and `git push` of your own
+  `issue-<n>` branch. Denied to every role (you included): force-push, `git rebase` /
+  `git pull --rebase`, `git worktree add` (non-`--detach`), all `gh` GitHub mutations, and any
+  `$SDLC` command outside your set — the guard names the command to use. A base sync
+  (`sync-branch`) is the orchestrator's; never merge the base by hand. Small logical local
+  commits. Push **once per cycle**: once immediately before `open-dev-pr`, and on a
+  rework round once after all fix commits, before re-handing off — each push re-triggers
+  `pull_request` CI. Push mid-cycle only to hand off to a human or unblock a teammate. A
+  rejected push: stop and report; never work around it.
 
 ## The completion gates
 
@@ -198,11 +213,17 @@ included.
    diff — or whose code is wired into no entrypoint — is not done.
 6. **Sweep every numbered task-local decision in the design**, in order: quote the code that
    realises it and write `conform` or `deviate`. A `deviate` row states what you did instead
-   and why, goes in the PR description as an explicit delta, and updates your own Task's
-   subsection of `lld.md` in the same PR to match what you built. Silent deviation is the
-   defect; widening a decision while fixing something else is how it ships.
+   and why, and goes in the PR description as an explicit delta — **you author no design doc,
+   so never edit `<docRoot>/epic-*/**` (`lld.md` / `architecture.md`) or any file another
+   Task's `## Footprint` owns** to record it. A file outside your own footprint that the
+   change genuinely needs: name it in the PR description; if it belongs to a sibling Task,
+   stop with a `blocked` / `needs-human` outcome rather than editing it. Silent deviation is
+   the defect; widening a decision while fixing something else is how it ships.
 7. **A build you cite is a real build** → `references/verification-rules.md`, "Compile-checking
-   is not verification" (clear stale `*.tsbuildinfo` or assert the artifact; say which).
+   is not verification". When the diff changes a DTO, a route, or anything OpenAPI-visible,
+   clear stale build output (`rm -rf dist *.tsbuildinfo`, then rebuild) **before** the
+   integration/IT tier — those tests run against compiled `dist`, so a green run on a stale
+   build proves nothing.
 8. **Test gates from "How to write the tests"** — criterion→test map complete with
    discriminating assertions, family controls run, guards mutation-checked, tree clean.
 

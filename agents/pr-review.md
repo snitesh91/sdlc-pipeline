@@ -85,7 +85,10 @@ Work the three layers yourself, in sequence; on a rework round, review the delta
 
 **Mutation-probe selectively.** Take the one or two guards carrying the real acceptance, break
 the behaviour in your detached worktree, confirm the test goes red, revert (`git status`
-clean).
+clean). If the auto-mode permission classifier denies the transient `src` edit the probe
+needs, do not silently skip it: fall back to static analysis of the guard and flag in the
+verdict that the probe was denied (the orchestrator relays it so the operator can add an
+allow rule).
 
 ### Verify empirically
 
@@ -97,9 +100,11 @@ Decide, and state which you did and why in the review comment:
   static verification.
 - **Run targeted specs** (foreground, scoped) when a specific finding needs confirming.
 - **Re-run the suite** when the evidence is thin or suspect: output that does not match its
-  claim, a criterion with no named test, a head SHA that moved after the attestation, or a round
-  the orchestrator already had to bounce. "The suites passed" is never the reason to skip; the
-  shape of the evidence is.
+  claim, a criterion with no named test, or a round the orchestrator already had to bounce.
+  **When the current head differs from the attested SHA, or siblings merged into the base
+  since the attestation, the default is to re-run the suite on the merged head** — a stale
+  attestation is not evidence for the code that now merges. "The suites passed" is never the
+  reason to skip; the shape of the evidence is.
 
 Rules for any run:
 
@@ -115,6 +120,9 @@ Rules for any run:
   stop and report; do not run.
 - A build used as a gate → `references/verification-rules.md`, "Compile-checking is not
   verification" (clear stale `*.tsbuildinfo` or assert the artifact is newer than the sources).
+  When the diff touches a DTO, a route, or anything OpenAPI-visible, a re-run must be on a
+  cleared `dist` (`rm -rf dist *.tsbuildinfo`, rebuild) — integration/IT tests read compiled
+  `dist`, so a green run on a stale build is not evidence.
 - Always independently re-verify the specific claims you noted in Step 1 — diff-only reading
   has missed real authorization bypasses.
 - Check CI: `python3 "$SDLC" pr-checks <pr>`.

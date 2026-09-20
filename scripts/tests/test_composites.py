@@ -395,15 +395,20 @@ def test_start_stage_adds_the_worktree_before_claiming(repo, monkeypatch):
 
     result = s.cmd_start_stage(gh, 10, "architecture", repo_path=str(repo))
 
-    assert order == ["cmd_worktree_add", "cmd_claim"]
+    # A child of a non-standing Epic first ensures the epic branch + worktree, then its own.
+    assert order == ["cmd_worktree_add", "cmd_worktree_add", "cmd_claim"]
+    assert result["completed_steps"] == ["check-claimable", "epic-worktree", "worktree-add",
+                                         "claim"]
     assert result["claimed"] is True and result["ok"] is True
     assert Path(result["path"]).is_dir()
     assert result["steps"]["worktree-add"]["base"] == "origin/epic-9"
+    assert result["steps"]["epic-worktree"]["branch"] == "epic-9"
     assert gh.issues[10]["status"] == "in-progress"
 
 
 def test_start_stage_does_not_claim_when_worktree_add_refuses(monkeypatch):
-    gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9})
+    # Parentless (main-based): no epic-worktree step, so the child worktree-add is the one to fail.
+    gh = _tree({"number": 10, "labels": ["type:task"]})
     monkeypatch.setattr(s, "cmd_worktree_add",
                         lambda *a, **k: {"diverged": True, "reason": "local has diverged"})
 
@@ -411,6 +416,18 @@ def test_start_stage_does_not_claim_when_worktree_add_refuses(monkeypatch):
 
     assert result["failed_step"] == "worktree-add" and result["claimed"] is False
     assert result["reason"] == "local has diverged"
+    assert gh.issues[10]["status"] is None and gh.comments_on(10) == []
+
+
+def test_start_stage_stops_at_epic_worktree_when_it_refuses(monkeypatch):
+    # A child of a non-standing Epic whose epic-worktree step refuses never reaches its own.
+    gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9})
+    monkeypatch.setattr(s, "cmd_worktree_add",
+                        lambda *a, **k: {"diverged": True, "reason": "local has diverged"})
+
+    result = s.cmd_start_stage(gh, 10, "architecture")
+
+    assert result["failed_step"] == "epic-worktree" and result["claimed"] is False
     assert gh.issues[10]["status"] is None and gh.comments_on(10) == []
 
 
@@ -435,7 +452,8 @@ def test_start_stage_development_claims_when_only_another_branch_has_a_pr(monkey
     result = s.cmd_start_stage(gh, 10, "development")
 
     assert result["ok"] is True and result["claimed"] is True
-    assert result["completed_steps"] == ["check-claimable", "worktree-add", "claim"]
+    assert result["completed_steps"] == ["check-claimable", "epic-worktree", "worktree-add",
+                                         "claim"]
 
 
 # --- transition ---------------------------------------------------------------
@@ -596,15 +614,26 @@ def test_repair_issue_sets_every_missing_field_and_is_idempotent():
     assert second["set"] == [] and len(second["already_set"]) == 5
 
 
-def test_repair_issue_never_overwrites_a_set_value():
+def test_repair_issue_never_overwrites_parent_type_status_but_priority_effort_flags_override():
     gh = _tree({"number": 12, "labels": ["type:task"], "parent": 9, "issue_type": "Bug",
                 "status": "in-progress", "priority": "High", "effort": "Low"})
     result = s.cmd_repair_issue(gh, 12, parent=5, type_name="Task", priority="Low",
                                 effort="High")
-    assert result["set"] == []
+    # parent/type/status keep never-overwrite; an explicit --priority/--effort is set anyway,
+    # so a half-created issue can be corrected to the requested values.
+    assert result["set"] == ["Priority", "Effort"]
     i = gh.issues[12]
     assert (i["parent"], i["issue_type"], i["status"], i["priority"], i["effort"]) == (
-        9, "Bug", "in-progress", "High", "Low")
+        9, "Bug", "in-progress", "Low", "High")
+
+
+def test_repair_issue_without_flags_leaves_a_set_priority_and_effort_untouched():
+    gh = _tree({"number": 12, "labels": ["type:task"], "parent": 9, "issue_type": "Bug",
+                "status": "in-progress", "priority": "High", "effort": "Low"})
+    result = s.cmd_repair_issue(gh, 12)
+    assert result["set"] == [] and set(result["already_set"]) >= {"Priority", "Effort"}
+    i = gh.issues[12]
+    assert (i["priority"], i["effort"]) == ("High", "Low")
 
 
 def test_repair_issue_types_an_epic_but_leaves_its_status_cleared():

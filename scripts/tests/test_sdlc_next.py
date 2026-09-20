@@ -918,10 +918,12 @@ def test_start_comment_posts_marker_with_no_label_mutation():
     runner = ScriptedRunner({
         ("gh", "issue", "comment", "9", "--repo", "owner/repo",
          "--body", "🚧 Picking this up — arch-review stage starting."): "",
+        **dict([_epic_check(9)]),  # arch-review surfaces the profile's skip threshold
     })
     gh = GitHub(runner=runner)
-    assert cmd_start_comment(gh, 9, "arch-review") == {"issue": 9, "started": "arch-review"}
-    assert len(runner.calls) == 1
+    assert cmd_start_comment(gh, 9, "arch-review") == {
+        "issue": 9, "started": "arch-review", "skip_confidence_threshold": 80}
+    assert any(c[:3] == ["gh", "issue", "comment"] for c in runner.calls)
 
 
 def test_handoff_to_pr_review_posts_marker_without_referencing_a_stage_doc():
@@ -1888,12 +1890,14 @@ def test_pr_checks_reports_missing_required_workflows():
             "frontend/app/page.tsx\n",
         # No local-ci attestation on the PR -> frontend suite is genuinely missing.
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
-         "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc1234"}),
+         "--json", "comments,headRefOid,baseRefName"):
+            json.dumps({"comments": [], "headRefOid": "abc1234", "baseRefName": "main"}),
     })
     gh = GitHub(runner=runner)
     result = cmd_pr_checks(gh, 42)
     assert result["status"] == "missing-checks"
     assert "Frontend CI" in result["missing_required_workflows"]
+    assert "sync-branch" in result["hint"]  # distinguishes missing from "still running"
 
 
 def test_pr_checks_local_ci_attestation_clears_missing_required_workflow():
@@ -1907,14 +1911,15 @@ def test_pr_checks_local_ci_attestation_clears_missing_required_workflow():
         ("gh", "api", "--paginate", "repos/owner/repo/pulls/42/files", "--jq", ".[].filename"):
             "frontend/app/page.tsx\n",
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
-         "--json", "comments,headRefOid"): json.dumps({
+         "--json", "comments,headRefOid,baseRefName"): json.dumps({
             "comments": [{"body": "<!-- local-ci: frontend:42 @ abc1234def -->"}],
-            "headRefOid": "abc1234def"}),
+            "headRefOid": "abc1234def", "baseRefName": "main"}),
     })
     gh = GitHub(runner=runner)
     result = cmd_pr_checks(gh, 42)
     assert result["status"] == "passed"
     assert result["missing_required_workflows"] == []
+    assert "hint" not in result
 
 
 def test_open_dev_pr_creates_draft_pr_with_closes_and_sets_stage_field_to_pr_review():
@@ -1934,6 +1939,9 @@ def test_open_dev_pr_creates_draft_pr_with_closes_and_sets_stage_field_to_pr_rev
         ("gh", "pr", "list", "--repo", "owner/repo", "--head", "issue-9",
          "--state", "open", "--json", "number,isDraft,headRefName,title,url"): "[]",
         tuple(_list_argv()): _list_response([_issue(9)]),
+        # dev-PR scope check reads the branch's changed files vs its base (none here).
+        ("gh", "api", "repos/owner/repo/compare/main...issue-9", "--jq", ".files[]?.filename"):
+            "",
     })
     runner.prefix_responses = {
         ("gh", "issue", "comment", "9"): "",
@@ -5672,7 +5680,7 @@ def test_create_issue_defaults_come_from_pipeline_issue_defaults(monkeypatch):
     assert (result["priority"], result["effort"]) == ("Low", "High")
 
 
-@pytest.mark.parametrize("kwargs", [{"priority": "Critical"}, {"effort": "Huge"}])
+@pytest.mark.parametrize("kwargs", [{"priority": "Nonsense"}, {"effort": "Huge"}])
 def test_create_issue_refuses_an_invalid_priority_or_effort_before_creating(kwargs):
     from sdlc_next import cmd_create_issue
     gh = _RecordingGh()
@@ -5721,6 +5729,9 @@ def _verify_exit_pr_runners(tmp_path, comments, stage_field_value="PR Review", p
         ("gh", "pr", "view", str(pr), "--repo", "owner/repo",
          "--json", "isDraft,headRefName,baseRefName"):
             json.dumps({"isDraft": True, "headRefName": "issue-9", "baseRefName": "main"}),
+        # dev-PR scope check reads the PR's changed files (none here).
+        ("gh", "api", "--paginate", f"repos/owner/repo/pulls/{pr}/files",
+         "--jq", ".[].filename"): "",
         **dict([_epic_check(9)]),  # parentless: not an Epic's phase-Task
     })
     git_runner = ScriptedRunner({("git", "-C", str(tmp_path), "log", "--oneline", "-5"): ""})

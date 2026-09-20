@@ -130,6 +130,9 @@ _PIPELINE_DEFAULTS = {
     "productWip": {"maxGateAPending": 5},
     "escalation": {"replaceAt": 3, "needsHumanAt": 6},
     "continuous": {"cycleCap": 8},
+    # A `resume` action younger than `liveWindowMinutes` is flagged `likely_live`: another
+    # session may still be driving it, so the orchestrator asks the operator before taking over.
+    "resume": {"liveWindowMinutes": 30},
     # `auto`: the orchestrator runs the final `close-epic` itself; close-epic's own
     # refusals (open children, stale verification, failing checks) still apply.
     "epicClose": {"auto": False},
@@ -182,6 +185,8 @@ EPIC_BRANCH_PREFIX = PIPELINE["branches"]["epicPrefix"]
 ESCALATION = PIPELINE["escalation"]
 # Read at call time (never bound as a default arg) so it can be overridden on the module.
 PRODUCT_WIP_CAP = PIPELINE["productWip"]["maxGateAPending"]
+# A resume younger than this is treated as possibly still live (item: liveness signal).
+RESUME_LIVE_WINDOW_MINUTES = PIPELINE["resume"]["liveWindowMinutes"]
 
 
 def issue_branch(number: int) -> str:
@@ -208,6 +213,9 @@ EFFORT_FIELD_ID = _PF.get("effortFieldId")
 EFFORT_OPTION_IDS = _PF.get("effortOptionIds") or {}
 # Lower sorts first; an issue with no Priority value ranks as Medium.
 PRIORITY_RANK = {"Urgent": 0, "High": 1, "Medium": 2, "Low": 3}
+# Common spellings from other trackers -> this repo's top Priority value. Accepted by
+# create-issue / repair-issue so `--priority Critical` (or `Blocker`) is not refused.
+PRIORITY_ALIASES = {"critical": "Urgent", "blocker": "Urgent"}
 # The native Stage / Pipeline Status fields are the sole source of truth for
 # stage and status, so a failed write must raise, never be swallowed.
 STAGE_FIELD_ID = _PF["stageFieldId"]
@@ -678,6 +686,11 @@ def parse_created_at(issue: dict) -> datetime:
     return datetime.strptime(issue["createdAt"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
+def _parse_marker_ts(ts: str) -> datetime:
+    """Parse a UTC comment/marker timestamp (`%Y-%m-%dT%H:%M:%SZ`) to an aware datetime."""
+    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
 def sort_key(issue: dict) -> tuple:
     return (priority_rank(issue), parse_created_at(issue))
 
@@ -735,6 +748,11 @@ for _suite in LOCAL_CI_SUITES:
 LOCAL_CI_COMMAND_PATTERNS = {
     w["suite"]: w["commandPattern"]
     for w in CONFIG["requiredWorkflows"] if w.get("commandPattern")}
+
+# An unexpanded `<placeholder>` token in a copied-from-docs command (e.g. `<node_modules-volume>`).
+# Requires an identifier immediately after `<` and no spaces, so shell input redirection
+# (`< file`), heredocs (`<<EOF`) and `2>&1` never match.
+_UNEXPANDED_PLACEHOLDER = re.compile(r"<[A-Za-z_][\w.-]*>")
 
 
 def local_ci_suites_attested(comments: list, head_sha: str) -> set:
@@ -1108,7 +1126,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     view = gh.pr_view(pr_number, "comments,headRefOid")
     status, missing_checks = merge_gate_status(
         gh.pr_files(pr_number), checks,
-        view.get("comments", []), view.get("headRefOid"))
+        view.get("comments", []), view.get("headRefOid"), base_ref="main")
     if status != "passed":
         detail_msg = f" (no passing check from: {', '.join(missing_checks)})" if missing_checks else ""
         return {"epic": epic, "merged": False, "pr": pr_number, "checks": status,
@@ -1332,10 +1350,16 @@ def run_cap_reached(state: Optional[dict]) -> bool:
         and len(run_completed(state)) >= MAX_TASKS_PER_RUN
 
 
-def record_terminal_unit(gh: WorkItemProvider, issue: int) -> Optional[dict]:
+def record_terminal_unit(gh: WorkItemProvider, issue: int,
+                          run_id: Optional[str] = None) -> Optional[dict]:
     """Idempotently count `issue` against its parent's tracked run (from `merge-pr` /
     `close-issue`). Returns the count summary, or None when no run is tracked.
-    An empty run-state dir short-circuits before any tracker call."""
+    An empty run-state dir short-circuits before any tracker call.
+
+    With an explicit `run_id` (merge-pr's `--run-id`), the count is booked under that run,
+    adopting it if the state file holds a different (e.g. stale probe) id -- so the terminal
+    count is never attributed to a throwaway probe run. Without it, the state file's current
+    run id stands (the most recent run that touched this epic)."""
     try:
         if not os.listdir(_run_state_dir()):
             return None
@@ -1348,7 +1372,7 @@ def record_terminal_unit(gh: WorkItemProvider, issue: int) -> Optional[dict]:
             break
     if parent is None:
         return None
-    state = read_run_state(parent)
+    state = run_cap_state(parent, run_id) if run_id else read_run_state(parent)
     if state is None:
         return None
     if issue not in state["terminal"] or str(issue) in state.get("in_flight", {}):
@@ -1586,16 +1610,64 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
     return none_result()
 
 
+def _resume_liveness(gh: GitHub, epic: int, issue: int) -> dict:
+    """Liveness hints for a `resume` action: `claimed_at` and `claim_age_seconds` from the unit's
+    latest start comment, `claimed_by_run` when the run-state still records who handed it out, and
+    `likely_live` when the claim is younger than `RESUME_LIVE_WINDOW_MINUTES` (another session may
+    still be driving it). `claim_age_seconds: null` -- said honestly -- when no claim timestamp is
+    derivable, never a guess. The `reason` tells the orchestrator what to do about it."""
+    claimed_at = None
+    try:
+        comments = gh.issue_view(issue).get("comments", [])
+    except GhError:
+        comments = []
+    for c in comments:  # latest start comment wins
+        if "Picking this up" in c.get("body", "") and c.get("createdAt"):
+            claimed_at = c["createdAt"]
+    info = {"claimed_at": claimed_at, "claim_age_seconds": None, "likely_live": False}
+    state = read_run_state(epic)
+    if state and str(issue) in (state.get("in_flight") or {}):
+        info["claimed_by_run"] = state.get("run_id")
+    age = None
+    if claimed_at:
+        try:
+            age = (datetime.now(timezone.utc) - _parse_marker_ts(claimed_at)).total_seconds()
+        except (ValueError, TypeError):
+            age = None
+    window = RESUME_LIVE_WINDOW_MINUTES * 60
+    if age is not None:
+        info["claim_age_seconds"] = age
+        info["likely_live"] = window > 0 and age < window
+    if age is None:
+        info["reason"] = ("no claim timestamp is derivable (claim_age_seconds: null) -- cannot "
+                          "tell whether another session is driving this unit; if unsure, ask the "
+                          "operator before resuming.")
+    elif info["likely_live"]:
+        info["reason"] = (f"claimed {int(age // 60)} min ago, inside the "
+                          f"{RESUME_LIVE_WINDOW_MINUTES}-min live window -- another session may "
+                          f"still be driving it. If this session is not the one driving it, skip "
+                          f"it and ask the operator before taking it over.")
+    else:
+        info["reason"] = (f"claimed {int(age // 60)} min ago, past the "
+                          f"{RESUME_LIVE_WINDOW_MINUTES}-min live window -- likely a crashed or "
+                          f"abandoned run; safe to resume.")
+    return info
+
+
 def cmd_next_action(gh: GitHub, args) -> dict:
     """`next-action`: `decide_next_action` plus `cap_enforced` (true only with a
-    `--run-id` and a nonzero cap), which describes the invocation, not the decision."""
+    `--run-id` and a nonzero cap), which describes the invocation, not the decision.
+    A `resume` also carries liveness hints (`_resume_liveness`)."""
     run_id = getattr(args, "run_id", None)
     result = decide_next_action(gh, args.epic, run_id=run_id,
                                 skip_epics=getattr(args, "skip_epic", None))
+    # Read liveness before note_in_flight re-stamps this run onto the unit.
+    liveness = (_resume_liveness(gh, args.epic, result["issue"])
+                if result.get("action") == "resume" else {})
     if "issue" in result:
         note_in_flight(args.epic, run_id,
                        {result["issue"]: result.get("stage") or result["action"]})
-    return {**result, "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0}
+    return {**result, **liveness, "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0}
 
 
 def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None) -> dict:
@@ -1813,6 +1885,65 @@ def footprint_overlaps(a: list, b: list) -> bool:
     b_prefixes = [_footprint_prefix(p) for p in b]
     return any(x == y or x.startswith(y + "/") or y.startswith(x + "/")
                for x in a_prefixes for y in b_prefixes)
+
+
+# The rule a `development` PR must obey on its diff, quoted verbatim in every refusal/report.
+DEV_PR_SCOPE_RULE = ("development authors no design doc; record deviations in the PR description")
+
+
+def dev_pr_scope_offenders(gh: WorkItemProvider, issue: int, changed_files: list,
+                           repo_path: str = ".", runner: Runner = _default_runner) -> dict:
+    """Paths a `development` branch/PR must not touch: any Epic design doc under
+    `<docRoot>/epic-*/` (e.g. lld.md), and any file listed in ANOTHER open Task's `## Footprint`
+    of the same Epic's lld.md that is not in this unit's OWN footprint. Returns
+    `{"design_docs": [...], "foreign_footprint": [...]}` (both sorted, deduped); the
+    foreign-footprint list is empty when the unit is not a child of a non-standing Epic or the
+    Epic lld.md is unreadable (never guessed at)."""
+    design_prefix = DOC_ROOT.rstrip("/") + "/epic-"
+    design_docs = sorted({p for p in changed_files if p.startswith(design_prefix)})
+    foreign: set = set()
+    # Only the foreign-footprint arm needs the Epic lld.md; skip it (and its API calls) when the
+    # diff has no non-design-doc paths to check.
+    non_doc = [p for p in changed_files if not p.startswith(design_prefix)]
+    integ = integration_base(gh, issue) if non_doc else "main"
+    if integ != "main":
+        epic_no = int(integ[len(EPIC_BRANCH_PREFIX):])
+        try:
+            lld = runner(["git", "-C", repo_path, "show",
+                          f"origin/{epic_branch(epic_no)}:{DOC_ROOT}/epic-{epic_no}/lld.md"])
+        except GhError:
+            lld = None
+        if lld:
+            own = parse_task_footprint(lld, issue)
+            open_children = {i["number"] for i in gh.issue_list()
+                             if i["state"] == "OPEN"
+                             and (i.get("parent") or {}).get("number") == epic_no
+                             and i["number"] != issue}
+            others: list = []
+            for entry in parse_task_headings(lld):
+                if entry["number"] in open_children:
+                    others.extend(parse_footprint(lld[entry["line_end"]:entry["end"]]))
+            for p in changed_files:
+                if p.startswith(design_prefix) or footprint_overlaps([p], own):
+                    continue  # a design doc (counted above) or the unit's own footprint
+                if others and footprint_overlaps([p], others):
+                    foreign.add(p)
+    return {"design_docs": design_docs, "foreign_footprint": sorted(foreign)}
+
+
+def _dev_pr_scope_refusal_reason(offenders: dict) -> Optional[str]:
+    """A one-string reason naming the offending paths, or None when the diff is clean."""
+    parts = []
+    if offenders["design_docs"]:
+        parts.append(f"edits Epic design doc(s): {', '.join(offenders['design_docs'])}")
+    if offenders["foreign_footprint"]:
+        parts.append(f"touches another Task's Footprint file(s): "
+                     f"{', '.join(offenders['foreign_footprint'])}")
+    if not parts:
+        return None
+    return (f"this development diff {'; and '.join(parts)} -- {DEV_PR_SCOPE_RULE}. Revert those "
+            f"paths and, if the design truly needs to change, escalate an Architecture/LLD "
+            f"revision rather than editing the doc from a development branch.")
 
 
 def worktree_path_for_branch(branch: str, runner: Runner = _default_runner,
@@ -2495,10 +2626,19 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
     the PR head. Returns `attested`, `evidence_lines`."""
     if suite not in LOCAL_CI_SUITES:
         raise GhError(f"suite must be one of {LOCAL_CI_SUITES}, got {suite!r}")
+    if suite in NON_ATTESTABLE_SUITES:
+        raise GhError(f"the {suite!r} suite is configured `attestable: false` -- a local-ci "
+                      f"attestation cannot stand in for it; only a passing GitHub Actions check "
+                      f"satisfies its required workflow")
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha or ""):
         raise GhError(f"sha must be a 7-40 char hex commit id, got {sha!r}")
     if not (command or "").strip():
         raise GhError("--command is required: the exact command the suite was run with")
+    placeholder = _UNEXPANDED_PLACEHOLDER.search(command)
+    if placeholder:
+        raise GhError(f"--command contains an unexpanded placeholder {placeholder.group(0)!r} -- "
+                      f"attest the real command you ran, not a template copied from the docs "
+                      f"(substitute every `<...>` token first)")
     pattern = LOCAL_CI_COMMAND_PATTERNS.get(suite)
     if pattern and not re.search(pattern, command):
         raise GhError(f"--command {command.strip()!r} does not match the {suite!r} suite's "
@@ -2706,9 +2846,44 @@ def cmd_route(gh: GitHub, issue: int, to: str, reason: str) -> dict:
 
 
 def cmd_start_comment(gh: GitHub, issue: int, role: str) -> dict:
-    """Post the start comment with no field mutation, for roles with no Stage of their own."""
+    """Post the start comment with no field mutation, for roles with no Stage of their own.
+
+    For `pr-review` -- which `transition` runs AFTER `sync-branch` has moved the head -- it first
+    refuses (`ok: False`, no comment posted) when a required suite's `local-ci` attestation is not
+    the current PR head, so the review is never queued against evidence sync just invalidated; a
+    suite whose sync only merged files outside its coverage is carried forward instead.
+
+    For `arch-review` it surfaces the effective `skip_confidence_threshold` -- the profile's
+    `skipConfidenceThreshold` the reviewer's confidence must exceed for `skip-gate` to skip Gate B
+    -- so the reviewer knows the bar before writing its confidence marker."""
+    if role == "pr-review":
+        prs = gh.pr_list_for_branch(issue_branch(issue))
+        carried: list = []
+        if prs:
+            status = pr_stale_attestations(gh, issue, prs[0]["number"])
+            if status["stale"]:
+                stale = status["stale"]
+                return {"issue": issue, "role": role, "started": False, "ok": False,
+                        "refused": True,
+                        "stale_suites": [s["suite"] for s in stale],
+                        "reason": (f"the local-ci attestation for "
+                                   f"{', '.join(s['suite'] for s in stale)} is not the PR head "
+                                   f"(sync-branch moved it) -- re-run those suite(s) and "
+                                   f"`record-local-ci` on the post-sync head, then re-run this. A "
+                                   f"suite whose sync only merged files outside its coverage is "
+                                   f"carried forward automatically; these were not.")}
+            carried = status["carried"]
+        _post_start_comment(gh, issue, role)
+        result = {"issue": issue, "started": role}
+        if carried:
+            result["carried_attestation_forward"] = carried
+        return result
     _post_start_comment(gh, issue, role)
-    return {"issue": issue, "started": role}
+    result = {"issue": issue, "started": role}
+    if role == "arch-review":
+        result["skip_confidence_threshold"] = (
+            _profile_for_issue(gh, issue)["gates"]["skipConfidenceThreshold"])
+    return result
 
 
 def git_rev_parse_head(repo_path: str, runner: Runner = _default_runner) -> str:
@@ -3780,6 +3955,18 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str)
                 "reason": f"PR #{pr_number} is already open on {issue_branch(issue)} -- "
                           f"reusing it rather than opening a duplicate"}
     base = integration_base(gh, issue)
+    # Refuse a diff that authors a design doc or another Task's footprint file before opening
+    # the PR (development authors no design doc; deviations belong in the PR description).
+    try:
+        changed = gh.files_since(base, issue_branch(issue))
+    except GhError:
+        changed = []
+    offenders = dev_pr_scope_offenders(gh, issue, changed)
+    reason = _dev_pr_scope_refusal_reason(offenders)
+    if reason:
+        return {"issue": issue, "created": False, "refused": True, "reason": reason,
+                "offending_design_docs": offenders["design_docs"],
+                "offending_footprint_paths": offenders["foreign_footprint"]}
     pr_number = gh.pr_create(base=base, head=issue_branch(issue), title=title,
                               body=f"{body}\n\nCloses #{issue}", draft=True)
     gh.set_stage_field(issue, "pr-review")
@@ -4019,6 +4206,17 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
                     f"`handoff-to-pr-review {issue} --pr {pr} --summary ...`. Until it "
                     f"is posted, `list-ready-for-review` never queues this PR and "
                     f"`merge-pr` refuses it as missing_pipeline_evidence.")
+            # A development PR must author no design doc and touch no other Task's footprint.
+            try:
+                offenders = dev_pr_scope_offenders(gh, issue, gh.pr_files(pr),
+                                                   repo_path=repo_path, runner=runner)
+            except GhError:
+                offenders = {"design_docs": [], "foreign_footprint": []}
+            result["dev_pr_scope"] = offenders
+            scope_reason = _dev_pr_scope_refusal_reason(offenders)
+            if scope_reason:
+                result["ok"] = False
+                problems.append(scope_reason)
             result["problems"] = problems
     # A non-standing Epic's phase-Task authors `epic-<e>/<doc>` in place (docs merge into the
     # epic branch by its design PR); everything else keeps `issue-<n>/`.
@@ -4071,12 +4269,21 @@ def checks_status(checks: list) -> str:
 # Workflows required when a PR touches their paths. `workflow` must match the
 # workflow file's `name:`; `suite` names the `local-ci` attestation that can stand in for it.
 # `excludeGlobs` mirrors the workflow's path negations (`!**/*.md`): a match never counts.
+# `bases`: the PR base branches this entry applies to (empty = every base). `attestable`:
+# False when no `local-ci` attestation can stand in for it (a passing GHA check only).
 REQUIRED_WORKFLOWS = tuple(
     {"workflow": w["workflow"], "suite": w["suite"],
      "prefixes": tuple(w["prefixes"]), "files": tuple(w.get("files", ())),
-     "excludeGlobs": tuple(w.get("excludeGlobs", ()))}
+     "excludeGlobs": tuple(w.get("excludeGlobs", ())),
+     "bases": tuple(w.get("bases", ())),
+     "attestable": w.get("attestable", True)}
     for w in CONFIG["requiredWorkflows"]
 )
+
+# Suites whose attestation `record-local-ci` refuses (`attestable: false`): only a passing
+# GHA check satisfies their required workflow.
+NON_ATTESTABLE_SUITES = frozenset(
+    w["suite"] for w in CONFIG["requiredWorkflows"] if w.get("attestable") is False)
 
 
 def _workflow_covers(spec: dict, path: str) -> bool:
@@ -4088,14 +4295,25 @@ def _workflow_covers(spec: dict, path: str) -> bool:
     return path.startswith(spec["prefixes"]) or path in spec["files"]
 
 
+def _workflow_applies_to_base(spec: dict, base_ref: Optional[str]) -> bool:
+    """Whether a base-scoped entry applies to a PR into `base_ref`. An entry with no `bases`
+    applies to every base; a scoped entry applies only when `base_ref` is one of them (an
+    unknown `base_ref` never matches a scoped entry, so it is not over-required)."""
+    return not spec["bases"] or base_ref in spec["bases"]
+
+
 def missing_required_workflows(changed_files: list, checks: list,
-                               comments: list = None, head_sha: str = None) -> list:
+                               comments: list = None, head_sha: str = None,
+                               base_ref: Optional[str] = None) -> list:
     """Names of required workflows the PR touches that have neither a passing GHA check
-    from that workflow nor a `local-ci` attestation for `head_sha`."""
+    from that workflow nor a `local-ci` attestation for `head_sha`. A base-scoped entry
+    (`bases`) is skipped unless the PR's `base_ref` matches it."""
     passing = {c.get("workflow", "") for c in checks if c.get("bucket") == "pass"}
     attested = local_ci_suites_attested(comments or [], head_sha)
     missing = []
     for spec in REQUIRED_WORKFLOWS:
+        if not _workflow_applies_to_base(spec, base_ref):
+            continue
         if not any(_workflow_covers(spec, p) for p in changed_files):
             continue
         if spec["workflow"] in passing:
@@ -4134,31 +4352,104 @@ def touches_pipeline_config(changed_files: list) -> bool:
 
 
 def merge_gate_status(changed_files: list, checks: list,
-                      comments: list = None, head_sha: str = None) -> tuple:
+                      comments: list = None, head_sha: str = None,
+                      base_ref: Optional[str] = None) -> tuple:
     """`(status, missing_workflows)` for pr-checks and merge-pr. A pending/failed check
     status wins over `missing-checks`, but `missing` is always returned alongside it."""
     status = checks_status(checks)
-    missing = missing_required_workflows(changed_files, checks, comments, head_sha)
+    missing = missing_required_workflows(changed_files, checks, comments, head_sha, base_ref)
     if status != "passed":
         return status, missing
     return ("missing-checks" if missing else "passed"), missing
 
 
+# Why a required workflow's check can be absent, ordered most-likely first; surfaced by
+# pr-checks/merge-pr so `missing-checks` is not mistaken for "a check still running".
+_MISSING_WORKFLOW_HINT = (
+    "A required workflow reported no check on this head. Likely causes, in order: (1) its "
+    "main-only suite is not attested for the current head -- re-run the suite and "
+    "`record-local-ci` for this head; (2) the workflow file is not on the PR branch (added on "
+    "the base after the branch was cut) -- run `sync-branch` and push so it can run; (3) the "
+    "workflow was renamed/disabled out of step with `requiredWorkflows` -- a config defect, "
+    "`mark-needs-human`.")
+
+
+def _latest_attested_sha_by_suite(comments: list) -> dict:
+    """The most recent attested sha per suite from `local-ci` markers (comments in order)."""
+    latest = {}
+    for c in comments:
+        for m in _LOCAL_CI_MARKER.finditer(c.get("body", "")):
+            latest[m.group(1)] = m.group(3).lower()
+    return latest
+
+
+def _suite_reattest_needed(spec: dict, delta_files: list) -> bool:
+    """Whether the files changed since a suite's attested sha force a re-attest: a truncated
+    delta, a pipeline-config change, or any file the suite's workflow covers. Mirrors merge-pr's
+    carry-forward rule, scoped to one suite."""
+    if len(delta_files) >= 300 or touches_pipeline_config(delta_files):
+        return True
+    return any(_workflow_covers(spec, p) for p in delta_files)
+
+
+def pr_stale_attestations(gh: WorkItemProvider, issue: int, pr: int) -> dict:
+    """For each attestable required workflow the PR touches (base-scoped), whether its suite is
+    attested at the PR head -- freshly, or carried forward when the only files changed since the
+    attested sha fall outside the suite's coverage (reusing the merge-pr carry-forward rule).
+    Returns `{"stale": [{suite, workflow, attested_sha}], "carried": [suite, ...]}`; a suite with
+    no attestation at all is `stale` with `attested_sha: None`."""
+    view = gh.pr_view(pr, "comments,headRefOid,baseRefName")
+    head = view.get("headRefOid")
+    comments = view.get("comments", [])
+    base_ref = view.get("baseRefName")
+    changed = gh.pr_files(pr)
+    fresh = local_ci_suites_attested(comments, head)
+    latest = _latest_attested_sha_by_suite(comments)
+    stale, carried = [], []
+    for spec in REQUIRED_WORKFLOWS:
+        suite = spec.get("suite")
+        if not suite or suite in NON_ATTESTABLE_SUITES:
+            continue  # a non-attestable suite is satisfied only by a real GHA check
+        if not _workflow_applies_to_base(spec, base_ref):
+            continue
+        if not any(_workflow_covers(spec, p) for p in changed):
+            continue
+        if suite in fresh:
+            continue
+        attested_sha = latest.get(suite)
+        if attested_sha:
+            try:
+                delta = gh.files_since(attested_sha, issue_branch(issue))
+            except GhError:
+                delta = None
+            if delta is not None and not _suite_reattest_needed(spec, delta):
+                carried.append(suite)
+                continue
+        stale.append({"suite": suite, "workflow": spec["workflow"], "attested_sha": attested_sha})
+    return {"stale": stale, "carried": carried}
+
+
 def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
     checks = gh.pr_checks(pr_number)
-    view = gh.pr_view(pr_number, "comments,headRefOid")
+    view = gh.pr_view(pr_number, "comments,headRefOid,baseRefName")
     status, missing = merge_gate_status(
         gh.pr_files(pr_number), checks,
-        view.get("comments", []), view.get("headRefOid"))
-    return {"pr": pr_number, "status": status,
-            "missing_required_workflows": missing, "checks": checks}
+        view.get("comments", []), view.get("headRefOid"), view.get("baseRefName"))
+    result = {"pr": pr_number, "status": status,
+              "missing_required_workflows": missing, "checks": checks}
+    if missing:
+        result["hint"] = _MISSING_WORKFLOW_HINT
+    return result
 
 
-def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -> dict:
+def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
+                 run_id: Optional[str] = None) -> dict:
     """Squash-merge the PR after its evidence and checks pass. Refuses (exit 0) when
     behind a base delta that needs re-attest; otherwise carries the attestation forward.
     Idempotent: an already-MERGED PR only gets the post-merge bookkeeping (`recovered`).
-    Stage/Pipeline Status are left to `mark-issue-closed` on the `issues: closed` event."""
+    Stage/Pipeline Status are left to `mark-issue-closed` on the `issues: closed` event.
+    `run_id` books the terminal-unit count under that run, not whatever id last wrote the
+    epic's run-state file (which may be a throwaway probe run's)."""
     entry = next((i for i in gh.issue_list() if i["number"] == issue), None)
     if entry is not None and current_stage(entry) in DESIGN_STAGE_REVIEW:
         parent = phase_task_parent(gh, issue)
@@ -4170,7 +4461,7 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
                               f"waive-gate/finish-lld run it), never merge-pr"}
     if gh.pr_view(pr_number, fields="state").get("state") == "MERGED":
         return _finalize_merged_pr(gh, pr_number, issue, repo_path, integration_base(gh, issue),
-                                   gh.pr_files(pr_number), {"recovered": True})
+                                   gh.pr_files(pr_number), {"recovered": True}, run_id=run_id)
     base = integration_base(gh, issue)
     behind = gh.branch_behind_by(issue_branch(issue), base=base)
     carried_forward = {}
@@ -4198,11 +4489,13 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
     checks = gh.pr_checks(pr_number)
     files = gh.pr_files(pr_number)
     view = gh.pr_view(pr_number, "comments,headRefOid")
+    # `base` (integration_base) is the PR's base branch -- no extra field fetch needed.
     status, missing = merge_gate_status(
-        files, checks, view.get("comments", []), view.get("headRefOid"))
+        files, checks, view.get("comments", []), view.get("headRefOid"), base)
     if status != "passed":
         detail = f" (no passing check or fresh local-ci attestation from: {', '.join(missing)})" if missing else ""
-        raise GhError(f"PR #{pr_number} checks not passed (status={status}){detail}")
+        hint = f" {_MISSING_WORKFLOW_HINT}" if status == "missing-checks" and missing else ""
+        raise GhError(f"PR #{pr_number} checks not passed (status={status}){detail}{hint}")
     gh.pr_ready(pr_number)
     try:
         gh.pr_merge(pr_number)
@@ -4212,11 +4505,13 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".") -
             raise
     gh.pr_comment(pr_number, f"Auto-merged under the pipeline's scoped PR-merge override — "
                               f"see \"PRs merge automatically\" in the pipeline docs.")
-    return _finalize_merged_pr(gh, pr_number, issue, repo_path, base, files, carried_forward)
+    return _finalize_merged_pr(gh, pr_number, issue, repo_path, base, files, carried_forward,
+                               run_id=run_id)
 
 
 def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
-                        base: str, files: list, extra: dict) -> dict:
+                        base: str, files: list, extra: dict,
+                        run_id: Optional[str] = None) -> dict:
     """Post-merge bookkeeping: close an epic-branch child `Closes #<n>` didn't, the
     `Merged via` note, run-cap accounting and releasing the worktree."""
     issue_state = gh.issue_view(issue)["state"]
@@ -4228,7 +4523,7 @@ def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
         issue_closed = True
     if issue_closed:
         gh.issue_comment(issue, f"Merged via #{pr_number}.")
-    terminal = record_terminal_unit(gh, issue)
+    terminal = record_terminal_unit(gh, issue, run_id=run_id)
     return {"pr": pr_number, "issue": issue, "merged": True, "issue_closed": issue_closed,
             "config_changed": touches_pipeline_config(files),
             **extra,
@@ -4352,13 +4647,18 @@ def _issue_kind(type_name: str) -> str:
     return type_name.lower()
 
 
-def _option_name(field: str, value, options: dict) -> str:
-    """`value` matched case-insensitively to one of `options`' names; GhError if none."""
+def _option_name(field: str, value, options: dict, aliases: Optional[dict] = None) -> str:
+    """`value` (or an `aliases` entry for it) matched case-insensitively to one of `options`'
+    names; GhError listing the valid values if none."""
+    if aliases and value is not None and str(value).strip().lower() in aliases:
+        value = aliases[str(value).strip().lower()]
     for name in options:
         if value is not None and name.lower() == str(value).strip().lower():
             return name
-    raise GhError(f"{field} {value!r} is not a configured option (one of {sorted(options)}) "
-                  f"-- refused before creating anything")
+    valid = ", ".join(sorted(options))
+    extra = f" (aliases: {', '.join(sorted(aliases))})" if aliases else ""
+    raise GhError(f"{field} {value!r} is not a configured option -- valid values: {valid}{extra}. "
+                  f"Refused before creating anything.")
 
 
 def issue_field_values(priority: Optional[str] = None, effort: Optional[str] = None) -> dict:
@@ -4368,7 +4668,7 @@ def issue_field_values(priority: Optional[str] = None, effort: Optional[str] = N
     out = {}
     if PRIORITY_FIELD_ID:
         out["priority"] = _option_name("Priority", priority or defaults.get("priority"),
-                                       PRIORITY_OPTION_IDS)
+                                       PRIORITY_OPTION_IDS, aliases=PRIORITY_ALIASES)
     if EFFORT_FIELD_ID:
         out["effort"] = _option_name("Effort", effort or defaults.get("effort"), EFFORT_OPTION_IDS)
     return out
@@ -4459,8 +4759,11 @@ def inferred_issue_type(issue: dict) -> Optional[str]:
 def cmd_repair_issue(gh: WorkItemProvider, number: int, parent: Optional[int] = None,
                      type_name: Optional[str] = None, priority: Optional[str] = None,
                      effort: Optional[str] = None) -> dict:
-    """Set whatever of create-issue's fields `number` lacks, never overwriting a set value.
-    Validates before the first write, so a re-run finishes a partial repair."""
+    """Set whatever of create-issue's fields `number` lacks, never overwriting a set value --
+    except that an explicit `--priority`/`--effort` is set even over an existing value (so a
+    half-created issue can be corrected to the requested Priority/Effort). Parent and type keep
+    never-overwrite unless a flag is passed. Validates before the first write, so a re-run
+    finishes a partial repair."""
     info, fields = gh.issue_epic_info(number), gh.issue_fields(number)
     steps, already = [], []
     if info.get("parent"):
@@ -4484,11 +4787,16 @@ def cmd_repair_issue(gh: WorkItemProvider, number: int, parent: Optional[int] = 
     elif not (is_initiative(info) or is_epic(info)):  # cleared by design on containers
         steps.append(("Pipeline Status", lambda: gh.set_pipeline_status_field(number, "todo")))
     values = issue_field_values(priority, effort)
-    for name, setter in (("Priority", gh.set_priority_field), ("Effort", gh.set_effort_field)):
+    for name, setter, passed in (("Priority", gh.set_priority_field, priority is not None),
+                                 ("Effort", gh.set_effort_field, effort is not None)):
         value = values.get(name.lower())
-        if fields.get(name):
+        if value is None:
+            continue  # field not configured
+        if passed:  # an explicit flag overrides even a value already set
+            steps.append((name, lambda setter=setter, value=value: setter(number, value)))
+        elif fields.get(name):
             already.append(name)
-        elif value:
+        else:  # fill the missing field with its default, never overwriting
             steps.append((name, lambda setter=setter, value=value: setter(number, value)))
     for _, step in steps:
         step()
@@ -5012,6 +5320,13 @@ def cmd_file_closing_delta(gh: GitHub, epic: int, title: str, body: str,
     created = seq.run("create-issue", lambda: cmd_create_issue(
         gh, title, body, epic, [], "Bug", priority, effort))
     number = (created or seq.steps.get("create-issue") or {}).get("issue")
+    if created is None and number is not None and seq.failed_step == "create-issue":
+        # create-issue left a half-made issue (a mid-create failure). Finish it in place with the
+        # requested Priority/Effort rather than re-running create-issue, which would duplicate it.
+        seq.failed_step, seq.ok, seq.error = None, True, None
+        seq.completed.append("create-issue")
+        created = seq.run("repair-issue", lambda: cmd_repair_issue(
+            gh, number, parent=epic, type_name="Bug", priority=priority, effort=effort))
     if start and created:
         seq.run("set-stage", lambda: cmd_set_stage(gh, number, "development"))
         seq.run("start-stage", lambda: cmd_start_stage(gh, number, "development", "issue",
@@ -5053,6 +5368,16 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
     role = RETIRED_ROLES.get(role, role)
     seq = StepSequence()
     seq.run("check-claimable", lambda: _check_claimable(gh, number, role))
+    # A child of a non-standing Epic integrates into `epic-<parent>`. Ensure that branch AND its
+    # worktree exist first (idempotently, exactly as cut-phase-tasks does) so `next-action` never
+    # delegates a child onto a base branch that isn't there yet -- a live worktree is fast-forwarded.
+    if unit == "issue" and not seq.stopped:
+        integ = integration_base(gh, number)
+        if integ != "main":
+            epic_no = int(integ[len(EPIC_BRANCH_PREFIX):])
+            seq.run("epic-worktree", lambda: cmd_worktree_add(
+                gh, epic_no, unit="epic", repo_path=repo_path, runner=runner),
+                failed=_worktree_refused)
     worktree = seq.run("worktree-add", lambda: cmd_worktree_add(
         gh, number, unit, repo_path, runner=runner, base=base), failed=_worktree_refused)
     claim = seq.run("claim", lambda: cmd_claim(gh, number, role))
@@ -5417,7 +5742,11 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--issue", type=int, required=True)
     p.add_argument("--repo-path", default=".",
                     help="Repo root (to release the branch's worktree)")
-    p.set_defaults(func=lambda a: cmd_merge_pr(get_work_item_provider(), a.pr, a.issue, a.repo_path))
+    p.add_argument("--run-id", default=None,
+                    help="Book the terminal-unit count under this run id (else the epic's "
+                         "run-state file's current id)")
+    p.set_defaults(func=lambda a: cmd_merge_pr(get_work_item_provider(), a.pr, a.issue,
+                                               a.repo_path, run_id=a.run_id))
     p = sub.add_parser("create-issue")
     p.add_argument("--title", required=True)
     p.add_argument("--body", required=True)

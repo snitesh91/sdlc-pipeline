@@ -6,7 +6,7 @@
     "product-review": "opus",
     "architecture": "opus",
     "arch-review": "opus",
-    "lld": "sonnet",
+    "lld": "opus",
     "lld-review": "opus",
     "development": "sonnet",
     "pr-review": "opus",
@@ -17,7 +17,7 @@
   "fanout": {
     "product-review": {"allowed": false},
     "arch-review": {"allowed": true, "maxChildren": 2, "model": "sonnet", "axisModels": {}},
-    "lld-review": {"allowed": true, "maxChildren": 2, "model": "sonnet", "axisModels": {}},
+    "lld-review": {"allowed": true, "maxChildren": 4, "model": "sonnet", "axisModels": {}},
     "pr-review": {"allowed": false}
   }
 }

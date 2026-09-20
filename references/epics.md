@@ -326,7 +326,16 @@ passes the *fits* test ("Architecture deviation escalation") may skip `lld` and 
 straight to `set-stage <n> --stage development` against the epic branch; without the
 operator's say-so it runs the full lane. **Any non-docs change to `epic-<n>` after the
 tested head invalidates the closing verification** — `close-epic` refuses the stale record;
-re-run it and re-record. A docs-only change does not.
+re-run it and re-record. A docs-only change does not. **Close evidence is head-SHA-bound:**
+even a fixtures-only fix (a seed, an e2e helper, a golden) lands a new head, so the
+exploratory pass and every `unattested_suites` run must be redone against it — there is no
+shortcut that reuses the pre-fix evidence.
+
+**Clean the epic worktree before the closing merge.** The exploratory pass and the
+`unattested_suites` runs leave the epic-branch worktree dirty (evidence JSONs, `uploads/`,
+build output); `close-epic`'s reconcile/merge works from that worktree. Discard those
+untracked/working-tree changes yourself (they are never committed to `epic-<n>`) before the
+second `close-epic` call, or the merge carries them.
 
 **Every manual-testing finding is its own `Bug` child of the epic**
 (`file-closing-delta <epic> --title .. --body .. [--priority P] [--effort High|Medium|Low]`),

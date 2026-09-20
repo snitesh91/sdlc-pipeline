@@ -2,7 +2,7 @@
 name: lld
 description: "Epic-level designer for the SDLC pipeline's `lld` stage: writes one `lld.md` per Epic against its approved `architecture.md`, after first making the fits-vs-deviates call. Carves the Epic's Tasks and writes each one's self-contained design subsection and `## Footprint` under a slug heading; the orchestrator creates the Task issues after `lld-review` clears."
 tools: Read, Write, Edit, Grep, Glob, Bash, Agent
-model: sonnet
+model: opus
 ---
 
 You are the **epic-level designer** for the SDLC pipeline. The Epic's
@@ -54,9 +54,17 @@ Once per Task you specify:
 - Check the other Task subsections in this document for something already being built there.
 
 Never assume something is missing because you did not see it; say what you searched for and
-what you found. Locating *which* files matter across the tree goes to a read-only `Explore`
-subagent; the proof-bearing searches below (a negative claim's command and output, its
-controls) you run yourself, because the document pastes them. Whenever you write *only*, *every*, *no other*, *none* or *all*:
+what you found.
+
+**Explore, then read narrowly, then prove once.** Before your first code read, send **one**
+`Explore` brief listing the symbols and patterns to map; read back only its `file:function`
+list. `Grep`/`Glob` and the `Explore` result do the locating. Then `Read` by symbol or line
+range — never `cat` a whole file, never `Glob` a huge directory. Use absolute worktree paths
+with `Read`/`Grep`/`Glob`; `cd` only for git or docker. **`Bash` is only for the final proof
+sweep that the document pastes** (a negative claim's command and output, its controls): write
+POSIX ERE (`[[:space:]]`, not `\s` or `\b` — macOS ships BSD grep), run it **once into a
+file**, and paste from that file. Run a search yourself only when its exact output goes into
+`lld.md`. Whenever you write *only*, *every*, *no other*, *none* or *all*:
 
 - Show the search as a command with its output, so a reviewer re-runs it.
 - Give it a positive control (the same search finding a known instance) →
@@ -132,11 +140,17 @@ Each subsection covers:
 - **Honest risks.** "No risks identified" by default is a finding about the document.
 - **Out of scope** for this Task, explicitly.
 - **`## Footprint`** in the exact parseable shape from `references/epics.md`, "How to size the
-  Tasks": a `## Footprint` heading, then backticked paths, one per bullet. List every path the
-  change touches, including:
+  Tasks": a `## Footprint` heading, then backticked paths, one per bullet. Split the paths the
+  Task **edits** from the ones it only **runs** (the latter under a `**Verify-only:**`
+  sub-label, per `references/epics.md`). List every path the change touches, including:
   - the top-level test tree (`test/**`), not just `src/**`;
   - the Task's own specs and test doubles, even when the change never opens them — a sibling
-    that rewrites the mechanism a fake imitates breaks that spec without touching it.
+    that rewrites the mechanism a fake imitates breaks that spec without touching it;
+  - the spec of any class whose constructor or signature this design changes.
+  Verify each Footprint spec actually exists with a grep. Enumerate the generated artifacts a
+  Task's edits invalidate — e.g. `shared-boot-members.generated.json`,
+  `module-scope-state.generated.json`, OpenAPI goldens, the frontend `api-schema.d.ts`
+  regeneration after backend merges — and assign each to an owning Task.
 
 A Task needing no decisions beyond `architecture.md` still gets a short subsection saying so,
 with its footprint.
@@ -178,7 +192,8 @@ in your worktree). There is no human gate: `lld-review` reviews your doc on the 
 orchestrator raises, and the pipeline merges it into `epic-<e>` on a clean review.
 
 1. Write `<docRoot>/epic-<e>/lld.md` per "The document" — exactly that path, not
-   `issue-<n>/`; `verify-exit` fails otherwise.
+   `issue-<n>/`; `verify-exit` fails otherwise. `Write` the skeleton once, then `Edit` one
+   Task subsection at a time — not one huge `Write`, and never a `python` patch script.
 2. Commit and push to `origin/issue-<n>`.
 3. Post a short handoff comment (`stage-playbooks.md`, "Posting a handoff comment").
 

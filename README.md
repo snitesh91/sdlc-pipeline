@@ -111,6 +111,7 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `pipeline.productWip.maxGateAPending` | 5 | Open Gate A PRs allowed repo-wide |
 | `pipeline.escalation.replaceAt` / `.needsHumanAt` | 3 / 6 | Bounces before a context-reset replacement / `needs-human` |
 | `pipeline.continuous.cycleCap` | 8 | Merges per unattended run before pausing |
+| `pipeline.resume.liveWindowMinutes` | 30 | A `next-action` resume claimed sooner than this is flagged `likely_live` (another session may be driving it) |
 | `pipeline.models.<role>` / `pipeline.fanout.<role>` | `hooks/model_policy.json` | Model per stage; which reviews fan out, how wide, at which model |
 | `pipeline.epicClose.auto` | `false` | Whether the orchestrator closes a verified epic itself |
 | `pipeline.issueDefaults.priority` / `.effort` | `Medium` / `Medium` | Priority / Effort `create-issue` sets when no flag or lld line names one |

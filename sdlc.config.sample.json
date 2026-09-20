@@ -15,7 +15,7 @@
     "designLane": 1,
     "maxTasksPerRun": 0
   },
-  "_requiredWorkflows_comment": "Each entry mirrors one GHA workflow's `paths:` filter: `prefixes`/`files` its paths, `excludeGlobs` its negations (`!**/*.md`). Optional `commandPattern`: a regex the `record-local-ci --command` must match. `suite` keys: letters, digits, `_`, `-`.",
+  "_requiredWorkflows_comment": "Each entry mirrors one GHA workflow's `paths:` filter: `prefixes`/`files` its paths, `excludeGlobs` its negations (`!**/*.md`). Optional `commandPattern`: a regex the `record-local-ci --command` must match. Optional `bases` (e.g. [\"main\"]): the PR base branches the entry is required on -- omitted means every base, so an entry can be scoped to PRs into `main` only. Optional `attestable: false`: no local-ci attestation can stand in for it (only a passing GHA check satisfies it); `record-local-ci` refuses that suite. `suite` keys: letters, digits, `_`, `-`.",
   "requiredWorkflows": [
     {
       "workflow": "Backend CI",
@@ -44,6 +44,7 @@
       ]
     }
   ],
+  "_requiredWorkflows_scoped_example": "A base-scoped, non-attestable entry looks like: {\"workflow\": \"Backend Integration Tests\", \"suite\": \"backend-it\", \"prefixes\": [\"backend/\"], \"excludeGlobs\": [\"**/*.md\"], \"bases\": [\"main\"], \"attestable\": false} -- required only on PRs into `main`, and satisfied only by a passing GHA check (record-local-ci refuses it).",
   "projectFields": {
     "issueTypeIds": {
       "Task": "IT_TASK_ID",
@@ -150,6 +151,10 @@
     },
     "continuous": {
       "cycleCap": 8
+    },
+    "resume": {
+      "_comment": "A `next-action` resume claimed less than `liveWindowMinutes` ago is flagged `likely_live`: another session may still be driving it, so the orchestrator asks the operator before taking over.",
+      "liveWindowMinutes": 30
     },
     "_models_comment": "Optional `models` ({\"<role>\": \"opus|sonnet|haiku\"}) and `fanout` ({\"<review-role>\": {\"allowed\", \"maxChildren\", \"model\", \"axisModels\"}}) override the plugin's hooks/model_policy.json per role; a hook enforces the result on every Agent call.",
     "workItemProvider": {

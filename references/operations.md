@@ -20,14 +20,20 @@ from `pipeline.classification` (label-based by default: `type:initiative` /
 
 Every issue the pipeline creates goes through `create-issue --parent <n> --title ..
 --body .. --type <T> [--priority <P>] [--effort <E>]` — the orchestrator's command.
-Before creating it refuses an unknown or unprovisioned type and an invalid Priority/Effort (Effort: `High`/`Medium`/`Low`). It then sets the Issue Type
-(mandatory), the parent link, Pipeline Status `Todo`, and Priority and Effort (flag,
+Before creating it refuses an unknown or unprovisioned type and an invalid Priority/Effort;
+the refusal lists the valid values (Priority: `Urgent`/`High`/`Medium`/`Low`, plus the
+aliases `Critical`/`Blocker` → `Urgent`; Effort: `High`/`Medium`/`Low`). It then sets the
+Issue Type (mandatory), the parent link, Pipeline Status `Todo`, and Priority and Effort (flag,
 else `pipeline.issueDefaults`; skipped when the field isn't configured), and adds the
 classification label itself. A post-create failure returns `ok: false` naming the issue:
 run the `repair-issue` command its `reason` gives, never re-run. `repair-issue <n>
 [--parent <p>] [--type <T>] [--priority <P>] [--effort <E>]` sets only what is missing
 (type inferred from the classification label; an Epic/Initiative's Pipeline Status is
-left cleared) and never overwrites a value. Under a non-standing Epic follow with `set-stage`
+left cleared) and never overwrites parent/type/status — but an explicit `--priority`/`--effort`
+**is** set even over an existing value, so a half-created issue can be corrected to the
+requested Priority/Effort. `file-closing-delta` self-repairs a mid-create failure in place
+(passing the requested Priority/Effort to `repair-issue`) rather than duplicating the issue.
+Under a non-standing Epic follow with `set-stage`
 (Tasks from `create-lld-tasks` are staged by `merge-lld-doc`). `audit-issues [--epic
 <n>]` lists open issues missing any of these fields (with `--epic`, only that Epic's
 subtree), each with its `repair` command; an
@@ -38,7 +44,7 @@ Epic or Initiative is never flagged for lacking a parent.
 | Stage | `Product` / `Architecture` / `Development` / `Testing` / `PR Review` / `LLD` | Sole source of `current_stage()`. Set by `claim` (inside `start-stage`, `pass-gate`, `skip-gate`, `waive-gate`), `set-stage`, `route`, `merge-lld-doc`; `open-dev-pr` sets `PR Review`. `arch-review`/`lld-review` write no value of their own. `Testing` is retired (only read, for issues stranded there). `next-action` sets `default_stage()` on first sight: `product` for an Initiative's child or parentless issue. A standing child gets none — `next-action` returns `route`. A non-standing Epic's children get **no** default (phase-Tasks via `set-stage`, Tasks via `merge-lld-doc`; a late Stage-less child is reported `unstaged`). Cleared on close, and on the Epic when it becomes `epic:architected`. |
 | Pipeline Status | `Todo` / `In Progress` / `Awaiting Human Review` / `Feedback Received` / `Needs Human` / `Done` | `In Progress` = claimed by a live run (crash-recovery marker). `Awaiting Human Review` / `Feedback Received` = paused at an open gate (both gate-pending). `Needs Human` = only the operator can decide. `Todo` is set by `create-issue` (and the workflow on open), and on a unit parked or advanced unclaimed; `Done` on close. Blocked is not a value — it is derived from `blockedBy`. |
 | Type | `Task` / `Bug` / `Feature` / `Epic` / `Initiative` | Mandatory; a defect is type `Bug`, never a `Task` with a label. Routing ignores it. |
-| Priority | `Urgent` / `High` / `Medium` / `Low` | Set by `create-issue`; empty = `Medium`. Orders children. |
+| Priority | `Urgent` / `High` / `Medium` / `Low` | Set by `create-issue`; empty = `Medium`. `Critical` / `Blocker` are accepted as aliases for `Urgent`. Orders children. |
 | Effort | `High` / `Medium` / `Low` | Set by `create-issue`; read by nothing. `High` alone is not a reason to split a Task — footprint collision is (`references/epics.md`). |
 | `blockedBy` | native relationship | ≥ 1 open blocker = not eligible; clears when the blocker closes. Set with `mark-blocked <n> --dep <m>`. |
 | Assignee | native | Unassigned = agent-owned (below). |
@@ -96,6 +102,13 @@ human gates on product/architecture are separate and unaffected.
   and "Merged via #<n>" on the issue, and closes a child merged into an epic branch.
 - `merge-pr` is idempotent: on a PR already `MERGED` (a retry, or a 5xx after the squash
   landed) it only finishes the bookkeeping and returns `recovered: true`.
+- **A development PR authors no design doc, and touches no other Task's footprint.**
+  `open-dev-pr` refuses (before opening) a branch diff that edits any Epic design doc under
+  `<docRoot>/epic-*/` (e.g. `lld.md`) or a file listed in another open Task's `## Footprint`
+  of the Epic's `lld.md`; files in the unit's own footprint are fine. `verify-exit` reports
+  the same offenders on the pr-review handoff (`dev_pr_scope`). If the design truly needs to
+  change, escalate an Architecture/LLD revision and record the deviation in the PR
+  description — do not edit the doc from a development branch.
 - Never delete the per-issue docs folder after merge.
 - `merge-pr` is the only merge gate (branch protection is unavailable — don't look for
   it). It refuses on a non-passing check, a code-touching PR whose required suite has
@@ -112,19 +125,39 @@ child PR to merge; the proof is `development`'s local run:
 - For each suite it actually ran and passed, `development` runs `record-local-ci --pr
   <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`, posting `<!--
   local-ci: <suite>:<pr> @ <sha> -->` on the PR with the captured output. It refuses a
-  missing or empty output file — never pass a summary.
+  missing or empty output file — never pass a summary. It also refuses a `--command` still
+  holding an unexpanded `<placeholder>` token (e.g. `<node_modules-volume>`), so a template
+  copied from the docs is never attested as the real run; genuine shell syntax (`< file`,
+  `2>&1`, `<(...)`) is fine.
 - `merge-pr` / `pr-checks` accept it only while `<sha>` is the PR's current head. Any
-  later push (rework, `sync-branch`) makes it stale: re-run the suite and re-attest.
+  later push (rework, `sync-branch`) makes it stale: re-run the suite and re-attest. So the
+  attestation is checked **post-sync**: `transition --expect-stage pr-review` runs
+  `start-comment` (role pr-review) after `sync-branch`, and that refuses (posting no start
+  comment) when a required suite's attestation is not the current head — re-run and
+  `record-local-ci` on the post-sync head. A suite whose sync only merged files outside its
+  coverage is carried forward automatically (`carried_attestation_forward`), never re-run.
 - Attest before `handoff-to-pr-review`; an unattested PR is not reviewable.
+- `merge-pr` accepts `--run-id`: the terminal-unit count is booked under that run rather
+  than whatever id last wrote the epic's run-state file (which may be a throwaway probe
+  run's). Without it, the state file's current id stands.
 - Each `requiredWorkflows` entry mirrors one workflow's `paths:` filter: `prefixes` /
   `files`, plus `excludeGlobs` for its negations (`!**/*.md` → `"**/*.md"`); a changed
   file matching one never requires the suite. `suite` keys are `[A-Za-z0-9_-]+` (checked
   at config load). An optional `commandPattern` regex must match the attested `--command`.
+  Optional **`bases`** (e.g. `["main"]`) scopes an entry to those PR base branches only
+  (omitted = every base) — so an integration suite can be required on PRs into `main` yet
+  ignored on child PRs into an epic branch. Optional **`attestable: false`** means no
+  local-CI attestation can stand in for the suite (only a passing GHA check satisfies it);
+  `record-local-ci` refuses that suite cleanly.
 
-**`pr-checks` status `missing-checks`** is never "still running" — never poll it:
+**`pr-checks` status `missing-checks`** is never "still running" — never poll it. When it
+is set, `pr-checks` returns a `hint` field naming the causes in likelihood order (and
+`merge-pr`'s refusal carries the same hint):
 
 - Main-only suite not attested for the current head (the usual case, not a defect) →
   `development` re-runs the suite and `record-local-ci` for that head.
+- The workflow file is not on the PR branch (added on the base after the branch was cut)
+  → run `sync-branch` and push so it can run.
 - A still-required GHA workflow never reported (renamed out of step with
   `requiredWorkflows`, disabled, `paths:` mismatch) → config defect: `pr-review` stops
   with `needs-human` (`agents/pr-review.md`, exit actions); you run `mark-needs-human`.

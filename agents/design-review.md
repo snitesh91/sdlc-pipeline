@@ -85,8 +85,9 @@ CLEAN | REWORK — <one line>
 
 ## The confidence marker
 
-`skip-gate` reads `<!-- arch-review-confidence: N -->` (0–100) and, on a clean verdict above the threshold, skips Gate B — for an Epic's phase-Task it merges the design PR itself (`references/gates.md`, "Gate B confidence skip"). Score it this way:
+`skip-gate` reads `<!-- arch-review-confidence: N -->` (0–100) and, on a clean verdict scoring **strictly above** the effective threshold, skips Gate B — for an Epic's phase-Task it merges the design PR itself (`references/gates.md`, "Gate B confidence skip"). Score it this way:
 
+- **Read the effective threshold, never a hardcoded number.** The `start-comment` output that opened this `arch-review` carries `skip_confidence_threshold`; if you don't have it, run `python3 "$SDLC" show-config` and read `gates.skipConfidenceThreshold`. A clean review must score strictly above that value to skip the gate.
 - **N = your confidence the design is implementable as written without a human catching something first** — not polish, not a hedge against everything you cannot guarantee.
 - Meaningful only on a **clean** verdict. If you found anything, report low confidence.
 - **A clean verdict with zero blockers normally scores at or above the threshold.** Confidence restates the coverage that let you call it clean; it is not a second, more cautious pass.

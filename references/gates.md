@@ -198,7 +198,9 @@ A clean `arch-review` reports `confidence` (0–100) in a
 `<!-- arch-review-confidence: N -->` marker. The threshold is the governing epic's
 profile `gates.skipConfidenceThreshold` (a child resolves via its parent epic), falling
 back to the global `pipeline.gates.skipConfidenceThreshold` (default 80). Never hardcode
-a number — `skip-gate` reports the threshold it applied.
+a number — `skip-gate` reports the threshold it applied, and `start-comment --role arch-review`
+surfaces the same effective bar up front as `skip_confidence_threshold`, so the reviewer
+knows what its confidence marker must clear.
 
 - **Confidence > threshold** → skip Gate B:
   ```bash
