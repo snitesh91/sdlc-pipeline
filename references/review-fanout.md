@@ -4,11 +4,14 @@ Read by `design-review` (both halves), the only role that may fan out. Its agent
 the axes; it does not repeat these rules. The Agent guard hook denies fan-out to every other
 role, caps the children and sets their model from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (`fanout.<role>`).
 
-**`maxChildren` caps the total fan-out children per review run, not concurrent ones**
-(`agent_guard.py`'s `claim_slot` counts every child launched against the parent, and slots do
-not free when a child returns). `arch-review` gets 2, `lld-review` 4 (a whole `lld.md` has
-more independent axes to cover). A reviewer denied a child because the cap is reached works
-the remaining axes itself — the completeness lens is never dropped.
+**`maxChildren` caps the children running at once** (`arch-review` 2, `lld-review` 4 — a
+whole `lld.md` has more independent axes to cover). The guard seats each launch in a slot and
+frees it when that child reports. **Wait-and-dispatch loop:** a launch denied at the cap
+carries `retry_after: {waiting_on: [holders], hint}` — it is not final. Wait for any holder
+to report, re-launch the denied axis, repeat until every axis ran. Work an axis yourself only
+when no holder is left to wait for (or there is no `Agent` tool) — the completeness lens is
+never dropped. A parent whose `ROLE:` header the guard cannot read gets the stricter of the
+two caps and a warning, never an uncapped run.
 
 ## Review fan-out discipline — every review stage that dispatches subagents
 

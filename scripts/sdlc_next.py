@@ -81,6 +81,8 @@ _PARALLELISM = CONFIG.get("parallelism") or {}
 PR_REVIEW_PARALLELISM = _PARALLELISM.get("prReview", 1)
 DEV_LANE_PARALLELISM = _PARALLELISM.get("devLane", 1)
 DESIGN_LANE_PARALLELISM = _PARALLELISM.get("designLane", 1)
+# Whether other epics' live worktrees join the dev lane's footprint-overlap check.
+CROSS_EPIC_FOOTPRINT_CHECK = bool(_PARALLELISM.get("crossEpicFootprintCheck", False))
 # Units one orchestrator run drives to a terminal state before a resumable stop,
 # bounding the orchestrator's own context growth. 0 = unlimited.
 MAX_TASKS_PER_RUN = _PARALLELISM.get("maxTasksPerRun", 0)
@@ -1498,12 +1500,15 @@ def _merged_design_action(gh: GitHub, issue: dict, epic: int) -> Optional[dict]:
 
 
 def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
-                       skip_epics: Optional[list] = None) -> dict:
+                       skip_epics: Optional[list] = None, repo_path: str = ".",
+                       runner: Runner = _default_runner) -> dict:
     """Pick the next action among the named Epic's/Initiative's open non-Epic children: `skip` |
     `resume` | `pass-gate` | `finish-lld` | `address-gate-feedback` | `route` | `delegate` |
     `stop-at-cap` | `none`; an Initiative with no such child walks its open Epics: `cut-phase-tasks`
     | `run-epic` (`skip_epics` parks stalled ones). Raises GhError when `epic` is neither.
-    Caps gate only fresh work."""
+    Caps gate only fresh work: the run cap never defers a unit this run already handed out, and
+    a fresh dev-lane unit needs a free slot and a footprint disjoint from the holders'
+    (`dev_lane_slots`); `slots` reports that arithmetic on a dev-lane `delegate` or `none`."""
     skip_epics = skip_epics or []
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
@@ -1529,24 +1534,56 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
     # Run cap gates only fresh work; refusing in-flight work would strand it mid-pipeline.
     cap_state = run_cap_state(epic, run_id)
     at_cap = run_cap_reached(cap_state)
+    # Units this run already handed out (`note_in_flight`): started work the cap never defers.
+    in_flight = {int(n) for n in (cap_state or {}).get("in_flight", {}) if str(n).isdigit()}
     deferred_by_run_cap: list = []
+    deferred_by_lane: list = []
+    lane: dict = {}
 
     def capped(stage: str) -> bool:
         return stage == "product" and product_headroom is not None and product_headroom <= 0
+
+    def lane_refusal(number: int) -> Optional[str]:
+        """Why a fresh dev-lane unit cannot start now, else None; computes the lane once."""
+        if not lane:
+            try:
+                lane.update(dev_lane_slots(gh, repo_path, epic, all_issues, runner=runner))
+                if lane["occupied"] or lane["cross_epic"]:
+                    runner(["git", "-C", repo_path, "fetch", "origin"])
+                    lane["footprints"] = dev_lane_footprints(lane, repo_path, by_number,
+                                                             runner=runner)
+            except GhError as e:
+                lane.update(cap=DEV_LANE_PARALLELISM, occupied=[], free=DEV_LANE_PARALLELISM,
+                            excluded_other_epic=[], cross_epic=[], footprints=[],
+                            warning=f"dev lane unverifiable ({e}); treating it as empty")
+        return dev_lane_refusal(lane, number, lambda n: read_footprint(
+            repo_path, n, runner=runner, epic=epic))
+
+    def with_lane(result: dict) -> dict:
+        """The lane arithmetic (`slots`) once consulted, and what it deferred (`dev_lane`)."""
+        if lane:
+            keys = ("cap", "occupied", "free", "excluded_other_epic", "warning")
+            result["slots"] = {k: lane[k] for k in keys if k in lane}
+        if deferred_by_lane:
+            result["dev_lane"] = {
+                "deferred": deferred_by_lane,
+                "reason": "a fresh dev-lane unit waits on a slot or on a holder's footprint; "
+                          "it starts once a tracked agent finishes -- survey again then."}
+        return result
 
     def none_result() -> dict:
         if deferred_by_run_cap:
             # Never `none`: "run is full" must not read as "epic has nothing left".
             completed = run_completed(cap_state)
             return {"action": "stop-at-cap", "epic": epic, "cap": MAX_TASKS_PER_RUN,
-                    "completed": completed,
+                    "completed": completed, "in_flight": sorted(in_flight),
                     "reason": f"this run has driven {len(completed)} unit(s) to a terminal "
                               f"state, reaching the maxTasksPerRun cap of "
                               f"{MAX_TASKS_PER_RUN}. Deferred this pass: "
                               f"{', '.join(f'#{n}' for n in deferred_by_run_cap)}. Every "
                               f"unit's state is already persisted -- start a new run (a "
                               f"fresh --run-id) to carry on with a small context."}
-        result = {"action": "none", "epic": epic}
+        result = with_lane({"action": "none", "epic": epic})
         if unstaged:
             result["unstaged"] = unstaged
             result["unstaged_reason"] = (
@@ -1626,19 +1663,24 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
             # Before blockedBy and the Stage write: a deferred unit gets no side effects.
             deferred_by_cap.append(issue["number"])
             continue
-        if at_cap:
+        if at_cap and issue["number"] not in in_flight:
             deferred_by_run_cap.append(issue["number"])
             continue
         if gh.blocked_by(issue["number"]):
             continue
         if pickup:
             # The orchestrator picks a standing child's first stage from the issue (`route`).
-            return {"action": "route", "issue": issue["number"], "unit": "issue"}
+            return with_lane({"action": "route", "issue": issue["number"], "unit": "issue"})
+        if stage in DEV_LANE_START_STAGES:
+            refusal = lane_refusal(issue["number"])
+            if refusal:
+                deferred_by_lane.append({"issue": issue["number"], "reason": refusal})
+                continue
         if current_stage(issue) is None:
             # Stamp the Stage on first sight so the board never shows it blank.
             gh.set_stage_field(issue["number"], stage)
-        return {"action": "delegate", "issue": issue["number"], "unit": "issue",
-                "stage": stage}
+        return with_lane({"action": "delegate", "issue": issue["number"], "unit": "issue",
+                          "stage": stage})
 
     if is_initiative(epic_issue) and epic_issue["state"] == "OPEN" and not deferred_by_run_cap:
         step = _initiative_epic_step(gh, all_issues, epic, skip_epics)
@@ -1709,7 +1751,8 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     A `resume` also carries liveness hints (`_resume_liveness`)."""
     run_id = getattr(args, "run_id", None)
     result = decide_next_action(gh, args.epic, run_id=run_id,
-                                skip_epics=getattr(args, "skip_epic", None))
+                                skip_epics=getattr(args, "skip_epic", None),
+                                repo_path=getattr(args, "repo_path", None) or ".")
     # Read liveness before note_in_flight re-stamps this run onto the unit.
     liveness = (_resume_liveness(gh, args.epic, result["issue"])
                 if result.get("action") == "resume" else {})
@@ -2059,6 +2102,7 @@ def cmd_show_config(runner: Runner = _default_runner) -> dict:
                             "devLane": DEV_LANE_PARALLELISM,
                             "prReview": PR_REVIEW_PARALLELISM,
                             "designLane": DESIGN_LANE_PARALLELISM,
+                            "crossEpicFootprintCheck": CROSS_EPIC_FOOTPRINT_CHECK,
                             "maxTasksPerRun": MAX_TASKS_PER_RUN},
             "requiredWorkflows": CONFIG["requiredWorkflows"],
             "localCiSuites": list(LOCAL_CI_SUITES),
@@ -2412,6 +2456,104 @@ def active_worktree_branches(repo_path: str, runner: Runner = _default_runner) -
     return branches
 
 
+# Stages a fresh unit enters the dev lane at; a unit past them (`pr-review`) has started.
+DEV_LANE_START_STAGES = ("development", "testing")
+
+
+def _dev_lane_parked(gh: GitHub, issue: dict) -> Optional[str]:
+    """Why an open unit holds no dev-lane slot (parked or blocked), else None."""
+    status = pipeline_status(issue)
+    if status == "needs-human" or status in GATE_PENDING_STATUSES:
+        return f"Pipeline Status is {status!r}"
+    if gh.blocked_by(issue["number"]):
+        return "blocked by an open dependency"
+    return None
+
+
+def dev_lane_slots(gh: GitHub, repo_path: str, epic: int, all_issues: list,
+                   runner: Runner = _default_runner, cap: Optional[int] = None) -> dict:
+    """The dev lane's slot arithmetic, one definition for `next-action` and
+    `list-parallel-ready`. A slot is held by an open child of `epic` that has started -- a live
+    worktree on its branch, Pipeline Status `in-progress`, or Stage `pr-review` -- and is not
+    parked or blocked. Other epics' worktrees hold no slot: they are `excluded_other_epic`, or
+    `cross_epic` (overlap check only) under `parallelism.crossEpicFootprintCheck`."""
+    cap = DEV_LANE_PARALLELISM if cap is None else cap
+    by_number = {i["number"]: i for i in all_issues}
+    active = active_worktree_branches(repo_path, runner=runner)
+    holders, stale, other = {}, [], []
+    for branch in sorted(active):
+        number = issue_number_from_branch(branch)
+        if number is None:
+            continue
+        issue = by_number.get(number)
+        if issue is None or issue["state"] != "OPEN":
+            stale.append({"branch": branch, "reason": "issue is closed or not found"})
+            continue
+        if (issue.get("parent") or {}).get("number") != epic:
+            other.append(branch)
+            continue
+        parked = _dev_lane_parked(gh, issue)
+        if parked:
+            stale.append({"branch": branch, "reason": parked})
+            continue
+        holders[number] = {"issue": number, "branch": branch, "worktree": True}
+    for issue in all_issues:
+        number = issue["number"]
+        if (number in holders or issue["state"] != "OPEN" or is_epic(issue)
+                or (issue.get("parent") or {}).get("number") != epic):
+            continue
+        if pipeline_status(issue) != "in-progress" and current_stage(issue) != "pr-review":
+            continue
+        if _dev_lane_parked(gh, issue) is None:
+            holders[number] = {"issue": number, "branch": issue_branch(number), "worktree": False}
+    occupied = sorted(holders)
+    return {"cap": cap, "occupied": occupied, "free": max(0, cap - len(occupied)),
+            "holders": [holders[n] for n in occupied], "stale_worktrees": stale,
+            "excluded_other_epic": [] if CROSS_EPIC_FOOTPRINT_CHECK else other,
+            "cross_epic": other if CROSS_EPIC_FOOTPRINT_CHECK else [],
+            "active_branches": active}
+
+
+def dev_lane_footprints(lane: dict, repo_path: str, by_number: dict,
+                        runner: Runner = _default_runner) -> list:
+    """`(issue, footprint)` for every slot holder and cross-epic branch whose footprint is
+    readable on origin; an unreadable one is left out (it still holds its slot)."""
+    numbers = [h["issue"] for h in lane["holders"]]
+    numbers += [issue_number_from_branch(b) for b in lane["cross_epic"]]
+    out = []
+    for number in numbers:
+        # Footprints live in the unit's own epic's lld.md, so use its parent, not the lane's epic.
+        parent = (by_number.get(number) or {}).get("parent")
+        fp = read_footprint(repo_path, number, runner=runner,
+                            epic=parent["number"] if parent else None)
+        if fp:
+            out.append((number, fp))
+    return out
+
+
+def footprint_collision(footprint: list, others: list) -> Optional[str]:
+    """The refusal when `footprint` cannot be shown disjoint from `others` (`(issue, fp)`
+    pairs): empty means unverifiable, an overlap names the unit. None when clear."""
+    if not footprint:
+        return "no readable ## Footprint -- cannot verify non-overlap"
+    hit = next((n for n, fp in others if footprint_overlaps(footprint, fp)), None)
+    return f"footprint overlaps active/eligible #{hit}" if hit is not None else None
+
+
+def dev_lane_refusal(lane: dict, number: int, footprint_of) -> Optional[str]:
+    """Why a fresh unit cannot enter the lane now, else None: a holder is already admitted;
+    otherwise it needs a free slot and, when anything holds one, a footprint disjoint from
+    the holders' (`footprint_of(number)` is read only then)."""
+    if number in lane["occupied"]:
+        return None
+    if lane["free"] <= 0:
+        return (f"dev lane full: {len(lane['occupied'])}/{lane['cap']} slot(s) held by "
+                f"{', '.join(f'#{n}' for n in lane['occupied'])}")
+    if not lane.get("footprints"):
+        return None
+    return footprint_collision(footprint_of(number), lane["footprints"])
+
+
 def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional[int] = None,
                              runner: Runner = _default_runner,
                              run_id: Optional[str] = None) -> dict:
@@ -2433,7 +2575,9 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
     if run_cap_reached(cap_state):
         # The cap must close this lane too, or overflow just moves here from next-action.
         completed = run_completed(cap_state)
+        in_flight = sorted(int(n) for n in cap_state.get("in_flight", {}) if str(n).isdigit())
         return {**base, "stop_at_cap": True, "cap": MAX_TASKS_PER_RUN, "completed": completed,
+                "in_flight": in_flight,
                 "note": f"run has driven {len(completed)} unit(s) to a terminal state, at "
                         f"the maxTasksPerRun cap of {MAX_TASKS_PER_RUN} -- no new work is "
                         f"handed out until a new run (a fresh --run-id) starts. Units "
@@ -2449,42 +2593,11 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
                 and i["parent"]["number"] == epic]
 
     runner(["git", "-C", repo_path, "fetch", "origin"])
-    active_branches = active_worktree_branches(repo_path, runner=runner)
-
-    # A worktree nothing can advance (closed/parked/blocked issue) is neither a slot
-    # nor a collision risk; both derivations below use this one split.
-    occupied, stale = [], []
-    for branch in sorted(active_branches):
-        number = issue_number_from_branch(branch)
-        if number is None:
-            continue
-        issue = by_number.get(number)
-        if issue is None or issue["state"] != "OPEN":
-            stale.append({"branch": branch, "reason": "issue is closed or not found"})
-            continue
-        status = pipeline_status(issue)
-        if status == "needs-human" or status in GATE_PENDING_STATUSES:
-            stale.append({"branch": branch, "reason": f"Pipeline Status is {status!r}"})
-            continue
-        if gh.blocked_by(number):
-            stale.append({"branch": branch, "reason": "blocked by an open dependency"})
-            continue
-        occupied.append(branch)
-
-    active_footprints = []
-    for branch in occupied:
-        number = issue_number_from_branch(branch)
-        if number is None:
-            continue
-        # Collisions span the whole dev lane, so use the active branch's own epic.
-        active_parent = (by_number.get(number) or {}).get("parent")
-        fp = read_footprint(repo_path, number, runner=runner,
-                             epic=active_parent["number"] if active_parent else None)
-        if fp:
-            active_footprints.append((number, fp))
+    lane = dev_lane_slots(gh, repo_path, epic, all_issues, runner=runner, cap=limit)
+    active_branches = lane["active_branches"]
 
     eligible, skipped = [], []
-    selected_footprints = list(active_footprints)
+    selected_footprints = dev_lane_footprints(lane, repo_path, by_number, runner=runner)
     for issue in sorted(children, key=sort_key):
         number = issue["number"]
         branch = issue_branch(number)
@@ -2516,22 +2629,26 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
                                                          "epic-<n>/lld.md, on origin -- "
                                                          "cannot verify non-overlap"})
             continue
-        collision = next((n for n, fp in selected_footprints if footprint_overlaps(footprint, fp)), None)
+        collision = footprint_collision(footprint, selected_footprints)
         if collision is not None:
-            skipped.append({"issue": number, "reason": f"footprint overlaps active/eligible #{collision}"})
+            skipped.append({"issue": number, "reason": collision})
             continue
         eligible.append({"issue": number, "branch": branch, "stage": stage, "title": issue["title"]})
         selected_footprints.append((number, footprint))
 
-    # An occupied branch holds a slot even when its footprint was unreadable.
-    active_count = len(occupied)
-    slots = max(0, limit - active_count)
+    # A holder keeps its slot even when its footprint was unreadable.
+    active_count = len(lane["occupied"])
+    slots = lane["free"]
     selected = eligible[:slots]
     note_in_flight(epic, run_id, {u["issue"]: u["stage"] for u in selected})
     return {"parallel_ready": selected, "count": len(selected), "eligible_total": len(eligible),
-            "active_count": active_count, "active_branches": sorted(occupied),
-            "limit": limit, "slots_available": slots, "epic": epic, "skipped": skipped,
-            "stale_worktrees": stale, "cap_enforced": cap_enforced, "stop_at_cap": False}
+            "active_count": active_count,
+            "active_branches": sorted(h["branch"] for h in lane["holders"]),
+            "limit": limit, "slots_available": slots,
+            "slots": {"cap": limit, "occupied": lane["occupied"], "free": slots,
+                      "excluded_other_epic": lane["excluded_other_epic"]},
+            "epic": epic, "skipped": skipped, "stale_worktrees": lane["stale_worktrees"],
+            "cap_enforced": cap_enforced, "stop_at_cap": False}
 
 
 def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional[int] = None,
@@ -5848,6 +5965,8 @@ def main(argv: Optional[list] = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("next-action")
     p.add_argument("epic", type=int, help="The epic to drive")
+    p.add_argument("--repo-path", default=".",
+                    help="Repo whose `git worktree list` gives the dev lane's slot holders")
     p.add_argument("--run-id", default=None,
                     help="This run's id; enables the maxTasksPerRun cap, shared across an "
                          "Initiative's Epics (omit = no cap)")

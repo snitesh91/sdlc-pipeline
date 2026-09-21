@@ -32,6 +32,16 @@ eligibility.
 `start-stage`. A child stuck `in-progress` with no worktree is a crashed run: route it
 through `next-action`'s `resume`, not this pool.
 
+**One slot definition, both commands.** A dev-lane slot is held by an open child of the epic
+that has started — a live worktree on its branch, Pipeline Status `in-progress`, or Stage
+`pr-review` — and is not parked (`needs-human`, gate-pending) or blocked. `next-action` and
+`list-parallel-ready` share the helper and the `parallelism.devLane` cap, and both report the
+arithmetic as `slots: {cap, occupied, free, excluded_other_epic}`. A fresh unit needs a free
+slot and a `## Footprint` disjoint from every holder's; `next-action` lists what it held back
+under `dev_lane.deferred` (a `none` carrying it means wait for a tracked agent, then survey
+again). Other epics' worktrees hold no slot and are listed in `excluded_other_epic`; set
+`parallelism.crossEpicFootprintCheck: true` to include them in the overlap check only.
+
 ## Design lane
 
 Standing epics only. `list-design-ready <epic> --repo-path <p>` → `design_ready`: up to
@@ -181,9 +191,9 @@ difference is minutes.
   sees the epic branch's config, `merge-pr`/`close-epic` in the main checkout see
   `main`'s. Land config changes on `main` (their own PR) so the gate enforces what the
   branches attest against.
-- Caps and the one-suite-heavy-stage rule are machine-wide, but nothing enforces the
-  latter across invocations; keep it by hand. (Cross-epic coordination file: DEFERRED,
-  not built.)
+- The dev-lane cap is per epic ("Parallel implementation lane"); the one-suite-heavy-stage
+  rule is machine-wide, but nothing enforces it across invocations; keep it by hand.
+  (Cross-epic coordination file: DEFERRED, not built.)
 
 ### Per-epic isolated stack
 

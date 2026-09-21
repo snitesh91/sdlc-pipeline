@@ -7,8 +7,9 @@ import re
 import sys
 
 import _metrics
-from _common import (RESULT_FORMAT, load_json, message_text, read_input, repo_config, run,
-                     run_states, sdlc_result, sdlc_role)
+from _common import (RESULT_FORMAT, first_prompt, load_json, message_text, prompt_header,
+                     read_input, repo_config, run, run_states, sdlc_result, sdlc_role)
+from agent_guard import release_slot
 
 TAIL_BYTES = 2_000_000
 COMMENT_ROLES = ("product", "architecture", "lld")
@@ -96,6 +97,17 @@ def posted_handoff(path: str, role: str):
     return False
 
 
+def release_fanout_slot(data: dict) -> None:
+    """A finished fan-out child frees the slot it held under its parent (named by the
+    sibling `.meta.json`), so the parent's next launch can seat the remaining axis."""
+    path = str(data.get("agent_transcript_path") or "")
+    if not path.endswith(".jsonl"):
+        return
+    parent = load_json(path[:-len(".jsonl")] + ".meta.json").get("parentAgentId")
+    if parent:
+        release_slot(str(parent), prompt_header(first_prompt(path)).get("axis", ""))
+
+
 def record(data: dict, config: dict, final_text) -> None:
     """Append this agent's metrics record; never affects the stop decision."""
     try:
@@ -114,6 +126,7 @@ def main() -> int:
     config_path = repo_config(data.get("cwd") or os.getcwd())
     if not config_path:
         return 0
+    release_fanout_slot(data)
     text = data.get("last_assistant_message")
     if sdlc_role(data.get("agent_type")) and not data.get("stop_hook_active"):
         if not isinstance(text, str):

@@ -850,6 +850,72 @@ def test_agent_guard_lld_review_caps_at_four(tmp_path, sdlc_repo):
     assert out["permissionDecision"] == "deny" and "at most 4" in out["permissionDecisionReason"]
 
 
+def _child_stop(tmp_path, cwd, child_id, parent_id, prompt):
+    """A fan-out child's SubagentStop: its transcript plus the `.meta.json` naming its parent."""
+    sub = tmp_path / "s" / "subagents"
+    sub.mkdir(parents=True, exist_ok=True)
+    path = sub / f"agent-{child_id}.jsonl"
+    path.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": prompt}})
+                    + "\n" + json.dumps({"type": "assistant", "message": {
+                        "role": "assistant", "content": [{"type": "text", "text": "nothing"}]}})
+                    + "\n")
+    (sub / f"agent-{child_id}.meta.json").write_text(json.dumps(
+        {"agentType": "general-purpose", "parentAgentId": parent_id, "spawnDepth": 2}))
+    proc = run_hook("subagent_stop.py", {
+        "agent_id": child_id, "agent_type": "general-purpose", "agent_transcript_path": str(path),
+        "cwd": cwd, "stop_hook_active": False}, env={"CLAUDE_PLUGIN_DATA": str(tmp_path / "data")})
+    assert proc.returncode == 0, proc.stderr
+
+
+def _retry_after(out):
+    assert out["permissionDecision"] == "deny", out
+    tail = out["permissionDecisionReason"].split("retry_after=", 1)[1]
+    return json.JSONDecoder().raw_decode(tail)[0]
+
+
+def test_agent_guard_denied_launch_waits_on_the_holders_and_reclaims_when_one_reports(tmp_path, sdlc_repo):
+    _parent_transcript(tmp_path, "p1", "ROLE: arch-review ISSUE: 5\nReview")
+    parent = ("p1", "sdlc:design-review")
+    for axis in ("flows", "completeness"):
+        assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", parent=parent,
+                                   prompt=f"AXIS: {axis}\nGo")) == "sonnet"
+    third = launch(sdlc_repo, tmp_path, "general-purpose", parent=parent, prompt="AXIS: security\nGo")
+    assert "at most 2" in third["permissionDecisionReason"]
+    retry = _retry_after(third)
+    assert retry["waiting_on"] == ["flows", "completeness"] and "re-run" in retry["hint"]
+    # The flows child reports: its slot frees and the third axis seats.
+    _child_stop(tmp_path, sdlc_repo, "c1", "p1", "AXIS: flows\nGo")
+    assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", parent=parent,
+                               prompt="AXIS: security\nGo")) == "sonnet"
+    assert json.loads((tmp_path / "data" / "fanout" / "p1").read_text()) == ["completeness", "security"]
+    fourth = launch(sdlc_repo, tmp_path, "general-purpose", parent=parent, prompt="AXIS: perf\nGo")
+    assert _retry_after(fourth)["waiting_on"] == ["completeness", "security"]
+    # A child of a parent holding no slots frees nothing and leaves no file behind.
+    _child_stop(tmp_path, sdlc_repo, "c2", "nobody", "AXIS: flows\nGo")
+    assert not (tmp_path / "data" / "fanout" / "nobody").exists()
+
+
+def test_agent_guard_applies_the_stricter_cap_when_the_parent_role_is_unreadable(tmp_path, sdlc_repo):
+    parent = ("nohdr", "sdlc:design-review")  # no parent transcript: the ROLE header is unreadable
+    for _ in range(2):
+        out = launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)
+        assert forced_model(out) == "sonnet" and "stricter arch-review" in out["additionalContext"]
+    third = launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)
+    assert third["permissionDecision"] == "deny"
+    assert "at most 2" in third["permissionDecisionReason"]
+    assert "stricter arch-review" in third["permissionDecisionReason"]
+    # Denied outright when the stricter of the two policies forbids fan-out.
+    repo = _policy_repo(tmp_path, {"fanout": {"lld-review": {"allowed": False}}})
+    out = launch(repo, tmp_path, "general-purpose", parent=("nohdr2", "sdlc:design-review"))
+    assert out["permissionDecision"] == "deny" and "single pass" in out["permissionDecisionReason"]
+    assert "stricter lld-review" in out["permissionDecisionReason"]
+    # Positive control: a readable header gets its own cap and no warning.
+    _parent_transcript(tmp_path, "hdr", "ROLE: lld-review ISSUE: 5\nReview")
+    for _ in range(3):
+        out = launch(sdlc_repo, tmp_path, "general-purpose", parent=("hdr", "sdlc:design-review"))
+        assert forced_model(out) == "sonnet" and "additionalContext" not in out
+
+
 def test_agent_guard_counts_parallel_launches_exactly(tmp_path, sdlc_repo):
     _parent_transcript(tmp_path, "p9", "ROLE: arch-review ISSUE: 5\nReview")
     payload = json.dumps({"tool_name": "Agent", "cwd": sdlc_repo, "agent_id": "p9",

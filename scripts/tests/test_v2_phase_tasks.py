@@ -443,7 +443,8 @@ def test_next_action_hands_out_advanced_tasks_once_the_v2_epic_is_architected():
     ])
 
     assert s.decide_next_action(gh, 9) == {
-        "action": "delegate", "issue": 13, "unit": "issue", "stage": "development"}
+        "action": "delegate", "issue": 13, "unit": "issue", "stage": "development",
+        "slots": {"cap": 1, "occupied": [], "free": 1, "excluded_other_epic": []}}
 
 
 # --- task headings, doc merges, closing and worktree release -----------------
@@ -752,6 +753,27 @@ def test_list_parallel_ready_hands_out_nothing_at_the_run_cap(run_state, repo):
     assert result["parallel_ready"] == []
     assert result["stop_at_cap"] is True
     assert result["cap_enforced"] is True
+
+
+def test_next_action_never_run_cap_defers_a_unit_this_run_handed_out(run_state):
+    """list-parallel-ready handed #13 out at 1/2; #12 then merged. #13 is started work, not fresh."""
+    gh = _architected_epic()
+    (run_state / "epic-9.json").write_text(json.dumps(
+        {"run_id": "run-1", "terminal": [11, 12], "in_flight": {"13": "development"}}))
+
+    result = s.decide_next_action(gh, 9, run_id="run-1")
+
+    assert result["action"] == "delegate" and result["issue"] == 13
+
+
+def test_next_action_still_stops_at_the_cap_for_a_unit_not_handed_out(run_state):
+    gh = _architected_epic()
+    (run_state / "epic-9.json").write_text(json.dumps(
+        {"run_id": "run-1", "terminal": [11, 12], "in_flight": {}}))
+
+    result = s.decide_next_action(gh, 9, run_id="run-1")
+
+    assert result["action"] == "stop-at-cap" and result["in_flight"] == []
 
 
 def test_a_new_run_id_resets_the_cap(run_state):

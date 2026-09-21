@@ -500,6 +500,10 @@ def _no_blockers_responses(*numbers):
     }
 
 
+# `slots` on a dev-lane `delegate` when nothing holds a slot (sample config: devLane 1).
+_EMPTY_LANE = {"cap": 1, "occupied": [], "free": 1, "excluded_other_epic": []}
+
+
 def _stage_assign_responses(number, stage):
     """Node-id lookup + Stage-field write decide_next_action issues for an unstaged eligible issue."""
     from sdlc_next import _ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION, STAGE_FIELD_ID, STAGE_OPTION_IDS
@@ -585,7 +589,8 @@ def test_blocked_issue_excluded_but_its_open_dependency_is_worked():
     responses.update(_no_blockers_responses(6))
     runner = ScriptedRunner(responses)
     gh = GitHub(runner=runner)
-    assert decide_next_action(gh, 90) == {"action": "delegate", "issue": 6, "unit": "issue", "stage": "development"}
+    assert decide_next_action(gh, 90) == {"action": "delegate", "issue": 6, "unit": "issue",
+                                          "stage": "development", "slots": _EMPTY_LANE}
 
 
 def test_blocked_issue_whose_dependency_closed_is_available():
@@ -598,7 +603,8 @@ def test_blocked_issue_whose_dependency_closed_is_available():
     responses.update(_no_blockers_responses(5))
     runner = ScriptedRunner(responses)
     gh = GitHub(runner=runner)
-    assert decide_next_action(gh, 90) == {"action": "delegate", "issue": 5, "unit": "issue", "stage": "development"}
+    assert decide_next_action(gh, 90) == {"action": "delegate", "issue": 5, "unit": "issue",
+                                          "stage": "development", "slots": _EMPTY_LANE}
 
 
 def test_picks_highest_priority_then_oldest_among_eligible_within_one_epic():
@@ -3012,7 +3018,7 @@ def test_next_action_picks_a_development_task_by_sort_key():
     responses.update(_no_blockers_responses(185, 186))
     gh = GitHub(runner=ScriptedRunner(responses))
     assert decide_next_action(gh, 110) == {"action": "delegate", "issue": 186, "unit": "issue",
-                                            "stage": "development"}
+                                            "stage": "development", "slots": _EMPTY_LANE}
 
 
 def test_next_action_resumes_development_after_a_crash_between_the_two_advance_writes():
@@ -4545,6 +4551,158 @@ def test_list_parallel_ready_still_collides_with_a_live_worktrees_footprint():
         {"issue": 323, "reason": "already active in its own worktree"},
         {"issue": 494, "reason": "footprint overlaps active/eligible #323"}]
     assert result["active_count"] == 1
+
+
+# --- One slot definition: next-action and list-parallel-ready agree on the dev lane ---
+
+def _lane_responses(issues, worktrees, footprints):
+    """Scripted issue list, fetch, `worktree list` and per-issue architecture.md footprints."""
+    responses = {
+        tuple(_list_argv()): _list_response(issues),
+        ("git", "-C", "/repo", "fetch", "origin"): "",
+        ("git", "-C", "/repo", "worktree", "list", "--porcelain"):
+            _worktree_list(("/repo", "main"), *worktrees),
+    }
+    for n, fp in footprints.items():
+        responses[("git", "-C", "/repo", "show",
+                   f"origin/issue-{n}:docs/sdlc/issue-{n}/architecture.md")] = \
+            f"## Footprint\n\n- `{fp}`\n"
+    return responses
+
+
+def test_next_action_and_list_parallel_ready_agree_a_pr_review_holder_fills_the_lane():
+    """Regression: #185 is started (pr-review, live worktree) and not terminal, so the lane
+    (cap 1) is full. list-parallel-ready said so while next-action handed out #187 anyway."""
+    from sdlc_next import GitHub, cmd_list_parallel_ready, decide_next_action
+    epic = _epic(110, labels=["epic:architected"])
+    holder = _issue(185, stage="pr-review", parent=110, created="2026-08-02T00:00:00Z")
+    fresh = _issue(187, stage="development", parent=110, created="2026-08-01T00:00:00Z")
+    responses = _lane_responses([epic, holder, fresh], [("/tmp/sdlc-dev-185", "issue-185")],
+                                {185: "backend/a/**", 187: "backend/b/**"})
+    responses.update(_no_blockers_responses(185, 187))
+    runner = ScriptedRunner(responses)
+    gh = GitHub(runner=runner)
+    pool = cmd_list_parallel_ready(gh, "/repo", 110, runner=runner)
+    assert pool["slots"] == {"cap": 1, "occupied": [185], "free": 0, "excluded_other_epic": []}
+    assert pool["parallel_ready"] == [] and pool["eligible_total"] == 1
+    assert pool["active_count"] == 1 and pool["active_branches"] == ["issue-185"]
+    decision = decide_next_action(gh, 110, repo_path="/repo", runner=runner)
+    assert (decision["action"], decision["issue"], decision["stage"]) == ("delegate", 185, "pr-review")
+    assert decision["slots"] == pool["slots"]
+    assert decision["dev_lane"]["deferred"] == [
+        {"issue": 187, "reason": "dev lane full: 1/1 slot(s) held by #185"}]
+
+
+def test_a_parked_holder_frees_the_lane_for_both_commands():
+    """Positive control: parked (needs-human) is not started work; #187 goes out both ways."""
+    from sdlc_next import GitHub, cmd_list_parallel_ready, decide_next_action
+    epic = _epic(110, labels=["epic:architected"])
+    parked = _issue(185, stage="pr-review", status="needs-human", parent=110)
+    fresh = _issue(187, stage="development", parent=110)
+    responses = _lane_responses([epic, parked, fresh], [("/tmp/sdlc-dev-185", "issue-185")],
+                                {185: "backend/a/**", 187: "backend/b/**"})
+    responses.update(_no_blockers_responses(187))
+    runner = ScriptedRunner(responses)
+    gh = GitHub(runner=runner)
+    pool = cmd_list_parallel_ready(gh, "/repo", 110, runner=runner)
+    assert [c["issue"] for c in pool["parallel_ready"]] == [187]
+    assert pool["slots"] == _EMPTY_LANE
+    decision = decide_next_action(gh, 110, repo_path="/repo", runner=runner)
+    assert decision == {"action": "delegate", "issue": 187, "unit": "issue",
+                        "stage": "development", "slots": _EMPTY_LANE}
+
+
+def test_next_action_defers_a_fresh_unit_whose_footprint_overlaps_a_holder(monkeypatch):
+    """The overlap verdict is one helper: what list-parallel-ready refuses, next-action defers."""
+    import sdlc_next
+    monkeypatch.setattr(sdlc_next, "DEV_LANE_PARALLELISM", 2)
+    from sdlc_next import GitHub, cmd_list_parallel_ready, decide_next_action
+    epic = _epic(110, labels=["epic:architected"])
+    holder = _issue(185, stage="pr-review", parent=110, created="2026-08-02T00:00:00Z")
+    fresh = _issue(187, stage="development", parent=110, created="2026-08-01T00:00:00Z")
+    responses = _lane_responses([epic, holder, fresh], [("/tmp/sdlc-dev-185", "issue-185")],
+                                {185: "backend/a/**", 187: "backend/a/core.ts"})
+    responses.update(_no_blockers_responses(185, 187))
+    runner = ScriptedRunner(responses)
+    gh = GitHub(runner=runner)
+    pool = cmd_list_parallel_ready(gh, "/repo", 110, runner=runner)
+    assert {s["issue"]: s["reason"] for s in pool["skipped"]}[187] == \
+        "footprint overlaps active/eligible #185"
+    assert pool["slots"] == {"cap": 2, "occupied": [185], "free": 1, "excluded_other_epic": []}
+    decision = decide_next_action(gh, 110, repo_path="/repo", runner=runner)
+    assert (decision["action"], decision["issue"]) == ("delegate", 185)
+    assert decision["dev_lane"]["deferred"] == [
+        {"issue": 187, "reason": "footprint overlaps active/eligible #185"}]
+    # Positive control: a disjoint footprint takes the free slot in both commands.
+    runner.responses[("git", "-C", "/repo", "show",
+                      "origin/issue-187:docs/sdlc/issue-187/architecture.md")] = \
+        "## Footprint\n\n- `backend/b/**`\n"
+    assert [c["issue"] for c in cmd_list_parallel_ready(gh, "/repo", 110, runner=runner)
+            ["parallel_ready"]] == [187]
+    decision = decide_next_action(gh, 110, repo_path="/repo", runner=runner)
+    assert decision == {"action": "delegate", "issue": 187, "unit": "issue", "stage": "development",
+                        "slots": {"cap": 2, "occupied": [185], "free": 1,
+                                  "excluded_other_epic": []}}
+
+
+def test_list_parallel_ready_counts_a_crashed_in_progress_child_as_a_slot_holder():
+    """A crashed unit is started work: resuming it takes the slot, so nothing else is handed out."""
+    from sdlc_next import GitHub, cmd_list_parallel_ready
+    epic = _epic(110, labels=["epic:architected"])
+    crashed = _issue(185, stage="development", status="in-progress", parent=110)
+    fresh = _issue(187, stage="development", parent=110)
+    responses = _lane_responses([epic, crashed, fresh], [],
+                                {185: "backend/a/**", 187: "backend/b/**"})
+    responses.update(_no_blockers_responses(185, 187))
+    runner = ScriptedRunner(responses)
+    pool = cmd_list_parallel_ready(GitHub(runner=runner), "/repo", 110, runner=runner)
+    assert pool["slots"] == {"cap": 1, "occupied": [185], "free": 0, "excluded_other_epic": []}
+    assert pool["parallel_ready"] == [] and pool["eligible_total"] == 1
+    assert "crashed run" in pool["skipped"][0]["reason"]
+
+
+def test_other_epics_worktrees_hold_no_slot_and_join_the_overlap_check_only_when_configured(monkeypatch):
+    import sdlc_next
+    monkeypatch.setattr(sdlc_next, "DEV_LANE_PARALLELISM", 2)
+    from sdlc_next import GitHub, cmd_list_parallel_ready, decide_next_action
+    epic = _epic(110, labels=["epic:architected"])
+    other_epic = _epic(120, labels=["epic:architected"])
+    other = _issue(300, stage="development", parent=120)
+    fresh = _issue(187, stage="development", parent=110)
+    responses = _lane_responses([epic, other_epic, other, fresh],
+                                [("/tmp/sdlc-dev-300", "issue-300")],
+                                {300: "backend/a/**", 187: "backend/a/**"})
+    responses.update(_no_blockers_responses(187))
+    runner = ScriptedRunner(responses)
+    gh = GitHub(runner=runner)
+
+    pool = cmd_list_parallel_ready(gh, "/repo", 110, runner=runner)
+    assert [c["issue"] for c in pool["parallel_ready"]] == [187]
+    assert pool["slots"] == {"cap": 2, "occupied": [], "free": 2,
+                             "excluded_other_epic": ["issue-300"]}
+    assert pool["active_branches"] == [] and pool["stale_worktrees"] == []
+    decision = decide_next_action(gh, 110, repo_path="/repo", runner=runner)
+    assert (decision["action"], decision["issue"]) == ("delegate", 187)
+    assert decision["slots"] == pool["slots"]
+
+    monkeypatch.setattr(sdlc_next, "CROSS_EPIC_FOOTPRINT_CHECK", True)
+    pool = cmd_list_parallel_ready(gh, "/repo", 110, runner=runner)
+    assert pool["skipped"] == [{"issue": 187, "reason": "footprint overlaps active/eligible #300"}]
+    assert pool["slots"] == {"cap": 2, "occupied": [], "free": 2, "excluded_other_epic": []}
+    decision = decide_next_action(gh, 110, repo_path="/repo", runner=runner)
+    assert decision["action"] == "none" and decision["slots"] == pool["slots"]
+    assert decision["dev_lane"]["deferred"] == [
+        {"issue": 187, "reason": "footprint overlaps active/eligible #300"}]
+
+
+def test_cli_next_action_passes_repo_path(monkeypatch):
+    import sdlc_next
+    monkeypatch.setenv("GITHUB_TOKEN", "x")
+    captured = {}
+    monkeypatch.setattr(sdlc_next, "cmd_next_action",
+                        lambda gh, a: captured.update(vars(a)) or {"action": "none"})
+    assert sdlc_next.main(["next-action", "110", "--repo-path", "/repo"]) == 0
+    assert captured["repo_path"] == "/repo" and captured["epic"] == 110
 
 
 def _verify_exit_runners(tmp_path, stage_field_value):
