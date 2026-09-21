@@ -288,20 +288,41 @@ never reaches `main`; merge its design PR). Remaining items: closing verificatio
 
 1. First call: refuses on open children (`open_children`); otherwise, when `epic-<n>` is
    behind `origin/main`, reconciles it and stops (`reconciled`); when already current it
-   goes straight to the evidence check below. Either result lists the required suites the
-   epic's changes cover that have neither a passing check on the epic PR nor an attestation
-   at the epic head: `unattested_suites` (attestable — run and attest) and `awaiting_checks`
-   (`attestable: false` — only the epic PR's check can satisfy them; never run locally).
+   goes straight to the evidence check below. Every result carries the required suites the
+   epic's changes cover that nothing yet satisfies at the epic head — `unattested_suites`
+   (attestable: run and attest) and `awaiting_checks` (`attestable: false`: only the epic
+   PR's check can satisfy them; never run locally) — and `evidence` (`exploratory` and each
+   suite: `fresh` | `carried_forward_from <sha>` | `children:#a,#b` | `passing_check` |
+   `not_required` | `missing`), with `carried_forward_files` (the delta it judged safe) and
+   `evidence_breaks` (why a suite's child chain failed: the child PR or direct commit that
+   breaks it).
 2. Run the exploratory pass against the reconciled tree and record it. Also run
    every suite in `unattested_suites`.
 3. Second call: refuses on missing or stale evidence (`missing_verification`) or a required
-   suite with neither a passing check nor an attestation; otherwise merges `epic-<n>` to
-   `main`. A failed, pending or never-started GitHub Actions run never blocks this merge by
-   itself — it only leaves a suite unsatisfied, which matters for one in `awaiting_checks`.
-   The epic PR exists only from this call, so attest each suite right after it
+   suite still `missing` (`checks: missing-checks`); otherwise merges `epic-<n>` to `main`.
+   A failed, pending or never-started GitHub Actions run never blocks this merge by itself —
+   it only leaves a suite unsatisfied, which matters for one in `awaiting_checks`. The epic
+   PR exists only from this call, so attest each suite it names right after it
    (`record-local-ci --pr <pr>` on the epic head), wait for `awaiting_checks` to pass, and
    call again.
 4. `teardown-epic-stack <n>` (no-op unless provisioned).
+
+**Evidence carry-forward — what a later commit on `epic-<n>` does to recorded evidence:**
+
+- The exploratory record stays valid across a delta that touches only
+  `pipeline.epicClose.evidenceCarryForward.paths` (default: `**/*.md`, `docs/**`,
+  `<docRoot>/**`; the pipeline config never). Any other path, or a delta of 300+ files,
+  stales it: re-run and re-record. Widen the set in config for fixture or evidence
+  directories you know cannot change runtime behaviour; never widen it to source or tests.
+- A suite attestation on the epic PR carries forward when nothing the suite's workflow
+  covers changed since its stamped sha (the `merge-pr` rule).
+- A suite with no attestation on the epic PR is still satisfied when every merged child PR
+  that touched its paths carries an attestation or passing check at its merged head and no
+  direct commit on `epic-<n>` (a `main` reconcile, a closing-delta fix) touches those paths;
+  otherwise `evidence_breaks` names the child PR or commit, and that suite must run on the
+  epic head.
+- `close-epic <n> --no-carry-forward` accepts only evidence stamped at the epic head itself:
+  no delta carry-forward, no child chain.
 
 **Preflight the machine before an e2e run** (the e2e-test Task's, or any you run yourself). An exhausted Docker VM makes a run
 unrecordable (`Page crashed`, `ENOSPC`, container OOM kills). Check `docker system df`, VM disk
@@ -318,8 +339,9 @@ fresh `sdlc:development` agent and a run-only brief (fix nothing, report). **You
 exploratory half with `record-epic-verification <n> --kind exploratory --summary "..."` (it
 stamps the tested epic-branch head; `--sha` names an earlier tested head; the summary is the
 findings comment the agent returned) — an agent never records it. Evidence older than the last
-`origin/main` reconcile, or predating code that landed on `epic-<n>` since its stamped head,
-counts as missing. **Never record a verification you did not run clean.**
+`origin/main` reconcile, or predating a later change on `epic-<n>` outside the carry-forward
+set ("Evidence carry-forward" above), counts as missing. **Never record a verification you
+did not run clean.**
 
 **With `epicClose.auto` on, escalate instead of closing when:**
 
@@ -347,12 +369,9 @@ evidence goal — two single zero-retry runs are not a comparison); how the suit
 **Close-blocker lane — only with operator authorisation.** A Blocker/Critical fix that
 passes the *fits* test ("Architecture deviation escalation") may skip `lld` and go
 straight to `set-stage <n> --stage development` against the epic branch; without the
-operator's say-so it runs the full lane. **Any non-docs change to `epic-<n>` after the
-tested head invalidates the closing verification** — `close-epic` refuses the stale record;
-re-run it and re-record. A docs-only change does not. **Close evidence is head-SHA-bound:**
-even a fixtures-only fix (a seed, an e2e helper, a golden) lands a new head, so the
-exploratory pass and every `unattested_suites` run must be redone against it — there is no
-shortcut that reuses the pre-fix evidence.
+operator's say-so it runs the full lane. A fix that lands on `epic-<n>` after the tested head
+is judged by "Evidence carry-forward" above: `close-epic`'s `evidence` field says what still
+stands and what must be re-run and re-recorded.
 
 **Clean the epic worktree before the closing merge.** The exploratory pass and the
 `unattested_suites` runs leave the epic-branch worktree dirty (evidence JSONs, `uploads/`,

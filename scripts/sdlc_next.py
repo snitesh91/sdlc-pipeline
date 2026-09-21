@@ -140,7 +140,10 @@ _PIPELINE_DEFAULTS = {
     "resume": {"liveWindowMinutes": 30},
     # `auto`: the orchestrator runs the final `close-epic` itself; close-epic's own
     # refusals (open children, stale verification, failing checks) still apply.
-    "epicClose": {"auto": False},
+    # `evidenceCarryForward.paths`: globs a commit after the tested head may touch without
+    # invalidating the exploratory evidence (`{docRoot}` expands to `docRoot`).
+    "epicClose": {"auto": False,
+                  "evidenceCarryForward": {"paths": ["**/*.md", "docs/**", "{docRoot}/**"]}},
     # Priority / Effort `create-issue` sets when no flag names one (fields configured only).
     "issueDefaults": {"priority": "Medium", "effort": "Medium"},
     # Stage models and fan-out: one home, hooks/model_policy.json (agent_guard enforces it).
@@ -192,6 +195,10 @@ ESCALATION = PIPELINE["escalation"]
 PRODUCT_WIP_CAP = PIPELINE["productWip"]["maxGateAPending"]
 # A resume younger than this is treated as possibly still live (item: liveness signal).
 RESUME_LIVE_WINDOW_MINUTES = PIPELINE["resume"]["liveWindowMinutes"]
+EVIDENCE_CARRY_FORWARD_GLOBS = tuple(
+    g.replace("{docRoot}", DOC_ROOT.rstrip("/"))
+    for g in ((PIPELINE["epicClose"].get("evidenceCarryForward") or {}).get("paths")
+              or _PIPELINE_DEFAULTS["epicClose"]["evidenceCarryForward"]["paths"]))
 
 
 def issue_branch(number: int) -> str:
@@ -548,6 +555,18 @@ class GitHub:
         """Files `base` changed since its merge-base with `head` (REST compare). GitHub
         returns at most 300 files; callers treat a delta at that cap as truncated."""
         out = self._run(["gh", "api", f"repos/{self.repo}/compare/{head}...{base}",
+                          "--jq", ".files[]?.filename"])
+        return [line for line in out.splitlines() if line.strip()]
+
+    def branch_commits(self, base: str, head: str) -> list:
+        """Shas of the commits on `head` that `base` lacks (REST compare, capped at 250)."""
+        out = self._run(["gh", "api", f"repos/{self.repo}/compare/{base}...{head}",
+                          "--jq", ".commits[]?.sha"])
+        return [line for line in out.splitlines() if line.strip()]
+
+    def commit_files(self, sha: str) -> list:
+        """Files one commit changed against its first parent (capped at 300)."""
+        out = self._run(["gh", "api", f"repos/{self.repo}/commits/{sha}",
                           "--jq", ".files[]?.filename"])
         return [line for line in out.splitlines() if line.strip()]
 
@@ -1051,48 +1070,177 @@ def missing_epic_verification(comments: list, stale_since: Optional[Callable] = 
     return problems
 
 
-def _epic_evidence_stale(gh, branch: str) -> Callable:
-    """`stale_since` for `missing_epic_verification`: flags code changes on `branch` after `sha`."""
-    def check(sha: str) -> Optional[str]:
-        try:
-            files = gh.files_since(sha, branch)
-        except GhError:
-            return (f"names a tested head ({sha[:10]}) that `{branch}` cannot be compared "
+def _glob_matches(path: str, glob: str) -> bool:
+    """fnmatch with GHA's rule that a leading `**/` also matches at the repo root."""
+    return fnmatch.fnmatch(path, glob) or (glob.startswith("**/") and fnmatch.fnmatch(path, glob[3:]))
+
+
+def evidence_carries_forward(path: str) -> bool:
+    """Whether a file changed after the exploratory evidence was stamped leaves it valid: one
+    of `pipeline.epicClose.evidenceCarryForward.paths`; the pipeline config never is."""
+    if touches_pipeline_config([path]):
+        return False
+    return any(_glob_matches(path, g) for g in EVIDENCE_CARRY_FORWARD_GLOBS)
+
+
+class _EpicEvidenceDelta:
+    """`stale_since` for `missing_epic_verification`: how `branch` moved on from a tested
+    `sha` (`fresh` | `carried_forward` | `stale` | `uncomparable`, with the files), remembered
+    per sha so close-epic can report what it carried forward."""
+
+    def __init__(self, gh, branch: str, carry_forward: bool = True):
+        self.gh, self.branch, self.carry_forward, self.deltas = gh, branch, carry_forward, {}
+
+    def classify(self, sha: str) -> dict:
+        if sha not in self.deltas:
+            try:
+                files = self.gh.files_since(sha, self.branch)
+                status = ("fresh" if not files
+                          else "carried_forward" if self.carry_forward and len(files) < 300
+                          and all(evidence_carries_forward(p) for p in files)
+                          else "stale")
+            except GhError:
+                files, status = [], "uncomparable"
+            self.deltas[sha] = {"status": status, "files": files}
+        return self.deltas[sha]
+
+    def __call__(self, sha: str) -> Optional[str]:
+        status = self.classify(sha)["status"]
+        if status == "uncomparable":
+            return (f"names a tested head ({sha[:10]}) that `{self.branch}` cannot be compared "
                     f"against -- re-run and re-record it")
-        if len(files) >= 300 or not all(_is_doc_path(p) for p in files):
-            return (f"tested `{branch}` at {sha[:10]}, but code has landed since -- it "
-                    f"describes a different tree; re-run it and re-record")
+        if status == "stale":
+            return (f"tested `{self.branch}` at {sha[:10]}, but code has landed since -- it "
+                    f"describes a different tree; re-run it and re-record"
+                    + ("" if self.carry_forward else " (carry-forward disabled)"))
         return None
-    return check
 
 
-def _passing_checks(checks: list) -> list:
-    """Epic close ignores GitHub Actions results except as positive evidence: a passing check
-    still satisfies its required suite, but a failed, pending or never-started run (e.g. Actions
-    disabled or out of budget) neither blocks the merge nor counts. Attestations remain."""
-    return [c for c in checks if c.get("bucket") == "pass"]
+def _exploratory_evidence_status(comments: list, delta: _EpicEvidenceDelta,
+                                 problems: list) -> str:
+    """`fresh` | `carried_forward_from <sha>` | `missing` for close-epic's `evidence` field."""
+    if problems:
+        return "missing"
+    sha = None
+    for c in comments:
+        m = _EPIC_VERIFICATION_MARKER.search(c.get("body", ""))
+        if m and m.group(1) == "exploratory":
+            sha = m.group(3)  # the latest record wins, as in `missing_epic_verification`
+    if not sha:
+        return "missing"
+    status = delta.classify(sha)["status"]
+    return f"carried_forward_from {sha[:10]}" if status == "carried_forward" else status
 
 
-def _epic_suite_gaps(gh, branch: str) -> dict:
-    """Required suites the epic PR (whose changes vs `main` cover them) still lacks a passing
-    check or an attestation for at the epic branch head; needed before the merge. Split into
-    `unattested_suites` (run and attest locally) and `awaiting_checks` (`attestable: false`:
-    only the suite's GHA check on the epic PR can satisfy it)."""
-    files = gh.base_delta_files("main", base=branch)
-    head = gh.branch_head_sha(branch)
-    existing = gh.pr_list_for_branch(branch)
-    checks, comments = [], []
-    if existing:
-        number = existing[0]["number"]
-        checks = _passing_checks(gh.pr_checks(number))
-        comments = gh.pr_view(number, "comments,headRefOid").get("comments", [])
-    if len(files) >= 300:
-        files = [p for spec in REQUIRED_WORKFLOWS for p in spec["prefixes"]]
-    missing = set(missing_required_workflows(files, checks, comments, head))
-    gaps = [spec["suite"] for spec in REQUIRED_WORKFLOWS
-            if spec["workflow"] in missing and spec.get("suite")]
-    return {"unattested_suites": [x for x in gaps if x not in NON_ATTESTABLE_SUITES],
-            "awaiting_checks": [x for x in gaps if x in NON_ATTESTABLE_SUITES]}
+def _pr_suite_evidence(gh, spec: dict, view: dict, checks: list, ref: str,
+                       carry_forward: bool, carried_files: set) -> Optional[str]:
+    """How one PR satisfies `spec` at its head: `passing_check`, `fresh` (attested at the
+    head), `carried_forward_from <sha>` (attested earlier and nothing the suite covers changed
+    since, the merge-pr rule), or None. The one place check- or attestation-based suite
+    satisfaction is decided for epic close. `ref` is what `files_since` compares against."""
+    if workflow_check_state(checks, spec["workflow"]) == "passing":
+        return "passing_check"
+    suite = spec["suite"]
+    if suite in NON_ATTESTABLE_SUITES:
+        return None
+    comments = view.get("comments", [])
+    if suite in local_ci_suites_attested(comments, view.get("headRefOid")):
+        return "fresh"
+    sha = _latest_attested_sha_by_suite(comments).get(suite) if carry_forward else None
+    if not sha:
+        return None
+    try:
+        delta = gh.files_since(sha, ref)
+    except GhError:
+        return None
+    if _suite_reattest_needed(spec, delta):
+        return None
+    carried_files.update(delta)
+    return f"carried_forward_from {sha[:10]}"
+
+
+def _epic_child_chain(gh, branch: str, children: list) -> dict:
+    """Every merged child PR of the epic (`{pr: {issue, view, files, checks}}`) and the shas
+    of the commits on `branch` that came through none of them (`direct`; None when the
+    branch has too many commits to enumerate)."""
+    prs = {}
+    for child in children:
+        for pr in gh.pr_list_for_branch(issue_branch(child["number"]), state="merged"):
+            n = pr["number"]
+            prs[n] = {"issue": child["number"],
+                      "view": gh.pr_view(n, "comments,headRefOid,mergeCommit"),
+                      "files": gh.pr_files(n), "checks": gh.pr_checks(n)}
+    merged = {(p["view"].get("mergeCommit") or {}).get("oid") for p in prs.values()}
+    commits = gh.branch_commits("main", branch)
+    direct = None if len(commits) >= 250 else [c for c in commits if c not in merged]
+    return {"prs": prs, "direct": direct}
+
+
+def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
+                         epic_pr: Optional[int], carry_forward: bool = True) -> dict:
+    """Per required suite (base `main`) at the epic head: how it is satisfied -- the epic
+    PR's own check/attestation, or the child chain (every merged child PR that touched the
+    suite is satisfied and no direct epic commit touches it). Returns `suites` (status per
+    suite), `unattested` / `awaiting` (attestable / non-attestable suites still `missing`),
+    `missing` (their workflows),
+    `breaks` (why a chain failed) and `carried_files`."""
+    truncated = len(epic_files) >= 300
+    view, checks = {}, []
+    if epic_pr is not None:
+        view = gh.pr_view(epic_pr, "comments,headRefOid")
+        checks = gh.pr_checks(epic_pr)
+    chain = None
+    suites, unattested, awaiting, missing, breaks, carried = {}, [], [], [], {}, set()
+    for spec in REQUIRED_WORKFLOWS:
+        suite = spec["suite"]
+        if not _workflow_applies_to_base(spec, "main"):
+            continue
+        if not truncated and not any(_workflow_covers(spec, p) for p in epic_files):
+            suites[suite] = "not_required"
+            continue
+        status = _pr_suite_evidence(gh, spec, view, checks, branch, carry_forward, carried) \
+            if epic_pr is not None else None
+        if status is None and carry_forward:
+            chain = chain or _epic_child_chain(gh, branch, children)
+            status, why = _chain_suite_evidence(gh, spec, chain, branch, carried)
+            if why:
+                breaks[suite] = why
+        if status is None:
+            status = "missing"
+            missing.append(spec["workflow"])
+            (awaiting if suite in NON_ATTESTABLE_SUITES else unattested).append(suite)
+        suites[suite] = status
+    return {"suites": suites, "unattested": unattested, "awaiting": awaiting, "missing": missing,
+            "breaks": breaks, "carried_files": carried}
+
+
+def _chain_suite_evidence(gh, spec: dict, chain: dict, branch: str, carried: set) -> tuple:
+    """`(status, breaks)` for one suite over the child chain: `children:#a,#b` when every
+    child PR touching the suite is satisfied at its merged head and no direct commit touches
+    it; else `(None, [reasons])`."""
+    suite, breaks, attested = spec["suite"], [], []
+    for n, pr in sorted(chain["prs"].items()):
+        if not any(_workflow_covers(spec, p) for p in pr["files"]):
+            continue
+        head = pr["view"].get("headRefOid") or ""
+        if _pr_suite_evidence(gh, spec, pr["view"], pr["checks"], head, True, carried):
+            attested.append(pr["issue"])
+        else:
+            breaks.append(f"child #{pr['issue']} (PR #{n}) touched `{suite}` paths but has no "
+                          f"`{suite}` attestation or passing check at its merged head")
+    if chain["direct"] is None:
+        breaks.append(f"`{branch}` has too many commits to attribute each to a child PR")
+    else:
+        for sha in chain["direct"]:
+            files = gh.commit_files(sha)
+            if len(files) >= 300 or any(_workflow_covers(spec, p) for p in files):
+                breaks.append(f"commit {sha[:10]} on `{branch}` touches `{suite}` paths outside "
+                              f"any child PR")
+    if not attested and not breaks:
+        breaks.append(f"no merged child PR accounts for the `{suite}` paths the epic changed")
+    if breaks:
+        return None, breaks
+    return "children:" + ",".join(f"#{i}" for i in sorted(set(attested))), []
 
 
 def cmd_record_epic_verification(gh: GitHub, epic: int, kind: str, summary: str,
@@ -1110,11 +1258,45 @@ def cmd_record_epic_verification(gh: GitHub, epic: int, kind: str, summary: str,
     return {"epic": epic, "kind": kind, "sha": sha, "recorded": True}
 
 
+def _close_epic_evidence(gh, epic: int, branch: str, children: list, epic_pr: Optional[int],
+                         carry_forward: bool) -> dict:
+    """The evidence fields every close-epic result carries: `missing_verification` (when
+    any), `unattested_suites`, `evidence`, `carried_forward_files`, `evidence_breaks`,
+    plus the private `_missing_workflows` the merge gate reads."""
+    comments = gh.issue_view(epic).get("comments", [])
+    delta = _EpicEvidenceDelta(gh, branch, carry_forward)
+    problems = missing_epic_verification(comments, delta)
+    files = gh.pr_files(epic_pr) if epic_pr is not None else gh.base_delta_files("main", base=branch)
+    suites = _epic_suite_evidence(gh, branch, children, files, epic_pr, carry_forward)
+    carried = set(suites["carried_files"])
+    carried.update(f for d in delta.deltas.values() if d["status"] == "carried_forward"
+                   for f in d["files"])
+    result = {"unattested_suites": suites["unattested"],
+              "awaiting_checks": suites["awaiting"],
+              "evidence": {"exploratory": _exploratory_evidence_status(comments, delta, problems),
+                           "suites": suites["suites"]},
+              "carried_forward_files": sorted(carried),
+              "_missing_workflows": suites["missing"]}
+    if problems:
+        result["missing_verification"] = problems
+    if suites["breaks"]:
+        result["evidence_breaks"] = suites["breaks"]
+    return result
+
+
+def _close_epic_exploratory_problems(gh, epic: int, branch: str, carry_forward: bool) -> list:
+    """Just the exploratory half of `_close_epic_evidence`, to decide before the epic PR is
+    opened whether the second call can proceed at all."""
+    return missing_epic_verification(gh.issue_view(epic).get("comments", []),
+                                     _EpicEvidenceDelta(gh, branch, carry_forward))
+
+
 def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
-                    runner: Runner = _default_runner) -> dict:
+                    runner: Runner = _default_runner, carry_forward: bool = True) -> dict:
     """Reconcile the epic branch with `main` (first call, then stop), or merge it once
     closing evidence is recorded (second call). Returns `merged`; refusals carry `reason`.
-    Two calls because verification must run between the two merges."""
+    Two calls because verification must run between the two merges. `carry_forward=False`
+    accepts only evidence stamped at the epic head itself."""
     detail = gh.issue_view(epic)
     if not resolve_profile(detail)["closes"]:
         return {"epic": epic, "merged": False,
@@ -1141,19 +1323,23 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
             f"Evidence recorded before this point describes a "
             f"different tree and will not be accepted.\n\n"
             f"<!-- epic-reconciled: {epic} @ {timestamp} -->")
+        existing = gh.pr_list_for_branch(branch)
+        evidence = _close_epic_evidence(gh, epic, branch, children,
+                                        existing[0]["number"] if existing else None, carry_forward)
+        evidence.pop("_missing_workflows")
         return _with_workspace(
-            {"epic": epic, "merged": False, "branch": branch, "reconciled": behind,
-             **_epic_suite_gaps(gh, branch),
+            {"epic": epic, "merged": False, "branch": branch, "reconciled": behind, **evidence,
              "reason": f"picked up {behind} commit(s) from main -- run the exploratory pass "
                        f"against the reconciled branch, then re-run close-epic"},
             ws)
-    missing = missing_epic_verification(gh.issue_view(epic).get("comments", []),
-                                        _epic_evidence_stale(gh, branch))
-    if missing:
-        return {"epic": epic, "merged": False, "branch": branch, "missing_verification": missing,
-                **_epic_suite_gaps(gh, branch),
-                "reason": f"closing verification incomplete: {'; '.join(missing)}"}
     existing = gh.pr_list_for_branch(branch)
+    if _close_epic_exploratory_problems(gh, epic, branch, carry_forward):
+        evidence = _close_epic_evidence(gh, epic, branch, children,
+                                        existing[0]["number"] if existing else None, carry_forward)
+        evidence.pop("_missing_workflows")
+        return {"epic": epic, "merged": False, "branch": branch, **evidence,
+                "reason": f"closing verification incomplete: "
+                          f"{'; '.join(evidence['missing_verification'])}"}
     if existing:
         pr_number = existing[0]["number"]
     else:
@@ -1162,22 +1348,21 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
             title=f"{detail['title']} — epic integration (#{epic})",
             body=f"Integration of every child of #{epic}.\n\nCloses #{epic}",
             draft=True)
-    checks = _passing_checks(gh.pr_checks(pr_number))
-    # Comments + head SHA let a fresh `local-ci` attestation satisfy a required suite.
-    view = gh.pr_view(pr_number, "comments,headRefOid")
-    status, missing_checks = merge_gate_status(
-        gh.pr_files(pr_number), checks,
-        view.get("comments", []), view.get("headRefOid"), base_ref="main")
-    if status != "passed":
-        detail_msg = f" (no passing check from: {', '.join(missing_checks)})" if missing_checks else ""
-        return {"epic": epic, "merged": False, "pr": pr_number, "checks": status,
-                "reason": f"PR #{pr_number} checks not passed (status={status}){detail_msg}"}
+    # The PR's files, checks and attestations are the gate's inputs, so it must exist first.
+    evidence = _close_epic_evidence(gh, epic, branch, children, pr_number, carry_forward)
+    missing_workflows = evidence.pop("_missing_workflows")
+    if missing_workflows:
+        return {"epic": epic, "merged": False, "pr": pr_number, "checks": "missing-checks",
+                **evidence,
+                "reason": f"PR #{pr_number} required suites unsatisfied at the epic head "
+                          f"(no passing check, attestation or child chain from: "
+                          f"{', '.join(missing_workflows)})"}
     gh.pr_ready(pr_number)
     gh.pr_merge(pr_number)
     # The PR's `Closes #<n>` closes the epic; set its terminal fields here too,
     # so a repo without the `issues: closed` Action job is not left unset.
     cmd_mark_issue_closed(gh, epic)
-    return {"epic": epic, "merged": True, "pr": pr_number, "branch": branch,
+    return {"epic": epic, "merged": True, "pr": pr_number, "branch": branch, **evidence,
             "worktree": release_worktree(branch, runner=runner, base_repo=repo_path)}
 
 
@@ -6321,7 +6506,11 @@ def main(argv: Optional[list] = None) -> int:
                         help="Reconcile and merge the epic branch once verified")
     p.add_argument("epic", type=int)
     p.add_argument("--repo-path", default=".")
-    p.set_defaults(func=lambda a: cmd_close_epic(get_work_item_provider(), a.epic, a.repo_path))
+    p.add_argument("--no-carry-forward", action="store_false", dest="carry_forward",
+                    help="Accept only evidence stamped at the epic head itself: no "
+                         "carry-forward over a safe delta, no per-child attestation chain")
+    p.set_defaults(func=lambda a: cmd_close_epic(get_work_item_provider(), a.epic, a.repo_path,
+                                                  carry_forward=a.carry_forward))
     p = sub.add_parser("record-epic-verification",
                         help="Record one half of an epic's closing verification")
     p.add_argument("epic", type=int)
