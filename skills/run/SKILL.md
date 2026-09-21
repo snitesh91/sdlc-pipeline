@@ -517,8 +517,9 @@ reads that branch's HEAD, and from the main checkout it falsely reports the doc 
 - An Epic's `architecture`/`lld` phase-Task: `transition` raised the design PR; give the review
   agent its number (`steps.open-design-pr.pr`) — it reviews on that PR.
 - A `pr-review` reporting its mutation probe was **denied by the auto-mode classifier** (a
-  transient `src` edit): relay it so the operator can add an allow rule — do not treat the
-  missing probe as a clean signal.
+  transient `src` edit): relay it so the operator can add the allow rule
+  (`references/operations.md`, "Auto-mode allow rule for the `pr-review` mutation probe") —
+  do not treat the missing probe as a clean signal.
 - Confirm the previous stage left a comment on the issue; if not, get one.
 - On an LLD-phase Task's clean `lld-review` → `finish-lld` ("Cutting an Epic's
   phase-Tasks").
@@ -615,5 +616,5 @@ before editing. Once approved:
    `.claude/settings.json`, and the `SDLC_PIPELINE_REF` Actions variable) to the new tag
    and commit it, naming the retrospective.
 
-**Bump the pin only when no run is live on the driven repo.** The new version loads in
-the next session (after `claude plugin marketplace update sdlc-pipeline`).
+When the bump takes effect, and why it waits for a quiet repo: `references/operations.md`,
+"Plugin pin".

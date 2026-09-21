@@ -167,7 +167,7 @@ class FakeGh:
         return [{"number": n, **p} for n, p in self.prs.items()
                 if p.get("headRefName") == branch and p.get("state", "OPEN") == "OPEN"]
 
-    def pr_merge(self, n, delete_branch=True, method="squash"):
+    def pr_merge(self, n, delete_branch=True, method="squash", match_head=None):
         self.merges.append((n, delete_branch))
         self.merge_methods.append(method)
         pr = self.prs[n]
@@ -793,7 +793,7 @@ def test_merge_pr_counts_the_merged_unit_against_the_run(run_state, repo):
     gh.pr_files = lambda n: []
     gh.pr_view = lambda n, fields="": {"comments": [], "headRefOid": "abc"}
     gh.pr_ready = lambda n: None
-    gh.pr_merge = lambda n: None
+    gh.pr_merge = lambda n, **kw: None
     gh.pr_comment = lambda n, body: None
     _write_run(run_state, [])
 

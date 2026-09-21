@@ -21,6 +21,7 @@ bin/sdlc-run                     starts a run on the policy's orchestrator model
 scripts/sdlc_next.py             the control plane; scripts/tests is its suite
 scripts/sdlc_metrics.py          cost/outcome report over the metrics store
 workflows/gate-auto-advance.yml  real-time gate backstop, copied into the driven repo
+.github/workflows/tests.yml      this repo's CI: both pytest suites on every PR and on main
 sdlc.config.sample.json          config template
 ```
 
