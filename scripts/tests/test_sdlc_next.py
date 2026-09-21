@@ -4765,6 +4765,9 @@ def test_merge_epic_lld_doc_advances_every_freshly_created_task_and_skips_alread
         ("git", "-C", path, "fetch", "origin"): "",
         ("git", "-C", path, "rev-parse", "--verify", "--quiet", f"origin/epic-110:{doc}"): "blobXYZ\n",
         ("git", "-C", path, "rev-parse", "origin/epic-110"): "tip110\n",
+        ("git", "-C", path, "show", f"origin/epic-110:{doc}"):
+            "## Task #501: a\n## Footprint\n- `a`\n## Task #502: b\n## Footprint\n- `b`\n"
+            "## Task #503: c\n## Footprint\n- `c`\n",
     })
 
     result = cmd_merge_lld_doc(gh, path, 110, runner=git_runner)
@@ -4813,6 +4816,8 @@ def test_merge_epic_lld_doc_completes_the_epics_own_design_phase():
         ("git", "-C", path, "fetch", "origin"): "",
         ("git", "-C", path, "rev-parse", "--verify", "--quiet", f"origin/epic-120:{doc}"): "blobXYZ\n",
         ("git", "-C", path, "rev-parse", "origin/epic-120"): "tip120\n",
+        ("git", "-C", path, "show", f"origin/epic-120:{doc}"):
+            "## Task #701: a\n## Footprint\n- `a`\n",
     })
     result = cmd_merge_lld_doc(gh, path, 120, runner=git_runner)
     assert result["merged"] is True
@@ -4973,6 +4978,8 @@ def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
         ("git", "-C", "/epic-41", "rev-parse", "--verify", "--quiet",
          f"origin/epic-41:{doc_path}"): "blobABC\n",
         ("git", "-C", "/epic-41", "rev-parse", "origin/epic-41"): "tip41\n",
+        ("git", "-C", "/epic-41", "show", f"origin/epic-41:{doc_path}"):
+            "## Task #45: parse WhatsApp payload\n## Footprint\n- `src/whatsapp.ts`\n",
     })
     merge_result = cmd_merge_lld_doc(gh, "/epic-41", 41, runner=merge_git_runner)
     assert merge_result["merged"] is True

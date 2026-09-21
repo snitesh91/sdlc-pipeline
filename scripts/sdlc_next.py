@@ -1734,8 +1734,9 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
 _FOOTPRINT_HEADING = re.compile(r"^#+\s*(?:\d+[.)]\s*)?Footprint\s*:?\s*$",
                                 re.IGNORECASE | re.MULTILINE)
 _FOOTPRINT_BULLET_PATH = re.compile(r"^-\s+`([^`]+)`")
-# A bold sub-label (`**Verify-only:**`) ends the changed-path list: what follows is read, not owned.
-_FOOTPRINT_SUBLABEL = re.compile(r"^\*\*.+")
+# The `**Verify-only:**` sub-label ends the owned-path list: what follows is read, not owned.
+_FOOTPRINT_VERIFY_ONLY = re.compile(r"^\*\*\s*(?:verify|read)[ -]?only\b", re.IGNORECASE)
+_FENCED_BLOCK = re.compile(r"^[ \t]*```.*?^[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE)
 # A Task heading is `## Task #<n>` or, before issues exist, `## Task <slug-key>: ...`
 # (`###` and a missing `#` also parse). Keys must be slugs so prose headings like
 # `## Task Breakdown` are never read as Tasks.
@@ -1799,19 +1800,20 @@ def _task_heading_matches(entry: dict, task) -> bool:
     return ident in (entry["key"], entry["task_key"])
 
 
-def parse_footprint(doc_text: str) -> list:
-    """Backticked bullet paths under the first `## Footprint` heading, up to the next
-    heading. `[]` when absent -- callers treat that as "cannot verify", never "no overlap"."""
-    m = _FOOTPRINT_HEADING.search(doc_text)
+def find_footprint(doc_text: str) -> Optional[list]:
+    """Owned paths (backticked bullets) under the first real `## Footprint` heading, up to
+    the next heading; None when the doc has no such heading. Lead-in lines before the
+    bullets are skipped; a `**Verify-only:**` sub-label ends the owned list."""
+    m = _FOOTPRINT_HEADING.search(_FENCED_BLOCK.sub("", doc_text))
     if not m:
-        return []
-    rest = doc_text[m.end():]
+        return None
+    rest = m.string[m.end():]
     end = re.search(r"^#+\s", rest, re.MULTILINE)
     body = rest[:end.start()] if end else rest
     paths = []
     for line in body.splitlines():
         stripped = line.strip()
-        if _FOOTPRINT_SUBLABEL.match(stripped):
+        if _FOOTPRINT_VERIFY_ONLY.match(stripped):
             break
         bm = _FOOTPRINT_BULLET_PATH.match(stripped)
         if bm:
@@ -1819,13 +1821,25 @@ def parse_footprint(doc_text: str) -> list:
     return paths
 
 
-def parse_task_footprint(doc_text: str, task_number: int) -> list:
-    """`parse_footprint` scoped to one Task's subsection of an Epic `lld.md`
-    (`task_number` may be an issue number or task key); `[]` when missing."""
+def parse_footprint(doc_text: str) -> list:
+    """`find_footprint` with a missing section flattened to `[]` -- callers that need to
+    tell "no section" from "owns nothing" use `find_footprint`."""
+    return find_footprint(doc_text) or []
+
+
+def find_task_footprint(doc_text: str, task_number) -> Optional[list]:
+    """`find_footprint` scoped to one Task's subsection of an Epic `lld.md`
+    (`task_number` may be an issue number or task key); None when the subsection or
+    its `## Footprint` heading is missing."""
     for entry in parse_task_headings(doc_text):
         if _task_heading_matches(entry, task_number):
-            return parse_footprint(doc_text[entry["line_end"]:entry["end"]])
-    return []
+            return find_footprint(doc_text[entry["line_end"]:entry["end"]])
+    return None
+
+
+def parse_task_footprint(doc_text: str, task_number) -> list:
+    """`find_task_footprint` with a missing section flattened to `[]`."""
+    return find_task_footprint(doc_text, task_number) or []
 
 
 def slice_task_subsection(doc_text: str, task_number: int) -> Optional[str]:
@@ -1858,9 +1872,10 @@ def cmd_lld_section(repo_path: str, epic: int, task,
 
 
 def read_footprint(repo_path: str, issue: int, runner: Runner = _default_runner,
-                    epic: Optional[int] = None) -> list:
-    """An issue's footprint from `origin/issue-<n>`'s architecture.md, else (with
-    `epic`) from its Task subsection of the Epic's lld.md; `[]` when unreadable.
+                    epic: Optional[int] = None) -> Optional[list]:
+    """An issue's owned footprint from `origin/issue-<n>`'s architecture.md, else (with
+    `epic`) from its Task subsection of the Epic's lld.md. None when no `## Footprint`
+    section is readable anywhere; `[]` for a section that owns no path (verify-only).
     Reads origin refs via `git show`, so no worktree is needed."""
     try:
         text = runner(["git", "-C", repo_path, "show",
@@ -1868,17 +1883,17 @@ def read_footprint(repo_path: str, issue: int, runner: Runner = _default_runner,
     except GhError:
         text = None
     if text is not None:
-        footprint = parse_footprint(text)
-        if footprint:
+        footprint = find_footprint(text)
+        if footprint is not None:
             return footprint
     if epic is not None:
         try:
             text = runner(["git", "-C", repo_path, "show",
                             f"origin/{epic_branch(epic)}:{DOC_ROOT}/epic-{epic}/lld.md"])
         except GhError:
-            return []
-        return parse_task_footprint(text, issue)
-    return []
+            return None
+        return find_task_footprint(text, issue)
+    return None
 
 
 def _footprint_prefix(path: str) -> str:
@@ -2438,7 +2453,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
             skipped.append({"issue": number, "reason": "blocked by an open dependency"})
             continue
         footprint = read_footprint(repo_path, number, runner=runner, epic=epic)
-        if not footprint:
+        if footprint is None:
             skipped.append({"issue": number, "reason": "no ## Footprint section found in its own "
                                                          "architecture.md, or under a "
                                                          f"`## Task #{number}` heading in its Epic's "
@@ -3314,14 +3329,17 @@ _PUSH_REJECTED_RE = re.compile(
 def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
                        runner: Runner = _default_runner) -> dict:
     """Verify `epic-<n>/lld.md` is on `origin/epic-<n>` (merged there by the LLD-phase Task's design PR), advance every open, Stage-less
-    Task child to `development`, and label the Epic architected. Idempotent.
-    Returns `merged`, `verified_on_origin`, `advanced_tasks`."""
+    Task child that the doc carved (a `## Task #<n>` subsection with a `## Footprint`, and
+    not realised by another Task) to `development`, and label the Epic architected.
+    Idempotent. Returns `merged`, `verified_on_origin`, `advanced_tasks`, `not_advanced`."""
     epic_br = epic_branch(epic)
     doc_path = f"{DOC_ROOT}/epic-{epic}/lld.md"
     with branch_lock(epic_br), BranchWorkspace(epic_br, repo_path, runner) as ws:
         runner(["git", "-C", ws.path, "fetch", "origin"])
         blob = _blob_at(ws.path, f"origin/{epic_br}", doc_path, runner)
         tip = (runner(["git", "-C", ws.path, "rev-parse", f"origin/{epic_br}"]).strip()
+               if blob is not None else None)
+        doc = (runner(["git", "-C", ws.path, "show", f"origin/{epic_br}:{doc_path}"])
                if blob is not None else None)
     if blob is None:
         return _with_workspace({"epic": epic, "merged": False,
@@ -3330,10 +3348,18 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
     tasks = [i for i in all_issues.values()
              if i["state"] == "OPEN" and i.get("parent") and i["parent"]["number"] == epic
              and current_stage(i) is None and classify_unit_from_issue(i) == "task"]
+    realised_by = {}
+    for h in parse_task_headings(doc):
+        for old in parse_task_realises(doc[h["line_end"]:h["end"]]):
+            realised_by.setdefault(old, h["number"] or h["key"])
     timestamp = _utc_now_marker()
-    advanced = []
+    advanced, not_advanced = [], []
     for task in tasks:
         number = task["number"]
+        held = _lld_hold_reason(doc, task, realised_by)
+        if held:
+            not_advanced.append({"issue": number, "reason": held})
+            continue
         gh.set_stage_field(number, "development")
         gh.set_pipeline_status_field(number, "todo")
         gh.issue_comment(number,
@@ -3349,18 +3375,41 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
         gh.issue_edit(epic, add_labels=[LABELS["architected"]])
         tasks_line = (f"Tasks advanced to `development`: {', '.join(f'#{n}' for n in advanced)}."
                       if advanced else "No fresh Tasks to advance this run.")
+        held_line = ("".join(f"\n- #{h['issue']} not advanced: {h['reason']}" for h in not_advanced)
+                     if not_advanced else "")
         gh.issue_comment(epic,
             f"📐 Epic design phase (architecture + lld) complete — `{doc_path}` "
-            f"(`{tip}`). {tasks_line}\n\n"
+            f"(`{tip}`). {tasks_line}{held_line}\n\n"
             f"<!-- stage-transition: epic-lld->children @ {timestamp} -->")
     if not advanced and not completed_now:
         return _with_workspace({"epic": epic, "merged": False, "verified_on_origin": True,
-                                "advanced_tasks": [],
+                                "advanced_tasks": [], "not_advanced": not_advanced,
                                 "reason": "up-to-date — lld.md is on origin, the Epic is already "
                                           "architected, and no Stage-less Task is left to advance"},
                                ws)
     return _with_workspace({"epic": epic, "merged": True, "verified_on_origin": True,
-                            "advanced_tasks": advanced}, ws)
+                            "advanced_tasks": advanced, "not_advanced": not_advanced}, ws)
+
+
+def _lld_hold_reason(doc: str, task: dict, realised_by: dict) -> Optional[str]:
+    """Why `merge-lld-doc` must not advance `task` into the development pool (None when
+    it may): the doc realises it through another Task, or never carved it (no
+    `## Task #<n>` subsection carrying a `## Footprint` -- matched by number or task-key)."""
+    number = task["number"]
+    if number in realised_by:
+        by = realised_by[number]
+        label = f"#{by}" if isinstance(by, int) else f"`{by}`"
+        return (f"realised by Task {label} -- it is blocked on that Task and closes when "
+                f"that Task's PR merges")
+    idents = [number]
+    key_marker = _TASK_KEY_MARKER.search(task.get("body") or "")
+    if key_marker:
+        idents.append(key_marker.group(1))
+    if all(find_task_footprint(doc, ident) is None for ident in idents):
+        return (f"no `## Task #{number}` subsection with a `## Footprint` heading in lld.md -- "
+                f"not carved by `lld`; carve it there, or declare `Realises: #{number}` on "
+                f"the Task that covers it")
+    return None
 
 
 def _blob_at(repo_path: str, ref: str, path: str, runner: Runner) -> Optional[str]:
@@ -3388,6 +3437,37 @@ def _task_line(name: str) -> re.Pattern:
 _DEPENDS_ON_LINE = _task_line("Depends on")
 _PRIORITY_LINE = _task_line("Priority")
 _EFFORT_LINE = _task_line("Effort")
+_REALISES_LINE = _task_line("Reali[sz]es")
+_ISSUE_REF_RE = re.compile(r"#(\d+)")
+# `<!-- realises: #574 #577 -->` in a carved Task's body: the issues its PR delivers.
+_REALISES_MARKER = re.compile(r"<!--\s*realises:\s*([^>]*?)\s*-->")
+
+
+def parse_task_realises(section_text: str) -> list:
+    """Issue numbers from a section's `Realises:` line(s) (`#<n>` references only,
+    in order, deduplicated); [] when none."""
+    numbers = []
+    for m in _REALISES_LINE.finditer(section_text):
+        for ref in _ISSUE_REF_RE.findall(m.group(1)):
+            if int(ref) not in numbers:
+                numbers.append(int(ref))
+    return numbers
+
+
+def realised_issues(body: str) -> list:
+    """Issue numbers a carved Task's body marks as realised (its `realises` marker)."""
+    m = _REALISES_MARKER.search(body or "")
+    return [int(n) for n in _ISSUE_REF_RE.findall(m.group(1))] if m else []
+
+
+def task_section_defect(section_text: str) -> Optional[str]:
+    """Why a `## Task <KEY>` section is not a Task to carve (None when it is): a Task
+    section carries a `## Footprint` heading; prose under a Task heading does not."""
+    if find_footprint(section_text) is None:
+        return ("no `## Footprint` heading -- every Task section carries one "
+                "(references/epics.md, \"How to size the Tasks\"); prose such as a carving "
+                "summary must not sit under a `## Task` heading")
+    return None
 
 
 def parse_task_field(section_text: str, line: re.Pattern) -> Optional[str]:
@@ -3471,10 +3551,16 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
         raise GhError(f"cannot read {doc_path} on origin/{epic_br} -- merge the LLD-phase "
                        f"Task's design PR first (merge-design-pr), then re-run create-lld-tasks")
     headings = parse_task_headings(doc)
-    pending = [h for h in headings if h["key"]]
+    keyed = [h for h in headings if h["key"]]
+    # A `## Task` heading over prose (a carving table, a summary) is never a Task issue.
+    defects = {h["key"]: task_section_defect(doc[h["line_end"]:h["end"]]) for h in keyed}
+    pending = [h for h in keyed if defects[h["key"]] is None]
     result = {"epic": epic, "doc": doc_path, "created": [], "reused": [],
               "already_numbered": [h["number"] for h in headings if h["number"]],
-              "blocked_by": [], "blocked_by_failed": []}
+              "skipped_sections": [
+                  {"key": h["key"], "heading": doc[h["line_start"]:h["line_end"]].strip(),
+                   "reason": defects[h["key"]]} for h in keyed if defects[h["key"]]],
+              "blocked_by": [], "blocked_by_failed": [], "realises": [], "realises_failed": []}
     if not pending:
         return {**result, "committed": None, "pushed": False, "tasks": {},
                 "reason": "every `## Task` heading already carries an issue number -- "
@@ -3483,7 +3569,8 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
     # A crash between create and push leaves issues the doc doesn't number yet.
     key_to_number = {h["task_key"]: h["number"] for h in headings
                      if h["number"] and h["task_key"]}
-    for child in gh.issue_list():
+    all_issues = {i["number"]: i for i in gh.issue_list()}
+    for child in all_issues.values():
         if (child.get("parent") or {}).get("number") != epic:
             continue
         m = _TASK_KEY_MARKER.search(child.get("body") or "")
@@ -3501,9 +3588,14 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
         title = h["title"] or key
         number = key_to_number.get(key)
         if number is None:
+            # Only references that resolve are persisted; the rest are reported below.
+            realises = [n for n in parse_task_realises(doc[h["line_end"]:h["end"]])
+                        if n in all_issues and n not in key_to_number.values()]
+            realises_marker = (f"\n<!-- realises: {' '.join(f'#{n}' for n in realises)} -->"
+                               if realises else "")
             body = (f"{doc[h['line_end']:h['end']].strip()}\n\n"
                     f"Carved from `{doc_path}` on `{epic_br}` (Epic #{epic}).\n\n"
-                    f"<!-- task-key: {key} -->")
+                    f"<!-- task-key: {key} -->{realises_marker}")
             created = cmd_create_issue(gh, title, body, epic, [], type_name=type_name,
                                        **fields[key])
             if created.get("ok") is False:
@@ -3534,6 +3626,24 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
                 # Re-adding an existing edge errors; a resumed run must not crash on it.
                 result["blocked_by_failed"].append(
                     {"issue": issue_number, "on": dep, "error": str(e)})
+        # A realised issue waits on the Task that delivers it and closes with that Task's PR.
+        for old in parse_task_realises(doc[h["line_end"]:h["end"]]):
+            entry = {"issue": issue_number, "realises": old}
+            existing = all_issues.get(old)
+            if existing is None or old == issue_number or old in key_to_number.values():
+                result["realises_failed"].append(
+                    {**entry, "error": f"#{old} is not a pre-existing issue -- `Realises:` "
+                                       f"names issues that exist before this carving"})
+                continue
+            if existing["state"] != "OPEN":
+                result["realises"].append({**entry, "blocked": False, "reason": "already closed"})
+                continue
+            try:
+                edge = _add_blocked_by_once(gh, old, issue_number)
+                result["realises"].append({**entry, "blocked": True,
+                                           **({"reason": edge["reason"]} if edge.get("reason") else {})})
+            except GhError as e:
+                result["realises_failed"].append({**entry, "error": str(e)})
     published = _commit_doc_to_epic_branch(
         repo_path, epic_br, doc_path, number_task_headings(doc, key_to_number), runner,
         message=f"docs(sdlc): number epic-{epic} lld tasks")
@@ -4584,21 +4694,43 @@ def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
                         run_id: Optional[str] = None) -> dict:
     """Post-merge bookkeeping: close an epic-branch child `Closes #<n>` didn't, the
     `Merged via` note, run-cap accounting and releasing the worktree."""
-    issue_state = gh.issue_view(issue)["state"]
-    issue_closed = issue_state == "CLOSED"
+    view = gh.issue_view(issue)
+    issue_closed = view["state"] == "CLOSED"
     if not issue_closed and base != "main":
         # `Closes #<n>` only fires on the default branch; a merged-but-open child
         # would be re-delegated and block the epic's close.
         gh.issue_close(issue)
         issue_closed = True
+    realised = []
     if issue_closed:
         gh.issue_comment(issue, f"Merged via #{pr_number}.")
+        realised = _close_realised_issues(gh, issue, view.get("body"), pr=pr_number)
     terminal = record_terminal_unit(gh, issue, run_id=run_id)
     return {"pr": pr_number, "issue": issue, "merged": True, "issue_closed": issue_closed,
             "config_changed": touches_pipeline_config(files),
             **extra,
             **({"run_terminal": terminal} if terminal else {}),
+            **({"realised_closed": realised} if realised else {}),
             "worktree": release_worktree(issue_branch(issue), base_repo=repo_path, runner=gh._run)}
+
+
+def _close_realised_issues(gh: GitHub, issue: int, body: Optional[str],
+                           pr: Optional[int] = None) -> list:
+    """Close every still-open issue `issue`'s body marks as realised, naming the Task and
+    PR that delivered it (`Closes #<n>` never fires on an `epic-<n>` merge). Returns
+    `[{issue, closed}]`; never counts toward the run cap."""
+    out = []
+    for old in realised_issues(body):
+        if gh.issue_view(old)["state"] != "OPEN":
+            out.append({"issue": old, "closed": False, "reason": "already closed"})
+            continue
+        via = f" (PR #{pr})" if pr else ""
+        gh.issue_comment(old, f"✅ Realised by Task #{issue}{via} — closed by the pipeline.\n\n"
+                              f"<!-- realised-by: {issue} pr:{pr or 'none'} @ {_utc_now_marker()} -->")
+        gh.issue_close(old)
+        cmd_mark_issue_closed(gh, old)
+        out.append({"issue": old, "closed": True})
+    return out
 
 
 def _release_unit_worktree(issue: int, base_repo: str = ".",
@@ -4653,12 +4785,15 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
                     runner: Runner = _default_runner) -> dict:
     """Close `issue`, apply the terminal fields and release its worktree -- for a
     phase-Task that never merges through `merge-pr`. Counts toward the run cap."""
+    body = gh.issue_view(issue).get("body")
     gh.issue_close(issue)
     cmd_mark_issue_closed(gh, issue)
+    realised = _close_realised_issues(gh, issue, body)
     released = release_worktree(issue_branch(issue), runner=runner, base_repo=repo_path or ".")
     terminal = record_terminal_unit(gh, issue)
     return {"issue": issue, "closed": True, "worktree": released,
-            **({"run_terminal": terminal} if terminal else {})}
+            **({"run_terminal": terminal} if terminal else {}),
+            **({"realised_closed": realised} if realised else {})}
 
 
 def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:

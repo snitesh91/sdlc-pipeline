@@ -78,9 +78,12 @@ Task:                    development -> [pr-review] -> auto-merge into epic-<n> 
    terminal fields after a close and leaves the issue open, Stage-less, handed out again.
 
 `merge-lld-doc` ends the design phase: verifies `epic-<n>/lld.md` on `origin/epic-<n>`,
-advances every Stage-less Task under the Epic to `development` (**not** claimed), clears
-the Epic's own Stage/Pipeline Status, adds `epic:architected`. **Tasks are never eligible
-before `epic:architected`.**
+advances every Stage-less Task under the Epic **that the doc carved** (a `## Task #<n>`
+subsection carrying a `## Footprint`) to `development` (**not** claimed), clears the
+Epic's own Stage/Pipeline Status, adds `epic:architected`. A child with no such
+subsection, or one a Task `Realises:`, stays Stage-less and is reported in
+`not_advanced` with its reason — never advance it by hand without settling that reason.
+**Tasks are never eligible before `epic:architected`.**
 
 Requirements: an Initiative-driven Epic uses its Initiative's `product.md`; an
 engineering-driven Epic has only its issue body (`architecture` returns its questions for
@@ -135,10 +138,21 @@ Stage options: `Product` / `Architecture` / `Development` / `Testing` / `PR Revi
 
 - **Headings**: `## Task <KEY>: <title>`, `<KEY>` a slug (lowercase letters, digits,
   hyphens), e.g. `## Task skeleton-health: Add /health`. `###` also parses; a non-slug
-  heading like `## Task Breakdown` is not a Task.
+  heading like `## Task Breakdown` is not a Task. **A `## Task` heading over prose** (a
+  carving summary, a Task-to-issue table) **is not a Task either**: a Task section carries
+  a `## Footprint`, and `create-lld-tasks` skips any that doesn't, reporting it in
+  `skipped_sections` — put such prose under a non-`Task` heading.
 - **`Depends on: <KEY>`** lines (comma- or `and`-separated) only for genuine ordering.
   `create-lld-tasks` creates each Task as a sibling of the LLD-phase Task, renumbers the
   headings, and adds one `blockedBy` edge per dependency.
+- **`Realises: #<n>, #<m>`** — one line, only when the Task delivers issues that already
+  exist (Epic children filed before the LLD, a bug it fixes). `create-lld-tasks` blocks
+  each named issue on the new Task and records the relation in the Task's body;
+  `merge-lld-doc` never advances a realised issue; when the Task's PR merges (or the Task
+  is closed by `close-issue`) the pipeline closes each realised issue with a comment naming
+  the Task and PR (`Closes #<n>` never fires on an `epic-<n>` merge). A `#<n>` that does
+  not exist is reported in `realises_failed`. Never head a section `## Task #<n>` for a
+  pre-existing issue unless that issue *is* the Task as carved.
 - **Every Epic carries two standing Tasks, Integration-test and e2e-test**, specified like
   functional Tasks; they run after the functional Tasks merge and own the coverage unit
   tests don't.
@@ -177,10 +191,12 @@ A Task is what `development` loads into a fresh context and `pr-review` judges a
   ```
 
   The heading is exactly `Footprint` at any level (a numeric prefix `## 12. Footprint` or a
-  trailing colon parse; `## Footprint overlap ...` does not). The list ends at the next
-  heading or at a bold sub-label (`**Verify-only:**`): paths under one are read, not owned,
-  and never count as overlap. Exact file paths or directory-prefix globs only; no mid-path
-  wildcards.
+  trailing colon parse; `## Footprint overlap ...`, a backticked mention or a fenced
+  example does not). Lines before the bullets (a bold label, a sentence) are skipped. The
+  owned list ends at the next heading or at a `**Verify-only:**` sub-label: paths under it
+  are read, not owned, and never count as overlap — a Task that owns nothing (a standing
+  test Task) still schedules; only a *missing* section excludes a Task. Exact file paths
+  or directory-prefix globs only; no mid-path wildcards.
 - **A shared contract no path shows gets a `Contract` heading** in the Task subsection:
   an API shape, a pinned count or allow-list size, a DB invariant, an enum's members. One
   bullet each, `reads:` or `changes:` —

@@ -293,7 +293,8 @@ def test_worktree_add_for_a_fresh_epic_pushes_the_epic_branch(repo):
 def test_epic_announces_the_design_phase_once_when_lld_md_is_on_the_epic_branch(repo):
     gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"},
                   {"number": 13, "labels": ["type:task"], "parent": 9})
-    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", "# lld\n")
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md",
+                     "# lld\n\n## Task #13: a\n\n## Footprint\n- `src/a.js`\n")
 
     merged = s.cmd_merge_lld_doc(gh, str(repo), 9)
     s.cmd_merge_lld_doc(gh, str(repo), 9)
@@ -904,10 +905,11 @@ def test_create_lld_tasks_refuses_when_the_epic_lld_is_not_merged(repo):
 
 
 def test_merge_lld_doc_epic_still_advances_the_tasks_it_finds(repo):
-    """merge-lld-doc still advances every Stage-less Task under the Epic."""
+    """merge-lld-doc still advances every Stage-less Task the doc carved under the Epic."""
     gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"},
                   {"number": 13, "labels": ["type:task"], "parent": 9})
-    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", "# lld\n")
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md",
+                     "# lld\n\n## Task #13: a\n\n## Footprint\n- `src/a.js`\n")
 
     merged = s.cmd_merge_lld_doc(gh, str(repo), 9)
 
