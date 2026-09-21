@@ -65,9 +65,10 @@ task:       development -> [pr-review] -> auto-merge into epic-<n> -> CLOSED
   running after every functional Task merges.
 - **Epic close does not run the full e2e suite:** the e2e-test Task owns that evidence, so
   `close-epic` requires only the exploratory pass (`record-epic-verification --kind e2e`
-  is still accepted, informational). GitHub Actions results never gate the epic merge
-  (a passing check still satisfies a required suite; a failed or never-started one is
-  ignored); the required suites' `record-local-ci` attestations at the epic head remain.
+  is still accepted, informational). A failed or never-started GitHub Actions run never
+  blocks the epic merge by itself; each required suite the epic's changes cover needs a
+  passing check on the epic PR or a `record-local-ci` attestation at the epic head
+  (`unattested_suites`), and a non-attestable suite its check alone (`awaiting_checks`).
 - **`product-review` follows every `product`** unless a standing child is routed past it:
   a blocker bounces `product`; clean goes to Gate A (waived when the profile sets
   `requiresHumanGateA: false` — `references/gates.md`, "Waived gates"). Reviews have no Stage value of their own.
@@ -209,7 +210,7 @@ failure.
 | Command | Does → returns |
 |---|---|
 | `start-stage <n> --role <role> [--unit epic] [--base <ref>]` | `worktree-add` then `claim` (Step 2) → worktree result, claim result. Refuses `development` on a unit with an open PR (`failed_step: check-claimable`): resume its agent instead (`references/rework.md`) |
-| `transition <n> --expect-stage <s> [--pr <pr>] [--repo-path <p>] [--base <ref>]` | After a subagent returns: `verify-exit` → `sync-branch` → `open-design-pr` (an Epic's `architecture`/`lld` phase-Task only) → `start-comment` when `<s>` is a review role (refuses a `pr-review` whose required-suite `record-local-ci` attestation is not on the post-sync head; a docs-only sync carries forward; `arch-review` also returns `skip_confidence_threshold` for the reviewer) → `ready`, `stopped_at`, per-step results (incl. `handoff_marker_present`, `conflict`, the design `pr`) |
+| `transition <n> --expect-stage <s> [--pr <pr>] [--repo-path <p>] [--base <ref>]` | After a subagent returns: `verify-exit` → `sync-branch` → `open-design-pr` (an Epic's `architecture`/`lld` phase-Task only) → `start-comment` when `<s>` is a review role (refuses a `pr-review` when a required suite the PR touches has neither a `record-local-ci` attestation nor a passing check on the post-sync head — `held` names each suite, its check state and the reason; a docs-only sync carries an attestation forward; `arch-review` also returns `skip_confidence_threshold` for the reviewer) → `ready`, `stopped_at`, per-step results (incl. `handoff_marker_present`, `conflict`, the design `pr`) |
 | `cut-phase-tasks <epic> [--arch-body TEXT] [--lld-body TEXT] --repo-path <p>` | `epic-<n>` + its worktree, create + stage both phase-Tasks, LLD blocked by Architecture, Architecture worktree off `epic-<n>`; idempotent → `architecture_task`, `lld_task` |
 | `finish-lld <lld-task-n> --epic <e> --repo-path <p>` | `merge-design-pr` → `create-lld-tasks` → `merge-lld-doc` → `close-issue` → `completed_steps`, `failed_step`, per-step results |
 | `open-arch-revision <epic> --title TEXT --body TEXT [--blocks N ...] --repo-path <p>` | `epic-<n>` worktree + `create-issue` + `set-stage architecture` + worktree off `epic-<n>` + `add-blocked-by` per `--blocks` unit → `revision_task` |
@@ -407,7 +408,7 @@ Delegate to exactly **one** fresh subagent of the role's `subagent_type` (this p
 | `arch-review` | right after `architecture` (on the design PR for an Epic's phase-Task) | `sdlc:design-review` | opus | none (comment + PR comment) |
 | `lld` | `stage:lld` (LLD-phase Task) | `sdlc:lld` | opus | `epic-<e>/lld.md` (authored on its `issue-<n>` branch), one `## Task <KEY>: <title>` section per Task; creates no issues |
 | `lld-review` | right after `lld`, on its design PR | `sdlc:design-review` | opus | none — **mandatory, never confidence-skipped, auto-merges on clean, no human gate**; one pass over the whole doc, also judges the Task carving |
-| `development` | `stage:development` (Task or standing child) | `sdlc:development` | sonnet | none — PR description + `record-local-ci` attestations; a normal Task writes unit tests only |
+| `development` | `stage:development` (Task or standing child) | `sdlc:development` | sonnet | none — PR description; suite evidence is the PR's required-workflow checks, or `record-local-ci` attestations for suites with no PR-level CI (`references/operations.md`, "Local-CI attestation"); a normal Task writes unit tests only |
 | `pr-review` | right after `development` hands off | `sdlc:pr-review` | opus | none (comment); never bounces a normal Task for integration/e2e coverage owned by the standing Tasks |
 
 **There is no `testing` stage** (merged into `development`). Nothing writes the `Testing`
@@ -510,9 +511,10 @@ reads that branch's HEAD, and from the main checkout it falsely reports the doc 
   - A failed `verify-exit` → the previous stage's exit action did not run; resolve it
     before dispatching anything.
 - **Sync before resuming a rework or run-only agent — that is yours**, since stage agents
-  are denied `sync-branch`. After a sibling merges, a `merge-pr` `behind_base` (or a stale
-  local-CI attestation) means `sync-branch <n>`, then resume `development` to re-run and
-  re-attest on the new head.
+  are denied `sync-branch`. After a sibling merges, a `merge-pr` `behind_base` (or a
+  `transition` `held` on a stale attestation) means `sync-branch <n>`, then wait for the new
+  head's required-workflow checks; only a suite with no PR-level CI needs `development`
+  resumed to re-run and re-attest on the new head.
 - `pass-gate`/`skip-gate`/`waive-gate` reconcile or merge internally — no sync after them.
 - An Epic's `architecture`/`lld` phase-Task: `transition` raised the design PR; give the review
   agent its number (`steps.open-design-pr.pr`) — it reviews on that PR.

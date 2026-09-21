@@ -270,15 +270,19 @@ never reaches `main`; merge its design PR). Remaining items: closing verificatio
 
 1. First call: refuses on open children (`open_children`); otherwise, when `epic-<n>` is
    behind `origin/main`, reconciles it and stops (`reconciled`); when already current it
-   goes straight to the evidence check below. Either result lists `unattested_suites`: the
-   required local-CI suites the epic's changes cover that have no attestation at the epic head yet.
+   goes straight to the evidence check below. Either result lists the required suites the
+   epic's changes cover that have neither a passing check on the epic PR nor an attestation
+   at the epic head: `unattested_suites` (attestable — run and attest) and `awaiting_checks`
+   (`attestable: false` — only the epic PR's check can satisfy them; never run locally).
 2. Run the exploratory pass against the reconciled tree and record it. Also run
    every suite in `unattested_suites`.
 3. Second call: refuses on missing or stale evidence (`missing_verification`) or a required
-   suite with no attestation; otherwise merges `epic-<n>` to `main`. **GitHub Actions results
-   never gate this merge** (a failed, pending or never-started run is ignored; a passing one
-   still satisfies its required suite). The epic PR exists only from this call, so attest
-   each suite right after it (`record-local-ci --pr <pr>` on the epic head) and call again.
+   suite with neither a passing check nor an attestation; otherwise merges `epic-<n>` to
+   `main`. A failed, pending or never-started GitHub Actions run never blocks this merge by
+   itself — it only leaves a suite unsatisfied, which matters for one in `awaiting_checks`.
+   The epic PR exists only from this call, so attest each suite right after it
+   (`record-local-ci --pr <pr>` on the epic head), wait for `awaiting_checks` to pass, and
+   call again.
 4. `teardown-epic-stack <n>` (no-op unless provisioned).
 
 **Preflight the machine before an e2e run** (the e2e-test Task's, or any you run yourself). An exhausted Docker VM makes a run

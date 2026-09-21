@@ -62,7 +62,7 @@ The review queue is two script-posted comment markers. Never hand-type them.
 
 | Marker | Posted by | When |
 |---|---|---|
-| `<!-- stage-transition: development->pr-review @ … -->` | `handoff-to-pr-review <n> --pr <pr> --summary "..."` | Every `development` finish, rework rounds included, after `record-local-ci` |
+| `<!-- stage-transition: development->pr-review @ … -->` | `handoff-to-pr-review <n> --pr <pr> --summary "..."` | Every `development` finish, rework rounds included, after any `record-local-ci` it owes |
 | `<!-- pr-review-outcome: clean\|rework:<pr> @ … -->` | `record-pr-review <n> --pr <pr> --outcome clean\|rework --summary "..."` | `pr-review`'s last action, clean included, before `merge-pr` or resuming `development` |
 
 `handoff_marker_present: false` from `transition`/`verify-exit` → resume `development` to
@@ -128,9 +128,9 @@ difference is minutes.
   `development`, counted by `pairing-counts <n>` (→ `references/rework.md`).
 - `base_missing: true` → nothing to reconcile yet; proceed.
 - **Merge-time freshness gate:** `merge-pr` returns `merged: false` + `behind_base` →
-  `sync-branch`, resume `development` to re-run and `record-local-ci` the new head (or
-  wait for green CI), re-run `merge-pr`. `carried_attestation_forward: true` means it
-  merged; nothing to do.
+  `sync-branch`, wait for the new head's required-workflow checks (a suite with no PR-level
+  CI: resume `development` to re-run and `record-local-ci` the new head), re-run `merge-pr`.
+  `carried_attestation_forward: true` means it merged; nothing to do.
 - `merge-pr` fails because GitHub reports the PR non-mergeable → treat as a sync
   conflict (resume `development`); never blindly retry.
 - `finish-lld` / `create-lld-tasks` returns `conflict` → the numbered doc is not on origin;
