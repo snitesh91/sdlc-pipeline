@@ -96,6 +96,7 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | Key | Default | Controls |
 |---|---|---|
 | `parallelism.devLane` / `.prReview` / `.designLane` | 1 / 1 / 1 | Lane caps; set a lane above 1 to fan it out |
+| `parallelism.crossEpicFootprintCheck` | false | Also check dev-lane footprints against other epics' live worktrees (they never hold a slot) |
 | `parallelism.maxTasksPerRun` | 0 (unlimited) | Units driven to a terminal state per run |
 | `repo` / `docRoot` / `requirementsDir` / `tokenPath` / `humanAssignee` | — (required) | `owner/name`, doc tree, requirements docs (IRDs), PAT file, the operator login `check-epics-closeable` assigns |
 | `pipeline.docTemplates` | `_templates` | Directory under `docRoot` whose `product.template.md` / `architecture.template.md` override the plugin's |

@@ -223,7 +223,7 @@ an override only.
 
 | Command | What it owns |
 |---|---|
-| `next-action <epic\|initiative> --run-id <id> [--skip-epic <n> ...]` | The one unit to work (Step 1); on an Initiative, the Epic to descend into ("The Initiative loop") |
+| `next-action <epic\|initiative> --run-id <id> [--repo-path <p>] [--skip-epic <n> ...]` | The one unit to work (Step 1); on an Initiative, the Epic to descend into ("The Initiative loop"). `--repo-path` (default `.`) is where it reads the dev lane's slot holders |
 | `list-parallel-ready <epic> --repo-path <p> --run-id <id>` / `list-design-ready <epic> --repo-path <p>` / `list-ready-for-review <epic>` | Dev-lane / standing-epic design-lane / review pools |
 | `lld-section --epic <n> --task <m> --repo-path <p>` | Only Task #`<m>`'s subsection of `epic-<n>/lld.md` |
 | `worktree-add <n> [--unit epic] [--base <ref>]` | The only way to make a worktree: resumes from `origin/<branch>` (fast-forwards; refuses a diverged branch), else branches off the integration base (recreates a stale local branch with no unique commits; refuses one with) |
@@ -569,8 +569,8 @@ and every Epic it descends into.
   `next-action`/`list-parallel-ready` again. Report what you completed and that work
   remains; the next `/sdlc:run` run (fresh run-id, fresh context) resumes exactly
   there.
-- **Never capped:** `resume`, `pass-gate`, `address-gate-feedback`. Only fresh
-  `delegate` work and the dev-lane pool count.
+- **Never capped:** `resume`, `pass-gate`, `address-gate-feedback`, and any unit this run
+  already handed out (`in_flight`). Only fresh `delegate` work and the dev-lane pool count.
 - The cap only batches throughput — it never changes Task carving or `blockedBy` order.
 
 ## Step 4 — Report back to the user
