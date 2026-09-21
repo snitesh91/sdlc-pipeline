@@ -318,8 +318,9 @@ the specs for surfaces that child moved.
 - **Normal / Low** — unmapped surface, non-reproducible flake, or a pre-existing failure
   cluster with unchanged membership → file against the standing backlog epic.
 
-Pin the confirmation procedure (retries, workers, what counts as a stable delta) in the
-e2e-test Task's `## Task` subsection — two single zero-retry runs are not a comparison.
+The e2e-test Task's `## Task` subsection states what counts as a stable delta (its
+evidence goal — two single zero-retry runs are not a comparison); how the suite runs is
+`development`'s, never the LLD's (`agents/lld.md`, "The document").
 
 **Close-blocker lane — only with operator authorisation.** A Blocker/Critical fix that
 passes the *fits* test ("Architecture deviation escalation") may skip `lld` and go

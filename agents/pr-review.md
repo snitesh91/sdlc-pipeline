@@ -51,10 +51,12 @@ rework valve. Work in your own **detached** worktree; sibling reviews run concur
    - **Standing-epic child:** the issue body and `<docRoot>/issue-<n>/`'s `product.md` or
      `architecture.md`, in full.
    - **No design doc at all:** no-spec mode — skip the Acceptance Auditor and say so.
-4. Read the PR description, `development`'s handoff comment, and the `record-local-ci`
-   attestations. The description and handoff are **claims to check**, never the standard — the
-   standard is the design and its acceptance criteria. Each attestation is a suite run's own
-   captured output pinned to a head SHA, standing in for CI. Note every specific claim you will
+4. Read the PR description, `development`'s handoff comment, `pr-checks <pr>`, and any
+   `record-local-ci` attestations. The description and handoff are **claims to check**, never
+   the standard — the standard is the design and its acceptance criteria. An attestation is a
+   suite run's own captured output pinned to a head SHA; it stands in only for a suite no
+   required workflow runs on the PR (`references/operations.md`, "Local-CI attestation") —
+   never require one for a suite a passing check covers. Note every specific claim you will
    verify.
 5. **Diff over ~20 files:** do not skim or ask for scoping. Review it in coherent slices (one
    module or concern at a time) and say in the report that you sliced it.
@@ -94,10 +96,10 @@ allow rule).
 
 Decide, and state which you did and why in the review comment:
 
-- **Skip the full re-run** when the evidence is strong: a `record-local-ci` attestation with
-  real captured output on the current head for every main-only suite the diff touches, plus a
-  criterion→test map that holds up. The review is then the diff read, the mutation probe, and
-  static verification.
+- **Skip the full re-run** when the evidence is strong: for every required suite the diff
+  touches, a passing check on the current head or a `record-local-ci` attestation with real
+  captured output on it, plus a criterion→test map that holds up. The review is then the diff
+  read, the mutation probe, and static verification.
 - **Run targeted specs** (foreground, scoped) when a specific finding needs confirming.
 - **Re-run the suite** when the evidence is thin or suspect: output that does not match its
   claim, a criterion with no named test, or a round the orchestrator already had to bounce.
@@ -230,10 +232,11 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
 - **Clean** → return. You never merge the diff you reviewed; the orchestrator runs
   `merge-pr` after your record. Use `pr-checks` only for the pending/failed/missing
   distinction.
-- **`pr-checks` status `missing-checks`** → never poll it; no GHA run is coming on a child PR.
-  - **A main-only required suite not attested for this head** (the common case, not a defect —
-    `development` skipped `record-local-ci`, or a rework push staled it) → re-run the suite on
-    the current head, then
+- **`pr-checks` status `missing-checks`** → never poll it; its `hint` names the cause
+  (`references/operations.md`, "Local-CI attestation").
+  - **A suite the config requires a local attestation for, unattested for this head** (the
+    common case, not a defect — `development` skipped `record-local-ci`, or a rework push
+    staled it) → re-run the suite on the current head, then
     `python3 "$SDLC" record-local-ci --pr <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`,
     and re-check. Never escalate this to a human.
   - **A genuine config defect** (another required workflow renamed out of step with the

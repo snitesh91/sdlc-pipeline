@@ -40,8 +40,10 @@ names the exact path.
 
 - `development`, `arch-review`/`lld-review` and `pr-review` write no doc file. Review
   findings live in the issue comment thread. `development`'s record is the **PR
-  description** (what was built and why); its evidence is the `record-local-ci`
-  attestations, pinned to a head SHA. Never commit self-reported pass/fail numbers.
+  description** (what was built and why); its evidence is the PR's required checks and
+  any `record-local-ci` attestation the config requires, pinned to a head SHA
+  (`references/operations.md`, "Local-CI attestation"). Never commit self-reported
+  pass/fail numbers.
 - Any other file under your doc directory is a defect. If you think a fourth doc is
   needed, say so in your handoff; do not create it.
 - Write each doc so the next stage can work from it alone, without the comment history.

@@ -97,6 +97,10 @@ effort; never below a shippable slice). In addition:
   each `Depends on:` every functional Task whose surfaces it proves, owns the integration /
   e2e coverage unit tests cannot, and carries its own `## Footprint` (the test trees it
   adds to). An Epic with no `e2e-test` Task has no e2e evidence at all (epic close no longer runs its own).
+  Its section names the suites in scope, the specs it adds or extends, and the evidence
+  goal — never how the suite runs ("A Task section holds design, never pipeline
+  mechanics"). One with no spec to add says why existing coverage already proves every
+  functional Task's surface; its deliverable is then the run evidence alone.
 - A Task that only makes sense after another's design settles is a dependency: sequence it
   with a `Depends on: <KEY>` line. A split whose footprints still overlap produces the
   collision this document exists to prevent.
@@ -119,6 +123,9 @@ number; none exists yet. Use each slug exactly everywhere,
 including siblings' `Depends on:` lines. `create-lld-tasks` later rewrites each heading in
 place to `## Task #<n>: <title>` (`### Task #<n>` and `Task <n>` also parse). Any other shape,
 such as `## Implement X (KEY)`, does not parse, and the Task is skipped as unverifiable.
+**Only a real Task gets a `## Task` heading.** A carving summary (a Task-to-bug table, a
+sequencing overview) goes under a non-Task heading such as `## Carving summary`;
+`create-lld-tasks` rejects any other `## Task` heading.
 
 Each subsection covers:
 
@@ -132,11 +139,14 @@ Each subsection covers:
 - **`Priority: <Urgent|High|Medium|Low>` / `Effort: <High|Medium|Low>`** — optional, one line
   each; `create-lld-tasks` sets them on the Task (omitted → `pipeline.issueDefaults`). Any
   other value refuses the whole run before an issue is created.
-- **The e2e-test Task's subsection also pins its confirmation procedure**: the worker count,
-  the retry count, and what counts as a stable delta (`references/epics.md`, "Epic closing").
-  Without it nothing separates a real regression from a load flake.
+- **`Realises: #n, #m`** — one line, only when the Task delivers pre-existing issues (a bug
+  it fixes, a filed delta): comma-separated `#<n>` references, among the metadata lines
+  beside `Depends on:`.
+- **The e2e-test Task's section states its evidence goal**: what counts as a stable delta
+  versus a flake (`references/epics.md`, "Epic closing"). Not the run itself — see below.
 - **Acceptance criteria**, carried from the Epic (unchanged, or with the revision stated).
   Each is observable and unambiguous enough to write a failing test from without reading code.
+  A criterion is a product behaviour, never a pipeline step.
 - **Honest risks.** "No risks identified" by default is a finding about the document.
 - **Out of scope** for this Task, explicitly.
 - **`## Footprint`** in the exact parseable shape from `references/epics.md`, "How to size the
@@ -154,6 +164,14 @@ Each subsection covers:
 
 A Task needing no decisions beyond `architecture.md` still gets a short subsection saying so,
 with its footprint.
+
+**A Task section holds design, never pipeline mechanics.** It states what the Task delivers,
+its footprint, its dependencies and its design. It never contains `record-local-ci` or any
+attestation step, a CI or check command, a suite-run procedure, a run-count or stability
+protocol, a load co-runner, credentials, or a verifier script — the control plane already
+enforces those (`references/operations.md`, "Local-CI attestation"; `agents/development.md`
+owns how a suite is run). Written into the LLD they drift from the real gates and make
+`pr-review` bounce on criteria the pipeline never required.
 
 **On a rework round, edit the design in place.** No "round N findings" or disposition
 sections in the file — it is a current-state spec. State what changed and why in your rework

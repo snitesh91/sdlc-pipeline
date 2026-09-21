@@ -54,7 +54,8 @@ Write nothing under `<docRoot>/issue-<n>/` (→ `references/stage-playbooks.md`,
 docs"). **Your record is the PR description**: what was built, how it maps to the design, how
 to verify it, what was deferred and why, and every deviation from the design as an explicit
 delta. Keep it a readable description of the change, not a transcript. Your evidence is the
-`record-local-ci` attestations and the handoff comment's criterion→test map.
+PR's required checks, any `record-local-ci` attestation the config requires, and the handoff
+comment's criterion→test map.
 
 ## How to write the tests
 
@@ -134,11 +135,21 @@ cycle.
 
 - Use the repo's own lint/build/test commands from its `CLAUDE.md`/`AGENTS.md`, in the
   environment it mandates — inside its container when it says so, never the host equivalent.
-- **Redirect every suite run to a file** as you go; `record-local-ci` needs that file.
-- **Copy the attested suite's invocation from its workflow file**, flags included — the
+- **Run locally the tests relevant to the change** — the unit/spec files for the code you
+  touched. A suite a required workflow runs on your PR is gated by that check; do not re-run
+  it whole locally. Run and attest a whole suite only where the config requires a local
+  attestation → `references/operations.md`, "Local-CI attestation".
+- **Redirect every suite run to a file** as you go; an attestation or your handoff table
+  quotes it.
+- **Copy an attested suite's invocation from its workflow file**, flags included — the
   config's `requiredWorkflows[].files` names it. Open it before the run. A cascade of failures
   across suites your diff never touched is environmental until proven otherwise; check your
   invocation against the workflow's first.
+- **One clean pass is the evidence.** Stop at the first clean run of the suite the design
+  requires; no stability, soak or load re-runs unless the design names them. Diagnose a
+  failure with the narrowest re-run (the failing spec), not the suite. Keep the stack up
+  between runs — no teardown or DB reset per run unless the reset is what you test; provision
+  fixtures and profiles once, before the first run.
 - **Integration tests run only against a test database.** Before starting any truncating or
   table-cleaning suite, confirm the *effective* DB name ends in `_test`. Never copy a DB-name
   override from an arbitrary Makefile target to make a suite run. If the effective DB is not a
@@ -240,16 +251,20 @@ else is settled; do not reopen it.
 1. Re-run "The completion gates", then push once.
 2. `python3 "$SDLC" open-dev-pr <n> --title "..." --body "..." --summary "..."` — opens the draft
    PR (appends `Closes #<n>`, sets Stage to `PR Review`, posts the PR-opened comment). It posts
-   no queue marker. On a rework round it reports the already-open PR (`created: false`).
-3. For **each main-only required suite this round actually ran** (suite keys from the config's
-   `requiredWorkflows[].suite`), on the **current head, after the last push**:
+   no queue marker. On a rework round it reports the already-open PR (`created: false`). A
+   verify-only Task with no code change adds `--allow-empty`; its body states what was
+   verified and the evidence.
+3. For **each suite the config requires a local attestation for** that this round ran (suite
+   keys from the config's `requiredWorkflows[].suite`; which ones →
+   `references/operations.md`, "Local-CI attestation"), on the **current head, after the last
+   push**:
    ```
    python3 "$SDLC" record-local-ci --pr <pr> --suite <suite> --sha <HEAD> \
        --command "<the exact command>" --output <path to that run's captured output>
    ```
-   It refuses a summary; it embeds the run's own output. A push after it stales it. Skip only a
-   suite you did not run (a change confined to one suite's `prefixes`). →
-   `references/operations.md`, "Local-CI attestation".
+   It refuses a summary; it embeds the run's own output. A push after it stales it. A suite a
+   required workflow runs on the PR itself, or one your change never touches (confined to
+   another suite's `prefixes`), needs none.
 4. `python3 "$SDLC" handoff-to-pr-review <n> --pr <pr> --summary "..."` — **always**, including
    after rework, and only after the attestations. The marker is the review queue; never
    hand-type it. The summary is the handoff comment below.
