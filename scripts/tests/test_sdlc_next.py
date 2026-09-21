@@ -5007,13 +5007,13 @@ def test_is_epic_and_is_initiative_follow_classification():
 
 
 def test_decide_next_action_accepts_an_epic_with_an_initiative_parent():
-    # A fresh Epic (no phase-Tasks cut yet) has nothing to delegate.
+    # A fresh Epic (no phase-Tasks cut yet) has nothing to delegate: it asks for the cut.
     from sdlc_next import GitHub, decide_next_action
     v2_epic = _epic(41, parent=40)
     runner = ScriptedRunner({tuple(_list_argv()): _list_response([v2_epic])})
     gh = GitHub(runner=runner)
     result = decide_next_action(gh, 41)
-    assert result == {"action": "none", "epic": 41}
+    assert (result["action"], result["epic"], result["unit"]) == ("cut-phase-tasks", 41, "epic")
 
 
 def test_decide_next_action_v2_epic_delegates_its_architecture_phase_task():

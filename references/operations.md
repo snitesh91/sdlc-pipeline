@@ -60,8 +60,9 @@ requested Priority/Effort. `file-closing-delta` self-repairs a mid-create failur
 Under a non-standing Epic follow with `set-stage`
 (Tasks from `create-lld-tasks` are staged by `merge-lld-doc`). `audit-issues [--epic
 <n>]` lists open issues missing any of these fields (with `--epic`, only that Epic's
-subtree), each with its `repair` command; an
-Epic or Initiative is never flagged for lacking a parent.
+subtree), each with its `repair` command, children first and the Epic's/Initiative's own
+gaps last (`container: true`) — repair the container's Priority/Effort too, but never let
+it hold up the children; an Epic or Initiative is never flagged for lacking a parent.
 
 | Field | Values | Rules |
 |---|---|---|
@@ -86,6 +87,34 @@ standing), `childrenNeedArchitectedEpic`, `closes`, and `gates`
 defaults (`legacy`, `standing`, catch-all `default`); `gates` inherit `pipeline.gates`. A
 profile applies only to an issue `pipeline.classification` already calls an epic.
 Field reference: `sdlc.config.sample.json`. `product-review` is not a toggle.
+
+## Dropping a unit
+
+A unit the operator drops is never closed as completed. Say why on the thread and close it
+with the right state reason:
+
+- **An Epic under an Initiative:** `detach-epic <epic> --reason "<why>"` first — it removes
+  the sub-issue link the Initiative loop walks and every `blockedBy` edge between the Epic
+  and its sibling Epics (a dependent sibling would otherwise wait on it forever), commenting
+  on the Epic and the Initiative; its own children stay with it. Then `close-issue <epic>
+  --not-planned --reason "<why>"`, and each open child the same way.
+- **Any other unit:** `close-issue <n> --not-planned --reason "<why>"` — state reason
+  `NOT_PLANNED`, the reason commented first, terminal fields set, worktree released
+  (a dirty or unpushed one is refused and reported, never destroyed).
+- `comment <n> --body "..."` (or `--body-file`) leaves any other plain audit-trail note —
+  no marker, orchestrator only; stage agents keep `post-comment`.
+
+## Worktree release
+
+Every path that releases a unit's worktree (`close-issue`, `merge-pr`, `mark-blocked`,
+`mark-needs-human`, `close-epic`) first runs `pipeline.worktrees.releaseCommand` inside
+the tree when the config sets one (a shell string; e.g. `make it-down` where the driven
+repo keeps a per-worktree test env), then `git worktree remove`. It runs only on a tree
+that is about to be removed — never on one refused for uncommitted or unpushed work — and
+a failure is reported (`release_command.ok: false`), never fatal. Closing a phase-Task
+also deletes its merged design PR's `origin/issue-<n>` (`design_pr_branch`; an unmerged
+one keeps its branch). A tree released without the hook (a refusal, a crash) leaves that
+env for you to tear down by hand.
 
 ## Assignee convention
 

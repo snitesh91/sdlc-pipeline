@@ -10,6 +10,7 @@ The main thread is guarded only while it drives a run (see `main_thread_guarded`
 import os
 import re
 import shlex
+import sys
 
 from _common import emit, load_json, read_input, repo_config, run, run_states, sdlc_role
 
@@ -60,8 +61,9 @@ REVIEW_ROLES = {"product-review", "design-review", "pr-review"}
 CONTROL_PLANE_REFS = {"$SDLC", "${SDLC}"}
 
 # A run's state file is written by `next-action --run-id` and never deleted, so "live" means
-# written within this window (the orchestrator rewrites it as units start and finish).
-RUN_LIVE_SECONDS = 8 * 3600
+# written within this window (the orchestrator rewrites it as units start and finish);
+# `guard.mainThreadFreshnessHours` overrides it.
+RUN_LIVE_HOURS = 8
 
 REASONS = {
     "graphql": f"Hand-run GraphQL is blocked: the control plane owns GitHub reads and writes. Use {SDLC} <command> (next-action, check-gate, pr-checks, resolve-thread, audit-issues, ...).",
@@ -79,6 +81,11 @@ REASONS = {
     "rebase": f"Never rebase a pipeline branch: use {SDLC} sync-branch <n> (merges the base).",
     "orchestrator-only": "That control-plane command is the orchestrator's: report it in your "
                          "SDLC-RESULT/handoff; the orchestrator runs it.",
+    "sync-branch-agent": "sync-branch is the orchestrator's (it must never move a live agent's "
+                         "worktree). Do NOT merge the base by hand (no `git merge origin/<base>`): "
+                         "stop, and end with your SDLC-RESULT (outcome `blocked`, naming "
+                         "`sync-branch <n>` as the needed step); the orchestrator syncs the "
+                         "branch and resumes you on the new head.",
     "post-comment-role": f"post-comment serves only your own stage: pass --role <your role> ({SDLC} post-comment <n> --role <r> --body-file <f>).",
     "review-git-write": "Review roles are read-only on the branch: describe the fix in your "
                         "review; the owning stage applies it.",
@@ -293,6 +300,8 @@ def _flag_value(words: list, flag: str):
 def check_role(words: list, role: str):
     """A stage agent's limits: its role's control-plane commands; reviewers never write git."""
     cmd = control_plane_command(words)
+    if cmd == "sync-branch":
+        return "sync-branch-agent"
     if cmd and cmd not in READ_ONLY_COMMANDS | ROLE_COMMANDS.get(role, set()):
         return "orchestrator-only"
     if cmd == "post-comment" and _flag_value(words, "--role") != role:
@@ -331,13 +340,22 @@ def verdict(command: str, role: str = ""):
     return None
 
 
+def run_live_seconds(config: dict) -> float:
+    """The freshness window: `guard.mainThreadFreshnessHours`, else `RUN_LIVE_HOURS`."""
+    try:
+        hours = float((config.get("guard") or {}).get("mainThreadFreshnessHours", RUN_LIVE_HOURS))
+    except (TypeError, ValueError):
+        hours = RUN_LIVE_HOURS
+    return hours * 3600
+
+
 def main_thread_guarded(config: dict, session_id: str) -> bool:
     """Whether the main thread's hand-run mutations are denied: only while this session
     drives a run, i.e. it has a fresh run-state file. `guard.mainThread: "always"` guards
     every session; an unknown session id (no run can be matched) stays guarded."""
     if (config.get("guard") or {}).get("mainThread") == "always" or not session_id:
         return True
-    return bool(run_states(config, session_id, max_age=RUN_LIVE_SECONDS))
+    return bool(run_states(config, session_id, max_age=run_live_seconds(config)))
 
 
 def main() -> int:
@@ -351,6 +369,9 @@ def main() -> int:
     role = sdlc_role(data.get("agent_type"))
     if not role and not main_thread_guarded(load_json(config_path),
                                             str(data.get("session_id") or "")):
+        # One line so an unguarded run is visible, never silent.
+        print("sdlc guard: main thread unguarded -- no fresh run-state for this session "
+              "(guard.mainThread=run-live; a run without --run-id writes none)", file=sys.stderr)
         return 0
     try:
         key = verdict(command, role)

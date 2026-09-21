@@ -76,8 +76,25 @@ class FakeGh:
     def issue_comment(self, n, body):
         self.issues[n]["comments"].append(body)
 
-    def issue_close(self, n):
+    def issue_close(self, n, reason="completed"):
         self.issues[n]["state"] = "CLOSED"
+        self.issues[n]["state_reason"] = reason
+
+    def delete_branch(self, branch):
+        """Like GitHub's REST delete: a missing ref is a GhError, not a silent no-op."""
+        if self.repo is not None:
+            gone = subprocess.run(["git", "push", "-q", "origin", "--delete", branch],
+                                  cwd=self.repo, capture_output=True, text=True)
+            if gone.returncode != 0:
+                raise s.GhError(f"delete {branch}: {gone.stderr.strip()}")
+        self.deleted_branches = [*getattr(self, "deleted_branches", []), branch]
+
+    def remove_sub_issue(self, parent_number, child_number):
+        assert self.issues[child_number]["parent"] == parent_number
+        self.issues[child_number]["parent"] = None
+
+    def remove_blocked_by(self, issue_number, blocking_number):
+        self.blocked[issue_number].remove(blocking_number)
 
     def issue_edit(self, n, add_labels=(), remove_labels=(), add_assignees=(), **_):
         labels = self.issues[n]["labels"]

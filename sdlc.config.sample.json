@@ -6,7 +6,9 @@
   "tokenEnv": "SDLC_GH_TOKEN",
   "requirementsDir": "docs/requirements",
   "guard": {
-    "mainThread": "run-live"
+    "_comment": "Bash guard on the main thread: \"run-live\" (default) guards it only while this session drives a run -- a run-state file written by `next-action --run-id` within `mainThreadFreshnessHours` (hours, default 8); \"always\" guards every session. An unguarded call logs one stderr line. sdlc:<role> agents are always guarded.",
+    "mainThread": "run-live",
+    "mainThreadFreshnessHours": 8
   },
   "humanAssignee": "maintainer",
   "parallelism": {
@@ -97,11 +99,13 @@
       "epicPrefix": "epic-"
     },
     "worktrees": {
+      "_comment": "`releaseCommand`: shell command run inside a unit's worktree right before the pipeline removes it (e.g. `make it-down` to tear down a per-worktree test env); failure is reported, never fatal. Empty = none.",
       "root": "/tmp",
       "devPrefix": "sdlc-dev-",
       "epicPrefix": "sdlc-epic-",
       "reviewPrefix": "sdlc-review-",
-      "ephemeralPrefix": "sdlc-tmp-"
+      "ephemeralPrefix": "sdlc-tmp-",
+      "releaseCommand": ""
     },
     "locks": {
       "_comment": "Per-branch flock every branch-writing command takes; `{worktreesRoot}` expands to worktrees.root. SDLC_LOCK_DIR in the environment overrides `dir`.",

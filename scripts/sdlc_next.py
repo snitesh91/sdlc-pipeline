@@ -99,8 +99,11 @@ _PIPELINE_DEFAULTS = {
     "branches": {"issuePrefix": "issue-", "epicPrefix": "epic-"},
     # `ephemeralPrefix`: throwaway tree for a branch no live worktree holds, since
     # the main checkout is never a git-write target.
+    # `releaseCommand`: shell command run inside a worktree right before it is removed
+    # (tear down per-worktree resources); failure is reported, never fatal. "" = none.
     "worktrees": {"root": "/tmp", "devPrefix": "sdlc-dev-", "epicPrefix": "sdlc-epic-",
-                  "reviewPrefix": "sdlc-review-", "ephemeralPrefix": "sdlc-tmp-"},
+                  "reviewPrefix": "sdlc-review-", "ephemeralPrefix": "sdlc-tmp-",
+                  "releaseCommand": ""},
     # Per-branch flock; `SDLC_LOCK_DIR` in the environment overrides `dir`.
     "locks": {"dir": "{worktreesRoot}/.sdlc-locks", "waitSeconds": 600},
     # Per-epic runtime stack. The driven repo's compose must honour the `ports`
@@ -287,9 +290,10 @@ class WorkItemProvider(Protocol):
     def issue_epic_info(self, number: int) -> dict: ...
     def issue_create(self, title: str, body: str, labels: list) -> int: ...
     def issue_comment(self, number: int, body: str) -> None: ...
-    def issue_close(self, number: int) -> None: ...
+    def issue_close(self, number: int, reason: str = "completed") -> None: ...
     def blocked_by(self, number: int) -> list: ...
     def add_blocked_by(self, issue_number: int, blocking_number: int) -> None: ...
+    def remove_blocked_by(self, issue_number: int, blocking_number: int) -> None: ...
     def blocking(self, number: int) -> list: ...
     def set_issue_type(self, number: int, type_name: str) -> None: ...
     def set_stage_field(self, number: int, stage: str) -> None: ...
@@ -299,6 +303,7 @@ class WorkItemProvider(Protocol):
     def clear_stage_and_status_fields(self, number: int) -> None: ...
     def clear_stage_field(self, number: int) -> None: ...
     def add_sub_issue(self, parent_number: int, child_number: int) -> None: ...
+    def remove_sub_issue(self, parent_number: int, child_number: int) -> None: ...
 
     def classify_unit(self, number: int) -> str:
         """"initiative", "epic", "task" or "other" for `number`."""
@@ -387,6 +392,11 @@ class GitHub:
         blocking_id = self.issue_node_id(blocking_number)
         self.graphql(_ADD_BLOCKED_BY_MUTATION.format(issue_id=issue_id, blocking_id=blocking_id))
 
+    def remove_blocked_by(self, issue_number: int, blocking_number: int):
+        issue_id = self.issue_node_id(issue_number)
+        blocking_id = self.issue_node_id(blocking_number)
+        self.graphql(_REMOVE_BLOCKED_BY_MUTATION.format(issue_id=issue_id, blocking_id=blocking_id))
+
     def blocking(self, number: int) -> list:
         """Open issue numbers that `number` blocks (the reverse of `blocked_by`)."""
         data = self.graphql(_BLOCKING_QUERY.format(n=number))
@@ -441,12 +451,21 @@ class GitHub:
         child_id = self.issue_node_id(child_number)
         self.graphql(_ADD_SUB_ISSUE_MUTATION.format(parent_id=parent_id, child_id=child_id))
 
+    def remove_sub_issue(self, parent_number: int, child_number: int):
+        parent_id = self.issue_node_id(parent_number)
+        child_id = self.issue_node_id(child_number)
+        self.graphql(_REMOVE_SUB_ISSUE_MUTATION.format(parent_id=parent_id, child_id=child_id))
+
     def issue_comment(self, number: int, body: str):
         self._run(["gh", "issue", "comment", str(number), "--repo", self.repo, "--body", body])
 
-    def issue_close(self, number: int):
+    def issue_close(self, number: int, reason: str = "completed"):
         self._run(["gh", "issue", "close", str(number), "--repo", self.repo,
-                   "--reason", "completed"])
+                   "--reason", reason])
+
+    def delete_branch(self, branch: str):
+        """Delete `origin/<branch>` GitHub-side (REST); a missing ref raises GhError."""
+        self._run(["gh", "api", "-X", "DELETE", f"repos/{self.repo}/git/refs/heads/{branch}"])
 
     def pr_comment(self, number: int, body: str):
         self._run(["gh", "pr", "comment", str(number), "--repo", self.repo, "--body", body])
@@ -859,6 +878,18 @@ _DELETE_ISSUE_FIELD_VALUE_MUTATION = """mutation {{
 _ADD_SUB_ISSUE_MUTATION = """mutation {{
   addSubIssue(input: {{issueId: "{parent_id}", subIssueId: "{child_id}"}}) {{
     subIssue {{ number }}
+  }}
+}}"""
+
+_REMOVE_SUB_ISSUE_MUTATION = """mutation {{
+  removeSubIssue(input: {{issueId: "{parent_id}", subIssueId: "{child_id}"}}) {{
+    subIssue {{ number }}
+  }}
+}}"""
+
+_REMOVE_BLOCKED_BY_MUTATION = """mutation {{
+  removeBlockedBy(input: {{issueId: "{issue_id}", blockingIssueId: "{blocking_id}"}}) {{
+    issue {{ number }}
   }}
 }}"""
 
@@ -1615,6 +1646,16 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
             deferred_by_run_cap.append(step["epic"])
         elif step:
             return step
+    # A bare Epic run (no Initiative loop above it) still needs its phase-Tasks cut first.
+    if (is_epic(epic_issue) and epic_issue["state"] == "OPEN" and not is_epic_standing(epic_issue)
+            and not is_epic_architected(epic_issue) and not deferred_by_run_cap
+            and epic_lacks_phase_tasks(all_issues, epic)):
+        if at_cap:
+            deferred_by_run_cap.append(epic)
+        else:
+            return {"action": "cut-phase-tasks", "epic": epic, "unit": "epic",
+                    "reason": f"Epic #{epic} has no phase-Tasks: run `cut-phase-tasks {epic} "
+                              f"--repo-path <p>`, then `next-action {epic}` again"}
     return none_result()
 
 
@@ -2133,10 +2174,24 @@ def _resume_live_worktree(path: str, branch: str, repo_path: str, runner: Runner
     return {**result, "synced_to_origin": True, "behind_before": behind}
 
 
+def _run_release_command(path: str, shell: Optional[Callable] = None) -> Optional[dict]:
+    """Run `pipeline.worktrees.releaseCommand` inside `path`; None when none is configured.
+    Never raises: `{command, ok, error?}` reports a failure and the removal goes ahead."""
+    command = PIPELINE["worktrees"].get("releaseCommand") or ""
+    if not command:
+        return None
+    try:
+        (shell or _default_shell)(command, path)
+    except GhError as exc:
+        return {"command": command, "ok": False, "error": str(exc)}
+    return {"command": command, "ok": True}
+
+
 def release_worktree(branch: str, runner: Runner = _default_runner,
-                      base_repo: str = ".") -> dict:
+                      base_repo: str = ".", shell: Optional[Callable] = None) -> dict:
     """Remove the worktree holding `branch` so a parked/finished unit frees its lane
-    slot. Returns `{released, path?, reason?}`; never raises and never destroys work
+    slot, running `pipeline.worktrees.releaseCommand` in it first (`release_command`).
+    Returns `{released, path?, reason?}`; never raises and never destroys work
     (refuses on uncommitted/unpushed changes or the main worktree)."""
     try:
         path = worktree_path_for_branch(branch, runner=runner, base_repo=base_repo)
@@ -2160,12 +2215,13 @@ def release_worktree(branch: str, runner: Runner = _default_runner,
         if unpushed:
             return {"released": False, "path": path,
                     "reason": f"{len(unpushed.splitlines())} commit(s) not pushed to origin/{branch}"}
+        release = _run_release_command(path, shell)
         # Safe: the refusals above guarantee a clean tree. Plain `remove` refuses
         # any tree containing submodules.
         runner(["git", "-C", base_repo, "worktree", "remove", "--force", path])
     except GhError as exc:
         return {"released": False, "path": path, "reason": str(exc)}
-    return {"released": True, "path": path}
+    return {"released": True, "path": path, **({"release_command": release} if release else {})}
 
 
 def resolve_repo_path(repo_path: Optional[str], branch: str,
@@ -4070,9 +4126,28 @@ def cmd_pause_for_epic_regate(gh: GitHub, issue: int, epic: int,
             "found_by": found_by}
 
 
-def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str) -> dict:
+_NO_COMMITS_RE = re.compile(r"no commits between", re.IGNORECASE)
+
+
+def _push_empty_commit(issue: int, repo_path: Optional[str], runner: Runner) -> dict:
+    """Land one empty commit on `issue-<n>` (its live worktree, else an ephemeral one) and
+    push it, so a verify-only Task can still raise a PR. Returns `sha`."""
+    branch = issue_branch(issue)
+    with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
+        runner(["git", "-C", ws.path, "commit", "--allow-empty", "-m",
+                f"chore(#{issue}): verify-only task, no code change"])
+        _run_retry_transient(["git", "-C", ws.path, "push", "origin", branch], runner)
+        sha = runner(["git", "-C", ws.path, "rev-parse", "HEAD"]).strip()
+    return _with_workspace({"branch": branch, "sha": sha}, ws)
+
+
+def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
+                    allow_empty: bool = False, repo_path: Optional[str] = None,
+                    runner: Runner = _default_runner) -> dict:
     """Open the development draft PR and set Stage to `pr-review`; an already-open
-    PR on the branch is reused (`created: False`). Returns `pr`, `created`."""
+    PR on the branch is reused (`created: False`). A branch with no commits ahead of its
+    base gets an empty commit first only with `allow_empty` (`empty_commit`), else the
+    refusal names the flag. Returns `pr`, `created`."""
     existing = gh.pr_list_for_branch(issue_branch(issue))
     if existing:
         pr_number = existing[0]["number"]
@@ -4092,8 +4167,22 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str)
         return {"issue": issue, "created": False, "refused": True, "reason": reason,
                 "offending_design_docs": offenders["design_docs"],
                 "offending_footprint_paths": offenders["foreign_footprint"]}
-    pr_number = gh.pr_create(base=base, head=issue_branch(issue), title=title,
-                              body=f"{body}\n\nCloses #{issue}", draft=True)
+    pr_body = f"{body}\n\nCloses #{issue}"
+    extra: dict = {}
+    try:
+        pr_number = gh.pr_create(base=base, head=issue_branch(issue), title=title,
+                                 body=pr_body, draft=True)
+    except GhError as e:
+        if not _NO_COMMITS_RE.search(str(e)):
+            raise
+        if not allow_empty:
+            raise GhError(f"{issue_branch(issue)} has no commits ahead of {base}, so GitHub "
+                          f"refuses the PR. A verify-only Task re-runs open-dev-pr with "
+                          f"--allow-empty (lands an empty commit first); otherwise commit and "
+                          f"push the work, then re-run.\n{e}")
+        extra["empty_commit"] = _push_empty_commit(issue, repo_path, runner)
+        pr_number = gh.pr_create(base=base, head=issue_branch(issue), title=title,
+                                 body=pr_body, draft=True)
     gh.set_stage_field(issue, "pr-review")
     gh.issue_comment(issue,
         f"✅ {summary} Draft PR: #{pr_number} — what was built and why is in the PR "
@@ -4101,7 +4190,7 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str)
         f"Not yet queued for review: `development` still owes `record-local-ci` per "
         f"suite it ran and `handoff-to-pr-review`, which posts the marker "
         f"`list-ready-for-review` reads.")
-    return {"issue": issue, "pr": pr_number, "created": True}
+    return {"issue": issue, "pr": pr_number, "created": True, **extra}
 
 
 # --- citations: cite / verify-citations / verify-exit's citations_ok ---
@@ -4781,19 +4870,101 @@ def cmd_mark_issue_closed(gh: GitHub, issue: int) -> dict:
             "marked_done": True}
 
 
+def _delete_merged_design_pr_branch(gh: GitHub, issue: int) -> Optional[dict]:
+    """Delete `origin/issue-<n>` once the unit's design PR is MERGED (merge-design-pr keeps
+    the branch until the Task closes); None when there is no design PR, never raises."""
+    try:
+        found = find_design_pr(gh.issue_view(issue).get("comments", []))
+        if not found:
+            return None
+        pr = found[1]
+        if gh.pr_view(pr, fields="state").get("state") != "MERGED":
+            return {"pr": pr, "deleted": False, "reason": "design PR is not merged"}
+        gh.delete_branch(issue_branch(issue))
+        return {"pr": pr, "deleted": True, "branch": issue_branch(issue)}
+    except GhError as e:
+        return {"deleted": False, "reason": str(e)}
+
+
 def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
-                    runner: Runner = _default_runner) -> dict:
-    """Close `issue`, apply the terminal fields and release its worktree -- for a
-    phase-Task that never merges through `merge-pr`. Counts toward the run cap."""
+                    runner: Runner = _default_runner, not_planned: bool = False,
+                    reason: Optional[str] = None) -> dict:
+    """Close `issue` (`not_planned`: state reason NOT_PLANNED, with `reason` commented first),
+    apply the terminal fields, release its worktree, delete a merged design PR's branch
+    (`design_pr_branch`, non-fatal) and close the issues it `Realises:` -- for a unit that
+    never merges through `merge-pr`. Counts toward the run cap."""
+    if reason and not not_planned:
+        raise GhError("--reason only goes with --not-planned")
     body = gh.issue_view(issue).get("body")
-    gh.issue_close(issue)
+    if not_planned:
+        gh.issue_comment(issue, f"🚫 Closed as not planned — {reason or 'dropped by the operator'}.")
+    gh.issue_close(issue, "not planned" if not_planned else "completed")
     cmd_mark_issue_closed(gh, issue)
-    realised = _close_realised_issues(gh, issue, body)
-    released = release_worktree(issue_branch(issue), runner=runner, base_repo=repo_path or ".")
+    realised = None if not_planned else _close_realised_issues(gh, issue, body)
+    released = _release_unit_worktree(issue, base_repo=repo_path or ".", runner=runner)
+    design_branch = _delete_merged_design_pr_branch(gh, issue)
     terminal = record_terminal_unit(gh, issue)
     return {"issue": issue, "closed": True, "worktree": released,
+            **({"state_reason": "not_planned"} if not_planned else {}),
+            **({"design_pr_branch": design_branch} if design_branch else {}),
             **({"run_terminal": terminal} if terminal else {}),
             **({"realised_closed": realised} if realised else {})}
+
+
+def cmd_comment(gh: WorkItemProvider, issue: int, body: Optional[str] = None,
+                body_file: Optional[str] = None) -> dict:
+    """Post a plain comment on `issue` from `body` or `body_file` (one of them), capped at
+    `HANDOFF_CAP` chars. No marker: it is the orchestrator's audit-trail note."""
+    if (body is None) == (body_file is None):
+        raise GhError("pass exactly one of --body / --body-file")
+    if body_file is not None:
+        try:
+            with io.open(os.path.expanduser(body_file), encoding="utf-8") as fh:
+                body = fh.read()
+        except OSError as exc:
+            raise GhError(f"--body-file must be a readable file holding the comment text: {exc}")
+    body = (body or "").strip()
+    if not body:
+        raise GhError("the comment is empty -- say something or do not comment")
+    if len(body) > HANDOFF_CAP:
+        return {"issue": issue, "refused": True,
+                "reason": f"the comment is {len(body):,} chars, over the {HANDOFF_CAP:,}-char "
+                          f"cap (references/stage-playbooks.md, \"Comment size is a "
+                          f"contract\"); trim it and re-run"}
+    gh.issue_comment(issue, body)
+    return {"issue": issue, "commented": True, "chars": len(body)}
+
+
+def cmd_detach_epic(gh: GitHub, epic: int, reason: Optional[str] = None) -> dict:
+    """Take an Epic out of its Initiative: drop the sub-issue link the Initiative loop walks
+    and every `blockedBy` edge between it and the Initiative's other Epics (either direction),
+    then comment on both. The Epic stays open; close it with `close-issue --not-planned` or
+    run it bare. Refuses (exit 0) an issue that is not an Epic under an Initiative."""
+    issues = {i["number"]: i for i in gh.issue_list()}
+    entry = issues.get(epic)
+    if entry is None:
+        raise GhError(f"issue #{epic} not found in the repo issue list")
+    parent = (entry.get("parent") or {}).get("number")
+    if not is_epic(entry) or parent is None or not is_initiative(issues.get(parent) or {}):
+        return {"epic": epic, "detached": False, "refused": True,
+                "reason": f"#{epic} is not an Epic under an Initiative -- nothing to detach"}
+    siblings = {n for n, i in issues.items()
+                if (i.get("parent") or {}).get("number") == parent and is_epic(i) and n != epic}
+    removed = []
+    for blocker in gh.blocked_by(epic):
+        if blocker in siblings:
+            gh.remove_blocked_by(epic, blocker)
+            removed.append({"issue": epic, "blocked_by": blocker})
+    for dependent in gh.blocking(epic):
+        if dependent in siblings:
+            gh.remove_blocked_by(dependent, epic)
+            removed.append({"issue": dependent, "blocked_by": epic})
+    gh.remove_sub_issue(parent, epic)
+    why = f" — {reason}" if reason else ""
+    gh.issue_comment(epic, f"🔗 Detached from Initiative #{parent}{why}. It is no longer in "
+                           f"that Initiative's Epic loop; its own state is unchanged.")
+    gh.issue_comment(parent, f"🔗 Epic #{epic} detached from this Initiative{why}.")
+    return {"epic": epic, "initiative": parent, "detached": True, "removed_edges": removed}
 
 
 def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
@@ -5012,7 +5183,9 @@ def cmd_audit_issues(gh: WorkItemProvider, epic: Optional[int] = None) -> dict:
     """Read-only: open issues in the Initiative/Epic trees (plus parentless ones), or only
     `epic`'s (or an Initiative's) subtree when given, missing issueType, parent (Tasks and other
     non-containers), Priority, Effort or Pipeline Status, each with a `repair-issue` command;
-    and open non-standing Epics with no phase-Tasks, with the `cut-phase-tasks` command."""
+    and open non-standing Epics with no phase-Tasks, with the `cut-phase-tasks` command.
+    Children come first; an Epic's/Initiative's own gaps (`container: true`) come last, so a
+    scoped audit never leads with the container's Priority/Effort."""
     issues = gh.issue_list()
     by_number = {i["number"]: i for i in issues}
     children: dict = {}
@@ -5056,7 +5229,8 @@ def cmd_audit_issues(gh: WorkItemProvider, epic: Optional[int] = None) -> dict:
             repairs.append(f"cut-phase-tasks {n} --repo-path <p>")
         if missing:
             found.append({"issue": n, "title": i["title"], "missing": missing,
-                          "repair": "; ".join(repairs)})
+                          "repair": "; ".join(repairs), **({"container": True} if container else {})})
+    found.sort(key=lambda f: (f.get("container", False), f["issue"]))
     return {"issues": found, "count": len(found)}
 
 
@@ -5637,6 +5811,9 @@ COMMENT_CAPS = {
     "mark-needs-human": ("reason", HANDOFF_CAP),
     "resolve-thread": ("reply", HANDOFF_CAP),
     "route": ("reason", ROUTE_REASON_CAP),
+    "close-issue": ("reason", HANDOFF_CAP),
+    "comment": ("body", HANDOFF_CAP),
+    "detach-epic": ("reason", HANDOFF_CAP),
 }
 
 
@@ -5851,7 +6028,13 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
                     help="Any path inside the repository (base for the worktree map)")
-    p.set_defaults(func=lambda a: cmd_close_issue(get_work_item_provider(), a.issue, repo_path=a.repo_path))
+    p.add_argument("--not-planned", action="store_true",
+                    help="Close with state reason NOT_PLANNED (a dropped unit), commenting --reason")
+    p.add_argument("--reason", default=None,
+                    help="Why it is not planned (one paragraph; with --not-planned only)")
+    p.set_defaults(func=lambda a: cmd_close_issue(get_work_item_provider(), a.issue,
+                                                  repo_path=a.repo_path,
+                                                  not_planned=a.not_planned, reason=a.reason))
     p = sub.add_parser("pause-for-epic-regate")
     p.add_argument("issue", type=int)
     p.add_argument("--epic", type=int, required=True)
@@ -5938,7 +6121,14 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--title", required=True)
     p.add_argument("--body", required=True)
     p.add_argument("--summary", required=True)
-    p.set_defaults(func=lambda a: cmd_open_dev_pr(get_work_item_provider(), a.issue, a.title, a.body, a.summary))
+    p.add_argument("--allow-empty", action="store_true",
+                    help="Verify-only Task: land an empty commit when the branch has no "
+                         "commits ahead of its base, so the PR can open")
+    p.add_argument("--repo-path", default=None,
+                    help="Any path inside the repository (base for the empty commit's worktree map)")
+    p.set_defaults(func=lambda a: cmd_open_dev_pr(get_work_item_provider(), a.issue, a.title,
+                                                  a.body, a.summary, allow_empty=a.allow_empty,
+                                                  repo_path=a.repo_path))
     p = sub.add_parser("pr-checks")
     p.add_argument("pr", type=int)
     p.set_defaults(func=lambda a: cmd_pr_checks(get_work_item_provider(), a.pr))
@@ -6117,6 +6307,19 @@ def main(argv: Optional[list] = None) -> int:
                     help="Override sync-branch's auto-detected integration base")
     p.set_defaults(func=lambda a: cmd_transition(
         get_work_item_provider(), a.issue, a.expect_stage, a.pr, a.repo_path, a.base))
+    # --- operator control-plane ---
+    p = sub.add_parser("detach-epic",
+                        help="Take an Epic out of its Initiative (sub-issue link + sibling blockedBy edges)")
+    p.add_argument("epic", type=int)
+    p.add_argument("--reason", default=None, help="Why, for the comments on both issues")
+    p.set_defaults(func=lambda a: cmd_detach_epic(get_work_item_provider(), a.epic, a.reason))
+    p = sub.add_parser("comment", help="Post a plain comment on an issue (no marker)")
+    p.add_argument("issue", type=int)
+    text = p.add_mutually_exclusive_group(required=True)
+    text.add_argument("--body", default=None, help=f"The comment text (<= {HANDOFF_CAP:,} chars)")
+    text.add_argument("--body-file", default=None, help="File holding the comment text")
+    p.set_defaults(func=lambda a: cmd_comment(get_work_item_provider(), a.issue, a.body,
+                                              a.body_file))
     args = parser.parse_args(argv)
     refusal = comment_cap_refusal(args)
     if refusal:
