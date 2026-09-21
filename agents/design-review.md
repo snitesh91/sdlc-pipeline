@@ -45,7 +45,7 @@ Fan out only per `review-fanout.md`, "Defaults for when a review stage fans out"
 
 - Pick the axes this design actually has — not a fixed list. Examples: does the mechanism match the inputs it claims to; does it hold under composition (config precedence, ordering, inheritance, override); which syntax forms does the underlying tool actually visit; does every number and transcript in the doc reproduce; what does the design assert about the codebase that is false; **the completeness lens — "what class of defect has nobody examined at all?" (mandatory)**.
 - Dispatch one `Agent` (`subagent_type: "general-purpose"`) per axis, all in one message; start each prompt with `AXIS: <axis-key>` (e.g. `completeness`). Give each: the doc path, the worktree path, its axis brief, the "Verify against the real codebase" rule verbatim, and a requirement to run a **positive control** proving its check can fail before trusting a pass.
-- Axes beyond the child cap, or with no `Agent` tool: work them yourself — same axes, same completeness lens.
+- A launch denied at the child cap is not final: wait for a holder to report, then re-launch the axis (`review-fanout.md`, "Wait-and-dispatch loop"). Work an axis yourself — same completeness lens — only with no `Agent` tool or no holder left to wait for.
 - **State axis coverage in your handoff comment:** how many axes you launched, how many had returned when you formed the verdict, and which (if any) you dropped.
 
 **Rework round:** work the delta yourself. Prove its shape first (`git diff --stat` against the integration branch): a code delta can invalidate an earlier measurement, a doc-only delta cannot. If the delta is a redesign rather than a fix, treat it as a first round.

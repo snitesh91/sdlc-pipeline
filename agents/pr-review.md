@@ -86,11 +86,12 @@ Work the three layers yourself, in sequence; on a rework round, review the delta
   handoff's criterion→test map against the diff, not against itself.
 
 **Mutation-probe selectively.** Take the one or two guards carrying the real acceptance, break
-the behaviour in your detached worktree, confirm the test goes red, revert (`git status`
-clean). If the auto-mode permission classifier denies the transient `src` edit the probe
-needs, do not silently skip it: fall back to static analysis of the guard and flag in the
-verdict that the probe was denied (the orchestrator relays it so the operator can add an
-allow rule).
+the behaviour in your detached worktree, confirm the test goes red, revert with
+`git restore <file>` (`git status` clean; the guard denies `git checkout --` to a reviewer).
+If the auto-mode permission classifier denies the transient `src` edit the probe needs, do
+not silently skip it: fall back to static analysis of the guard and flag in the verdict that
+the probe was denied (the orchestrator relays it; the rule to add is in
+`references/operations.md`, "Auto-mode allow rule for the `pr-review` mutation probe").
 
 ### Verify empirically
 
@@ -105,8 +106,10 @@ Decide, and state which you did and why in the review comment:
   claim, a criterion with no named test, or a round the orchestrator already had to bounce.
   **When the current head differs from the attested SHA, or siblings merged into the base
   since the attestation, the default is to re-run the suite on the merged head** — a stale
-  attestation is not evidence for the code that now merges. "The suites passed" is never the
-  reason to skip; the shape of the evidence is.
+  attestation is not evidence for the code that now merges. A suite a required workflow runs
+  on the PR is the exception: its new head's check is the evidence — wait for it, never
+  re-run that suite whole locally. "The suites passed" is never the reason to skip; the
+  shape of the evidence is.
 
 Rules for any run:
 

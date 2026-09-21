@@ -1,7 +1,7 @@
 {
   "name": "sdlc",
   "description": "Agent-driven SDLC over GitHub Issues: drives an Initiative or Epic through product, architecture, lld, development and pr-review to merge, with a deterministic control plane and guard hooks.",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "author": { "name": "Nitesh Singla" },
   "repository": "https://github.com/snitesh91/sdlc-pipeline"
 }

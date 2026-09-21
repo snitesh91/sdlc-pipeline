@@ -68,9 +68,9 @@ sdlc.config.sample.json          config template
    outlast its turn).
 
 **Upgrading**: bump the `ref` in `.claude/settings.json` and `SDLC_PIPELINE_REF` together,
-run `claude plugin marketplace update sdlc-pipeline`, and start a new session. Bump only
-when no run is live. There is one plugin version per driven repo; `show-config` → `plugin`
-reports the running one (manifest version, plus the HEAD sha of a git checkout).
+run `claude plugin marketplace update sdlc-pipeline`, and start a new session (when and where
+the pin is read: `references/operations.md`, "Plugin pin"). `show-config` → `plugin` reports
+the running version (manifest version, plus the HEAD sha of a git checkout).
 
 Repo-specific commands (lint, build, test, suite names, ports) belong in the driven repo's
 `CLAUDE.md` / `AGENTS.md`, which every stage agent reads.

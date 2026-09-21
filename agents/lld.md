@@ -123,9 +123,10 @@ number; none exists yet. Use each slug exactly everywhere,
 including siblings' `Depends on:` lines. `create-lld-tasks` later rewrites each heading in
 place to `## Task #<n>: <title>` (`### Task #<n>` and `Task <n>` also parse). Any other shape,
 such as `## Implement X (KEY)`, does not parse, and the Task is skipped as unverifiable.
-**Only a real Task gets a `## Task` heading.** A carving summary (a Task-to-bug table, a
-sequencing overview) goes under a non-Task heading such as `## Carving summary`;
-`create-lld-tasks` rejects any other `## Task` heading.
+**Only a real Task gets a `## Task` heading** — one carrying a `## Footprint`. A carving
+summary (a Task-to-bug table, a sequencing overview) goes under a non-Task heading such as
+`## Carving summary`; `create-lld-tasks` skips any `## Task` section without a Footprint and
+reports it (`skipped_sections`).
 
 Each subsection covers:
 
@@ -139,9 +140,13 @@ Each subsection covers:
 - **`Priority: <Urgent|High|Medium|Low>` / `Effort: <High|Medium|Low>`** — optional, one line
   each; `create-lld-tasks` sets them on the Task (omitted → `pipeline.issueDefaults`). Any
   other value refuses the whole run before an issue is created.
-- **`Realises: #n, #m`** — one line, only when the Task delivers pre-existing issues (a bug
-  it fixes, a filed delta): comma-separated `#<n>` references, among the metadata lines
-  beside `Depends on:`.
+- **`Realises: #n, #m`** — one line, only when the Task delivers pre-existing issues (Epic
+  children filed before you, a bug it fixes, a filed delta): comma-separated `#<n>`
+  references, among the metadata lines beside `Depends on:`. Name every one:
+  `create-lld-tasks` blocks them on this Task and the pipeline closes them when its PR merges
+  (`references/epics.md`, "`lld` specifies the Tasks"). Never carve a pre-existing issue as
+  its own `## Task` section unless that issue *is* the Task; an issue neither carved nor
+  realised stays parked.
 - **The e2e-test Task's section states its evidence goal**: what counts as a stable delta
   versus a flake (`references/epics.md`, "Epic closing"). Not the run itself — see below.
 - **Acceptance criteria**, carried from the Epic (unchanged, or with the revision stated).
@@ -152,7 +157,8 @@ Each subsection covers:
 - **`## Footprint`** in the exact parseable shape from `references/epics.md`, "How to size the
   Tasks": a `## Footprint` heading, then backticked paths, one per bullet. Split the paths the
   Task **edits** from the ones it only **runs** (the latter under a `**Verify-only:**`
-  sub-label, per `references/epics.md`). List every path the change touches, including:
+  sub-label, always *after* the owned bullets; a Task that only runs suites has just that
+  sub-label and still schedules). List every path the change touches, including:
   - the top-level test tree (`test/**`), not just `src/**`;
   - the Task's own specs and test doubles, even when the change never opens them — a sibling
     that rewrites the mechanism a fake imitates breaks that spec without touching it;
