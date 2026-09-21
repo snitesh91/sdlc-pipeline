@@ -67,7 +67,8 @@ task:       development -> [pr-review] -> auto-merge into epic-<n> -> CLOSED
   `close-epic` requires only the exploratory pass (`record-epic-verification --kind e2e`
   is still accepted, informational). GitHub Actions results never gate the epic merge
   (a passing check still satisfies a required suite; a failed or never-started one is
-  ignored); the required suites' `record-local-ci` attestations at the epic head remain.
+  ignored); the required suites remain, satisfied at the epic head by the epic PR's
+  attestation, or by the merged children's (`references/epics.md`, "Evidence carry-forward").
 - **`product-review` follows every `product`** unless a standing child is routed past it:
   a blocker bounces `product`; clean goes to Gate A (waived when the profile sets
   `requiresHumanGateA: false` — `references/gates.md`, "Waived gates"). Reviews have no Stage value of their own.
@@ -240,7 +241,7 @@ an override only.
 | `pairing-counts <n>` / `show-config` | Valve strike counts + thresholds / effective tunables and the running `plugin` version (read once per invocation) |
 | `list-needs-human` / `check-epics-closeable` / `audit-issues [--epic <n>\|--initiative <n>]` | End-of-invocation sweeps; `audit-issues` also flags open Epics with no phase-Tasks, with the `cut-phase-tasks` repair |
 | `resolve-thread --thread-id <id> [--reply TEXT]` | Reply to and resolve a gate PR review thread; the gate-feedback agent runs it for the threads it addressed (`references/gates.md`) |
-| `close-epic <n>` / `record-epic-verification <n> --kind e2e\|exploratory [--sha S]` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
+| `close-epic <n> [--no-carry-forward]` / `record-epic-verification <n> --kind e2e\|exploratory [--sha S]` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
 | `check-initiative-closeable <n>` / `record-initiative-verification <n> --outcome met\|unmet --summary` / `close-initiative <n>` | "Closing an Initiative" |
 | `mark-feedback-addressed <n>` | Yours, after a gate-feedback agent finished and `transition` verified its push (`references/gates.md`, "Addressing gate feedback"); never the agent's |
 | `auto-pass-gate` / `mark-todo` / `mark-issue-closed` / `mark-feedback-received` | CI-triggered paths only — never run them yourself (the shipped workflow runs the first three; `mark-feedback-received` only if the driven repo wires a comment trigger) |

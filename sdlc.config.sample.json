@@ -152,6 +152,13 @@
     "continuous": {
       "cycleCap": 8
     },
+    "epicClose": {
+      "_comment": "`auto`: the orchestrator makes the second close-epic call itself. `evidenceCarryForward.paths`: globs a commit on epic-<n> after the tested head may touch without staling the exploratory record ({docRoot} expands to docRoot; the pipeline config file never carries forward). Widen it for fixture/evidence directories, never for source or tests.",
+      "auto": false,
+      "evidenceCarryForward": {
+        "paths": ["**/*.md", "docs/**", "{docRoot}/**"]
+      }
+    },
     "resume": {
       "_comment": "A `next-action` resume claimed less than `liveWindowMinutes` ago is flagged `likely_live`: another session may still be driving it, so the orchestrator asks the operator before taking over.",
       "liveWindowMinutes": 30
