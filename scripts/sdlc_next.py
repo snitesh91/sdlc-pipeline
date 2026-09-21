@@ -2716,10 +2716,11 @@ def dev_lane_footprints(lane: dict, repo_path: str, by_number: dict,
     return out
 
 
-def footprint_collision(footprint: list, others: list) -> Optional[str]:
+def footprint_collision(footprint: Optional[list], others: list) -> Optional[str]:
     """The refusal when `footprint` cannot be shown disjoint from `others` (`(issue, fp)`
-    pairs): empty means unverifiable, an overlap names the unit. None when clear."""
-    if not footprint:
+    pairs): None (no readable section) means unverifiable, `[]` (verify-only) owns nothing,
+    an overlap names the unit. None when clear."""
+    if footprint is None:
         return "no readable ## Footprint -- cannot verify non-overlap"
     hit = next((n for n, fp in others if footprint_overlaps(footprint, fp)), None)
     return f"footprint overlaps active/eligible #{hit}" if hit is not None else None

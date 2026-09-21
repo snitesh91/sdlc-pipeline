@@ -61,7 +61,7 @@ def test_docs_only_commits_after_the_tested_head_keep_the_evidence_valid():
     gh = _epic(_marks(), files_since=["docs/sdlc/epic-9/lld.md", "README.md"])
     gh.pr_create = lambda **kw: 38
     gh.pr_ready = lambda n: None
-    gh.pr_merge = lambda n: None
+    gh.pr_merge = lambda n, **kw: None
     gh.pr_files = lambda n: []
     result = s.cmd_close_epic(gh, 9)
     assert "missing_verification" not in result
@@ -124,7 +124,7 @@ def _ready_epic(comments, checks, delta=("backend/a.ts",), attested=True):
     gh.pr_files = lambda n: list(delta)
     gh.pr_ready = lambda n: None
     gh.merged = []
-    gh.pr_merge = lambda n: gh.merged.append(n)
+    gh.pr_merge = lambda n, **kw: gh.merged.append(n)
     return gh
 
 
@@ -179,7 +179,7 @@ def test_close_epic_reports_fresh_exploratory_evidence_at_the_head():
     gh = _epic([_marks()[1]], delta=["docs/x.md"])
     gh.pr_create = lambda **kw: 38
     gh.pr_ready = lambda n: None
-    gh.pr_merge = lambda n: None
+    gh.pr_merge = lambda n, **kw: None
     result = s.cmd_close_epic(gh, 9)
     assert result["merged"] is True
     assert result["evidence"]["exploratory"] == "fresh"
@@ -194,7 +194,7 @@ def test_a_configured_fixtures_only_delta_carries_the_exploratory_evidence_forwa
                delta=["docs/x.md"])
     gh.pr_create = lambda **kw: 38
     gh.pr_ready = lambda n: None
-    gh.pr_merge = lambda n: None
+    gh.pr_merge = lambda n, **kw: None
     result = s.cmd_close_epic(gh, 9)
     assert result["merged"] is True
     assert result["evidence"]["exploratory"] == f"carried_forward_from {TESTED[:10]}"
@@ -273,7 +273,7 @@ def _chain_epic(children, direct=(), comments=(), delta=("backend/a.ts",)):
     gh.pr_create = lambda **kw: 38
     gh.pr_ready = lambda n: None
     gh.merged = []
-    gh.pr_merge = lambda n: gh.merged.append(n)
+    gh.pr_merge = lambda n, **kw: gh.merged.append(n)
     gh.branch_commits = lambda base, head: [c[4] for c in children] + [d[0] for d in direct]
     gh.commit_files = lambda sha: next(list(d[1]) for d in direct if d[0] == sha)
 

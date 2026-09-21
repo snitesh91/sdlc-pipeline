@@ -160,7 +160,7 @@ def _merging_tree(body: str):
     gh.pr_files = lambda n: []
     gh.pr_view = lambda n, fields="": {"comments": [], "headRefOid": "abc"}
     gh.pr_ready = lambda n: None
-    gh.pr_merge = lambda n: None
+    gh.pr_merge = lambda n, **kw: None
     gh.pr_comment = lambda n, body: None
     return gh
 
