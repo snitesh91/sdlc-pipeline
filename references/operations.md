@@ -10,6 +10,30 @@
 - The pipeline neither reads nor writes Projects v2 board state; Pipeline Status is the
   only status it maintains (`references/epics.md`, "Epic board Status").
 
+## Plugin pin
+
+A session runs the marketplace `ref` pinned in the `.claude/settings.json` of the checkout it
+starts in (the driven repo's main checkout, on `main`), read once at session start — never
+from a unit's branch or worktree; CI uses the `SDLC_PIPELINE_REF` Actions variable. So a
+bump merged to `main` reaches every unit, in-flight epics included, from the next session
+(after `claude plugin marketplace update sdlc-pipeline`); bump only while no run is live,
+since agents read the playbook mid-run.
+
+## Auto-mode allow rule for the `pr-review` mutation probe
+
+The probe edits a file under the review worktree (`<worktrees.root>/<reviewPrefix><n>/`,
+default `/tmp/sdlc-review-<n>/`). Outside the project directory, so the auto-mode classifier
+may deny it; an explicit allow rule resolves before the classifier. Add to the driven repo's
+`.claude/settings.json` (path rules are `Edit(...)` only — `Write`/`MultiEdit` rules are never
+consulted; `//` is an absolute path):
+
+```json
+{ "permissions": { "allow": ["Edit(//tmp/sdlc-review-*/**)"] } }
+```
+
+Revert the probe with `git restore <file>`: the Bash guard denies a review role `git checkout
+-- <file>` along with commit/push/merge/reset.
+
 ## Issue taxonomy
 
 `stage:X` / `status:X` in this skill mean "Stage field = X" / "Pipeline Status field =
@@ -114,7 +138,8 @@ human gates on product/architecture are separate and unaffected.
   it). It refuses on a non-passing check, a code-touching PR whose required suite has
   neither a passing GHA check nor a fresh local-CI attestation, missing pipeline
   evidence (`missing_evidence`), or a stale base (`behind_base` —
-  `references/parallelism.md`, "Git-conflict handling").
+  `references/parallelism.md`, "Git-conflict handling"). The squash is pinned to the head
+  SHA whose checks it read (`--match-head-commit`): a push in between fails the merge.
 
 ## Local-CI attestation
 

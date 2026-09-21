@@ -533,10 +533,14 @@ class GitHub:
     def pr_ready(self, number: int):
         self._run(["gh", "pr", "ready", str(number), "--repo", self.repo])
 
-    def pr_merge(self, number: int, delete_branch: bool = True, method: str = "squash"):
+    def pr_merge(self, number: int, delete_branch: bool = True, method: str = "squash",
+                 match_head: Optional[str] = None):
+        """`match_head` makes GitHub refuse the merge unless the head is still that SHA."""
         argv = ["gh", "pr", "merge", str(number), "--repo", self.repo, f"--{method}"]
         if delete_branch:
             argv.append("--delete-branch")
+        if match_head:
+            argv += ["--match-head-commit", match_head]
         self._run(argv)
 
     def reply_review_thread(self, thread_id: str, body: str):
@@ -4028,18 +4032,26 @@ def resolve_citation(path: str, body: str, rev: Optional[str] = None,
     Returns `resolved`, `line_hint` (+ `match_count`/`line_hints`) or `cited_vs_found`;
     never raises."""
     result = {"path": path, "rev": rev}
+    if not path:
+        result["resolved"] = False
+        result["cited_vs_found"] = "cite block has no path= attribute"
+        return result
     try:
         if rev:
             content = runner(["git", "-C", repo_path, "show", f"{rev}:{path}"])
         else:
             with open(os.path.join(repo_path, path), "r") as f:
                 content = f.read()
-    except (GhError, OSError) as e:
+    except (GhError, OSError, ValueError) as e:
         result["resolved"] = False
         result["cited_vs_found"] = (f"could not read {path}"
                                      f"{f' at rev {rev}' if rev else ''}: {e}")
         return result
-    count = content.count(body) if body else 0
+    if not body.strip():
+        result["resolved"] = False
+        result["cited_vs_found"] = "empty citation body"
+        return result
+    count = content.count(body)
     result["resolved"] = count >= 1
     if result["resolved"]:
         line_hints = []
@@ -4087,15 +4099,18 @@ def cmd_cite(path: str, line: Optional[int] = None, lines: Optional[str] = None,
         else:
             with open(os.path.join(repo_path, path), "r") as f:
                 content = f.read()
-    except (GhError, OSError) as e:
+    except (GhError, OSError, ValueError) as e:
         return {"ok": False,
                 "reason": f"could not read {path}{f' at rev {rev}' if rev else ''}: {e}"}
     file_lines = content.splitlines()
     if line is not None:
         start = end = line
     elif lines is not None:
-        a, b = lines.split("-", 1)
-        start, end = int(a), int(b)
+        try:
+            a, b = lines.split("-", 1)
+            start, end = int(a), int(b)
+        except ValueError:
+            return {"ok": False, "reason": f"--lines {lines!r} is not a <start>-<end> range"}
     elif match is not None:
         matches = [i + 1 for i, l in enumerate(file_lines) if match in l]
         if len(matches) == 0:
@@ -4112,6 +4127,10 @@ def cmd_cite(path: str, line: Optional[int] = None, lines: Optional[str] = None,
                  "reason": f"line range {start}-{end} is out of range for {path} "
                            f"({len(file_lines)} lines)"}
     body = "\n".join(file_lines[start - 1:end])
+    if not body.strip():
+        return {"ok": False,
+                "reason": f"lines {start}-{end} of {path} are blank -- a blank citation "
+                          f"never resolves; select a line with content"}
     # Fence longer than any backtick run in the body so it can't close early.
     fence_len = 3
     for m in re.finditer(r'`+', body):
@@ -4128,11 +4147,17 @@ def cmd_cite(path: str, line: Optional[int] = None, lines: Optional[str] = None,
 def cmd_verify_citations(paths: list, repo_path: str = ".",
                           runner: Runner = _default_runner) -> dict:
     """Resolve every citation in `paths`. One document returns flat; several nest
-    under `documents` with an aggregate `all_resolved`. `ok` mirrors `all_resolved`."""
+    under `documents` with an aggregate `all_resolved`. `ok` mirrors `all_resolved`;
+    an unreadable document is unresolved with a `reason`, never an exception."""
     documents = []
     for p in paths:
-        with open(os.path.join(repo_path, p), "r") as f:
-            text = f.read()
+        try:
+            with open(os.path.join(repo_path, p), "r") as f:
+                text = f.read()
+        except (OSError, ValueError) as e:
+            documents.append({"document": p, "citations": [], "examples_skipped": 0,
+                              "all_resolved": False, "reason": f"could not read {p}: {e}"})
+            continue
         doc_result = verify_citations_text(text, repo_path=repo_path, runner=runner)
         doc_result = {"document": p, **doc_result}
         documents.append(doc_result)
@@ -4486,19 +4511,21 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
                           f"resumed session as a stage that never ran. Post the stage's own "
                           f"exit comment and re-run its exit action (handoff-to-pr-review / "
                           f"record-pr-review), then re-run merge-pr"}
+    # Head first: the merge is pinned to it, so a push after this point can only make the
+    # merge fail, never land a commit whose checks were not the ones read below.
+    view = gh.pr_view(pr_number, "comments,headRefOid")
+    head = view.get("headRefOid")
     checks = gh.pr_checks(pr_number)
     files = gh.pr_files(pr_number)
-    view = gh.pr_view(pr_number, "comments,headRefOid")
     # `base` (integration_base) is the PR's base branch -- no extra field fetch needed.
-    status, missing = merge_gate_status(
-        files, checks, view.get("comments", []), view.get("headRefOid"), base)
+    status, missing = merge_gate_status(files, checks, view.get("comments", []), head, base)
     if status != "passed":
         detail = f" (no passing check or fresh local-ci attestation from: {', '.join(missing)})" if missing else ""
         hint = f" {_MISSING_WORKFLOW_HINT}" if status == "missing-checks" and missing else ""
         raise GhError(f"PR #{pr_number} checks not passed (status={status}){detail}{hint}")
     gh.pr_ready(pr_number)
     try:
-        gh.pr_merge(pr_number)
+        gh.pr_merge(pr_number, match_head=head)
     except GhError:
         # GitHub can answer 5xx after the squash already landed; only a PR still open failed.
         if gh.pr_view(pr_number, fields="state").get("state") != "MERGED":

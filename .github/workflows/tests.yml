@@ -1,0 +1,27 @@
+name: Tests
+
+# The plugin's own suites (scripts/tests, hooks/tests) on every PR and on main. The driven
+# repo's merge gate depends on this control plane, so a regression must fail here first.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - name: Git identity for the tests that commit in throwaway repos
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.invalid"
+      - name: Control-plane suite
+        working-directory: scripts
+        run: python3 -m pytest -q
+      - name: Hook suite
+        run: python3 -m pytest -q hooks/tests

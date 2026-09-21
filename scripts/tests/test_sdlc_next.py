@@ -1447,7 +1447,7 @@ def test_merge_pr_merges_and_confirms_issue_closed_when_checks_pass():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
             json.dumps({"state": "CLOSED", "comments": _clean_pipeline_comments()}),
@@ -1770,7 +1770,7 @@ def test_merge_pr_allows_docs_only_pr_with_no_checks():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
             json.dumps({"state": "CLOSED", "comments": _clean_pipeline_comments()}),
@@ -1802,7 +1802,7 @@ def test_merge_pr_reports_config_changed_when_the_merged_pr_touched_the_pipeline
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
             json.dumps({"state": "CLOSED", "comments": _clean_pipeline_comments()}),
@@ -1862,7 +1862,7 @@ def test_merge_pr_allows_when_both_required_workflows_pass():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
             json.dumps({"state": "CLOSED", "comments": _clean_pipeline_comments()}),
@@ -4034,7 +4034,7 @@ def test_merge_pr_closes_child_explicitly_when_merged_into_epic_branch():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
         ("gh", "issue", "close", "9", "--repo", "owner/repo", "--reason", "completed"): "",
         **_NO_UNIT_WORKTREE,
     })
@@ -4068,7 +4068,7 @@ def test_merge_pr_does_not_close_the_issue_itself_when_the_base_is_main():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
         **_NO_UNIT_WORKTREE,
     })
     runner.prefix_responses = {("gh", "pr", "comment", "42"): ""}
@@ -5437,7 +5437,7 @@ def test_merge_pr_carries_attestation_forward_when_behind_base_is_docs_only():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
             json.dumps({"state": "CLOSED", "comments": _clean_pipeline_comments()}),
@@ -6291,7 +6291,7 @@ def test_merge_pr_recovers_when_the_merge_call_fails_after_the_squash_landed():
     from sdlc_next import GitHub, cmd_merge_pr
     runner, call = _merged_pr_bookkeeping(["OPEN", "MERGED"])
     runner.fail_on = {("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash",
-                       "--delete-branch")}
+                       "--delete-branch", "--match-head-commit", "abc")}
     result = cmd_merge_pr(GitHub(runner=call), 42, issue=9)
     assert result["merged"] is True and "recovered" not in result
 
@@ -6300,7 +6300,7 @@ def test_merge_pr_still_raises_when_the_failed_merge_left_the_pr_open():
     from sdlc_next import GitHub, GhError, cmd_merge_pr
     runner, call = _merged_pr_bookkeeping(["OPEN", "OPEN"])
     runner.fail_on = {("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash",
-                       "--delete-branch")}
+                       "--delete-branch", "--match-head-commit", "abc")}
     with pytest.raises(GhError):
         cmd_merge_pr(GitHub(runner=call), 42, issue=9)
 
