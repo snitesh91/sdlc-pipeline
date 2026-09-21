@@ -119,6 +119,9 @@ class _StaleGh:
     def pr_files(self, n):
         return self.changed
 
+    def pr_checks(self, n):
+        return []
+
     def files_since(self, sha, branch):
         return self.delta_by_sha.get(sha, [])
 

@@ -143,25 +143,37 @@ human gates on product/architecture are separate and unaffected.
 
 ## Local-CI attestation
 
-Required suites (`requiredWorkflows`; keep in step with the workflows' `name:` fields)
-run in GitHub Actions on `main` only, not on child PRs. They remain mandatory for a
-child PR to merge; the proof is `development`'s local run:
+A required suite (`requiredWorkflows`; keep in step with the workflows' `name:` fields) is
+required on a PR only when the PR changes a file its entry covers; an empty or docs-only diff
+requires nothing. **One rule wherever the pipeline checks a suite** (`transition` into
+`pr-review`, `pr-checks`, `merge-pr`, `close-epic`): the suite is satisfied by **a passing
+GHA check for its workflow on the current PR head OR a `record-local-ci` attestation for
+that head**. A suite whose workflow runs on every PR it applies to needs no local run at
+all — mark it `attestable: false` so no stage is ever asked for one. `record-local-ci` is
+for a suite with no PR-level CI (a workflow that runs only on push to `main`).
 
-- For each suite it actually ran and passed, `development` runs `record-local-ci --pr
-  <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`, posting `<!--
-  local-ci: <suite>:<pr> @ <sha> -->` on the PR with the captured output. It refuses a
-  missing or empty output file — never pass a summary. It also refuses a `--command` still
-  holding an unexpanded `<placeholder>` token (e.g. `<node_modules-volume>`), so a template
-  copied from the docs is never attested as the real run; genuine shell syntax (`< file`,
-  `2>&1`, `<(...)`) is fine.
-- `merge-pr` / `pr-checks` accept it only while `<sha>` is the PR's current head. Any
-  later push (rework, `sync-branch`) makes it stale: re-run the suite and re-attest. So the
-  attestation is checked **post-sync**: `transition --expect-stage pr-review` runs
-  `start-comment` (role pr-review) after `sync-branch`, and that refuses (posting no start
-  comment) when a required suite's attestation is not the current head — re-run and
-  `record-local-ci` on the post-sync head. A suite whose sync only merged files outside its
-  coverage is carried forward automatically (`carried_attestation_forward`), never re-run.
-- Attest before `handoff-to-pr-review`; an unattested PR is not reviewable.
+- Attesting: for each attestable suite it actually ran and passed, `development` runs
+  `record-local-ci --pr <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`,
+  posting `<!-- local-ci: <suite>:<pr> @ <sha> -->` on the PR with the captured output. It
+  refuses a missing or empty output file (never pass a summary), a `--command` still holding
+  an unexpanded `<placeholder>` token (a template copied from the docs; genuine shell syntax
+  `< file`, `2>&1`, `<(...)` is fine), and a suite configured `attestable: false`.
+- An attestation counts only while `<sha>` is the PR's current head. A later push (rework,
+  `sync-branch`) makes it stale unless the push only merged files outside the suite's
+  coverage, which carries it forward (`carried_attestation_forward`), never re-run. A passing
+  check on the new head satisfies the suite too: re-run and re-attest only when neither holds.
+- The rule is applied **post-sync**: `transition --expect-stage pr-review` runs
+  `start-comment` (role pr-review) after `sync-branch`. It refuses (`ok: false`, no start
+  comment) when an attestable suite the PR touches has neither, returning `held`: one
+  `{suite, workflow, attested_sha, check, reason}` per suite, `check` being the workflow's
+  state on the head (`pending` / `failing` / `skipped` / `missing`) and `reason` e.g.
+  `` `backend`: no local attestation on head 1a2b3c4 and check 'Backend Validate' is pending ``.
+  `pending` → wait, re-run `transition`. `failing` → the PR is not reviewable; resume
+  `development`. `missing` → the suite has no PR-level CI: run it and `record-local-ci`
+  (or see `missing-checks` below). Suites satisfied by their check are listed as
+  `satisfied_by_check`. A non-attestable suite is never held here; `merge-pr` gates it.
+- `merge-pr` / `pr-checks` apply the same OR rule per suite; `merge-pr` also refuses on any
+  failing or pending check on the PR.
 - `merge-pr` accepts `--run-id`: the terminal-unit count is booked under that run rather
   than whatever id last wrote the epic's run-state file (which may be a throwaway probe
   run's). Without it, the state file's current id stands.
@@ -171,16 +183,18 @@ child PR to merge; the proof is `development`'s local run:
   at config load). An optional `commandPattern` regex must match the attested `--command`.
   Optional **`bases`** (e.g. `["main"]`) scopes an entry to those PR base branches only
   (omitted = every base) — so an integration suite can be required on PRs into `main` yet
-  ignored on child PRs into an epic branch. Optional **`attestable: false`** means no
-  local-CI attestation can stand in for the suite (only a passing GHA check satisfies it);
-  `record-local-ci` refuses that suite cleanly.
+  ignored on child PRs into an epic branch. Optional **`attestable: false`** (default
+  `true`): the workflow runs on every PR the entry applies to, so only its passing check
+  satisfies the suite — no stage runs it locally, `record-local-ci` refuses it, and
+  `close-epic` lists it under `awaiting_checks` instead of `unattested_suites`.
 
 **`pr-checks` status `missing-checks`** is never "still running" — never poll it. When it
 is set, `pr-checks` returns a `hint` field naming the causes in likelihood order (and
 `merge-pr`'s refusal carries the same hint):
 
-- Main-only suite not attested for the current head (the usual case, not a defect) →
-  `development` re-runs the suite and `record-local-ci` for that head.
+- The workflow does not run on this PR (e.g. main-only) and its suite is not attested for
+  the current head (the usual case, not a defect) → `development` re-runs the suite and
+  `record-local-ci` for that head.
 - The workflow file is not on the PR branch (added on the base after the branch was cut)
   → run `sync-branch` and push so it can run.
 - A still-required GHA workflow never reported (renamed out of step with

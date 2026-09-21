@@ -1040,9 +1040,11 @@ def _passing_checks(checks: list) -> list:
     return [c for c in checks if c.get("bucket") == "pass"]
 
 
-def _epic_unattested_suites(gh, branch: str) -> list:
-    """Required local-CI suites the epic PR (whose changes vs `main` cover them) still lacks
-    a passing check or an attestation for at the epic branch head; needed before the merge."""
+def _epic_suite_gaps(gh, branch: str) -> dict:
+    """Required suites the epic PR (whose changes vs `main` cover them) still lacks a passing
+    check or an attestation for at the epic branch head; needed before the merge. Split into
+    `unattested_suites` (run and attest locally) and `awaiting_checks` (`attestable: false`:
+    only the suite's GHA check on the epic PR can satisfy it)."""
     files = gh.base_delta_files("main", base=branch)
     head = gh.branch_head_sha(branch)
     existing = gh.pr_list_for_branch(branch)
@@ -1054,8 +1056,10 @@ def _epic_unattested_suites(gh, branch: str) -> list:
     if len(files) >= 300:
         files = [p for spec in REQUIRED_WORKFLOWS for p in spec["prefixes"]]
     missing = set(missing_required_workflows(files, checks, comments, head))
-    return [spec["suite"] for spec in REQUIRED_WORKFLOWS
+    gaps = [spec["suite"] for spec in REQUIRED_WORKFLOWS
             if spec["workflow"] in missing and spec.get("suite")]
+    return {"unattested_suites": [x for x in gaps if x not in NON_ATTESTABLE_SUITES],
+            "awaiting_checks": [x for x in gaps if x in NON_ATTESTABLE_SUITES]}
 
 
 def cmd_record_epic_verification(gh: GitHub, epic: int, kind: str, summary: str,
@@ -1106,7 +1110,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
             f"<!-- epic-reconciled: {epic} @ {timestamp} -->")
         return _with_workspace(
             {"epic": epic, "merged": False, "branch": branch, "reconciled": behind,
-             "unattested_suites": _epic_unattested_suites(gh, branch),
+             **_epic_suite_gaps(gh, branch),
              "reason": f"picked up {behind} commit(s) from main -- run the exploratory pass "
                        f"against the reconciled branch, then re-run close-epic"},
             ws)
@@ -1114,7 +1118,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                                         _epic_evidence_stale(gh, branch))
     if missing:
         return {"epic": epic, "merged": False, "branch": branch, "missing_verification": missing,
-                "unattested_suites": _epic_unattested_suites(gh, branch),
+                **_epic_suite_gaps(gh, branch),
                 "reason": f"closing verification incomplete: {'; '.join(missing)}"}
     existing = gh.pr_list_for_branch(branch)
     if existing:
@@ -2652,7 +2656,7 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
     timestamp = _utc_now_marker()
     fence = "```"
     gh.pr_comment(pr, f"🧪 Local CI attested — `{suite}` suite passed locally against "
-                       f"`{sha}` (main-only GHA CI; this is the merge-gate stand-in).\n\n"
+                       f"`{sha}` (stands in for its GHA check on the merge gate).\n\n"
                        f"Command: `{command.strip()}`\n\n"
                        f"<details><summary>captured output (tail)</summary>\n\n"
                        f"{fence}\n{evidence}\n{fence}\n\n</details>\n\n"
@@ -2853,9 +2857,10 @@ def cmd_start_comment(gh: GitHub, issue: int, role: str) -> dict:
     """Post the start comment with no field mutation, for roles with no Stage of their own.
 
     For `pr-review` -- which `transition` runs AFTER `sync-branch` has moved the head -- it first
-    refuses (`ok: False`, no comment posted) when a required suite's `local-ci` attestation is not
-    the current PR head, so the review is never queued against evidence sync just invalidated; a
-    suite whose sync only merged files outside its coverage is carried forward instead.
+    refuses (`ok: False`, no comment posted) when a required suite has neither a `local-ci`
+    attestation nor a passing GHA check on the current PR head, so the review is never queued
+    against evidence sync just invalidated; a suite whose sync only merged files outside its
+    coverage is carried forward instead.
 
     For `arch-review` it surfaces the effective `skip_confidence_threshold` -- the profile's
     `skipConfidenceThreshold` the reviewer's confidence must exceed for `skip-gate` to skip Gate B
@@ -2863,6 +2868,7 @@ def cmd_start_comment(gh: GitHub, issue: int, role: str) -> dict:
     if role == "pr-review":
         prs = gh.pr_list_for_branch(issue_branch(issue))
         carried: list = []
+        by_check: list = []
         if prs:
             status = pr_stale_attestations(gh, issue, prs[0]["number"])
             if status["stale"]:
@@ -2870,17 +2876,22 @@ def cmd_start_comment(gh: GitHub, issue: int, role: str) -> dict:
                 return {"issue": issue, "role": role, "started": False, "ok": False,
                         "refused": True,
                         "stale_suites": [s["suite"] for s in stale],
-                        "reason": (f"the local-ci attestation for "
-                                   f"{', '.join(s['suite'] for s in stale)} is not the PR head "
-                                   f"(sync-branch moved it) -- re-run those suite(s) and "
-                                   f"`record-local-ci` on the post-sync head, then re-run this. A "
-                                   f"suite whose sync only merged files outside its coverage is "
-                                   f"carried forward automatically; these were not.")}
-            carried = status["carried"]
+                        "held": stale,
+                        "reason": (f"pr-review not queued -- "
+                                   f"{'; '.join(s['reason'] for s in stale)}. A required suite "
+                                   f"is satisfied by a `record-local-ci` attestation on the PR "
+                                   f"head OR a passing check for its workflow on that head (a "
+                                   f"sync that only merged files outside its coverage carries "
+                                   f"the attestation forward). Wait for a pending check and "
+                                   f"re-run this, or re-run the suite and `record-local-ci` on "
+                                   f"the post-sync head.")}
+            carried, by_check = status["carried"], status["passed_by_check"]
         _post_start_comment(gh, issue, role)
         result = {"issue": issue, "started": role}
         if carried:
             result["carried_attestation_forward"] = carried
+        if by_check:
+            result["satisfied_by_check"] = by_check
         return result
     _post_start_comment(gh, issue, role)
     result = {"issue": issue, "started": role}
@@ -4327,13 +4338,26 @@ def _workflow_applies_to_base(spec: dict, base_ref: Optional[str]) -> bool:
     return not spec["bases"] or base_ref in spec["bases"]
 
 
+def workflow_check_state(checks: list, workflow: str) -> str:
+    """One required workflow's check runs on a head, as `passing` | `failing` | `pending` |
+    `skipped` | `missing`. Every gate that accepts a GHA check reads it through this: a
+    workflow passes only when no run failed, was cancelled or is still running."""
+    buckets = [c.get("bucket") for c in checks if c.get("workflow", "") == workflow]
+    if not buckets:
+        return "missing"
+    if "fail" in buckets or "cancel" in buckets:
+        return "failing"
+    if set(buckets) - {"pass", "skipping"}:
+        return "pending"
+    return "passing" if "pass" in buckets else "skipped"
+
+
 def missing_required_workflows(changed_files: list, checks: list,
                                comments: list = None, head_sha: str = None,
                                base_ref: Optional[str] = None) -> list:
     """Names of required workflows the PR touches that have neither a passing GHA check
     from that workflow nor a `local-ci` attestation for `head_sha`. A base-scoped entry
     (`bases`) is skipped unless the PR's `base_ref` matches it."""
-    passing = {c.get("workflow", "") for c in checks if c.get("bucket") == "pass"}
     attested = local_ci_suites_attested(comments or [], head_sha)
     missing = []
     for spec in REQUIRED_WORKFLOWS:
@@ -4341,7 +4365,7 @@ def missing_required_workflows(changed_files: list, checks: list,
             continue
         if not any(_workflow_covers(spec, p) for p in changed_files):
             continue
-        if spec["workflow"] in passing:
+        if workflow_check_state(checks, spec["workflow"]) == "passing":
             continue
         if spec.get("suite") in attested:
             continue
@@ -4391,9 +4415,10 @@ def merge_gate_status(changed_files: list, checks: list,
 # Why a required workflow's check can be absent, ordered most-likely first; surfaced by
 # pr-checks/merge-pr so `missing-checks` is not mistaken for "a check still running".
 _MISSING_WORKFLOW_HINT = (
-    "A required workflow reported no check on this head. Likely causes, in order: (1) its "
-    "main-only suite is not attested for the current head -- re-run the suite and "
-    "`record-local-ci` for this head; (2) the workflow file is not on the PR branch (added on "
+    "A required workflow reported no check on this head. Likely causes, in order: (1) the "
+    "workflow does not run on this PR (e.g. main-only) and its suite is not attested for the "
+    "current head -- re-run the suite and `record-local-ci` for this head; (2) the workflow "
+    "file is not on the PR branch (added on "
     "the base after the branch was cut) -- run `sync-branch` and push so it can run; (3) the "
     "workflow was renamed/disabled out of step with `requiredWorkflows` -- a config defect, "
     "`mark-needs-human`.")
@@ -4417,29 +4442,44 @@ def _suite_reattest_needed(spec: dict, delta_files: list) -> bool:
     return any(_workflow_covers(spec, p) for p in delta_files)
 
 
+def _held_suite_reason(suite: str, workflow: str, head: str, attested_sha: Optional[str],
+                       check: str) -> str:
+    """Why a required suite holds the PR: its attestation state and its check's state."""
+    attested = (f"local attestation is at {attested_sha[:7]}, not head {head[:7]},"
+                if attested_sha else f"no local attestation on head {head[:7]}")
+    return f"`{suite}`: {attested} and check '{workflow}' is {check}"
+
+
 def pr_stale_attestations(gh: WorkItemProvider, issue: int, pr: int) -> dict:
     """For each attestable required workflow the PR touches (base-scoped), whether its suite is
-    attested at the PR head -- freshly, or carried forward when the only files changed since the
-    attested sha fall outside the suite's coverage (reusing the merge-pr carry-forward rule).
-    Returns `{"stale": [{suite, workflow, attested_sha}], "carried": [suite, ...]}`; a suite with
-    no attestation at all is `stale` with `attested_sha: None`."""
+    satisfied at the PR head: a fresh attestation, a passing GHA check for the workflow on that
+    head, or an attestation carried forward when the only files changed since its sha fall
+    outside the suite's coverage (the merge-pr carry-forward rule). Returns `{"stale":
+    [{suite, workflow, attested_sha, check, reason}], "carried": [suite, ...],
+    "passed_by_check": [suite, ...]}`; a suite with no attestation is `stale` with
+    `attested_sha: None`. A non-attestable suite is never listed: merge-pr alone gates it."""
     view = gh.pr_view(pr, "comments,headRefOid,baseRefName")
     head = view.get("headRefOid")
     comments = view.get("comments", [])
     base_ref = view.get("baseRefName")
     changed = gh.pr_files(pr)
+    checks = gh.pr_checks(pr)
     fresh = local_ci_suites_attested(comments, head)
     latest = _latest_attested_sha_by_suite(comments)
-    stale, carried = [], []
+    stale, carried, passed_by_check = [], [], []
     for spec in REQUIRED_WORKFLOWS:
         suite = spec.get("suite")
         if not suite or suite in NON_ATTESTABLE_SUITES:
-            continue  # a non-attestable suite is satisfied only by a real GHA check
+            continue
         if not _workflow_applies_to_base(spec, base_ref):
             continue
         if not any(_workflow_covers(spec, p) for p in changed):
             continue
         if suite in fresh:
+            continue
+        check = workflow_check_state(checks, spec["workflow"])
+        if check == "passing":
+            passed_by_check.append(suite)
             continue
         attested_sha = latest.get(suite)
         if attested_sha:
@@ -4450,8 +4490,11 @@ def pr_stale_attestations(gh: WorkItemProvider, issue: int, pr: int) -> dict:
             if delta is not None and not _suite_reattest_needed(spec, delta):
                 carried.append(suite)
                 continue
-        stale.append({"suite": suite, "workflow": spec["workflow"], "attested_sha": attested_sha})
-    return {"stale": stale, "carried": carried}
+        stale.append({"suite": suite, "workflow": spec["workflow"], "attested_sha": attested_sha,
+                      "check": check,
+                      "reason": _held_suite_reason(suite, spec["workflow"], head or "",
+                                                   attested_sha, check)})
+    return {"stale": stale, "carried": carried, "passed_by_check": passed_by_check}
 
 
 def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
