@@ -39,7 +39,9 @@ LLD-phase Task:          lld (specifies every Task) -> design PR -> lld-review -
 Task:                    development -> [pr-review] -> auto-merge into epic-<n> -> CLOSED
 ```
 
-1. **Cut the phase-Tasks yourself** (not a subagent) as soon as the Epic exists:
+1. **Cut the phase-Tasks yourself** (not a subagent) as soon as the Epic exists —
+   `next-action` returns `cut-phase-tasks` (on the Initiative, or on the bare Epic) until
+   both exist:
    ```bash
    python3 "$SDLC" cut-phase-tasks <epic-n> [--arch-body TEXT] [--lld-body TEXT] --repo-path <p>
    ```

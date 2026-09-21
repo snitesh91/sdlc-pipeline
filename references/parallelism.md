@@ -156,9 +156,11 @@ difference is minutes.
 - Every stage pushes its commits to `origin/<branch>` as it goes; never leave commits
   unpushed between stages.
 - **Keeping a branch current:** `transition` runs `sync-branch` before every stage
-  (skip it only right after `pass-gate`/`skip-gate`). You and other agents never run
-  `sync-branch` while an agent of the same unit is live — it moves that worktree under the
-  agent. The live agent itself may.
+  (skip it only right after `pass-gate`/`skip-gate`). Never run `sync-branch` while an
+  agent of the same unit is live — it moves that worktree under the agent — and the guard
+  denies every stage agent the command: a live agent that finds itself behind stops with
+  `blocked` naming `sync-branch <n>` (never a hand `git merge origin/<base>`); you sync,
+  then resume it on the new head.
 - The gitignored `.env.<profile>` / `.secrets.<profile>` live only in the main checkout.
   For a stage that runs e2e or a live-credential check, symlink them into its worktree
   (`ln -s <repo-root>/.secrets.<profile> <worktree>/`) or name their main-checkout path

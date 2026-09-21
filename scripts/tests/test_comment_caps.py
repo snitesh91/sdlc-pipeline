@@ -25,6 +25,9 @@ ARGV = {
     "mark-needs-human": ["mark-needs-human", "5", "--reason", "{text}"],
     "resolve-thread": ["resolve-thread", "--thread-id", "T", "--reply", "{text}"],
     "route": ["route", "5", "--to", "development", "--reason", "{text}"],
+    "close-issue": ["close-issue", "5", "--not-planned", "--reason", "{text}"],
+    "comment": ["comment", "5", "--body", "{text}"],
+    "detach-epic": ["detach-epic", "9", "--reason", "{text}"],
 }
 
 
@@ -66,7 +69,7 @@ def test_caps_follow_the_contract():
 def test_pr_body_is_uncapped(monkeypatch, capsys):
     monkeypatch.setenv("GITHUB_TOKEN", "x")
     monkeypatch.setattr(s, "get_work_item_provider", lambda: "GH")
-    monkeypatch.setattr(s, "cmd_open_dev_pr", lambda *a: {"ok": True})
+    monkeypatch.setattr(s, "cmd_open_dev_pr", lambda *a, **k: {"ok": True})
     assert s.main(["open-dev-pr", "5", "--title", "t", "--body", "b" * 50_000,
                    "--summary", "s"]) == 0
     assert "refused" not in json.loads(capsys.readouterr().out)

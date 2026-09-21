@@ -260,6 +260,48 @@ def test_guard_noop_outside_sdlc_repo(plain_repo, tmp_path):
     assert guard("git rebase main", str(tmp_path)) is None
 
 
+def test_freshness_window_is_configurable(tmp_path):
+    # guard.mainThreadFreshnessHours narrows the window; the default stays 8 h.
+    runs = tmp_path / "runs"
+    _run_state(runs, "sess")
+    os.utime(runs / "epic-9.json", (time.time() - 2 * 3600,) * 2)
+    kw = {"session": "sess", "runs": runs}
+    narrow = _git_repo(tmp_path / "narrow", {"repo": "o/r", "guard": {"mainThreadFreshnessHours": 1}})
+    assert guard("gh pr merge 3", narrow, **kw) is None
+    default = _git_repo(tmp_path / "default", {"repo": "o/r"})
+    assert "sdlc guard: " in guard("gh pr merge 3", default, **kw)
+    # Positive control: a garbage value falls back to the default rather than unguarding.
+    junk = _git_repo(tmp_path / "junk", {"repo": "o/r", "guard": {"mainThreadFreshnessHours": "x"}})
+    assert "sdlc guard: " in guard("gh pr merge 3", junk, **kw)
+
+
+def _guard_stderr(command, cwd, session, runs):
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}, "tool_use_id": "t1",
+               "cwd": cwd, "session_id": session}
+    proc = run_hook("bash_guard.py", payload, env={"SDLC_RUNS_DIR": str(runs)})
+    assert proc.returncode == 0
+    return proc.stdout, proc.stderr
+
+
+def test_an_unguarded_main_thread_logs_one_stderr_line(tmp_path, sdlc_repo):
+    runs = tmp_path / "runs"
+    out, err = _guard_stderr("gh pr merge 3", sdlc_repo, "sess", runs)  # no run-state at all
+    assert out == "" and err.count("\n") == 1 and "unguarded" in err and "--run-id" in err
+    # Positive control: a guarded session says nothing on stderr.
+    _run_state(runs, "sess")
+    out, err = _guard_stderr("gh pr merge 3", sdlc_repo, "sess", runs)
+    assert "deny" in out and err == ""
+
+
+def test_sync_branch_denial_tells_the_agent_to_stop_and_report(sdlc_repo):
+    reason = guard(CP + "sync-branch 5", sdlc_repo, "sdlc:development")
+    assert "orchestrator" in reason and "SDLC-RESULT" in reason and "`blocked`" in reason
+    assert "git merge origin/<base>" in reason and "sync-branch <n>" in reason
+    # Positive control: another orchestrator-only command keeps the generic reason.
+    generic = guard(CP + "set-stage 5 --stage development", sdlc_repo, "sdlc:development")
+    assert "orchestrator" in generic and "`blocked`" not in generic
+
+
 def _guard_env(command, cwd, env=None):
     return run_hook("bash_guard.py", {"tool_name": "Bash", "tool_input": {"command": command},
                                       "cwd": cwd}, env=env).stdout
