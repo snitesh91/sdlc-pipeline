@@ -179,6 +179,7 @@ def test_guard_reason_names_control_plane_command(sdlc_repo):
     assert "set-stage" in guard("gh issue edit 5 --add-label bug", sdlc_repo)
     assert "resolve-thread" in guard("gh api graphql -f query='mutation { resolveReviewThread }'", sdlc_repo)
     assert "start-stage" in guard("git worktree add /tmp/x", sdlc_repo)
+    assert "review-worktree-add" in guard("git worktree add /tmp/x", sdlc_repo)
     assert "sync-branch" in guard("git rebase main", sdlc_repo)
 
 
@@ -386,6 +387,10 @@ ROLE_DENIED = [
     ("sdlc:product", CP + "mark-feedback-addressed 5", "orchestrator"),
     ("sdlc:architecture", CP + "cut-phase-tasks 9 --repo-path /w", "orchestrator"),
     ("sdlc:pr-review", CP + "claim 5 --role pr-review", "orchestrator"),
+    # The orchestrator makes and removes the review tree around the pr-review agent.
+    ("sdlc:pr-review", CP + "review-worktree-add 5 --repo-path /r", "orchestrator"),
+    ("sdlc:pr-review", CP + "release-review-worktree 5", "orchestrator"),
+    ("sdlc:development", CP + "prune-stale --dry-run", "orchestrator"),
     ("sdlc:exploratory", "echo $(" + CP + "close-epic 9)", "orchestrator"),
     ("sdlc:initiative-close", CP + "close-initiative 1", "orchestrator"),
     ("sdlc:development", CP + "route 5 --to merge --reason r", "orchestrator"),
@@ -417,6 +422,8 @@ def test_role_allowlist_denies(sdlc_repo, agent_type, command, reason):
 def test_orchestrator_and_other_agents_keep_every_command(sdlc_repo, agent_type):
     assert guard(CP + "set-stage 5 --stage development", sdlc_repo, agent_type) is None
     assert guard(CP + "route 5 --to development --reason r", sdlc_repo, agent_type) is None
+    assert guard(CP + "review-worktree-add 5 --repo-path /r", sdlc_repo, agent_type) is None
+    assert guard(CP + "prune-stale --repo-path /r", sdlc_repo, agent_type) is None
     assert guard("git commit -m x && git reset --hard", sdlc_repo, agent_type) is None
 
 

@@ -24,6 +24,9 @@ references/design-doc-rules.md):
   - not a revision log -- there is no "what changed since the last version" section.
     Revisions are recorded in the "Last revised" line and, where a requirement genuinely
     reversed, in the Decisions Log entry itself.
+  - not repetitive -- each fact (a limit, a shape, a rule, a ruling) is stated in full in
+    the one section that owns it; every other section refers to it ("the cap in section 2")
+    instead of restating it.
   - not hedged -- no confidence disclaimers, no "this is a hypothesis" framing. Where a
     claim is unverified, say what is unverified in that specific requirement, or put it
     in Open Questions.
@@ -45,14 +48,16 @@ Delete this comment block before committing the real document.
 
 <!-- Why this work exists, in prose a non-engineer can follow. What is true today, what is
      wrong or missing about it, and who feels it. Two to five paragraphs. This is the first
-     thing a reviewer reads -- it replaces any summary box. -->
+     thing a reviewer reads -- it replaces any summary box. Why, not what: the requirements
+     themselves belong in Functional Scope. -->
 
 ---
 
 ## Goals
 
-<!-- Outcome bullets, not features. Each one is something that becomes true for a user, an
-     operator, or the business when this is done. -->
+<!-- Outcome bullets, not features, one line each. Each one is something that becomes true
+     for a user, an operator, or the business when this is done -- not a summary of the
+     scope below. -->
 
 - ...
 
@@ -104,7 +109,8 @@ Delete this comment block before committing the real document.
 <!-- Only genuine constraints the work must respect: an operator ruling, a platform the
      business has already committed to, a regulatory limit, a budget ceiling. Write each as
      the constraint itself, never as a chosen solution ("must run with no persistent agent
-     host", not "use vendor X"). Drop the section if there are none. -->
+     host", not "use vendor X"), and do not repeat it in the Decisions Log. Drop the section
+     if there are none. -->
 
 - ...
 
@@ -114,8 +120,9 @@ Delete this comment block before committing the real document.
 
 <!-- Literal checklist, every item independently testable and written so a failing test can
      be derived from it without reading any code. The architecture and development stages work from this list
-     directly. Number them AC1.. and group under a bold line per functional area when the
-     list runs long. -->
+     directly. Name the behaviour and point at the Functional Scope item that holds its
+     detail rather than restating its limits. Number them AC1.. and group under a bold line
+     per functional area when the list runs long. -->
 
 - [ ] **AC1** — ...
 

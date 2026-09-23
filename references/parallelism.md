@@ -11,8 +11,7 @@ eligibility.
 
 ## Fan-out rules
 
-- Start every unit with `start-stage <n> --role <role>` (it creates the worktree, then
-  claims — the **Ordering rule**: never `claim` before the worktree exists).
+- Start every unit with `start-stage <n> --role <role>`, never a bare `claim`.
 - Dispatch all selected units in **one parallel `Agent` call**, one subagent per unit,
   each told its own worktree path. Track one stage agent per active unit.
 - **Hold the waiting yourself.** A subagent cannot wait across turns. When a stage is
@@ -55,16 +54,13 @@ via `next-action`, never fanned out.
    `parallelism.prReview`).
 2. One worktree per PR, **detached** at `origin/issue-<n>` — never a local `issue-<n>`
    branch, which `development` must stay free to hold for rework:
-   ```bash
-   git -C <repo-root> fetch origin
-   git -C <repo-root> worktree add --detach <worktrees.root>/<reviewPrefix><n> origin/issue-<n>
-   ```
-3. `start-comment <n> --role pr-review` for each (skip where `transition` already posted
-   it), then one parallel `Agent` call — same `sdlc:pr-review` agent and prompt as a single
+   `python3 "$SDLC" review-worktree-add <n> --repo-path <repo-root>` (its `path`).
+3. `transition <n> --expect-stage pr-review --pr <pr> --repo-path <its dev worktree>` for
+   each (proceed only on `ready: true`), then one parallel `Agent` call — same `sdlc:pr-review` agent and prompt as a single
    review.
 4. If suites starve each other, lower `parallelism.prReview`; never make reviews shallower.
 5. Remove each review worktree when its review ends, crash included:
-   `git worktree remove --force <path>`.
+   `python3 "$SDLC" release-review-worktree <n>` (`merge-pr` runs it too).
 
 ### The two queue markers
 
@@ -175,9 +171,9 @@ difference is minutes.
   For a stage that runs e2e or a live-credential check, symlink them into its worktree
   (`ln -s <repo-root>/.secrets.<profile> <worktree>/`) or name their main-checkout path
   in the prompt; otherwise it wrongly concludes no credentials exist.
-- `mark-needs-human`, `mark-blocked` and `merge-pr` release the unit's worktree
-  themselves (`worktree` key). Remove by hand only review worktrees and leftovers when
-  an invocation ends.
+- `mark-needs-human`, `mark-blocked`, `merge-pr` and `close-issue` release the unit's
+  worktree themselves (`worktree` key); the last two also clean up its review worktree and
+  landed branches (`cleanup`). Leftovers: `prune-stale` (SKILL.md, Step 1).
 
 ## Concurrent multi-epic isolation
 
@@ -197,8 +193,8 @@ difference is minutes.
 
 ### Per-epic isolated stack
 
-When `pipeline.stack.enabled`: `provision-epic-stack <epic>` at the epic's first touch,
-`teardown-epic-stack <epic>` after `close-epic`'s merge. Give every e2e-running stage the
+When `pipeline.stack.enabled`: `provision-epic-stack <epic>` at the epic's first touch;
+`close-epic`'s merge runs `teardown-epic-stack` itself. Give every e2e-running stage the
 returned `use` line and ports, never the shared dev stack's. A child validating its own
 e2e fixes builds from its own worktree with the epic profile; the epic-close run builds
 from `epic-<n>`. One stack per epic: its children take turns (suite-heavy rule). With the

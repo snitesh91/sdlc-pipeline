@@ -183,10 +183,14 @@ def test_open_dev_pr_re_raises_any_other_pr_create_failure():
 
 # ---- 3: close-issue --not-planned, detach-epic, comment ----
 
-def _no_worktree_runner():
+def _no_worktree_runner(remote_head: str = ""):
+    """No worktree, no local ref; `remote_head` = what origin holds for the unit's branch."""
     runner = ScriptedRunner({})
     runner.prefix_responses = {("git", "-C", "/r", "worktree", "list"):
-                               "worktree /r\nHEAD a\nbranch refs/heads/main\n"}
+                               "worktree /r\nHEAD a\nbranch refs/heads/main\n",
+                               ("git", "-C", "/r", "ls-remote", "origin"): remote_head,
+                               ("git", "-C", "/r", "branch", "--list"): "",
+                               ("git", "-C", "/r", "worktree", "prune"): ""}
     return runner
 
 
@@ -357,38 +361,44 @@ def _design_task(pr_state):
                                   "<!-- design-pr-opened: lld:50 @ 2026-09-20T00:00:00Z -->"]},
                     )
     gh.prs[50] = {"state": pr_state, "headRefName": "issue-11", "baseRefName": "epic-9",
-                  "body": "", "comments": []}
+                  "headRefOid": "abc", "body": "", "comments": []}
     return gh
 
 
 def test_close_issue_deletes_the_merged_design_pr_branch_on_origin():
     gh = _design_task("MERGED")
-    result = s.cmd_close_issue(gh, 11, repo_path="/r", runner=_no_worktree_runner())
-    assert result["design_pr_branch"] == {"pr": 50, "deleted": True, "branch": "issue-11"}
+    result = s.cmd_close_issue(gh, 11, repo_path="/r",
+                               runner=_no_worktree_runner("abc\trefs/heads/issue-11\n"))
+    assert result["cleanup"]["remote_branch"] == {"deleted": True, "head": "abc"}
     assert gh.deleted_branches == ["issue-11"]
 
 
 def test_close_issue_keeps_the_branch_of_an_unmerged_design_pr():
     # Positive control: a still-open design PR keeps its branch (the human may merge it).
     gh = _design_task("OPEN")
-    result = s.cmd_close_issue(gh, 11, repo_path="/r", runner=_no_worktree_runner())
-    assert result["design_pr_branch"]["deleted"] is False
+    result = s.cmd_close_issue(gh, 11, repo_path="/r",
+                               runner=_no_worktree_runner("abc\trefs/heads/issue-11\n"))
+    assert result["cleanup"]["remote_branch"]["deleted"] is False
+    assert "still open" in result["cleanup"]["remote_branch"]["reason"]
     assert not getattr(gh, "deleted_branches", [])
 
 
-def test_close_issue_without_a_design_pr_reports_nothing_about_branches():
+def test_close_issue_with_no_branch_on_origin_deletes_nothing():
     gh = _epic_tree({"number": 11, "labels": ["type:task"], "parent": 9})
     result = s.cmd_close_issue(gh, 11, repo_path="/r", runner=_no_worktree_runner())
-    assert "design_pr_branch" not in result and result["closed"] is True
+    assert result["closed"] is True
+    assert result["cleanup"]["remote_branch"] == {"deleted": False, "absent": True}
+    assert result["cleanup"]["local_branch"] == {"deleted": False, "absent": True}
 
 
 def test_a_failed_branch_delete_never_fails_the_close():
     gh = _design_task("MERGED")
     gh.delete_branch = lambda b: (_ for _ in ()).throw(GhError("422 ref does not exist"))
-    result = s.cmd_close_issue(gh, 11, repo_path="/r", runner=_no_worktree_runner())
+    result = s.cmd_close_issue(gh, 11, repo_path="/r",
+                               runner=_no_worktree_runner("abc\trefs/heads/issue-11\n"))
     assert result["closed"] is True and gh.issues[11]["state"] == "CLOSED"
-    assert result["design_pr_branch"]["deleted"] is False
-    assert "422" in result["design_pr_branch"]["reason"]
+    assert result["cleanup"]["remote_branch"]["deleted"] is False
+    assert "422" in result["cleanup"]["remote_branch"]["reason"]
 
 
 # ---- CLI wiring ----

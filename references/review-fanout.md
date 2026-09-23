@@ -26,7 +26,7 @@ These rules apply whatever a stage calls its axes or layers:
 - **Wait for every dispatched child before you form a verdict or post anything.** A
   verdict that leaves out a dispatched axis claims coverage you did not have.
 - **Persist each child's reply the moment it lands** — one file per axis
-  (`<scratchpad>/review-<n>/<axis>.md`), never once at the end. Resuming a pass that died
+  (`<worktree>/.sdlc-scratch/review-<n>/<axis>.md`), never once at the end. Resuming a pass that died
   mid-way (a rate limit, a crash), read those files first and re-dispatch only the axes
   with none; a persisted candidate is still verified before it becomes a finding.
 
@@ -41,7 +41,7 @@ characters**:
 - **Findings, one line each:** the claim plus its `file:line`. No quoted blocks,
   reasoning trace, or "what I checked and ruled out" inventory.
 - **Nothing else.** Evidence stays in the source file (the citation points to it) or in
-  a scratch file under the worktree that the parent can read.
+  a file under `<worktree>/.sdlc-scratch/` that the parent can read.
 
 **Parent:** run `wc -c` on each reply. If a reply is over the cap, ask for a terse
 re-send before acting on it.

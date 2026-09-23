@@ -20,6 +20,9 @@ means there.
   rebase.** A Bash guard hook denies hand-run ones and names the command to use instead. It
   also limits you to your role's commands (review roles: no git writes); anything else is
   the orchestrator's — report it in your handoff.
+- **Scratch goes only under `<worktree>/.sdlc-scratch/`** — logs, captured output,
+  comment bodies, probe files; never `/tmp` or elsewhere. Git ignores it, and it is removed
+  with the worktree.
 
 ## Per-issue docs (the source of record)
 
@@ -146,11 +149,8 @@ Comments are the human's visibility record and the crash-resume point. They are 
 source of record: that is the committed docs, the commits, and the issue body for durable
 requirements. Keep comments to a pointer plus a summary.
 
-- **The start comment is mandatory:** `🚧 Picking this up — <role> stage starting.`,
-  posted before delegating, every time, by a script and never hand-typed. `claim` (inside
-  `start-stage`, `pass-gate`, `skip-gate` and `waive-gate`) posts it for the role it
-  claims. For a review role, the orchestrator posts it with `transition <n>
-  --expect-stage <role>` or `start-comment <n> --role <role>`. Never post it twice.
+- **The start comment** (`🚧 Picking this up — <role> stage starting.`) is posted by the
+  orchestrator's commands before you start — never by you, never hand-typed.
 - Comment per milestone, not per step. Post at least one comment per stage (the
   handoff) and at most one per genuine milestone.
 - Link to the doc; don't paste it. Give a few sentences plus the doc path and commit SHA.
@@ -162,15 +162,14 @@ requirements. Keep comments to a pointer plus a summary.
 
 `product`, `architecture` and `lld` post theirs with
 `python3 "$SDLC" post-comment <n> --role <your role> --body-file <file>` — write the text to a
-file first. It tags the comment for you, refuses an over-cap body or an issue you do not hold,
-and is the only way these roles comment. The stop hook refuses a `done` finish until it has
-succeeded this round, so a rework or gate-feedback round posts again. Review roles and
+file first. It is the only way these roles comment; post again every round (rework and
+gate-feedback included) — the stop hook refuses a `done` finish until you have. Review roles and
 `development` use their `record-*` / `handoff-to-pr-review` commands instead.
 
 ### Comment size is a contract
 
 - **Stage handoff comment: ≤ 2,000 characters.** Say what changed, where the doc/commit
-  is, the delta since the last round, and the marker.
+  is, and the delta since the last round.
 - **Evidence-carrying comment** (`product-review`, `arch-review`/`lld-review`,
   `pr-review`, `development`'s handoff): **≤ 6,000 characters.** Findings first, each as
   one heading plus at most three lines (what, why it matters, the fix — described, not
@@ -184,10 +183,8 @@ succeeded this round, so a rework or gate-feedback round posts again. Review rol
 - The control plane refuses an over-cap `--summary` / `--reason` / `--reply` / `post-comment`
   body; check any other comment you post yourself with `wc -c`.
 
-Each handoff comment ends with the hidden marker
-`<!-- stage-transition: <from-role>-><to-role> @ <ISO8601> -->`. The script posts it
-wherever a script command owns the transition (`open-dev-pr`, `handoff-to-pr-review`,
-`open-gate`, `pass-gate`, `skip-gate`).
+Every hidden marker (`stage-transition`, `role-comment`, review outcomes) is posted by the
+command that posts your comment — never hand-type one.
 
 If a stage changes pipeline files the driven repo tracks (its `sdlc-pipeline.config.json`,
 the gate workflow), commit that with the related code. Never edit the plugin itself; flag

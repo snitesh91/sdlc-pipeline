@@ -114,8 +114,7 @@ def test_merge_pr_pins_the_merge_to_the_head_whose_checks_it_read():
     result = s.cmd_merge_pr(s.GitHub(runner=runner), 42, issue=9)
     assert result["merged"] is True
     [merge] = [c for c in runner.calls if c[:3] == ["gh", "pr", "merge"]]
-    assert merge == ["gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash",
-                     "--delete-branch", "--match-head-commit", "feedface"]
+    assert merge == ["gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--match-head-commit", "feedface"]
 
 
 def test_merge_pr_reads_the_head_before_the_checks():
@@ -130,17 +129,14 @@ def test_merge_pr_reads_the_head_before_the_checks():
 
 def test_pr_merge_without_a_head_pin_sends_no_match_flag():
     # Positive control: the flag is opt-in on the primitive.
-    runner = ScriptedRunner({("gh", "pr", "merge", "7", "--repo", "owner/repo", "--squash",
-                              "--delete-branch"): ""})
+    runner = ScriptedRunner({("gh", "pr", "merge", "7", "--repo", "owner/repo", "--squash"): ""})
     s.GitHub(runner=runner).pr_merge(7)
-    assert runner.calls == [["gh", "pr", "merge", "7", "--repo", "owner/repo", "--squash",
-                             "--delete-branch"]]
+    assert runner.calls == [["gh", "pr", "merge", "7", "--repo", "owner/repo", "--squash"]]
 
 
 def test_merge_pr_still_raises_when_the_pinned_merge_is_rejected_and_the_pr_stays_open():
     runner = _merge_runner()
     runner.prefix_responses.pop(("gh", "pr", "merge", "42"))
-    runner.fail_on = {("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash",
-                       "--delete-branch", "--match-head-commit", "feedface")}
+    runner.fail_on = {("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--match-head-commit", "feedface")}
     with pytest.raises(s.GhError):
         s.cmd_merge_pr(s.GitHub(runner=runner), 42, issue=9)

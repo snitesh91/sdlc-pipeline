@@ -54,8 +54,19 @@ class ScriptedRunner:
 
 
 _NO_UNIT_WORKTREE = {("git", "-C", ".", "worktree", "list", "--porcelain"):
-                      "worktree /repo\nHEAD x\nbranch refs/heads/main\n"}
+                      "worktree /repo\nHEAD x\nbranch refs/heads/main\n",
+                      # cleanup_unit: nothing on origin, no local ref.
+                      ("git", "-C", ".", "ls-remote", "origin", "refs/heads/issue-9"): "",
+                      ("git", "-C", ".", "branch", "--list", "issue-9"): "",
+                      ("git", "-C", ".", "worktree", "prune"): ""}
 _NO_WORKTREE_RESULT = {"released": False, "reason": "no worktree"}
+# `cleanup_unit`'s report for issue-9 when nothing but the issue is left.
+_NOTHING_TO_CLEAN = {"branch": "issue-9",
+                     "review_worktree": {"released": False, "path": "/tmp/sdlc-review-9",
+                                         "reason": "no review worktree"},
+                     "remote_branch": {"deleted": False, "absent": True},
+                     "local_branch": {"deleted": False, "absent": True},
+                     "worktree_pruned": True}
 
 
 def _live_wt(branch: str, path: str = "/repo", main: str = "/main") -> dict:
@@ -1475,7 +1486,7 @@ def test_merge_pr_merges_and_confirms_issue_closed_when_checks_pass():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--match-head-commit", "abc"): "",
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
             json.dumps({"state": "CLOSED", "comments": _clean_pipeline_comments()}),
@@ -1489,7 +1500,7 @@ def test_merge_pr_merges_and_confirms_issue_closed_when_checks_pass():
     gh = GitHub(runner=runner)
     result = cmd_merge_pr(gh, 42, issue=9)
     assert result == {"pr": 42, "issue": 9, "merged": True, "issue_closed": True, "config_changed": False,
-                       "worktree": _NO_WORKTREE_RESULT}
+                       "worktree": _NO_WORKTREE_RESULT, "cleanup": _NOTHING_TO_CLEAN}
 
 
 def test_missing_required_workflows_flags_backend_touch_with_no_check():
@@ -1801,7 +1812,7 @@ def test_merge_pr_allows_docs_only_pr_with_no_checks():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--match-head-commit", "abc"): "",
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
             json.dumps({"state": "CLOSED", "comments": _clean_pipeline_comments()}),
@@ -1815,7 +1826,7 @@ def test_merge_pr_allows_docs_only_pr_with_no_checks():
     gh = GitHub(runner=runner)
     result = cmd_merge_pr(gh, 42, issue=9)
     assert result == {"pr": 42, "issue": 9, "merged": True, "issue_closed": True, "config_changed": False,
-                       "worktree": _NO_WORKTREE_RESULT}
+                       "worktree": _NO_WORKTREE_RESULT, "cleanup": _NOTHING_TO_CLEAN}
 
 
 def test_merge_pr_reports_config_changed_when_the_merged_pr_touched_the_pipeline_config():
@@ -1834,7 +1845,7 @@ def test_merge_pr_reports_config_changed_when_the_merged_pr_touched_the_pipeline
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--match-head-commit", "abc"): "",
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
             json.dumps({"state": "CLOSED", "comments": _clean_pipeline_comments()}),
@@ -1896,7 +1907,7 @@ def test_merge_pr_allows_when_both_required_workflows_pass():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--match-head-commit", "abc"): "",
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
             json.dumps({"state": "CLOSED", "comments": _clean_pipeline_comments()}),
@@ -1910,7 +1921,7 @@ def test_merge_pr_allows_when_both_required_workflows_pass():
     gh = GitHub(runner=runner)
     result = cmd_merge_pr(gh, 42, issue=9)
     assert result == {"pr": 42, "issue": 9, "merged": True, "issue_closed": True, "config_changed": False,
-                       "worktree": _NO_WORKTREE_RESULT}
+                       "worktree": _NO_WORKTREE_RESULT, "cleanup": _NOTHING_TO_CLEAN}
 
 
 def test_pr_checks_reports_missing_required_workflows():
@@ -3103,14 +3114,40 @@ def test_branch_workspace_creates_ephemeral_worktree_from_origin_and_removes_it(
         ("git", "-C", path, "status", "--porcelain"): "",
         ("git", "-C", path, "log", "--oneline", "origin/epic-365..epic-365"): "",
         ("git", "-C", "/main", "worktree", "remove", path): "",
+        ("git", "-C", "/main", "branch", "-D", "epic-365"): "",
     })
     runner.fail_on = {("git", "-C", "/main", "rev-parse", "--verify", "--quiet", "refs/heads/epic-365")}
     with BranchWorkspace("epic-365", "/main", runner) as ws:
         assert ws.path == path and ws.ephemeral is True
     assert ["git", "-C", "/main", "worktree", "remove", path] in runner.calls
+    # The `-B` ref it created goes with the tree (it held nothing origin lacks).
+    assert runner.calls[-1] == ["git", "-C", "/main", "branch", "-D", "epic-365"]
     assert ws.retained is None
     # Nothing ever ran `git checkout` in the main checkout.
     assert not any(c[:3] == ["git", "-C", "/main"] and c[3] == "checkout" for c in runner.calls)
+
+
+def test_branch_workspace_keeps_a_local_ref_that_existed_before_it():
+    # Positive control: only a ref the workspace itself created is deleted on exit.
+    from sdlc_next import BranchWorkspace
+    import os
+    path = f"/tmp/sdlc-tmp-epic-365-{os.getpid()}"
+    runner = ScriptedRunner({
+        ("git", "-C", "/main", "worktree", "list", "--porcelain"):
+            "worktree /main\nHEAD aaa\nbranch refs/heads/main\n",
+        ("git", "-C", "/main", "fetch", "origin"): "",
+        ("git", "-C", "/main", "show-ref", "--verify", "--quiet", "refs/remotes/origin/epic-365"): "",
+        ("git", "-C", "/main", "rev-parse", "--verify", "--quiet", "refs/heads/epic-365"): "abc\n",
+        ("git", "-C", "/main", "log", "--oneline", "origin/epic-365..epic-365"): "",
+        ("git", "-C", "/main", "worktree", "add", path, "-B", "epic-365", "origin/epic-365"): "",
+        ("git", "-C", path, "status", "--porcelain"): "",
+        ("git", "-C", path, "log", "--oneline", "origin/epic-365..epic-365"): "",
+        ("git", "-C", "/main", "worktree", "remove", path): "",
+    })
+    with BranchWorkspace("epic-365", "/main", runner) as ws:
+        pass
+    assert ws.retained is None
+    assert not any(c[3:5] == ["branch", "-D"] for c in runner.calls)
 
 
 def test_branch_workspace_retains_ephemeral_worktree_with_unpushed_commits():
@@ -3172,6 +3209,7 @@ def test_sync_branch_with_no_live_worktree_runs_in_an_ephemeral_one():
         ("git", "-C", path, "status", "--porcelain"): "",
         ("git", "-C", path, "log", "--oneline", "origin/epic-92..epic-92"): "",
         ("git", "-C", "/main", "worktree", "remove", path): "",
+        ("git", "-C", "/main", "branch", "-D", "epic-92"): "",
     })
     runner.fail_on = {("git", "-C", "/main", "rev-parse", "--verify", "--quiet", "refs/heads/epic-92")}
     gh = GitHub(runner=ScriptedRunner({}))
@@ -4073,7 +4111,7 @@ def test_merge_pr_closes_child_explicitly_when_merged_into_epic_branch():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--match-head-commit", "abc"): "",
         ("gh", "issue", "close", "9", "--repo", "owner/repo", "--reason", "completed"): "",
         **_NO_UNIT_WORKTREE,
     })
@@ -4108,7 +4146,7 @@ def test_merge_pr_does_not_close_the_issue_itself_when_the_base_is_main():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--match-head-commit", "abc"): "",
         **_NO_UNIT_WORKTREE,
     })
     runner.prefix_responses = {("gh", "pr", "comment", "42"): ""}
@@ -5640,7 +5678,7 @@ def test_merge_pr_carries_attestation_forward_when_behind_base_is_docs_only():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
         ("gh", "pr", "ready", "42", "--repo", "owner/repo"): "",
-        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--delete-branch", "--match-head-commit", "abc"): "",
+        ("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--match-head-commit", "abc"): "",
         ("gh", "issue", "view", "9", "--repo", "owner/repo",
          "--json", "number,title,labels,body,state,comments"):
             json.dumps({"state": "CLOSED", "comments": _clean_pipeline_comments()}),
@@ -6001,10 +6039,13 @@ def test_base_delta_docs_only_still_carries_forward_without_workflows(monkeypatc
     assert sdlc_next.base_delta_needs_reattest([]) is False
 
 
-def test_base_delta_suite_tree_forces_reattest_even_when_every_file_is_markdown():
-    """A `.md` inside a configured suite's tree still forces re-attest."""
-    from sdlc_next import base_delta_needs_reattest
-    assert base_delta_needs_reattest(["backend/README.md"]) is True
+def test_base_delta_suite_tree_forces_reattest_even_when_every_file_is_markdown(monkeypatch):
+    """A `.md` inside a suite's tree still forces re-attest unless the workflow excludes it."""
+    import sdlc_next
+    spec = {"workflow": "Backend CI", "suite": "backend", "prefixes": ("backend/",),
+            "files": (), "excludeGlobs": (), "bases": (), "attestable": True}
+    monkeypatch.setattr(sdlc_next, "REQUIRED_WORKFLOWS", (spec,))
+    assert sdlc_next.base_delta_needs_reattest(["backend/README.md"]) is True
 
 
 # --- both Task heading forms (numbered and keyed) ---
@@ -6498,8 +6539,7 @@ def test_merge_pr_on_an_already_merged_pr_only_finishes_the_bookkeeping():
 def test_merge_pr_recovers_when_the_merge_call_fails_after_the_squash_landed():
     from sdlc_next import GitHub, cmd_merge_pr
     runner, call = _merged_pr_bookkeeping(["OPEN", "MERGED"])
-    runner.fail_on = {("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash",
-                       "--delete-branch", "--match-head-commit", "abc")}
+    runner.fail_on = {("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--match-head-commit", "abc")}
     result = cmd_merge_pr(GitHub(runner=call), 42, issue=9)
     assert result["merged"] is True and "recovered" not in result
 
@@ -6507,8 +6547,7 @@ def test_merge_pr_recovers_when_the_merge_call_fails_after_the_squash_landed():
 def test_merge_pr_still_raises_when_the_failed_merge_left_the_pr_open():
     from sdlc_next import GitHub, GhError, cmd_merge_pr
     runner, call = _merged_pr_bookkeeping(["OPEN", "OPEN"])
-    runner.fail_on = {("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash",
-                       "--delete-branch", "--match-head-commit", "abc")}
+    runner.fail_on = {("gh", "pr", "merge", "42", "--repo", "owner/repo", "--squash", "--match-head-commit", "abc")}
     with pytest.raises(GhError):
         cmd_merge_pr(GitHub(runner=call), 42, issue=9)
 

@@ -45,6 +45,11 @@ memory. It is the one source citation a `product.md` carries.
   uncertainty in the specific requirement or in Open Questions. Record revisions in the
   `**Last revised**` line. If a requirement genuinely reversed, rewrite it in place in the
   Decisions Log.
+- **State each fact once.** A limit, shape, rule or ruling is stated in full in the one
+  section that owns it (Functional Scope for behaviour, Constraints for a fixed external
+  limit, the Decisions Log for a choice made); Background, Goals, Non-Functional
+  Requirements, Acceptance Criteria and Out of Scope refer to it in a clause ("the cap in
+  §2"), never restate it.
 - **Keep detail inline.** Never hide requirement detail in `<details>` blocks.
 - **No system flow diagram**; that belongs to architecture. When a screen's layout
   matters, put an ASCII mock-up or a linked image under User Experience.

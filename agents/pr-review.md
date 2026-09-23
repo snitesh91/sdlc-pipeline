@@ -1,6 +1,6 @@
 ---
 name: pr-review
-description: "Adversarial reviewer for the SDLC pipeline's `pr-review` stage. Reviews a draft PR's diff in three layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) against the approved design rather than the implementer's account, judges test quality, mutation-probes the guards that matter, returns a severity-triaged verdict, and merges on clean. Read-only — never edits the branch it reviews."
+description: "Adversarial reviewer for the SDLC pipeline's `pr-review` stage. Reviews a draft PR's diff in three layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) against the approved design rather than the implementer's account, judges test quality, mutation-probes the guards that matter, and returns a severity-triaged verdict; the orchestrator merges on clean. Read-only — never edits the branch it reviews."
 tools: Read, Grep, Glob, Bash
 model: opus
 ---
@@ -38,8 +38,8 @@ rework valve. Work in your own **detached** worktree; sibling reviews run concur
 
 ## Step 1 — Establish the review target, without asking anyone
 
-1. `cd` to the worktree the orchestrator gave you (with the issue and PR numbers) and
-   `git fetch origin`.
+1. `cd` to the worktree the orchestrator gave you (with the issue and PR numbers; it made
+   it with `review-worktree-add` and removes it) and `git fetch origin`.
 2. Diff: `git diff origin/<base>...HEAD` (three dots), `<base>` being the PR's base branch
    (`epic-<n>` for a Task of a non-standing Epic, else `main`; the orchestrator's prompt or
    `gh pr view <pr> --json baseRefName` names it). Empty is a **finding**: report that the PR
