@@ -20,6 +20,9 @@ means there.
   rebase.** A Bash guard hook denies hand-run ones and names the command to use instead. It
   also limits you to your role's commands (review roles: no git writes); anything else is
   the orchestrator's — report it in your handoff.
+- **Scratch goes only under `<worktree>/.sdlc-scratch/`** — logs, captured output,
+  comment bodies, probe files; never `/tmp` or elsewhere. Git ignores it, and it is removed
+  with the worktree.
 
 ## Per-issue docs (the source of record)
 

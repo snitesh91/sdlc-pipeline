@@ -269,8 +269,8 @@ All other rework follows `references/rework.md`.
 - Epic git work (`merge-lld-doc`, `create-lld-tasks`, `close-epic`) never runs in the main
   checkout — only in `epic-<n>`'s live or ephemeral worktree, under the branch lock.
 - **Runtime stack**: when `pipeline.stack.enabled`, run `provision-epic-stack <n>` at the
-  epic's first touch and `teardown-epic-stack <n>` after the closing merge
-  (`references/parallelism.md`, "Per-epic isolated stack").
+  epic's first touch; `close-epic`'s merge tears it down (`references/parallelism.md`,
+  "Per-epic isolated stack").
 
 ## Epic closing
 
@@ -304,8 +304,10 @@ never reaches `main`; merge its design PR). Remaining items: closing verificatio
    it only leaves a suite unsatisfied, which matters for one in `awaiting_checks`. The epic
    PR exists only from this call, so attest each suite it names right after it
    (`record-local-ci --pr <pr>` on the epic head), wait for `awaiting_checks` to pass, and
-   call again.
-4. `teardown-epic-stack <n>` (no-op unless provisioned).
+   call again. After the merge it cleans up (`cleanup`, `children_cleanup`): the epic's and
+   its closed children's worktrees and landed branches on origin and locally, the run-state
+   file archived (`run_state`; `prune-stale` deletes it once stale), and
+   `teardown-epic-stack` (`stack`; no-op unless provisioned).
 
 **Evidence carry-forward — what a later commit on `epic-<n>` does to recorded evidence:**
 

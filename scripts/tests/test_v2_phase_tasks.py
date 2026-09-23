@@ -187,11 +187,18 @@ class FakeGh:
         return [{"number": n, **p} for n, p in self.prs.items()
                 if p.get("headRefName") == branch and p.get("state", "OPEN") == "OPEN"]
 
-    def pr_merge(self, n, delete_branch=True, method="squash", match_head=None):
+    def pr_heads_for_branch(self, branch):
+        """Every PR on `branch`, any state; a merged one keeps the head it merged at."""
+        return [{"number": n, "state": p.get("state", "OPEN"), "headRefOid": p.get("headRefOid")}
+                for n, p in self.prs.items() if p.get("headRefName") == branch]
+
+    def pr_merge(self, n, delete_branch=False, method="squash", match_head=None):
         self.merges.append((n, delete_branch))
         self.merge_methods.append(method)
         pr = self.prs[n]
         if self.repo is not None:
+            pr["headRefOid"] = _git("rev-parse", f"origin/{pr['headRefName']}",
+                                    cwd=self.repo).strip()
             _land_pr(self.repo, pr["headRefName"], pr["baseRefName"])
         pr["state"], pr["mergedAt"] = "MERGED", "2026-09-19T00:00:00Z"
 

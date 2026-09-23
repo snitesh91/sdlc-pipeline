@@ -60,7 +60,8 @@ ROLE_COMMANDS = {
 REVIEW_ROLES = {"product-review", "design-review", "pr-review"}
 CONTROL_PLANE_REFS = {"$SDLC", "${SDLC}"}
 
-# A run's state file is written by `next-action --run-id` and never deleted, so "live" means
+# A run's state file is written by `next-action --run-id` and outlives its run (only
+# `prune-stale` deletes a closed epic's, once stale), so "live" means
 # written within this window (the orchestrator rewrites it as units start and finish);
 # `guard.mainThreadFreshnessHours` overrides it.
 RUN_LIVE_HOURS = 8
@@ -76,7 +77,7 @@ REASONS = {
     "pr merge": f"Use {SDLC} merge-pr <pr> --issue <n>; it is the only code merge gate ({SDLC} merge-design-pr for a phase-Task's design PR; {SDLC} merge-gate <pr> --issue <n> --stage <s> --operator-confirmed for a gate PR, only when the operator explicitly said to merge it).",
     "pr ready": f"Use {SDLC} merge-pr <pr> --issue <n>; it marks the PR ready itself.",
     "pr close": "Closing a pipeline PR is the operator's call; report it instead.",
-    "worktree add": f"Use {SDLC} start-stage <n> --role <r> (or worktree-add <n>). Only a detached review worktree (git worktree add --detach) may be made by hand.",
+    "worktree add": f"Use {SDLC} start-stage <n> --role <r> (or worktree-add <n>); a pr-review worktree is {SDLC} review-worktree-add <n>.",
     "push force": "Force-push is blocked: stop and report the rejected push; only the operator may overwrite a branch.",
     "rebase": f"Never rebase a pipeline branch: use {SDLC} sync-branch <n> (merges the base).",
     "orchestrator-only": "That control-plane command is the orchestrator's: report it in your "

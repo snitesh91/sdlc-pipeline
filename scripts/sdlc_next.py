@@ -27,7 +27,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Callable, Optional, Protocol, runtime_checkable
+from typing import Callable, Optional, Protocol, Union, runtime_checkable
 
 CONFIG_FILENAME = "sdlc-pipeline.config.json"
 
@@ -473,7 +473,8 @@ class GitHub:
                    "--reason", reason])
 
     def delete_branch(self, branch: str):
-        """Delete `origin/<branch>` GitHub-side (REST); a missing ref raises GhError."""
+        """Delete `origin/<branch>` GitHub-side (REST); a missing ref raises GhError
+        (`cleanup_unit` re-checks origin, so an already-gone branch counts as deleted)."""
         self._run(["gh", "api", "-X", "DELETE", f"repos/{self.repo}/git/refs/heads/{branch}"])
 
     def pr_comment(self, number: int, body: str):
@@ -578,9 +579,17 @@ class GitHub:
         self._run(["gh", "label", "create", label, "--repo", self.repo, "--force"])
         self._run(["gh", "pr", "edit", str(number), "--repo", self.repo, "--add-label", label])
 
-    def pr_merge(self, number: int, delete_branch: bool = True, method: str = "squash",
+    def pr_heads_for_branch(self, branch: str) -> list:
+        """Every PR (any state) whose head is `branch`: `number`, `state`, `headRefOid`."""
+        out = self._run(["gh", "pr", "list", "--repo", self.repo, "--head", branch,
+                          "--state", "all", "--json", "number,state,headRefOid"])
+        return json.loads(out)
+
+    def pr_merge(self, number: int, delete_branch: bool = False, method: str = "squash",
                  match_head: Optional[str] = None):
-        """`match_head` makes GitHub refuse the merge unless the head is still that SHA."""
+        """`match_head` makes GitHub refuse the merge unless the head is still that SHA.
+        Branch deletion is `cleanup_unit`'s: gh's `--delete-branch` fails while a local
+        worktree holds the branch, leaving it on origin."""
         argv = ["gh", "pr", "merge", str(number), "--repo", self.repo, f"--{method}"]
         if delete_branch:
             argv.append("--delete-branch")
@@ -969,7 +978,11 @@ def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
     if unit == "epic":
         return "main"
     # `parent` exists only in `issue_list`'s GraphQL; `gh issue view --json` has no such field.
-    issues = {i["number"]: i for i in gh.issue_list()}
+    return integration_base_in({i["number"]: i for i in gh.issue_list()}, issue)
+
+
+def integration_base_in(issues: dict, issue: int) -> str:
+    """`integration_base` over an already-fetched `{number: issue}` map."""
     entry = issues.get(issue)
     if entry is None:
         raise GhError(f"issue #{issue} not found in the repo issue list")
@@ -1366,8 +1379,22 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     gh.pr_merge(pr_number)
     # The PR's `Closes #<n>` closes the epic; its terminal fields are set here.
     cmd_mark_issue_closed(gh, epic)
+    cleanup = cleanup_unit(gh, epic, "epic", repo_path, runner, base="main")
+    closed_children = {c["number"] for c in children}
     return {"epic": epic, "merged": True, "pr": pr_number, "branch": branch, **evidence,
-            "worktree": release_worktree(branch, runner=runner, base_repo=repo_path)}
+            "worktree": cleanup.pop("worktree"), "cleanup": cleanup,
+            "children_cleanup": sweep_units(gh, repo_path, runner, only=closed_children,
+                                            issues=all_issues)["units"],
+            "run_state": archive_run_state(epic),
+            "stack": _teardown_stack_after_close(epic)}
+
+
+def _teardown_stack_after_close(epic: int) -> dict:
+    """`teardown-epic-stack` once the epic merged (a no-op with the stack disabled); never raises."""
+    try:
+        return cmd_teardown_epic_stack(epic)
+    except (GhError, OSError) as exc:
+        return {"epic": epic, "torn_down": False, "reason": str(exc)}
 
 
 _INITIATIVE_VERIFICATION_MARKER = re.compile(
@@ -1551,6 +1578,21 @@ def run_cap_state(epic: int, run_id: Optional[str]) -> Optional[dict]:
         state = {"run_id": run_id, "terminal": []}
         _write_run_state(epic, state)
     return state
+
+
+def archive_run_state(epic: int) -> Optional[dict]:
+    """Mark a closed epic's run-state file `closed` rather than delete it: an Initiative run's
+    cap sums every Epic's file under its run id (`run_completed`), and the hooks read the
+    session's files for the guard and resume. `prune-stale` deletes it once no longer fresh."""
+    state = read_run_state(epic)
+    if state is None:
+        return None
+    if not state.get("closed"):
+        state["closed"] = True
+        state["closed_at"] = _utc_now_marker()
+        with open(_run_state_path(epic), "w") as f:
+            json.dump(state, f)
+    return {"path": _run_state_path(epic), "archived": True}
 
 
 def run_completed(state: Optional[dict]) -> list:
@@ -2342,12 +2384,12 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
                      runner: Runner = _default_runner, base: Optional[str] = None) -> dict:
     """Create or resume the unit's worktree: reuse a live one (fast-forwarded), else
     `-B` from `origin/<branch>` when pushed, else `-b` off `base` or the integration base.
-    Returns `created`, `path`, `branch`, `base`, `resumed` plus sync fields."""
+    Returns `created`, `path`, `branch`, `base`, `resumed`, `scratch` plus sync fields."""
     branch = unit_branch(unit, number)
     path = worktree_path(unit, number)
     existing = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
     if existing:
-        return _resume_live_worktree(existing, branch, repo_path, runner)
+        return _with_scratch(_resume_live_worktree(existing, branch, repo_path, runner))
     _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
     on_origin = runner(["git", "-C", repo_path, "branch", "-r", "--list",
                         f"origin/{branch}"]).strip()
@@ -2373,8 +2415,14 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
                                   f"refs/heads/{branch}:refs/heads/{branch}"], runner)
         resumed = False
         synced = {}
-    return {"created": True, "path": path, "branch": branch, "base": base,
-            "resumed": resumed, **synced}
+    return _with_scratch({"created": True, "path": path, "branch": branch, "base": base,
+                          "resumed": resumed, **synced})
+
+
+def _with_scratch(result: dict) -> dict:
+    """Add `scratch` (the worktree's `.sdlc-scratch/`) when the tree exists on disk."""
+    scratch = ensure_scratch(result["path"])
+    return {**result, "scratch": scratch} if scratch else result
 
 
 def _rev_count(repo_path: str, rev_range: str, runner: Runner) -> int:
@@ -2420,12 +2468,65 @@ def _run_release_command(path: str, shell: Optional[Callable] = None) -> Optiona
     return {"command": command, "ok": True}
 
 
+def _is_ancestor(repo_path: str, rev: str, ref: str, runner: Runner) -> bool:
+    """Whether `rev` is `ref` or an ancestor of it (False when either is unknown locally)."""
+    try:
+        runner(["git", "-C", repo_path, "merge-base", "--is-ancestor", rev, ref])
+        return True
+    except GhError:
+        return False
+
+
+def _landed(repo_path: str, rev: str, refs: list, runner: Runner) -> bool:
+    """Whether every non-merge commit of `rev` is on one of `refs` (merged PR heads, bases,
+    a kept origin branch): its work is stored elsewhere, so the ref can go. Merge commits are
+    exempt -- a post-merge reconcile (pass-gate, sync-branch) adds one after the PR merged."""
+    refs = [r for r in dict.fromkeys(refs) if r]
+    if rev in refs or any(_is_ancestor(repo_path, rev, ref, runner) for ref in refs):
+        return True
+    known = []
+    for ref in refs:
+        try:
+            runner(["git", "-C", repo_path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])
+            known.append(ref)
+        except GhError:
+            pass
+    if not known:
+        return False
+    try:
+        return not int(runner(["git", "-C", repo_path, "rev-list", "--count", "--no-merges", rev,
+                               "--not", *known]).strip() or 0)
+    except (GhError, ValueError):
+        return False
+
+
+def _unpushed_reason(path: str, branch: str, runner: Runner,
+                     safe_refs: Union[Callable[[], list], list] = ()) -> Optional[str]:
+    """Why `branch`'s tip in `path` is not safely stored elsewhere, else None: compared
+    with `origin/<branch>`, or -- once that tracking ref is gone (branch deleted, pruned)
+    -- with `safe_refs` (merged PR heads, the base), so a vanished ref never blocks."""
+    try:
+        unpushed = runner(["git", "-C", path, "log", "--oneline",
+                            f"origin/{branch}..{branch}"]).strip()
+        return (f"{len(unpushed.splitlines())} commit(s) not pushed to origin/{branch}"
+                if unpushed else None)
+    except GhError:
+        if origin_branch_exists(path, branch, runner=runner):
+            raise
+    if _landed(path, branch, safe_refs() if callable(safe_refs) else list(safe_refs), runner):
+        return None
+    return (f"origin/{branch} is gone and {branch}'s tip is on no merged PR head or base "
+            f"-- refusing to discard it")
+
+
 def release_worktree(branch: str, runner: Runner = _default_runner,
-                      base_repo: str = ".", shell: Optional[Callable] = None) -> dict:
+                      base_repo: str = ".", shell: Optional[Callable] = None,
+                      safe_refs: Union[Callable[[], list], list] = ()) -> dict:
     """Remove the worktree holding `branch` so a parked/finished unit frees its lane
     slot, running `pipeline.worktrees.releaseCommand` in it first (`release_command`).
     Returns `{released, path?, reason?}`; never raises and never destroys work
-    (refuses on uncommitted/unpushed changes or the main worktree)."""
+    (refuses on uncommitted/unpushed changes or the main worktree). `safe_refs` stand in
+    for `origin/<branch>` once that tracking ref is gone (see `_unpushed_reason`)."""
     try:
         path = worktree_path_for_branch(branch, runner=runner, base_repo=base_repo)
     except GhError as exc:
@@ -2443,15 +2544,124 @@ def release_worktree(branch: str, runner: Runner = _default_runner,
     try:
         if runner(["git", "-C", path, "status", "--porcelain"]).strip():
             return {"released": False, "path": path, "reason": "uncommitted changes"}
-        unpushed = runner(["git", "-C", path, "log", "--oneline",
-                            f"origin/{branch}..{branch}"]).strip()
+        unpushed = _unpushed_reason(path, branch, runner, safe_refs)
         if unpushed:
-            return {"released": False, "path": path,
-                    "reason": f"{len(unpushed.splitlines())} commit(s) not pushed to origin/{branch}"}
+            return {"released": False, "path": path, "reason": unpushed}
         release = _run_release_command(path, shell)
         # Safe: the refusals above guarantee a clean tree. Plain `remove` refuses
         # any tree containing submodules.
         runner(["git", "-C", base_repo, "worktree", "remove", "--force", path])
+    except GhError as exc:
+        return {"released": False, "path": path, "reason": str(exc)}
+    return {"released": True, "path": path, **({"release_command": release} if release else {})}
+
+
+# Agent scratch (logs, captured output, probe files) lives inside the unit's worktree, so it
+# goes when the worktree does; `info/exclude` keeps it out of `git status` and commits.
+SCRATCH_DIR = ".sdlc-scratch"
+
+
+def ensure_scratch(worktree: str) -> Optional[str]:
+    """Create `<worktree>/.sdlc-scratch/` and list it in the repo's shared `info/exclude`
+    (idempotent). Returns the scratch path, or None when `worktree` is no git tree on disk."""
+    dot_git = os.path.join(worktree, ".git")
+    try:
+        if os.path.isfile(dot_git):
+            with open(dot_git) as f:
+                gitdir = f.read().split("gitdir:", 1)[1].strip()
+            gitdir = os.path.join(worktree, gitdir)
+            common = gitdir
+            if os.path.isfile(os.path.join(gitdir, "commondir")):
+                with open(os.path.join(gitdir, "commondir")) as f:
+                    common = os.path.normpath(os.path.join(gitdir, f.read().strip()))
+        elif os.path.isdir(dot_git):
+            common = dot_git
+        else:
+            return None
+        exclude = os.path.join(common, "info", "exclude")
+        os.makedirs(os.path.dirname(exclude), exist_ok=True)
+        existing = ""
+        if os.path.exists(exclude):
+            with open(exclude) as f:
+                existing = f.read()
+        entry = f"{SCRATCH_DIR}/"
+        if entry not in existing.splitlines():
+            with open(exclude, "a") as f:
+                f.write(("" if not existing or existing.endswith("\n") else "\n") + entry + "\n")
+        scratch = os.path.join(worktree, SCRATCH_DIR)
+        os.makedirs(scratch, exist_ok=True)
+        return scratch
+    except (OSError, IndexError):
+        return None
+
+
+def review_worktree_path(number: int) -> str:
+    """The detached pr-review worktree for `issue-<n>` (default `/tmp/sdlc-review-<n>`)."""
+    w = PIPELINE["worktrees"]
+    return os.path.join(w["root"], f"{w['reviewPrefix']}{number}")
+
+
+def worktree_entries(repo_path: str, runner: Runner = _default_runner) -> list:
+    """Every worktree as `{path, branch}` (`branch` None when detached), main first."""
+    out = runner(["git", "-C", repo_path, "worktree", "list", "--porcelain"])
+    entries = []
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            entries.append({"path": line[len("worktree "):], "branch": None})
+        elif line.startswith("branch refs/heads/") and entries:
+            entries[-1]["branch"] = line[len("branch refs/heads/"):]
+    return entries
+
+
+def _registered_worktree(repo_path: str, path: str, runner: Runner) -> Optional[dict]:
+    """The worktree entry at `path` (symlinks resolved: /tmp is /private/tmp on macOS)."""
+    real = os.path.realpath(path)
+    return next((e for e in worktree_entries(repo_path, runner)
+                 if os.path.realpath(e["path"]) == real), None)
+
+
+def cmd_review_worktree_add(number: int, repo_path: str = ".",
+                            runner: Runner = _default_runner) -> dict:
+    """Create (or refresh) `issue-<n>`'s detached pr-review worktree at `origin/issue-<n>`,
+    with its scratch dir. Never a local `issue-<n>` branch: `development` must stay free
+    to hold it for rework."""
+    branch, path = issue_branch(number), review_worktree_path(number)
+    _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
+    if not origin_branch_exists(repo_path, branch, runner=runner):
+        raise GhError(f"origin/{branch} does not exist -- nothing to review")
+    entry = _registered_worktree(repo_path, path, runner)
+    if entry and entry["branch"]:
+        raise GhError(f"{path} holds branch {entry['branch']}, not a detached review worktree "
+                      f"-- inspect it by hand")
+    if entry:
+        runner(["git", "-C", path, "checkout", "--detach", "--force", f"origin/{branch}"])
+    else:
+        runner(["git", "-C", repo_path, "worktree", "add", "--detach", path, f"origin/{branch}"])
+    head = runner(["git", "-C", path, "rev-parse", "HEAD"]).strip()
+    return {"path": path, "branch": branch, "head": head, "reused": entry is not None,
+            "scratch": ensure_scratch(path)}
+
+
+def cmd_release_review_worktree(number: int, repo_path: str = ".",
+                                runner: Runner = _default_runner,
+                                shell: Optional[Callable] = None, dry_run: bool = False) -> dict:
+    """Remove `issue-<n>`'s detached review worktree (releaseCommand first); idempotent.
+    Force-removal loses nothing: a review tree is read-only on the branch."""
+    path = review_worktree_path(number)
+    try:
+        entry = _registered_worktree(repo_path, path, runner)
+    except GhError as exc:
+        return {"released": False, "path": path, "reason": f"worktree lookup failed: {exc}"}
+    if entry is None:
+        return {"released": False, "path": path, "reason": "no review worktree"}
+    if entry["branch"]:
+        return {"released": False, "path": path,
+                "reason": f"holds branch {entry['branch']}, not a detached review worktree"}
+    if dry_run:
+        return {"released": False, "path": path, "would_release": True}
+    release = _run_release_command(path, shell)
+    try:
+        runner(["git", "-C", repo_path, "worktree", "remove", "--force", path])
     except GhError as exc:
         return {"released": False, "path": path, "reason": str(exc)}
     return {"released": True, "path": path, **({"release_command": release} if release else {})}
@@ -2538,6 +2748,7 @@ class BranchWorkspace:
         self.runner = runner
         self.path: Optional[str] = None
         self.ephemeral = False
+        self.created_ref = False
         self.retained: Optional[str] = None
 
     def __enter__(self) -> "BranchWorkspace":
@@ -2578,6 +2789,8 @@ class BranchWorkspace:
         else:
             r(["git", "-C", base, "worktree", "add", self.path, branch])
         self.ephemeral = True
+        # `-B` made a local ref that did not exist; drop it again with the tree.
+        self.created_ref = on_origin and not local
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -2596,6 +2809,13 @@ class BranchWorkspace:
             r(["git", "-C", base, "worktree", "remove", path])
         except GhError:
             self.retained = path
+            return False
+        if self.created_ref:
+            try:
+                # Pushed (checked above), so the ref holds nothing origin lacks.
+                r(["git", "-C", base, "branch", "-D", self.branch])
+            except GhError:
+                pass
         return False
 
 
@@ -4055,7 +4275,8 @@ def _complete_phase_task(gh: GitHub, repo_path: Optional[str], issue: int, stage
         f"carries the flow from here.\n\n"
         f"{markers}<!-- phase-task-complete: {stage} @ {_utc_now_marker()} -->")
     closed = cmd_close_issue(gh, issue, repo_path=repo_path, runner=runner)
-    return {**result, "phase_task_complete": True, "closed": True, "worktree": closed["worktree"]}
+    return {**result, "phase_task_complete": True, "closed": True, "worktree": closed["worktree"],
+            "cleanup": closed["cleanup"]}
 
 
 def _merged_design_pr(gh: GitHub, comments: list, pr: int) -> Optional[tuple]:
@@ -5095,7 +5316,7 @@ def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
                         base: str, files: list, extra: dict,
                         run_id: Optional[str] = None) -> dict:
     """Post-merge bookkeeping: close an epic-branch child `Closes #<n>` didn't, the
-    `Merged via` note, run-cap accounting and releasing the worktree."""
+    `Merged via` note, run-cap accounting and `cleanup_unit` (worktrees, branches)."""
     view = gh.issue_view(issue)
     issue_closed = view["state"] == "CLOSED"
     if not issue_closed and base != "main":
@@ -5109,12 +5330,13 @@ def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
         gh.issue_comment(issue, f"Merged via #{pr_number}.")
         realised = _close_realised_issues(gh, issue, view.get("body"), pr=pr_number)
     terminal = record_terminal_unit(gh, issue, run_id=run_id)
+    cleanup = cleanup_unit(gh, issue, "issue", repo_path, gh._run, base=base)
     return {"pr": pr_number, "issue": issue, "merged": True, "issue_closed": issue_closed,
             "config_changed": touches_pipeline_config(files),
             **extra,
             **({"run_terminal": terminal} if terminal else {}),
             **({"realised_closed": realised} if realised else {}),
-            "worktree": release_worktree(issue_branch(issue), base_repo=repo_path, runner=gh._run)}
+            "worktree": cleanup.pop("worktree"), "cleanup": cleanup}
 
 
 def _close_realised_issues(gh: GitHub, issue: int, body: Optional[str],
@@ -5184,28 +5406,140 @@ def cmd_mark_issue_closed(gh: GitHub, issue: int) -> dict:
             "marked_done": True}
 
 
-def _delete_merged_design_pr_branch(gh: GitHub, issue: int) -> Optional[dict]:
-    """Delete `origin/issue-<n>` once the unit's design PR is MERGED (merge-design-pr keeps
-    the branch until the Task closes); None when there is no design PR, never raises."""
+def _remote_head(repo_path: str, branch: str, runner: Runner) -> Optional[str]:
+    """`origin/<branch>`'s head, read live from origin (`ls-remote`); None when absent."""
+    out = _run_retry_transient(["git", "-C", repo_path, "ls-remote", "origin",
+                                f"refs/heads/{branch}"], runner).strip()
+    return out.split()[0] if out else None
+
+
+def _cleanup_remote_branch(gh: GitHub, repo_path: str, branch: str, runner: Runner,
+                           prs: Callable, safe_refs: Callable, dry_run: bool) -> dict:
+    """Delete `origin/<branch>` when its head is on a merged PR head or the base (all its
+    work landed); keep it while a PR is open or it carries unmerged commits."""
     try:
-        found = find_design_pr(gh.issue_view(issue).get("comments", []))
-        if not found:
-            return None
-        pr = found[1]
-        if gh.pr_view(pr, fields="state").get("state") != "MERGED":
-            return {"pr": pr, "deleted": False, "reason": "design PR is not merged"}
-        gh.delete_branch(issue_branch(issue))
-        return {"pr": pr, "deleted": True, "branch": issue_branch(issue)}
-    except GhError as e:
-        return {"deleted": False, "reason": str(e)}
+        head = _remote_head(repo_path, branch, runner)
+    except GhError as exc:
+        return {"deleted": False, "reason": f"could not read origin: {exc}"}
+    if head is None:
+        return {"deleted": False, "absent": True}
+    listed = prs()
+    if listed is None:
+        return {"deleted": False, "head": head, "reason": "could not list the branch's PRs -- kept"}
+    open_prs = [p["number"] for p in listed if p.get("state") == "OPEN"]
+    if open_prs:
+        return {"deleted": False, "head": head, "reason": f"PR #{open_prs[0]} is still open -- kept"}
+    if not _landed(repo_path, head, safe_refs(), runner):
+        return {"deleted": False, "head": head,
+                "reason": f"origin/{branch} carries commits no merged PR or base holds -- "
+                          f"unmerged work is kept"}
+    if dry_run:
+        return {"deleted": False, "head": head, "would_delete": True}
+    try:
+        gh.delete_branch(branch)
+    except GhError as exc:
+        try:
+            still = _remote_head(repo_path, branch, runner)
+        except GhError:
+            still = head
+        if still:
+            return {"deleted": False, "head": head, "reason": str(exc)}
+    return {"deleted": True, "head": head}
+
+
+def _cleanup_local_branch(repo_path: str, branch: str, runner: Runner, safe_refs: Callable,
+                          remote: dict, dry_run: bool) -> dict:
+    """Delete local `<branch>` only when its tip is on a merged PR head, the base, or a
+    kept `origin/<branch>`; otherwise `retained_local_branch` with the reason."""
+    try:
+        listed = runner(["git", "-C", repo_path, "branch", "--list", branch]).strip()
+    except GhError as exc:
+        return {"deleted": False, "reason": f"branch lookup failed: {exc}"}
+    if not listed:
+        return {"deleted": False, "absent": True}
+    kept = {"deleted": False, "retained_local_branch": True}
+    if listed.startswith(("*", "+")):
+        return {**kept, "reason": "checked out in a worktree"}
+    refs = list(safe_refs())
+    if remote.get("head") and not remote.get("deleted"):
+        refs.append(remote["head"])
+    if not _landed(repo_path, f"refs/heads/{branch}", refs, runner):
+        return {**kept, "reason": f"local {branch} has commits on no merged PR head, base or "
+                                  f"origin/{branch} -- unmerged work is kept"}
+    if dry_run:
+        return {"deleted": False, "would_delete": True}
+    try:
+        runner(["git", "-C", repo_path, "branch", "-D", branch])
+    except GhError as exc:
+        return {**kept, "reason": str(exc)}
+    return {"deleted": True}
+
+
+def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = ".",
+                 runner: Optional[Runner] = None, base: Optional[str] = None,
+                 dry_run: bool = False, shell: Optional[Callable] = None) -> dict:
+    """Idempotent cleanup of a terminal unit, in the order that never strands work: its
+    review worktree, its worktree (releaseCommand first), `origin/<branch>`, then the local
+    ref, then `git worktree prune`. Never raises; each part reports what it did or why not
+    (`review_worktree`, `worktree`, `remote_branch`, `local_branch`, `worktree_pruned`).
+    `base` defaults to the unit's integration base, resolved only when needed."""
+    runner = runner or gh._run
+    repo_path = repo_path or "."
+    branch = unit_branch(unit, number)
+    cache: dict = {}
+
+    def prs():
+        if "prs" not in cache:
+            try:
+                cache["prs"] = gh.pr_heads_for_branch(branch)
+            except GhError:
+                cache["prs"] = None
+        return cache["prs"]
+
+    def safe_refs() -> list:
+        if "base" not in cache:
+            try:
+                cache["base"] = base or integration_base(gh, number, unit)
+            except GhError:
+                cache["base"] = None
+        heads = [p["headRefOid"] for p in (prs() or [])
+                 if p.get("state") == "MERGED" and p.get("headRefOid")]
+        return heads + [f"refs/remotes/origin/{b}" for b in dict.fromkeys([cache["base"], "main"])
+                        if b]
+
+    out: dict = {"branch": branch}
+    if unit == "issue":
+        out["review_worktree"] = cmd_release_review_worktree(number, repo_path, runner, shell,
+                                                             dry_run)
+    if dry_run:
+        try:
+            held = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
+        except GhError:
+            held = None
+        out["worktree"] = ({"released": False, "path": held, "would_release": True} if held
+                           else {"released": False, "reason": "no worktree"})
+    else:
+        out["worktree"] = release_worktree(branch, runner=runner, base_repo=repo_path,
+                                           shell=shell, safe_refs=safe_refs)
+    out["remote_branch"] = _cleanup_remote_branch(gh, repo_path, branch, runner, prs,
+                                                  safe_refs, dry_run)
+    out["local_branch"] = _cleanup_local_branch(repo_path, branch, runner, safe_refs,
+                                                out["remote_branch"], dry_run)
+    if not dry_run:
+        try:
+            runner(["git", "-C", repo_path, "worktree", "prune"])
+            out["worktree_pruned"] = True
+        except GhError:
+            out["worktree_pruned"] = False
+    return out
 
 
 def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
                     runner: Runner = _default_runner, not_planned: bool = False,
                     reason: Optional[str] = None) -> dict:
     """Close `issue` (`not_planned`: state reason NOT_PLANNED, with `reason` commented first),
-    apply the terminal fields, release its worktree, delete a merged design PR's branch
-    (`design_pr_branch`, non-fatal) and close the issues it `Realises:` -- for a unit that
+    apply the terminal fields, run `cleanup_unit` (worktrees; branches whose work landed --
+    an unmerged branch is kept) and close the issues it `Realises:` -- for a unit that
     never merges through `merge-pr`. Counts toward the run cap."""
     if reason and not not_planned:
         raise GhError("--reason only goes with --not-planned")
@@ -5213,16 +5547,150 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
     if not_planned:
         gh.issue_comment(issue, f"🚫 Closed as not planned — {reason or 'dropped by the operator'}.")
     gh.issue_close(issue, "not planned" if not_planned else "completed")
-    cmd_mark_issue_closed(gh, issue)
+    marked = cmd_mark_issue_closed(gh, issue)
     realised = None if not_planned else _close_realised_issues(gh, issue, body)
-    released = _release_unit_worktree(issue, base_repo=repo_path or ".", runner=runner)
-    design_branch = _delete_merged_design_pr_branch(gh, issue)
+    cleanup = cleanup_unit(gh, issue, "epic" if marked.get("is_epic") else "issue",
+                           repo_path or ".", runner)
+    released = cleanup.pop("worktree")
+    if released.get("released") or released.get("reason") != "no worktree":
+        released = {**released, "branch": cleanup["branch"]}
     terminal = record_terminal_unit(gh, issue)
-    return {"issue": issue, "closed": True, "worktree": released,
+    return {"issue": issue, "closed": True, "worktree": released, "cleanup": cleanup,
             **({"state_reason": "not_planned"} if not_planned else {}),
-            **({"design_pr_branch": design_branch} if design_branch else {}),
             **({"run_terminal": terminal} if terminal else {}),
             **({"realised_closed": realised} if realised else {})}
+
+
+_UNIT_BRANCH_RE = re.compile(rf"^(?:(?P<issue>{re.escape(ISSUE_BRANCH_PREFIX)})|"
+                             rf"(?P<epic>{re.escape(EPIC_BRANCH_PREFIX)}))(?P<n>\d+)$")
+
+
+def _unit_of_branch(branch: Optional[str]) -> Optional[tuple]:
+    """`("issue"|"epic", n)` for a pipeline branch name, else None."""
+    m = _UNIT_BRANCH_RE.match(branch or "")
+    if not m:
+        return None
+    return ("epic" if m.group("epic") else "issue", int(m.group("n")))
+
+
+def present_units(repo_path: str, runner: Runner = _default_runner) -> set:
+    """`(unit, n)` of every pipeline unit with a local ref, an `origin` branch, or a
+    worktree (detached review trees under `worktrees.root` included); other branches are
+    never listed. `cleanup_unit` never releases the main checkout or a branch it holds."""
+    units = set()
+    local = runner(["git", "-C", repo_path, "for-each-ref", "--format=%(refname:short)",
+                    "refs/heads/"])
+    remote = _run_retry_transient(["git", "-C", repo_path, "ls-remote", "--heads", "origin"],
+                                  runner)
+    names = local.split() + [line.split("refs/heads/", 1)[1] for line in remote.splitlines()
+                             if "refs/heads/" in line]
+    units.update(u for u in map(_unit_of_branch, names) if u)
+    w = PIPELINE["worktrees"]
+    review_re = re.compile(rf"^{re.escape(w['reviewPrefix'])}(\d+)$")
+    root = os.path.realpath(w["root"])
+    for i, entry in enumerate(worktree_entries(repo_path, runner)):
+        if i == 0:
+            continue  # the main checkout
+        unit = _unit_of_branch(entry["branch"])
+        if unit:
+            units.add(unit)
+        elif entry["branch"] is None and os.path.dirname(os.path.realpath(entry["path"])) == root:
+            m = review_re.match(os.path.basename(entry["path"]))
+            if m:
+                units.add(("issue", int(m.group(1))))
+    return units
+
+
+def sweep_units(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] = None,
+                only: Optional[set] = None, issues: Optional[list] = None,
+                dry_run: bool = False) -> dict:
+    """`cleanup_unit` for every present pipeline unit whose issue is CLOSED (`only`: just
+    these numbers). Open and unknown issues are listed, never touched."""
+    runner = runner or gh._run
+    repo_path = repo_path or "."
+    try:
+        present = present_units(repo_path, runner)
+    except GhError as exc:
+        return {"units": [], "error": f"could not list branches/worktrees: {exc}"}
+    by_number = {i["number"]: i for i in (issues if issues is not None else gh.issue_list())}
+    units, skipped_open, unknown = [], [], []
+    for unit, n in sorted(present, key=lambda u: (u[1], u[0])):
+        if only is not None and n not in only:
+            continue
+        issue = by_number.get(n)
+        if issue is None:
+            unknown.append(unit_branch(unit, n))
+            continue
+        if issue["state"] != "CLOSED":
+            skipped_open.append(n)
+            continue
+        base = "main" if unit == "epic" else integration_base_in(by_number, n)
+        units.append({"issue": n, "unit": unit,
+                      **cleanup_unit(gh, n, unit, repo_path, runner, base=base, dry_run=dry_run)})
+    return {"units": units, "skipped_open": skipped_open, "unknown": unknown}
+
+
+def _stale_run_states(closed: set, dry_run: bool) -> list:
+    """Delete run-state files of CLOSED epics/initiatives once no longer fresh (older than
+    `guard.mainThreadFreshnessHours`) and no fresh file shares their run id -- no live run
+    still sums them into its cap, and the hooks ignore them by then."""
+    try:
+        hours = float((CONFIG.get("guard") or {}).get("mainThreadFreshnessHours", 8))
+    except (TypeError, ValueError):
+        hours = 8.0
+    run_dir, now = _run_state_dir(), time.time()
+    try:
+        names = sorted(os.listdir(run_dir))
+    except OSError:
+        return []
+    files = {}
+    for name in names:
+        path = os.path.join(run_dir, name)
+        try:
+            with open(path) as f:
+                state = json.load(f)
+            files[name] = (path, os.path.getmtime(path), state if isinstance(state, dict) else {})
+        except (OSError, ValueError):
+            continue
+    fresh_ids = {st.get("run_id") for _, mtime, st in files.values() if now - mtime <= hours * 3600}
+    removed = []
+    for name, (path, mtime, state) in files.items():
+        m = re.fullmatch(r"epic-(\d+)\.json", name)
+        if (not m or int(m.group(1)) not in closed or now - mtime <= hours * 3600
+                or state.get("run_id") in fresh_ids):
+            continue
+        if not dry_run:
+            try:
+                os.remove(path)
+            except OSError:
+                continue
+        removed.append(path)
+    return removed
+
+
+def cmd_prune_stale(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] = None,
+                    dry_run: bool = False) -> dict:
+    """Sweep what finished units left behind: `cleanup_unit` for every closed issue's
+    branches and worktrees (review trees included), stale run-state files of closed epics,
+    then `git worktree prune` and `git fetch --prune origin`. `dry_run` reports only."""
+    runner = runner or gh._run
+    repo_path = repo_path or "."
+    issues = gh.issue_list()
+    swept = sweep_units(gh, repo_path, runner, issues=issues, dry_run=dry_run)
+    closed = {i["number"] for i in issues if i["state"] == "CLOSED"}
+    result = {"dry_run": dry_run, **swept,
+              ("would_remove_run_states" if dry_run else "run_states_removed"):
+                  _stale_run_states(closed, dry_run)}
+    if not dry_run:
+        for key, argv in (("worktree_pruned", ["git", "-C", repo_path, "worktree", "prune"]),
+                          ("fetch_pruned", ["git", "-C", repo_path, "fetch", "--prune", "origin"])):
+            try:
+                _run_retry_transient(argv, runner)
+                result[key] = True
+            except GhError as exc:
+                result[key] = False
+                result[f"{key}_error"] = str(exc)
+    return result
 
 
 def cmd_comment(gh: WorkItemProvider, issue: int, body: Optional[str] = None,
@@ -6393,6 +6861,22 @@ def main(argv: Optional[list] = None) -> int:
                     help="Override the auto-detected integration base (e.g. origin/main)")
     p.set_defaults(func=lambda a: cmd_worktree_add(
         get_work_item_provider(), a.number, a.unit, a.repo_path, base=a.base))
+    p = sub.add_parser("review-worktree-add",
+                        help="Create/refresh issue-<n>'s detached pr-review worktree at origin/issue-<n>")
+    p.add_argument("number", type=int)
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.set_defaults(func=lambda a: cmd_review_worktree_add(a.number, a.repo_path))
+    p = sub.add_parser("release-review-worktree",
+                        help="Remove issue-<n>'s detached pr-review worktree (idempotent)")
+    p.add_argument("number", type=int)
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.set_defaults(func=lambda a: cmd_release_review_worktree(a.number, a.repo_path))
+    p = sub.add_parser("prune-stale",
+                        help="Remove closed units' worktrees and merged branches; prune git state")
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.add_argument("--dry-run", action="store_true", help="Report what would be removed")
+    p.set_defaults(func=lambda a: cmd_prune_stale(get_work_item_provider(), a.repo_path,
+                                                  dry_run=a.dry_run))
 
     p = sub.add_parser("sync-branch")
     p.add_argument("issue", type=int)

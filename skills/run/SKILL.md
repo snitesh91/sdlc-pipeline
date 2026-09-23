@@ -229,22 +229,24 @@ an override only.
 | `next-action <epic\|initiative> --run-id <id> [--repo-path <p>] [--skip-epic <n> ...]` | The one unit to work (Step 1); on an Initiative, the Epic to descend into ("The Initiative loop"). `--repo-path` (default `.`) is where it reads the dev lane's slot holders |
 | `list-parallel-ready <epic> --repo-path <p> --run-id <id>` / `list-design-ready <epic> --repo-path <p>` / `list-ready-for-review <epic>` | Dev-lane / standing-epic design-lane / review pools |
 | `lld-section --epic <n> --task <m> --repo-path <p>` | Only Task #`<m>`'s subsection of `epic-<n>/lld.md` |
-| `worktree-add <n> [--unit epic] [--base <ref>]` | The only way to make a worktree: resumes from `origin/<branch>` (fast-forwards; refuses a diverged branch), else branches off the integration base (recreates a stale local branch with no unique commits; refuses one with) |
+| `worktree-add <n> [--unit epic] [--base <ref>]` | The only way to make a worktree: resumes from `origin/<branch>` (fast-forwards; refuses a diverged branch), else branches off the integration base (recreates a stale local branch with no unique commits; refuses one with); makes the tree's `.sdlc-scratch/` |
+| `review-worktree-add <n> --repo-path <p>` / `release-review-worktree <n>` | `pr-review`'s detached worktree at `origin/issue-<n>` / its removal (idempotent; `merge-pr` also runs it) |
+| `prune-stale --repo-path <p> [--dry-run]` | Closed units' worktrees (review ones included), landed branches on origin and locally, stale run-state files; then `worktree prune` + `fetch --prune`. Never touches open units, other branches or unmerged work |
 | `claim <n> --role <r>` / `start-comment <n> --role <r>` / `sync-branch <n> [--unit epic] [--base <ref>]` / `verify-exit <n> --expect-stage <s> [--pr <pr>]` | The steps inside `start-stage` / `transition` |
 | `route <n> --to product\|architecture\|development\|merge --reason "<one line>"` | Skip a standing child ahead ("Routing a standing child"); refuses (exit 0) anything but a forward move on a standing child |
 | `set-stage <n> --stage <s>` / `add-blocked-by <n> --on <dep>` / `create-issue --parent <n> --type <T> [--blocked-by <dep> ...]` / `repair-issue <n> [--parent <p>] [--type <T>]` | Stage a unit / order units (Epics: wave order, "Cutting Epics") / the only issue-creation path / fill an existing issue's missing fields |
 | `open-design-pr <n>` / `merge-design-pr <pr> --issue <n> [--repo-path <p>]` | A phase-Task's design PR `issue-<n>` → `epic-<e>`: `transition` opens it (idempotent); `merge-design-pr` squash-merges it once the review is recorded clean (never closes the Task, keeps its branch; refuses `behind_base`, missing/`rework` evidence, a review of a head whose doc has since changed (`review_stale`), and an `arch-review` below the skip bar). `skip-gate`/`waive-gate`/`finish-lld` call it |
-| `create-lld-tasks <epic> --repo-path <p>` / `merge-lld-doc <epic-n>` / `close-issue <n> [--repo-path <p>] [--not-planned --reason TEXT]` | The steps inside `finish-lld`; `close-issue` is the orchestrator's close (terminal fields, worktree release, a merged design PR's branch deleted); `--not-planned` drops a unit with its reason on the thread (`references/operations.md`, "Dropping a unit") |
+| `create-lld-tasks <epic> --repo-path <p>` / `merge-lld-doc <epic-n>` / `close-issue <n> [--repo-path <p>] [--not-planned --reason TEXT]` | The steps inside `finish-lld`; `close-issue` is the orchestrator's close (terminal fields, then `cleanup`: worktrees released, a branch whose work landed deleted on origin and locally, unmerged work kept); `--not-planned` drops a unit with its reason on the thread (`references/operations.md`, "Dropping a unit") |
 | `detach-epic <epic> [--reason TEXT]` / `comment <n> --body TEXT\|--body-file <f>` | Take an Epic out of its Initiative (sub-issue link + sibling `blockedBy` edges, commented on both) / a plain audit-trail comment, no marker (`references/operations.md`, "Dropping a unit") |
 | `open-gate` / `check-gate` / `pass-gate` / `skip-gate` / `waive-gate` | Gates (`references/gates.md`); on a phase-Task pass/skip/waive close it (after merging its design PR) instead of claiming a next stage |
 | `merge-gate <pr> --issue <n> --stage product\|architecture --operator-confirmed` | Merge an open gate PR (Gate A, or a human-gated design PR) — **only when the operator explicitly told you to merge it** (`references/gates.md`, "Merging a gate PR for the operator"). Refuses without the flag, on `behind_base`, or without green checks; `pass-gate` finishes it |
 | `open-dev-pr [--allow-empty]` / `handoff-to-pr-review` / `record-pr-review` / `record-local-ci` / `record-design-review <n> --role <r> --outcome clean\|rework` (also comments on the design PR) / `post-comment <n> --role <r> --body-file <f>` | Stage-agent exit actions (their agent files own them); `--allow-empty` lets a verify-only Task (no code change) open its PR on an empty commit — tell `development` to pass it when the Task's design says verify-only; `post-comment` is `product`/`architecture`/`lld`'s handoff comment |
-| `pr-checks <pr>` / `merge-pr <pr> --issue <n> [--run-id <id>]` | CI status / the only merge gate (pass the run's id so the terminal count books under it; refuses behind-base; reports `config_changed`; on an already-merged PR only finishes the bookkeeping, `recovered: true`) |
+| `pr-checks <pr>` / `merge-pr <pr> --issue <n> [--run-id <id>]` | CI status / the only merge gate (pass the run's id so the terminal count books under it; refuses behind-base; reports `config_changed`; on an already-merged PR only finishes the bookkeeping, `recovered: true`; `cleanup` as `close-issue`'s) |
 | `mark-blocked` / `mark-needs-human` / `pause-for-epic-regate <n> --epic <e> --gate-pr <pr> [--found-by <stage>]` | Park a unit (first two release its worktree) |
 | `pairing-counts <n>` / `show-config` | Valve strike counts + thresholds / effective tunables and the running `plugin` version (read once per invocation) |
 | `list-needs-human` / `check-epics-closeable` / `audit-issues [--epic <n>\|--initiative <n>]` | End-of-invocation sweeps; `audit-issues` also flags open Epics with no phase-Tasks, with the `cut-phase-tasks` repair |
 | `resolve-thread --thread-id <id> [--reply TEXT]` | Reply to and resolve a gate PR review thread; the gate-feedback agent runs it for the threads it addressed (`references/gates.md`) |
-| `close-epic <n> [--no-carry-forward]` / `record-epic-verification <n> --kind e2e\|exploratory [--sha S]` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
+| `close-epic <n> [--no-carry-forward]` / `record-epic-verification <n> --kind e2e\|exploratory [--sha S]` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"; its merge tears the stack down itself); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
 | `check-initiative-closeable <n>` / `record-initiative-verification <n> --outcome met\|unmet --summary` / `close-initiative <n>` | "Closing an Initiative" |
 | `mark-feedback-addressed <n>` | Yours, after a gate-feedback agent finished and `transition` verified its push (`references/gates.md`, "Addressing gate feedback"); never the agent's |
 | `auto-pass-gate` / `mark-feedback-received` | CI-triggered paths only — never run them yourself (the shipped workflow runs `auto-pass-gate`; `mark-feedback-received` only if the driven repo wires a comment trigger) |
@@ -309,7 +311,8 @@ in sequence, and rework is one development thread per issue.
 
 Generate **one run id per invocation** (any unique string, e.g. `date +%s`-`$$`) before
 the first call, and pass it to every `next-action` and `list-parallel-ready` call this
-run.
+run. At invocation start, run `python3 "$SDLC" prune-stale --repo-path <p>` (closed units'
+worktrees and landed branches; `--dry-run` to preview).
 
 ```bash
 python3 "$SDLC" next-action <epic> --run-id "$RUN_ID"
@@ -349,12 +352,12 @@ Every result except `skip`/`none`/`stop-at-cap` carries `unit`: `"issue"`, or `"
 - **Before ending on `none`:** `list-needs-human` (skim each reason; clear a stale one
   with a comment), `check-epics-closeable` (idempotent) and `audit-issues --epic <n>` (`--initiative <n>` on an Initiative)
   (run each flagged issue's `repair` command, filling any `<P>`/`<T>`; never re-create
-  it). All feed Step 4.
+  it), then `prune-stale --repo-path <p>`. All feed Step 4.
 - **When `check-epics-closeable` names an epic and `pipeline.epicClose.auto` is on**,
   close it yourself: `close-epic` (reconciles) → run the exploratory pass →
   record it only if it ran clean → clean the epic worktree (the pass leaves it dirty) →
-  `close-epic` again (merges) →
-  `teardown-epic-stack <n>`. Escalate instead on the cases in "What you decide". Full
+  `close-epic` again (merges; it also cleans up the epic's branches, worktrees and stack).
+  Escalate instead on the cases in "What you decide". Full
   mechanics: `references/epics.md`, "Epic closing". With the toggle off, just report it.
 
 ### Closing an Initiative
@@ -450,8 +453,8 @@ The agent must *have* (not necessarily be pasted):
    **For `pr-review`**
    the worktree is its own detached one, never the unit's development worktree (its
    mutation probe must not touch the tree a resumed `development` continues in): make it
-   with `git -C <repo-root> fetch origin && git -C <repo-root> worktree add --detach
-   <worktrees.root>/<reviewPrefix><n> origin/issue-<n>` and remove it when the review ends
+   with `python3 "$SDLC" review-worktree-add <n> --repo-path <p>` (its `path`) and remove
+   it when the review ends with `python3 "$SDLC" release-review-worktree <n>`
    (`references/parallelism.md`, "Parallel PR review").
 5. For any review computing a diff: `git fetch origin` first and diff against `origin/`
    refs, never a local branch.

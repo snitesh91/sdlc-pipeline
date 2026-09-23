@@ -111,10 +111,17 @@ Every path that releases a unit's worktree (`close-issue`, `merge-pr`, `mark-blo
 the tree when the config sets one (a shell string; e.g. `make it-down` where the driven
 repo keeps a per-worktree test env), then `git worktree remove`. It runs only on a tree
 that is about to be removed — never on one refused for uncommitted or unpushed work — and
-a failure is reported (`release_command.ok: false`), never fatal. Closing a phase-Task
-also deletes its merged design PR's `origin/issue-<n>` (`design_pr_branch`; an unmerged
-one keeps its branch). A tree released without the hook (a refusal, a crash) leaves that
-env for you to tear down by hand.
+a failure is reported (`release_command.ok: false`), never fatal. A tree released without
+the hook (a refusal, a crash) leaves that env for you to tear down by hand.
+
+Once a unit is terminal, `merge-pr` and `close-issue` (so every phase-Task close) also run
+the unit's cleanup (`cleanup`), in this order: its review worktree, its worktree, then
+`origin/<branch>` — deleted only when its head is on a merged PR head or the base (kept,
+with the reason, while a PR is open or it carries unmerged commits, e.g. a `--not-planned`
+unit's) — then the local ref, deleted only when its tip is on a merged PR head, the base
+or the kept origin branch (`retained_local_branch` otherwise), then `git worktree prune`.
+`close-epic` does the same for the epic and its children; `prune-stale` sweeps every
+closed unit.
 
 ## Assignee convention
 
