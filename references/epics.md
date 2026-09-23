@@ -120,6 +120,15 @@ Stage options: `Product` / `Architecture` / `Development` / `Testing` / `PR Revi
   epic and every child. Applied by hand; an epic that needs any behaviour gets the standing label or the
   default profile instead.
 
+### The 100-sub-issue cap
+
+GitHub caps a parent at 100 sub-issues, **closed ones included**. At the cap `create-issue`
+still creates the issue and sets its fields but returns `ok: false`, `linked: false`,
+`reason_code: sub_issue_cap` (`repair-issue --parent` reports the same). An unlinked issue is
+outside every epic's subtree, so `next-action` never drives it. Free slots by unlinking
+closed sub-issues, or rotate a standing epic before it fills (e.g. `RTB-2`), then
+`repair-issue <n> --parent <p>`.
+
 ## Doc layout at the epic level
 
 - Paths: `docs/sdlc/epic-<n>/architecture.md` and `.../lld.md` — the one path, authored
@@ -146,7 +155,9 @@ Stage options: `Product` / `Architecture` / `Development` / `Testing` / `PR Revi
   `skipped_sections` — put such prose under a non-`Task` heading.
 - **`Depends on: <KEY>`** lines (comma- or `and`-separated) only for genuine ordering.
   `create-lld-tasks` creates each Task as a sibling of the LLD-phase Task, renumbers the
-  headings, and adds one `blockedBy` edge per dependency.
+  headings, and adds one `blockedBy` edge per dependency. A section naming a dependency
+  no key parses from is refused (`skipped_sections`, `dependency_parse_warnings`) and
+  `finish-lld` stops before the close: fix the line on `epic-<n>`, re-run `finish-lld`.
 - **`Realises: #<n>, #<m>`** — one line, only when the Task delivers issues that already
   exist (Epic children filed before the LLD, a bug it fixes). `create-lld-tasks` blocks
   each named issue on the new Task and records the relation in the Task's body;
@@ -311,7 +322,8 @@ never reaches `main`; merge its design PR). Remaining items: closing verificatio
 
 **Evidence carry-forward — what a later commit on `epic-<n>` does to recorded evidence:**
 
-- The exploratory record stays valid across a delta that touches only
+- The exploratory record stays valid across a delta (an `origin/main` reconcile's incoming
+  changes included) that touches only
   `pipeline.epicClose.evidenceCarryForward.paths` (default: `**/*.md`, `docs/**`,
   `<docRoot>/**`; the pipeline config never). Any other path, or a delta of 300+ files,
   stales it: re-run and re-record. Widen the set in config for fixture or evidence
@@ -340,9 +352,9 @@ still accepted (informational, never gates). Run every suite in `unattested_suit
 fresh `sdlc:development` agent and a run-only brief (fix nothing, report). **You** record the
 exploratory half with `record-epic-verification <n> --kind exploratory --summary "..."` (it
 stamps the tested epic-branch head; `--sha` names an earlier tested head; the summary is the
-findings comment the agent returned) — an agent never records it. Evidence older than the last
-`origin/main` reconcile, or predating a later change on `epic-<n>` outside the carry-forward
-set ("Evidence carry-forward" above), counts as missing. **Never record a verification you
+findings comment the agent returned) — an agent never records it. Evidence predating a later
+change on `epic-<n>` outside the carry-forward set ("Evidence carry-forward" above), a
+reconcile's included, counts as missing. **Never record a verification you
 did not run clean.**
 
 **With `epicClose.auto` on, escalate instead of closing when:**

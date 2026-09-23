@@ -1060,9 +1060,10 @@ EPIC_CLOSE_REQUIRED_EVIDENCE = (("exploratory", "exploratory pass"),)
 
 
 def missing_epic_verification(comments: list, stale_since: Optional[Callable] = None) -> list:
-    """Problems with an epic's exploratory closing evidence; evidence older than
-    the last `origin/main` reconcile counts as missing. `stale_since(sha)` returns a problem
-    when the epic branch moved on from the tested `sha` with code changes. Empty = complete."""
+    """Problems with an epic's exploratory closing evidence. `stale_since(sha)` returns a
+    problem when the epic branch moved on from the tested `sha` with code changes -- a `main`
+    reconcile included; without it (or a sha) evidence older than the last reconcile counts
+    as missing. Empty = complete."""
     problems = []
     reconciled = None
     for idx, c in enumerate(comments):
@@ -1076,7 +1077,9 @@ def missing_epic_verification(comments: list, stale_since: Optional[Callable] = 
     for kind, label in EPIC_CLOSE_REQUIRED_EVIDENCE:
         if kind not in seen:
             problems.append(f"no `{kind}` closing-verification evidence ({label} never recorded)")
-        elif reconciled is not None and seen[kind][0] < reconciled:
+        # The tested-sha delta spans the reconcile merge, so it alone judges a stamped record.
+        elif reconciled is not None and seen[kind][0] < reconciled and not (
+                stale_since is not None and seen[kind][1]):
             problems.append(f"the `{kind}` evidence predates the last `origin/main` reconcile of "
                             f"the epic branch -- it describes a different tree; re-run it")
         elif stale_since is not None:
@@ -1652,8 +1655,10 @@ def record_terminal_unit(gh: WorkItemProvider, issue: int,
             state["terminal"].append(issue)
         state.get("in_flight", {}).pop(str(issue), None)
         _write_run_state(parent, state)
+    # The cap is run-wide (`run_completed`), so the count reported against it is too.
     return {"epic": parent, "run_id": state.get("run_id"),
-            "terminal_count": len(state["terminal"]), "cap": MAX_TASKS_PER_RUN}
+            "terminal_count": len(run_completed(state)),
+            "epic_terminal_count": len(state["terminal"]), "cap": MAX_TASKS_PER_RUN}
 
 
 PHASE_TASK_TITLES = {"architecture": "Architecture phase", "lld": "LLD phase"}
@@ -3531,6 +3536,22 @@ def phase_gate_title(gh: WorkItemProvider, issue: int, title: str) -> str:
     return base if parent_title.lower() in base.lower() else f"{base} - {parent_title}"
 
 
+# Decoration `open-gate` adds itself; a caller that includes it would see it twice.
+_GATE_TITLE_PREFIX = re.compile(r"^\s*gate(?:\s+[ab])?\s*(?::|\s[\-\u2013\u2014])\s*",
+                                re.IGNORECASE)
+_GATE_TITLE_SUFFIX = r"\s*(?:[\-\u2013\u2014]\s*[\w.-]+\.md\s+for\s+review)?\s*(?:\(#{issue}\))?\s*$"
+
+
+def gate_pr_title(gh: WorkItemProvider, issue: int, title: Optional[str] = None) -> tuple:
+    """`(title, normalized)`: the gate PR's base title -- `title` stripped of a gate-shorthand
+    prefix and a `- <doc> for review (#n)` suffix, else the issue's own -- through
+    `phase_gate_title`; `normalized` says a caller-supplied title had to be stripped."""
+    raw = title if title and title.strip() else gh.issue_view(issue)["title"]
+    suffix = re.compile(_GATE_TITLE_SUFFIX.format(issue=issue), re.IGNORECASE)
+    base = suffix.sub("", _GATE_TITLE_PREFIX.sub("", raw)).strip() or raw.strip()
+    return phase_gate_title(gh, issue, base), bool(title) and base != title.strip()
+
+
 # The design stages a non-standing Epic's phase-Task authors, and the review that follows each.
 DESIGN_STAGE_REVIEW = {"architecture": "arch-review", "lld": "lld-review"}
 
@@ -4018,8 +4039,11 @@ def cmd_add_blocked_by(gh: GitHub, issue: int, dep: int) -> dict:
 
 
 def _task_line(name: str) -> re.Pattern:
-    """A `<name>: <value>` line in a Task section; bullet and bold markup tolerated."""
-    return re.compile(rf"^\s*(?:[-*]\s+)?(?:\*\*)?{name}(?:\*\*)?\s*:\s*(.+?)\s*$",
+    """A `<name>: <value>` field in a Task section: at line start (bullet, bold and backtick
+    wrappers tolerated) or after a ` / ` or ` | ` separating it from a sibling field."""
+    return re.compile(rf"(?:^[ \t]*(?:[-*][ \t]+)?|[ \t]+[/|][ \t]+)`?(?:\*\*)?`?{name}`?"
+                      rf"(?:\*\*)?`?[ \t]*:[ \t]*(?:\*\*)?[ \t]*"
+                      rf"(.+?)(?=`?(?:\*\*)?(?:[ \t]+[/|][ \t]|[ \t]*$))",
                       re.IGNORECASE | re.MULTILINE)
 
 
@@ -4071,10 +4095,30 @@ def parse_task_depends_on(section_text: str) -> list:
     keys = []
     for m in _DEPENDS_ON_LINE.finditer(section_text):
         for raw in re.split(r",|\band\b", m.group(1)):
-            key = raw.strip().strip("`").strip().rstrip(".")
-            if _TASK_KEY_RE.match(key) and key not in keys:
+            key = raw.strip("`*. \t")
+            if _TASK_KEY_RE.match(key) and key not in _NO_DEPENDENCY and key not in keys:
                 keys.append(key)
     return keys
+
+
+# Any `Depends on:` mention, however marked up -- to catch one the strict parser misses.
+_DEPENDS_ON_MENTION = re.compile(r"depends[ \t]+on[`* \t]{0,4}:[ \t]*(.*)$",
+                                 re.IGNORECASE | re.MULTILINE)
+_NO_DEPENDENCY = {"", "none", "n/a", "-", "\u2014", "nothing"}
+
+
+def task_dependency_defect(section_text: str) -> Optional[str]:
+    """Why a Task section's `Depends on:` cannot be trusted (None when it can): the section
+    names a dependency but no key parses, so the Task would be created with no edge."""
+    if parse_task_depends_on(section_text):
+        return None
+    for m in _DEPENDS_ON_MENTION.finditer(section_text):
+        if m.group(1).strip("`*. \t").lower() not in _NO_DEPENDENCY:
+            return (f"`{m.group(0).strip()}` names a dependency but no Task key parses from "
+                    f"it -- the Task would be created with no `blockedBy` edge and race its "
+                    f"dependency. Write the line plain (`Depends on: <key>`, no backtick "
+                    f"wrapper, slug keys), then re-run")
+    return None
 
 
 def _commit_doc_to_epic_branch(repo_path: Optional[str], epic: str, doc_path: str,
@@ -4142,13 +4186,18 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
     headings = parse_task_headings(doc)
     keyed = [h for h in headings if h["key"]]
     # A `## Task` heading over prose (a carving table, a summary) is never a Task issue.
-    defects = {h["key"]: task_section_defect(doc[h["line_end"]:h["end"]]) for h in keyed}
+    # So is one whose `Depends on:` doesn't parse: created, it would race its dependency.
+    dep_defects = {h["key"]: task_dependency_defect(doc[h["line_end"]:h["end"]])
+                   for h in keyed}
+    defects = {h["key"]: task_section_defect(doc[h["line_end"]:h["end"]])
+               or dep_defects[h["key"]] for h in keyed}
     pending = [h for h in keyed if defects[h["key"]] is None]
     result = {"epic": epic, "doc": doc_path, "created": [], "reused": [],
               "already_numbered": [h["number"] for h in headings if h["number"]],
               "skipped_sections": [
                   {"key": h["key"], "heading": doc[h["line_start"]:h["line_end"]].strip(),
                    "reason": defects[h["key"]]} for h in keyed if defects[h["key"]]],
+              "dependency_parse_warnings": [k for k, d in dep_defects.items() if d],
               "blocked_by": [], "blocked_by_failed": [], "realises": [], "realises_failed": []}
     if not pending:
         return {**result, "committed": None, "pushed": False, "tasks": {},
@@ -5058,8 +5107,7 @@ NON_ATTESTABLE_SUITES = frozenset(
 def _workflow_covers(spec: dict, path: str) -> bool:
     """Whether the workflow's `paths:` filter (prefixes/files minus excludeGlobs) matches.
     A leading `**/` also matches at the repo root, as in GHA."""
-    if any(fnmatch.fnmatch(path, g) or (g.startswith("**/") and fnmatch.fnmatch(path, g[3:]))
-           for g in spec["excludeGlobs"]):
+    if any(_glob_matches(path, g) for g in spec["excludeGlobs"]):
         return False
     return path.startswith(spec["prefixes"]) or path in spec["files"]
 
@@ -5116,7 +5164,7 @@ def base_delta_needs_reattest(base_delta_files: list) -> bool:
     if touches_pipeline_config(base_delta_files):
         return True
     for spec in REQUIRED_WORKFLOWS:
-        if any(p.startswith(spec["prefixes"]) or p in spec["files"] for p in base_delta_files):
+        if any(_workflow_covers(spec, p) for p in base_delta_files):
             return True
     return not all(_is_doc_path(p) for p in base_delta_files)
 
@@ -5869,10 +5917,14 @@ def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: lis
               **({"blocked_by": list(blocked_by)} if blocked_by else {})}
     # The issue now exists: report failures with its number rather than raising,
     # so the caller repairs it instead of retrying into a duplicate.
+    capped = None
     for i, (name, step) in enumerate(steps):
         try:
             step(number)
         except GhError as e:
+            if name == "add_sub_issue" and _SUB_ISSUE_CAP_RE.search(str(e)):
+                capped = str(e)  # retrying cannot link it; finish the fields unlinked
+                continue
             todo = ", ".join(n for n, _ in steps[i:])
             edges = "".join(f" add-blocked-by {number} --on {dep};" for dep in blocked_by or []
                             if f"add_blocked_by:{dep}" in [n for n, _ in steps[i:]])
@@ -5883,7 +5935,23 @@ def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: lis
                               f"`repair-issue {number} --parent {parent} --type {type_name}"
                               + "".join(f" --{k} {v}" for k, v in fields.items())
                               + "` and" + (f" then{edges}" if edges else "") + " continue."}
+    if capped:
+        return {**result, "ok": False, "complete": False, "linked": False,
+                "failed_step": "add_sub_issue", "reason_code": "sub_issue_cap",
+                "error": capped, "reason": sub_issue_cap_advice(number, parent)}
     return result
+
+
+# GitHub caps a parent at 100 sub-issues, closed ones included.
+_SUB_ISSUE_CAP_RE = re.compile(r"cannot have more than \d+ sub-issues", re.IGNORECASE)
+
+
+def sub_issue_cap_advice(number: int, parent: int) -> str:
+    return (f"#{number} exists with its fields set but is NOT linked under #{parent}: #{parent} "
+            f"is at GitHub's 100-sub-issue cap (closed children count). Do NOT re-run "
+            f"create-issue or repair-issue --parent {parent} -- both hit the same cap. Unlink "
+            f"closed sub-issues from #{parent}, or rotate to a new parent (references/epics.md, "
+            f"\"The 100-sub-issue cap\"), then `repair-issue {number} --parent <parent>`.")
 
 
 def cmd_list_needs_human(gh: GitHub) -> dict:
@@ -5956,9 +6024,21 @@ def cmd_repair_issue(gh: WorkItemProvider, number: int, parent: Optional[int] = 
             already.append(name)
         else:  # fill the missing field with its default, never overwriting
             steps.append((name, lambda setter=setter, value=value: setter(number, value)))
-    for _, step in steps:
-        step()
-    return {"issue": number, "set": [name for name, _ in steps], "already_set": already}
+    capped = None
+    for name, step in steps:
+        try:
+            step()
+        except GhError as e:
+            if name != "parent" or not _SUB_ISSUE_CAP_RE.search(str(e)):
+                raise
+            capped = str(e)
+    done = [name for name, _ in steps if not (capped and name == "parent")]
+    if capped:
+        return {"issue": number, "ok": False, "linked": False, "failed_step": "parent",
+                "reason_code": "sub_issue_cap", "error": capped,
+                "reason": sub_issue_cap_advice(number, parent), "set": done,
+                "already_set": already}
+    return {"issue": number, "set": done, "already_set": already}
 
 
 def cmd_audit_issues(gh: WorkItemProvider, epic: Optional[int] = None) -> dict:
@@ -6512,7 +6592,8 @@ def cmd_finish_lld(gh: GitHub, lld_task: int, epic: int, repo_path: str = ".",
     # Nothing to create (`tasks == {}`) is a completed earlier run, not a failure.
     seq.run("create-lld-tasks", lambda: cmd_create_lld_tasks(gh, epic, repo_path,
                                                              runner=runner),
-            failed=lambda r: not r.get("pushed") and r.get("tasks") != {})
+            failed=lambda r: (not r.get("pushed") and r.get("tasks") != {})
+            or bool(r.get("dependency_parse_warnings")))
     seq.run("merge-lld-doc", lambda: cmd_merge_lld_doc(gh, repo_path, epic, runner=runner),
             failed=lambda r: not r.get("verified_on_origin"))
     closed = seq.run("close-issue", lambda: cmd_close_issue(gh, lld_task, repo_path=repo_path,
@@ -6613,8 +6694,9 @@ def comment_cap_refusal(args) -> Optional[dict]:
 
 def _open_gate_cli(a) -> dict:
     gh = get_work_item_provider()
-    return cmd_open_gate(gh, a.repo_path, a.issue, phase_gate_title(gh, a.issue, a.title),
-                         a.doc, a.next_stage, a.summary)
+    title, normalized = gate_pr_title(gh, a.issue, a.title)
+    result = cmd_open_gate(gh, a.repo_path, a.issue, title, a.doc, a.next_stage, a.summary)
+    return {**result, "title": title, "title_normalized": normalized}
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -6747,7 +6829,8 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
                     help=repo_path_help)
-    p.add_argument("--title", required=True)
+    p.add_argument("--title", default=None,
+                    help="Defaults to the issue's title; the PR title is derived from it")
     p.add_argument("--doc", required=True, choices=["product.md", "architecture.md"])
     p.add_argument("--next-stage", required=True)
     p.add_argument("--summary", required=True)

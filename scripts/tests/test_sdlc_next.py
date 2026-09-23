@@ -6039,10 +6039,13 @@ def test_base_delta_docs_only_still_carries_forward_without_workflows(monkeypatc
     assert sdlc_next.base_delta_needs_reattest([]) is False
 
 
-def test_base_delta_suite_tree_forces_reattest_even_when_every_file_is_markdown():
-    """A `.md` inside a configured suite's tree still forces re-attest."""
-    from sdlc_next import base_delta_needs_reattest
-    assert base_delta_needs_reattest(["backend/README.md"]) is True
+def test_base_delta_suite_tree_forces_reattest_even_when_every_file_is_markdown(monkeypatch):
+    """A `.md` inside a suite's tree still forces re-attest unless the workflow excludes it."""
+    import sdlc_next
+    spec = {"workflow": "Backend CI", "suite": "backend", "prefixes": ("backend/",),
+            "files": (), "excludeGlobs": (), "bases": (), "attestable": True}
+    monkeypatch.setattr(sdlc_next, "REQUIRED_WORKFLOWS", (spec,))
+    assert sdlc_next.base_delta_needs_reattest(["backend/README.md"]) is True
 
 
 # --- both Task heading forms (numbered and keyed) ---
