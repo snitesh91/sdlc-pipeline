@@ -230,10 +230,13 @@ def test_the_cli_flag_turns_carry_forward_off(monkeypatch, capsys):
     monkeypatch.setattr(s, "get_work_item_provider", lambda: "GH")
     seen = {}
     monkeypatch.setattr(s, "cmd_close_epic",
-                        lambda gh, epic, repo_path=".", carry_forward=True:
-                        seen.update(carry_forward=carry_forward) or {"ok": True})
+                        lambda gh, epic, repo_path=".", carry_forward=True, clean_worktree=False:
+                        seen.update(carry_forward=carry_forward, clean=clean_worktree)
+                        or {"ok": True})
     assert s.main(["close-epic", "9", "--no-carry-forward"]) == 0
-    assert seen == {"carry_forward": False}
+    assert seen == {"carry_forward": False, "clean": False}
+    assert s.main(["close-epic", "9", "--clean-worktree"]) == 0
+    assert seen == {"carry_forward": True, "clean": True}
 
 
 def test_an_epic_pr_attestation_carries_forward_over_files_the_suite_does_not_cover():

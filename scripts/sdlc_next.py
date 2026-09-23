@@ -1312,12 +1312,38 @@ def _close_epic_exploratory_problems(gh, epic: int, branch: str, carry_forward: 
                                      _EpicEvidenceDelta(gh, branch, carry_forward))
 
 
+def clean_epic_worktree(epic: int, repo_path: str = ".",
+                        runner: Runner = _default_runner) -> dict:
+    """Discard the closing run's untracked output (evidence JSONs, `uploads/`, ...) from the
+    epic's live worktree: `git clean -fd` -- untracked, non-ignored files only (ignored ones
+    leave with the tree at cleanup). Refuses (`refused`, `tracked_changes`) and touches
+    nothing when any tracked file is modified, staged or deleted: that is not run output."""
+    path = worktree_path_for_branch(epic_branch(epic), runner=runner, base_repo=repo_path)
+    if path is None:
+        return {"cleaned": False, "reason": "no epic worktree"}
+    lines = [l for l in runner(["git", "-C", path, "status", "--porcelain"]).splitlines() if l]
+    tracked = [l[3:] for l in lines if not l.startswith("??")]
+    if tracked:
+        return {"cleaned": False, "refused": True, "path": path, "tracked_changes": tracked,
+                "reason": f"the epic worktree {path} has {len(tracked)} tracked change(s) -- "
+                          f"not closing-run output; inspect them (never commit to epic-{epic} "
+                          f"by hand), then re-run"}
+    if not lines:
+        return {"cleaned": False, "path": path, "removed": [], "reason": "already clean"}
+    out = runner(["git", "-C", path, "clean", "-fd"])
+    removed = [l[len("Removing "):] for l in out.splitlines() if l.startswith("Removing ")]
+    return {"cleaned": True, "path": path, "removed": removed}
+
+
 def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
-                    runner: Runner = _default_runner, carry_forward: bool = True) -> dict:
+                    runner: Runner = _default_runner, carry_forward: bool = True,
+                    clean_worktree: bool = False) -> dict:
     """Reconcile the epic branch with `main` (first call, then stop), or merge it once
     closing evidence is recorded (second call). Returns `merged`; refusals carry `reason`.
     Two calls because verification must run between the two merges. `carry_forward=False`
-    accepts only evidence stamped at the epic head itself."""
+    accepts only evidence stamped at the epic head itself. `clean_worktree` runs
+    `clean_epic_worktree` right before a reconcile or the merge -- never on a refusal --
+    and refuses the call when the tree holds tracked changes (`worktree_clean`)."""
     detail = gh.issue_view(epic)
     if not resolve_profile(detail)["closes"]:
         return {"epic": epic, "merged": False,
@@ -1331,8 +1357,23 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         return {"epic": epic, "merged": False, "open_children": open_children,
                 "reason": f"{len(open_children)} child issue(s) still open: "
                           f"{', '.join(f'#{n}' for n in open_children)}"}
+    cleaned: dict = {}
+
+    def clean_refusal() -> Optional[dict]:
+        """Run the opt-in clean; the refusal to return when it found tracked changes."""
+        if not clean_worktree:
+            return None
+        cleaned.update(worktree_clean=clean_epic_worktree(epic, repo_path, runner))
+        if cleaned["worktree_clean"].get("refused"):
+            return {"epic": epic, "merged": False, "branch": branch, **cleaned,
+                    "reason": cleaned["worktree_clean"]["reason"]}
+        return None
+
     behind = gh.branch_behind_by(branch, base="main")
     if behind:
+        refused = clean_refusal()
+        if refused:
+            return refused
         # The epic branch rarely has a live worktree by close time; reconcile in
         # an ephemeral one under the branch lock, never in the main checkout.
         with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
@@ -1350,6 +1391,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         evidence.pop("_missing_workflows")
         return _with_workspace(
             {"epic": epic, "merged": False, "branch": branch, "reconciled": behind, **evidence,
+             **cleaned,
              "reason": f"picked up {behind} commit(s) from main -- run the exploratory pass "
                        f"against the reconciled branch, then re-run close-epic"},
             ws)
@@ -1378,6 +1420,10 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                 "reason": f"PR #{pr_number} required suites unsatisfied at the epic head "
                           f"(no passing check, attestation or child chain from: "
                           f"{', '.join(missing_workflows)})"}
+    # Cleaned only now the merge will happen, so a refused call keeps the run's output.
+    refused = clean_refusal()
+    if refused:
+        return {**refused, "pr": pr_number, **evidence}
     gh.pr_ready(pr_number)
     gh.pr_merge(pr_number)
     # The PR's `Closes #<n>` closes the epic; its terminal fields are set here.
@@ -1385,7 +1431,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     cleanup = cleanup_unit(gh, epic, "epic", repo_path, runner, base="main")
     closed_children = {c["number"] for c in children}
     return {"epic": epic, "merged": True, "pr": pr_number, "branch": branch, **evidence,
-            "worktree": cleanup.pop("worktree"), "cleanup": cleanup,
+            **cleaned, "worktree": cleanup.pop("worktree"), "cleanup": cleanup,
             "children_cleanup": sweep_units(gh, repo_path, runner, only=closed_children,
                                             issues=all_issues)["units"],
             "run_state": archive_run_state(epic),
@@ -1981,21 +2027,102 @@ def _resume_liveness(gh: GitHub, epic: int, issue: int) -> dict:
     return info
 
 
+# `next-action --sync-epic`: re-sync `epic-<n>` with `main` once this many units of the run
+# reached a terminal state (sibling merges) since the last sync.
+EPIC_SYNC_EVERY_MERGES = 3
+
+
+def _origin_sha(repo_path: str, branch: str, runner: Runner) -> Optional[str]:
+    """`origin/<branch>`'s sha (callers fetch first), or None when it does not exist."""
+    try:
+        return runner(["git", "-C", repo_path, "rev-parse", "--verify", "--quiet",
+                       f"refs/remotes/origin/{branch}"]).strip() or None
+    except GhError:
+        return None
+
+
+def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: str = ".",
+                     runner: Runner = _default_runner) -> dict:
+    """Keep a non-standing Epic's `epic-<n>` from rotting against `main`: `sync-branch <epic>
+    --unit epic` on this run-id's first call, after `EPIC_SYNC_EVERY_MERGES` terminal units
+    since the last sync, or when `origin/main` moved since then (run-state `epic_sync`).
+    Skipped (`skipped`) without a run id, for anything but an open non-standing Epic with open
+    children (at close `close-epic` reconciles), or before `epic-<n>` exists. A conflict is
+    posted once per (`main`, epic head) pair and then reported `pending` until either moves.
+    Never raises: an operational failure comes back as `error`."""
+    if not run_id:
+        return {"skipped": "no --run-id: the sync cadence is tracked per run"}
+    try:
+        issues = gh.issue_list()
+        entry = next((i for i in issues if i["number"] == epic), None)
+        if (entry is None or not is_epic(entry) or is_epic_standing(entry)
+                or is_epic_legacy(entry) or entry["state"] != "OPEN"):
+            return {"skipped": f"#{epic} is not an open non-standing Epic -- no epic branch "
+                               f"to keep current"}
+        if not any(i["state"] == "OPEN" and (i.get("parent") or {}).get("number") == epic
+                   and not is_epic(i) for i in issues):
+            return {"skipped": "no open children -- close-epic reconciles the branch at close"}
+        branch = epic_branch(epic)
+        _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
+        epic_sha = _origin_sha(repo_path, branch, runner)
+        if epic_sha is None:
+            return {"skipped": f"origin/{branch} does not exist yet"}
+        main_sha = _origin_sha(repo_path, "main", runner)
+        state = run_cap_state(epic, run_id)
+        last = state.get("epic_sync") or {}
+        terminal = len(state.get("terminal", []))
+        if not last:
+            due = "run-start"
+        elif terminal - last.get("terminal", 0) >= EPIC_SYNC_EVERY_MERGES:
+            due = "sibling-merges"
+        elif main_sha != last.get("main"):
+            due = "main-moved"
+        elif last.get("conflict"):
+            due = "conflict-retry"  # the epic head moved: check the resolution landed
+        else:
+            due = None
+        if last.get("conflict") and last.get("main") == main_sha and last.get("epic") == epic_sha:
+            # Unresolved and nothing moved: re-merging would only re-post the same conflict.
+            return {"synced": False, "conflict": True, "pending": True,
+                    "conflicting_files": last["conflict"], "branch": branch,
+                    "reason": "the recorded epic-branch <- main conflict is still unresolved"}
+        if due is None:
+            return {"synced": False, "due": None, "branch": branch,
+                    "reason": "not due: no new run, fewer than "
+                              f"{EPIC_SYNC_EVERY_MERGES} merges since the last sync, main unmoved"}
+        result = cmd_sync_branch(gh, repo_path, epic, "epic", runner=runner)
+        _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
+        record = {"main": main_sha, "epic": _origin_sha(repo_path, branch, runner),
+                  "terminal": terminal, "at": _utc_now_marker()}
+        if result.get("conflict"):
+            record["conflict"] = result.get("conflicting_files", [])
+        state["epic_sync"] = record
+        _write_run_state(epic, state)
+        return {**result, "due": due}
+    except GhError as e:
+        return {"synced": False, "error": str(e)}
+
+
 def cmd_next_action(gh: GitHub, args) -> dict:
     """`next-action`: `decide_next_action` plus `cap_enforced` (true only with a
     `--run-id` and a nonzero cap), which describes the invocation, not the decision.
-    A `resume` also carries liveness hints (`_resume_liveness`)."""
+    A `resume` also carries liveness hints (`_resume_liveness`). With `--sync-epic`,
+    `sync_epic_if_due` runs first and its result is `epic_sync`."""
     run_id = getattr(args, "run_id", None)
+    repo_path = getattr(args, "repo_path", None) or "."
+    epic_sync = (sync_epic_if_due(gh, args.epic, run_id, repo_path)
+                 if getattr(args, "sync_epic", False) else None)
     result = decide_next_action(gh, args.epic, run_id=run_id,
                                 skip_epics=getattr(args, "skip_epic", None),
-                                repo_path=getattr(args, "repo_path", None) or ".")
+                                repo_path=repo_path)
     # Read liveness before note_in_flight re-stamps this run onto the unit.
     liveness = (_resume_liveness(gh, args.epic, result["issue"])
                 if result.get("action") == "resume" else {})
     if "issue" in result:
         note_in_flight(args.epic, run_id,
                        {result["issue"]: result.get("stage") or result["action"]})
-    return {**result, **liveness, "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0}
+    return {**result, **liveness, "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0,
+            **({"epic_sync": epic_sync} if epic_sync is not None else {})}
 
 
 def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None) -> dict:
@@ -6659,6 +6786,110 @@ def cmd_transition(gh: GitHub, issue: int, expect_stage: str, pr: Optional[int] 
                       verified_stage=verify_stage, ready=not seq.stopped)
 
 
+# `advance-standing --from`: the stage a standing child just finished (`none` = at pickup). A
+# review role verifies as the stage it follows, so `transition` never posts its start comment.
+ADVANCE_FROM = ("none", "product", "product-review", "architecture", "arch-review")
+ADVANCE_TO = ("product", "architecture", "development")
+
+
+def cmd_advance_standing(gh: GitHub, issue: int, frm: str, to: str, reason: str,
+                         repo_path: Optional[str] = None,
+                         runner: Runner = _default_runner) -> dict:
+    """Skip a standing child ahead after a stage returns (or at pickup): `transition
+    --expect-stage <frm>` (none at pickup) -> `route --to <to>` -> `start-stage --role <to>`.
+    Returns `routed`, `path`, `claimed` plus the step record."""
+    if frm not in ADVANCE_FROM:
+        raise GhError(f"--from must be one of {', '.join(ADVANCE_FROM)}")
+    if to not in ADVANCE_TO:
+        raise GhError(f"--to must be one of {', '.join(ADVANCE_TO)} -- skipping pr-review "
+                      f"is `skip-pr-review`")
+    seq = StepSequence()
+    if frm != "none":
+        seq.run("transition", lambda: cmd_transition(
+            gh, issue, _REVIEW_FOLLOWS_STAGE.get(frm, frm), repo_path=repo_path, runner=runner),
+            failed=lambda r: not r.get("ready"))
+    routed = seq.run("route", lambda: cmd_route(gh, issue, to, reason),
+                     failed=lambda r: not r.get("routed"))
+    started = seq.run("start-stage", lambda: cmd_start_stage(
+        gh, issue, to, "issue", repo_path or ".", runner=runner),
+        failed=lambda r: r.get("failed_step") is not None)
+    return seq.report(issue=issue, **{"from": frm}, to=to, routed=bool(routed),
+                      path=(started or {}).get("path"), claimed=bool(started))
+
+
+def cmd_skip_pr_review(gh: GitHub, issue: int, pr: int, reason: str,
+                       run_id: Optional[str] = None, repo_path: Optional[str] = None,
+                       runner: Runner = _default_runner) -> dict:
+    """Merge a standing child's PR without `pr-review`: `verify-exit --expect-stage pr-review
+    --pr` (handoff marker, PR scope) -> `route --to merge` (its marker is the merge evidence;
+    refused after a `pr-review` rework bounce) -> `merge-pr`. Returns `merged` plus the steps."""
+    seq = StepSequence()
+    seq.run("verify-exit", lambda: cmd_verify_exit(gh, repo_path, issue, "pr-review", pr,
+                                                   runner=runner))
+    seq.run("route", lambda: cmd_route(gh, issue, "merge", reason),
+            failed=lambda r: not r.get("routed"))
+    merged = seq.run("merge-pr", lambda: cmd_merge_pr(gh, pr, issue, repo_path or ".",
+                                                     run_id=run_id),
+                     failed=lambda r: not r.get("merged"))
+    return seq.report(issue=issue, pr=pr, merged=bool(merged))
+
+
+def cmd_finish_gate_feedback(gh: GitHub, issue: int, expect_stage: str,
+                             repo_path: Optional[str] = None,
+                             runner: Runner = _default_runner) -> dict:
+    """After a gate-feedback agent returns `done`: `transition --expect-stage <s>` (verifies the
+    push, syncs), then -- only on `ready` -- `mark-feedback-addressed`, returning the issue to
+    `Awaiting Human Review`. Returns `ready`, `pipeline_status` plus the steps."""
+    seq = StepSequence()
+    seq.run("transition", lambda: cmd_transition(gh, issue, expect_stage, repo_path=repo_path,
+                                                 runner=runner),
+            failed=lambda r: not r.get("ready"))
+    marked = seq.run("mark-feedback-addressed", lambda: cmd_mark_feedback_addressed(gh, issue))
+    return seq.report(issue=issue, expect_stage=expect_stage,
+                      ready="transition" in seq.completed,
+                      pipeline_status=(marked or {}).get("pipeline_status"))
+
+
+def _suite_evidence_needs(gh: GitHub, issue: int, pr: int) -> dict:
+    """`pr_stale_attestations` on the PR's current head, reshaped for `prepare-rework`:
+    `needed` (per suite: its `check` state -- `pending` = wait for CI, `missing` = no PR-level
+    CI, re-run and `record-local-ci`), `carried`, `passed_by_check`. Never raises."""
+    try:
+        status = pr_stale_attestations(gh, issue, pr)
+    except GhError as e:
+        return {"error": str(e)}
+    return {"needed": status["stale"], "carried": status["carried"],
+            "passed_by_check": status["passed_by_check"]}
+
+
+def cmd_prepare_rework(gh: GitHub, number: int, unit: str = "issue", repo_path: str = ".",
+                       runner: Runner = _default_runner) -> dict:
+    """Before resuming a rework/run-only agent (or after a `behind_base`/`held`): `worktree-add`
+    (reuses a live tree, else re-creates a released one from origin) -> `sync-branch`. Returns
+    `path`, the post-sync `head`, `conflict`/`conflicting_files`, the open `pr` and `suites`
+    -- which required suites the new head still needs a check or attestation for."""
+    seq = StepSequence()
+    tree = seq.run("worktree-add", lambda: cmd_worktree_add(gh, number, unit, repo_path,
+                                                             runner=runner),
+                   failed=_worktree_refused)
+    # A missing base leaves nothing to reconcile: the agent resumes as is.
+    sync = seq.run("sync-branch", lambda: cmd_sync_branch(gh, repo_path, number, unit,
+                                                          runner=runner),
+                   failed=lambda r: not (r.get("synced") or r.get("base_missing")))
+    synced = seq.steps.get("sync-branch") or {}
+    out = {"unit": unit, "path": (tree or {}).get("path"), "head": None,
+           "conflict": bool(synced.get("conflict")), "pr": None}
+    if synced.get("conflict"):
+        out["conflicting_files"] = synced.get("conflicting_files", [])
+    if sync is not None:
+        out["head"] = git_rev_parse_head(out["path"], runner=runner)
+        prs = gh.pr_list_for_branch(unit_branch(unit, number)) if unit == "issue" else []
+        if prs:
+            out["pr"] = prs[0]["number"]
+            out["suites"] = _suite_evidence_needs(gh, number, out["pr"])
+    return seq.report(issue=number, **out)
+
+
 # references/stage-playbooks.md, "Comment size is a contract": command -> (flag, cap).
 HANDOFF_CAP, EVIDENCE_CAP = 2_000, 6_000
 COMMENT_CAPS = {
@@ -6674,6 +6905,8 @@ COMMENT_CAPS = {
     "mark-needs-human": ("reason", HANDOFF_CAP),
     "resolve-thread": ("reply", HANDOFF_CAP),
     "route": ("reason", ROUTE_REASON_CAP),
+    "advance-standing": ("reason", ROUTE_REASON_CAP),
+    "skip-pr-review": ("reason", ROUTE_REASON_CAP),
     "close-issue": ("reason", HANDOFF_CAP),
     "comment": ("body", HANDOFF_CAP),
     "detach-epic": ("reason", HANDOFF_CAP),
@@ -6720,6 +6953,9 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--skip-epic", type=int, action="append", default=[],
                     help="Initiative only: park this Epic for this run (repeatable), e.g. one "
                          "waiting on a human, so the loop moves to the next runnable Epic")
+    p.add_argument("--sync-epic", action="store_true",
+                    help="Non-standing Epic with --run-id: sync epic-<n> with main first when "
+                         "due (run start, every 3 merges, main moved); result in `epic_sync`")
     p.set_defaults(func=lambda a: cmd_next_action(get_work_item_provider(), a))
     p = sub.add_parser("list-ready-for-review",
                         help="Children whose handed-off draft PR awaits review this round")
@@ -7088,8 +7324,12 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--no-carry-forward", action="store_false", dest="carry_forward",
                     help="Accept only evidence stamped at the epic head itself: no "
                          "carry-forward over a safe delta, no per-child attestation chain")
+    p.add_argument("--clean-worktree", action="store_true",
+                    help="Before a reconcile or the merge, discard the closing run's untracked "
+                         "output from the epic worktree; refuses on tracked changes")
     p.set_defaults(func=lambda a: cmd_close_epic(get_work_item_provider(), a.epic, a.repo_path,
-                                                  carry_forward=a.carry_forward))
+                                                  carry_forward=a.carry_forward,
+                                                  clean_worktree=a.clean_worktree))
     p = sub.add_parser("record-epic-verification",
                         help="Record one half of an epic's closing verification")
     p.add_argument("epic", type=int)
@@ -7194,6 +7434,42 @@ def main(argv: Optional[list] = None) -> int:
                     help="Override sync-branch's auto-detected integration base")
     p.set_defaults(func=lambda a: cmd_transition(
         get_work_item_provider(), a.issue, a.expect_stage, a.pr, a.repo_path, a.base))
+    p = sub.add_parser("advance-standing",
+                        help="Standing child skip-ahead: transition -> route -> start-stage")
+    p.add_argument("issue", type=int)
+    p.add_argument("--from", required=True, dest="frm", choices=list(ADVANCE_FROM),
+                    help="Stage just finished (`none` at pickup: no transition)")
+    p.add_argument("--to", required=True, choices=list(ADVANCE_TO))
+    p.add_argument("--reason", required=True, help=f"One line, <= {ROUTE_REASON_CAP} chars")
+    p.add_argument("--repo-path", default=None,
+                    help="Any path inside the repository (the unit's worktree when it has one)")
+    p.set_defaults(func=lambda a: cmd_advance_standing(
+        get_work_item_provider(), a.issue, a.frm, a.to, a.reason, a.repo_path))
+    p = sub.add_parser("skip-pr-review",
+                        help="Standing child: verify-exit -> route --to merge -> merge-pr")
+    p.add_argument("issue", type=int)
+    p.add_argument("--pr", type=int, required=True)
+    p.add_argument("--reason", required=True, help=f"One line, <= {ROUTE_REASON_CAP} chars")
+    p.add_argument("--run-id", default=None, help="Book the terminal-unit count under this run")
+    p.add_argument("--repo-path", default=None,
+                    help="The shared main checkout (merge-pr releases the unit's worktree)")
+    p.set_defaults(func=lambda a: cmd_skip_pr_review(
+        get_work_item_provider(), a.issue, a.pr, a.reason, a.run_id, a.repo_path))
+    p = sub.add_parser("finish-gate-feedback",
+                        help="transition, then mark-feedback-addressed on ready")
+    p.add_argument("issue", type=int)
+    p.add_argument("--expect-stage", required=True, choices=["product", "architecture"],
+                    help="The gated doc's stage")
+    p.add_argument("--repo-path", required=True, help="The unit's own worktree")
+    p.set_defaults(func=lambda a: cmd_finish_gate_feedback(
+        get_work_item_provider(), a.issue, a.expect_stage, a.repo_path))
+    p = sub.add_parser("prepare-rework",
+                        help="worktree-add (reuse or re-create) -> sync-branch, before resuming an agent")
+    p.add_argument("number", type=int)
+    p.add_argument("--unit", choices=["issue", "epic"], default="issue")
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.set_defaults(func=lambda a: cmd_prepare_rework(
+        get_work_item_provider(), a.number, a.unit, a.repo_path))
     # --- operator control-plane ---
     p = sub.add_parser("detach-epic",
                         help="Take an Epic out of its Initiative (sub-issue link + sibling blockedBy edges)")
