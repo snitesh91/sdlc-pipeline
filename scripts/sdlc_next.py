@@ -2799,6 +2799,42 @@ def cmd_release_review_worktree(number: int, repo_path: str = ".",
     return {"released": True, "path": path, **({"release_command": release} if release else {})}
 
 
+def release_detached_dev_worktree(number: int, repo_path: str = ".",
+                                  runner: Runner = _default_runner,
+                                  shell: Optional[Callable] = None,
+                                  safe_refs: Union[Callable[[], list], list] = (),
+                                  dry_run: bool = False) -> dict:
+    """Remove `issue-<n>`'s dev-path worktree when it is detached (a hand-made or
+    checked-out-away tree `release_worktree` cannot find by branch). Never destroys work:
+    refuses a dirty tree, or a HEAD no merged PR head / base / `origin/issue-<n>` holds."""
+    path = worktree_path("issue", number)
+    try:
+        entry = _registered_worktree(repo_path, path, runner)
+    except GhError as exc:
+        return {"released": False, "path": path, "reason": f"worktree lookup failed: {exc}"}
+    if entry is None or entry["branch"]:
+        return {"released": False, "path": path, "reason": "no detached dev worktree"}
+    try:
+        if runner(["git", "-C", path, "status", "--porcelain"]).strip():
+            return {"released": False, "path": path, "reason": "uncommitted changes"}
+        head = runner(["git", "-C", path, "rev-parse", "HEAD"]).strip()
+    except GhError as exc:
+        return {"released": False, "path": path, "reason": str(exc)}
+    refs = list(safe_refs() if callable(safe_refs) else safe_refs)
+    refs.append(f"refs/remotes/origin/{issue_branch(number)}")
+    if not _landed(repo_path, head, refs, runner):
+        return {"released": False, "path": path, "head": head,
+                "reason": "detached HEAD carries commits no merged PR, base or origin branch holds"}
+    if dry_run:
+        return {"released": False, "path": path, "would_release": True}
+    release = _run_release_command(path, shell)
+    try:
+        runner(["git", "-C", repo_path, "worktree", "remove", "--force", path])
+    except GhError as exc:
+        return {"released": False, "path": path, "reason": str(exc)}
+    return {"released": True, "path": path, **({"release_command": release} if release else {})}
+
+
 def resolve_repo_path(repo_path: Optional[str], branch: str,
                        runner: Runner = _default_runner) -> str:
     """Where a read-only command reads a branch's files: `repo_path` if given, else
@@ -5696,6 +5732,12 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
     else:
         out["worktree"] = release_worktree(branch, runner=runner, base_repo=repo_path,
                                            shell=shell, safe_refs=safe_refs)
+    if unit == "issue" and out["worktree"].get("reason") == "no worktree":
+        # Before the remote delete: `origin/issue-<n>` is one of the refs that vouch for it.
+        detached = release_detached_dev_worktree(number, repo_path, runner, shell, safe_refs,
+                                                 dry_run)
+        if detached.get("reason") != "no detached dev worktree":
+            out["detached_worktree"] = detached
     out["remote_branch"] = _cleanup_remote_branch(gh, repo_path, branch, runner, prs,
                                                   safe_refs, dry_run)
     out["local_branch"] = _cleanup_local_branch(repo_path, branch, runner, safe_refs,
@@ -5750,7 +5792,7 @@ def _unit_of_branch(branch: Optional[str]) -> Optional[tuple]:
 
 def present_units(repo_path: str, runner: Runner = _default_runner) -> set:
     """`(unit, n)` of every pipeline unit with a local ref, an `origin` branch, or a
-    worktree (detached review trees under `worktrees.root` included); other branches are
+    worktree (detached review and dev trees under `worktrees.root` included); other branches are
     never listed. `cleanup_unit` never releases the main checkout or a branch it holds."""
     units = set()
     local = runner(["git", "-C", repo_path, "for-each-ref", "--format=%(refname:short)",
@@ -5761,7 +5803,7 @@ def present_units(repo_path: str, runner: Runner = _default_runner) -> set:
                              if "refs/heads/" in line]
     units.update(u for u in map(_unit_of_branch, names) if u)
     w = PIPELINE["worktrees"]
-    review_re = re.compile(rf"^{re.escape(w['reviewPrefix'])}(\d+)$")
+    review_re = re.compile(rf"^(?:{re.escape(w['reviewPrefix'])}|{re.escape(w['devPrefix'])})(\d+)$")
     root = os.path.realpath(w["root"])
     for i, entry in enumerate(worktree_entries(repo_path, runner)):
         if i == 0:

@@ -198,6 +198,45 @@ def test_prune_stale_cleans_closed_units_and_leaves_open_and_foreign_ones(repo):
     assert result["worktree_pruned"] is True and result["fetch_pruned"] is True
 
 
+def test_prune_stale_removes_a_closed_units_detached_dev_worktree(repo):
+    # A dev-path tree checked out away from `issue-<n>` (detached) is invisible to
+    # `release_worktree`, which finds trees by branch -- it used to survive every sweep.
+    gh = _real(_task(5), repo)
+    wt = _worktree_with_doc(gh, repo, 5, "src/a.txt", "a\n")
+    _git("checkout", "--detach", cwd=wt)
+    _merged_pr(gh)
+    gh.issues[5]["state"] = "CLOSED"
+
+    dry = s.cmd_prune_stale(gh, str(repo), dry_run=True)
+
+    assert Path(wt).exists()
+    assert dry["units"][0]["detached_worktree"]["would_release"] is True
+
+    result = s.cmd_prune_stale(gh, str(repo))
+
+    assert not Path(wt).exists()
+    assert result["units"][0]["detached_worktree"]["released"] is True
+    assert not _on_origin(repo, "issue-5") and not _local(repo, "issue-5")
+
+
+def test_prune_stale_keeps_a_detached_dev_worktree_with_unlanded_commits(repo):
+    # Positive control: a detached HEAD carrying a commit nothing else holds is kept.
+    gh = _real(_task(5), repo)
+    wt = _worktree_with_doc(gh, repo, 5, "src/a.txt", "a\n")
+    _git("checkout", "--detach", cwd=wt)
+    Path(wt, "src", "extra.txt").write_text("extra\n")
+    _git("add", "-A", cwd=wt)
+    _git("commit", "-qm", "unlanded", cwd=wt)
+    _merged_pr(gh)
+    gh.issues[5]["state"] = "CLOSED"
+
+    result = s.cmd_prune_stale(gh, str(repo))
+
+    assert Path(wt).exists()
+    detached = result["units"][0]["detached_worktree"]
+    assert detached["released"] is False and "commits" in detached["reason"]
+
+
 # --- close-epic: epic ref, children, run state, stack ------------------------------
 
 def test_close_epic_sweeps_the_epic_and_its_childrens_branches(repo, tmp_path, monkeypatch):
