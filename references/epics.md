@@ -120,6 +120,15 @@ Stage options: `Product` / `Architecture` / `Development` / `Testing` / `PR Revi
   epic and every child. Applied by hand; an epic that needs any behaviour gets the standing label or the
   default profile instead.
 
+### The 100-sub-issue cap
+
+GitHub caps a parent at 100 sub-issues, **closed ones included**. At the cap `create-issue`
+still creates the issue and sets its fields but returns `ok: false`, `linked: false`,
+`reason_code: sub_issue_cap` (`repair-issue --parent` reports the same). An unlinked issue is
+outside every epic's subtree, so `next-action` never drives it. Free slots by unlinking
+closed sub-issues, or rotate a standing epic before it fills (e.g. `RTB-2`), then
+`repair-issue <n> --parent <p>`.
+
 ## Doc layout at the epic level
 
 - Paths: `docs/sdlc/epic-<n>/architecture.md` and `.../lld.md` — the one path, authored

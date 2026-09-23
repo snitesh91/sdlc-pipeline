@@ -5448,10 +5448,14 @@ def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: lis
               **({"blocked_by": list(blocked_by)} if blocked_by else {})}
     # The issue now exists: report failures with its number rather than raising,
     # so the caller repairs it instead of retrying into a duplicate.
+    capped = None
     for i, (name, step) in enumerate(steps):
         try:
             step(number)
         except GhError as e:
+            if name == "add_sub_issue" and _SUB_ISSUE_CAP_RE.search(str(e)):
+                capped = str(e)  # retrying cannot link it; finish the fields unlinked
+                continue
             todo = ", ".join(n for n, _ in steps[i:])
             edges = "".join(f" add-blocked-by {number} --on {dep};" for dep in blocked_by or []
                             if f"add_blocked_by:{dep}" in [n for n, _ in steps[i:]])
@@ -5462,7 +5466,23 @@ def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: lis
                               f"`repair-issue {number} --parent {parent} --type {type_name}"
                               + "".join(f" --{k} {v}" for k, v in fields.items())
                               + "` and" + (f" then{edges}" if edges else "") + " continue."}
+    if capped:
+        return {**result, "ok": False, "complete": False, "linked": False,
+                "failed_step": "add_sub_issue", "reason_code": "sub_issue_cap",
+                "error": capped, "reason": sub_issue_cap_advice(number, parent)}
     return result
+
+
+# GitHub caps a parent at 100 sub-issues, closed ones included.
+_SUB_ISSUE_CAP_RE = re.compile(r"cannot have more than \d+ sub-issues", re.IGNORECASE)
+
+
+def sub_issue_cap_advice(number: int, parent: int) -> str:
+    return (f"#{number} exists with its fields set but is NOT linked under #{parent}: #{parent} "
+            f"is at GitHub's 100-sub-issue cap (closed children count). Do NOT re-run "
+            f"create-issue or repair-issue --parent {parent} -- both hit the same cap. Unlink "
+            f"closed sub-issues from #{parent}, or rotate to a new parent (references/epics.md, "
+            f"\"The 100-sub-issue cap\"), then `repair-issue {number} --parent <parent>`.")
 
 
 def cmd_list_needs_human(gh: GitHub) -> dict:
@@ -5535,9 +5555,21 @@ def cmd_repair_issue(gh: WorkItemProvider, number: int, parent: Optional[int] = 
             already.append(name)
         else:  # fill the missing field with its default, never overwriting
             steps.append((name, lambda setter=setter, value=value: setter(number, value)))
-    for _, step in steps:
-        step()
-    return {"issue": number, "set": [name for name, _ in steps], "already_set": already}
+    capped = None
+    for name, step in steps:
+        try:
+            step()
+        except GhError as e:
+            if name != "parent" or not _SUB_ISSUE_CAP_RE.search(str(e)):
+                raise
+            capped = str(e)
+    done = [name for name, _ in steps if not (capped and name == "parent")]
+    if capped:
+        return {"issue": number, "ok": False, "linked": False, "failed_step": "parent",
+                "reason_code": "sub_issue_cap", "error": capped,
+                "reason": sub_issue_cap_advice(number, parent), "set": done,
+                "already_set": already}
+    return {"issue": number, "set": done, "already_set": already}
 
 
 def cmd_audit_issues(gh: WorkItemProvider, epic: Optional[int] = None) -> dict:

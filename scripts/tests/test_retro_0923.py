@@ -172,3 +172,46 @@ def test_close_epic_carries_evidence_over_a_docs_only_reconcile():
     result = s.cmd_close_epic(gh, 9)
     assert result["merged"] is True
     assert result["evidence"]["exploratory"] == f"carried_forward_from {TESTED[:10]}"
+
+
+# --- Fix 4: GitHub's 100-sub-issue cap -------------------------------------------------
+
+from tests.test_v2_phase_tasks import FakeGh  # noqa: E402
+
+_CAP_ERROR = "GraphQL: Parent cannot have more than 100 sub-issues (addSubIssue)"
+
+
+def _capped_gh(error=_CAP_ERROR):
+    gh = FakeGh([{"number": 50, "labels": ["type:epic", "epic:standing"]}])
+
+    def refuse(parent, child):
+        raise s.GhError(error)
+    gh.add_sub_issue = refuse
+    return gh
+
+
+def test_create_issue_at_the_sub_issue_cap_finishes_the_fields_and_names_the_cap():
+    """Regression: the cap returned generic advice (`repair-issue --parent`) that hits the
+    same cap, and left type/status unset."""
+    gh = _capped_gh()
+    out = s.cmd_create_issue(gh, "Bug", "b", 50, [], type_name="Bug")
+    n = out["issue"]
+    assert out["ok"] is False and out["linked"] is False
+    assert out["failed_step"] == "add_sub_issue" and out["reason_code"] == "sub_issue_cap"
+    assert "100-sub-issue cap" in out["reason"] and "Do NOT re-run" in out["reason"]
+    assert gh.issues[n]["issue_type"] == "Bug" and gh.issues[n]["parent"] is None
+
+
+def test_create_issue_other_link_failure_keeps_the_generic_repair_advice():
+    """Positive control: a non-cap failure still stops and points at repair-issue."""
+    out = s.cmd_create_issue(_capped_gh("HTTP 502"), "Bug", "b", 50, [], type_name="Bug")
+    assert out["ok"] is False and out["failed_step"] == "add_sub_issue"
+    assert "repair-issue" in out["reason"] and "reason_code" not in out
+
+
+def test_repair_issue_parent_at_the_cap_reports_the_cap_not_a_crash():
+    gh = _capped_gh()
+    n = gh.issue_create("Bug", "b", [])
+    out = s.cmd_repair_issue(gh, n, parent=50, type_name="Bug")
+    assert out["reason_code"] == "sub_issue_cap" and out["linked"] is False
+    assert "issueType" in out["set"] and gh.issues[n]["issue_type"] == "Bug"
