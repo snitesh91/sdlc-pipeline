@@ -94,3 +94,47 @@ def test_finish_lld_stops_before_closing_when_a_depends_on_does_not_parse(repo):
 
     assert result["failed_step"] == "create-lld-tasks"
     assert gh.issues[11]["state"] == "OPEN"
+
+
+# --- Fix 2: open-gate derives its PR title --------------------------------------------
+
+from tests.test_gate_title import _tree as _gate_tree  # noqa: E402
+
+
+def _roadmap_tree():
+    return _gate_tree({"number": 2, "labels": ["type:task"], "parent": 1, "stage": "product",
+                       "title": "Product Roadmap"})
+
+
+@pytest.mark.parametrize("given", [
+    "Gate A: Product Roadmap - product.md for review",
+    "Product Roadmap — product.md for review (#2)",
+    "Gate A - Product Roadmap - Object storage",
+])
+def test_gate_pr_title_strips_gate_decoration_a_caller_included(given):
+    """Regression: a caller-built title got the `— <doc> for review` suffix a second time."""
+    assert s.gate_pr_title(_roadmap_tree(), 2, given) == ("Product Roadmap - Object storage", True)
+
+
+def test_gate_pr_title_defaults_to_the_issue_title_composed_with_its_parent():
+    assert s.gate_pr_title(_roadmap_tree(), 2) == ("Product Roadmap - Object storage", False)
+
+
+def test_gate_pr_title_leaves_a_plain_title_and_a_foreign_issue_reference_alone():
+    """Positive control: nothing to strip -> unchanged, not reported as normalised."""
+    gh = _gate_tree({"number": 11, "labels": ["type:task"], "stage": "product"})
+    assert s.gate_pr_title(gh, 11, "Fix widget (#40)") == ("Fix widget (#40)", False)
+    assert s.gate_pr_title(gh, 11, "Gate-keeper retries") == ("Gate-keeper retries", False)
+
+
+def test_open_gate_cli_title_is_optional_and_reported(monkeypatch, capsys):
+    gh = _roadmap_tree()
+    seen = {}
+    monkeypatch.setenv("GITHUB_TOKEN", "x")
+    monkeypatch.setattr(s, "get_work_item_provider", lambda: gh)
+    monkeypatch.setattr(s, "cmd_open_gate",
+                        lambda *a, **k: seen.setdefault("args", a) and {"gate_pr": 5})
+    s.main(["open-gate", "2", "--doc", "product.md", "--next-stage", "architecture",
+            "--summary", "x"])
+    assert seen["args"][3] == "Product Roadmap - Object storage"
+    assert '"title_normalized": false' in capsys.readouterr().out

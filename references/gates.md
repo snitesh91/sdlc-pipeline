@@ -58,8 +58,7 @@ are always authored on `issue-<n>` (at `epic-<n>/architecture.md` for an Epic's 
 never committed to `epic-<n>` directly.
 
 ```bash
-python3 "$SDLC" open-gate <n> \
-  --title "<issue title, verbatim>" --doc product.md --next-stage architecture \
+python3 "$SDLC" open-gate <n> --doc product.md --next-stage architecture \
   --summary "<2-3 sentence plain-language summary of what this stage decided>"
   # --repo-path optional: the branch's live worktree is auto-resolved
 ```
@@ -71,9 +70,9 @@ python3 "$SDLC" open-gate <n> \
   choose `--summary` and `--doc`/`--next-stage`
   (A: `product.md` → `architecture`; B: `architecture.md` → `development`; on a
   phase-Task `--next-stage` is required but nominal).
-- **PR title = the issue's title verbatim plus which doc it gates.** `open-gate` appends the
-  parent's title to a phase-Task's (`Product Roadmap - <initiative>`, `Architecture - <epic>`,
-  `LLD - <epic>`), so gates from different epics read apart. Never write "Gate",
+- **The PR title is derived by `open-gate`** from the issue's title (a phase-Task's gets its
+  parent's appended); pass no `--title`. A `--title` is stripped of gate shorthand and
+  `- <doc> for review` (`title_normalized: true`). Never write "Gate",
   "Gate A/B" or a bare "A"/"B" in PR titles, issue comments or commit messages — that
   shorthand is internal to this skill.
 - The gate PR is **ready for review, not draft** (a scoped exception to the draft-PR

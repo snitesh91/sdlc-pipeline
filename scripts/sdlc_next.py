@@ -3311,6 +3311,22 @@ def phase_gate_title(gh: WorkItemProvider, issue: int, title: str) -> str:
     return base if parent_title.lower() in base.lower() else f"{base} - {parent_title}"
 
 
+# Decoration `open-gate` adds itself; a caller that includes it would see it twice.
+_GATE_TITLE_PREFIX = re.compile(r"^\s*gate(?:\s+[ab])?\s*(?::|\s[\-\u2013\u2014])\s*",
+                                re.IGNORECASE)
+_GATE_TITLE_SUFFIX = r"\s*(?:[\-\u2013\u2014]\s*[\w.-]+\.md\s+for\s+review)?\s*(?:\(#{issue}\))?\s*$"
+
+
+def gate_pr_title(gh: WorkItemProvider, issue: int, title: Optional[str] = None) -> tuple:
+    """`(title, normalized)`: the gate PR's base title -- `title` stripped of a gate-shorthand
+    prefix and a `- <doc> for review (#n)` suffix, else the issue's own -- through
+    `phase_gate_title`; `normalized` says a caller-supplied title had to be stripped."""
+    raw = title if title and title.strip() else gh.issue_view(issue)["title"]
+    suffix = re.compile(_GATE_TITLE_SUFFIX.format(issue=issue), re.IGNORECASE)
+    base = suffix.sub("", _GATE_TITLE_PREFIX.sub("", raw)).strip() or raw.strip()
+    return phase_gate_title(gh, issue, base), bool(title) and base != title.strip()
+
+
 # The design stages a non-standing Epic's phase-Task authors, and the review that follows each.
 DESIGN_STAGE_REVIEW = {"architecture": "arch-review", "lld": "lld-review"}
 
@@ -6174,8 +6190,9 @@ def comment_cap_refusal(args) -> Optional[dict]:
 
 def _open_gate_cli(a) -> dict:
     gh = get_work_item_provider()
-    return cmd_open_gate(gh, a.repo_path, a.issue, phase_gate_title(gh, a.issue, a.title),
-                         a.doc, a.next_stage, a.summary)
+    title, normalized = gate_pr_title(gh, a.issue, a.title)
+    result = cmd_open_gate(gh, a.repo_path, a.issue, title, a.doc, a.next_stage, a.summary)
+    return {**result, "title": title, "title_normalized": normalized}
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -6308,7 +6325,8 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
                     help=repo_path_help)
-    p.add_argument("--title", required=True)
+    p.add_argument("--title", default=None,
+                    help="Defaults to the issue's title; the PR title is derived from it")
     p.add_argument("--doc", required=True, choices=["product.md", "architecture.md"])
     p.add_argument("--next-stage", required=True)
     p.add_argument("--summary", required=True)
