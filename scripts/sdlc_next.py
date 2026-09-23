@@ -1047,9 +1047,10 @@ EPIC_CLOSE_REQUIRED_EVIDENCE = (("exploratory", "exploratory pass"),)
 
 
 def missing_epic_verification(comments: list, stale_since: Optional[Callable] = None) -> list:
-    """Problems with an epic's exploratory closing evidence; evidence older than
-    the last `origin/main` reconcile counts as missing. `stale_since(sha)` returns a problem
-    when the epic branch moved on from the tested `sha` with code changes. Empty = complete."""
+    """Problems with an epic's exploratory closing evidence. `stale_since(sha)` returns a
+    problem when the epic branch moved on from the tested `sha` with code changes -- a `main`
+    reconcile included; without it (or a sha) evidence older than the last reconcile counts
+    as missing. Empty = complete."""
     problems = []
     reconciled = None
     for idx, c in enumerate(comments):
@@ -1063,7 +1064,9 @@ def missing_epic_verification(comments: list, stale_since: Optional[Callable] = 
     for kind, label in EPIC_CLOSE_REQUIRED_EVIDENCE:
         if kind not in seen:
             problems.append(f"no `{kind}` closing-verification evidence ({label} never recorded)")
-        elif reconciled is not None and seen[kind][0] < reconciled:
+        # The tested-sha delta spans the reconcile merge, so it alone judges a stamped record.
+        elif reconciled is not None and seen[kind][0] < reconciled and not (
+                stale_since is not None and seen[kind][1]):
             problems.append(f"the `{kind}` evidence predates the last `origin/main` reconcile of "
                             f"the epic branch -- it describes a different tree; re-run it")
         elif stale_since is not None:

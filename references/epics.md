@@ -311,7 +311,8 @@ never reaches `main`; merge its design PR). Remaining items: closing verificatio
 
 **Evidence carry-forward — what a later commit on `epic-<n>` does to recorded evidence:**
 
-- The exploratory record stays valid across a delta that touches only
+- The exploratory record stays valid across a delta (an `origin/main` reconcile's incoming
+  changes included) that touches only
   `pipeline.epicClose.evidenceCarryForward.paths` (default: `**/*.md`, `docs/**`,
   `<docRoot>/**`; the pipeline config never). Any other path, or a delta of 300+ files,
   stales it: re-run and re-record. Widen the set in config for fixture or evidence
@@ -340,9 +341,9 @@ still accepted (informational, never gates). Run every suite in `unattested_suit
 fresh `sdlc:development` agent and a run-only brief (fix nothing, report). **You** record the
 exploratory half with `record-epic-verification <n> --kind exploratory --summary "..."` (it
 stamps the tested epic-branch head; `--sha` names an earlier tested head; the summary is the
-findings comment the agent returned) — an agent never records it. Evidence older than the last
-`origin/main` reconcile, or predating a later change on `epic-<n>` outside the carry-forward
-set ("Evidence carry-forward" above), counts as missing. **Never record a verification you
+findings comment the agent returned) — an agent never records it. Evidence predating a later
+change on `epic-<n>` outside the carry-forward set ("Evidence carry-forward" above), a
+reconcile's included, counts as missing. **Never record a verification you
 did not run clean.**
 
 **With `epicClose.auto` on, escalate instead of closing when:**

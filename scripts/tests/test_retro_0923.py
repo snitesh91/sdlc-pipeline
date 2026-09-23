@@ -138,3 +138,37 @@ def test_open_gate_cli_title_is_optional_and_reported(monkeypatch, capsys):
             "--summary", "x"])
     assert seen["args"][3] == "Product Roadmap - Object storage"
     assert '"title_normalized": false' in capsys.readouterr().out
+
+
+# --- Fix 3: a docs-only main reconcile keeps exploratory evidence ----------------------
+
+from tests.test_epic_close_evidence import TESTED, _epic, _marks  # noqa: E402
+
+_RECONCILED = "<!-- epic-reconciled: 9 @ 2026-09-16T00:00:00Z -->"
+
+
+def test_a_docs_only_reconcile_after_the_tested_head_keeps_the_evidence():
+    """Regression: an unrelated product.md landing on main via the reconcile invalidated
+    clean exploratory evidence, though the delta since the tested sha was docs only."""
+    gh = _epic([_marks()[1], _RECONCILED],
+               files_since=["docs/sdlc/issue-700/product.md"])
+    assert s.missing_epic_verification(gh.issue_view(9)["comments"],
+                                       s._EpicEvidenceDelta(gh, "epic-9")) == []
+
+
+def test_a_reconcile_that_brought_code_still_invalidates_the_evidence():
+    """Positive control: incoming code via the reconcile still forces a re-run."""
+    gh = _epic([_marks()[1], _RECONCILED],
+               files_since=["docs/x.md", "backend/src/other.ts"])
+    assert len(s.missing_epic_verification(gh.issue_view(9)["comments"],
+                                           s._EpicEvidenceDelta(gh, "epic-9"))) == 1
+
+
+def test_close_epic_carries_evidence_over_a_docs_only_reconcile():
+    gh = _epic([_marks()[1], _RECONCILED], files_since=["README.md"], delta=["docs/x.md"])
+    gh.pr_create = lambda **kw: 38
+    gh.pr_ready = lambda n: None
+    gh.pr_merge = lambda n, **kw: None
+    result = s.cmd_close_epic(gh, 9)
+    assert result["merged"] is True
+    assert result["evidence"]["exploratory"] == f"carried_forward_from {TESTED[:10]}"
