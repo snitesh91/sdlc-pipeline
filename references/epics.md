@@ -394,8 +394,8 @@ the only status it maintains.
 
 ### Pipeline Status `Done`
 
-- **Any issue closing** (`merge-pr`'s `Closes #<n>`, the epic integration PR, a human
-  close) gets Stage cleared and Pipeline Status `Done` from `gate-auto-advance.yml`'s
-  `mark-issue-closed` job. `close-issue` and `close-epic` also set them directly.
+- **A pipeline close** — `merge-pr`, `close-issue`, `close-epic`, `close-initiative`, a
+  realised issue — clears Stage and sets Pipeline Status `Done` itself. A human close leaves
+  them as they were; every reader filters to open issues, so it is cosmetic.
 - `merge-lld-doc` **clears** the Epic's own fields (the Epic stays open);
   `pause-for-epic-regate` resets only Pipeline Status, to `Todo`.

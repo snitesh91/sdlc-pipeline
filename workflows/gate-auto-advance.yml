@@ -1,57 +1,19 @@
 name: sdlc-pipeline Gate Auto-Advance
 
-# Real-time backstop for sdlc gate PRs and issue status (references/gates.md, "Real-time backstop").
+# Real-time backstop for sdlc gate PRs (references/gates.md, "Real-time backstop").
 # next-action detects the same events itself, so a missed run only delays, never loses, state.
-#   auto-advance       (pull_request closed): merged gate PR -> auto-pass-gate; closed unmerged -> needs-human
-#   init-todo-status   (issues opened): Pipeline Status -> Todo unless already set
-#   mark-issue-closed  (issues closed): clear Stage, Pipeline Status -> Done
+#   auto-advance (pull_request closed): merged gate PR -> auto-pass-gate; closed unmerged -> needs-human
+# open-gate labels every human gate PR `sdlc:gate`; the job-level `if` keeps every other PR
+# (development, epic integration, pipeline-merged design PRs) from starting a runner.
 # Needs secret SDLC_GH_TOKEN (classic PAT). Optional variable SDLC_PIPELINE_REF pins the plugin
 # checkout; set it to the tag/sha your .claude/settings.json pins (default: main).
 on:
   pull_request:
     types: [closed]
-  issues:
-    types: [opened, closed]
 
 jobs:
-  init-todo-status:
-    if: github.event_name == 'issues' && github.event.action == 'opened'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: snitesh91/sdlc-pipeline
-          ref: ${{ vars.SDLC_PIPELINE_REF || 'main' }}
-          path: .sdlc-pipeline
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-      - name: Default this new issue's Pipeline Status to Todo
-        env:
-          GITHUB_TOKEN: ${{ secrets.SDLC_GH_TOKEN }}
-        run: python3 .sdlc-pipeline/scripts/sdlc_next.py mark-todo ${{ github.event.issue.number }}
-
-  mark-issue-closed:
-    if: github.event_name == 'issues' && github.event.action == 'closed'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: snitesh91/sdlc-pipeline
-          ref: ${{ vars.SDLC_PIPELINE_REF || 'main' }}
-          path: .sdlc-pipeline
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-      - name: Clear Stage and set Pipeline Status Done
-        env:
-          GITHUB_TOKEN: ${{ secrets.SDLC_GH_TOKEN }}
-        run: python3 .sdlc-pipeline/scripts/sdlc_next.py mark-issue-closed ${{ github.event.issue.number }}
-
   auto-advance:
-    if: github.event_name == 'pull_request'
+    if: contains(github.event.pull_request.labels.*.name, 'sdlc:gate')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
