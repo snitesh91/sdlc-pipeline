@@ -4886,8 +4886,7 @@ NON_ATTESTABLE_SUITES = frozenset(
 def _workflow_covers(spec: dict, path: str) -> bool:
     """Whether the workflow's `paths:` filter (prefixes/files minus excludeGlobs) matches.
     A leading `**/` also matches at the repo root, as in GHA."""
-    if any(fnmatch.fnmatch(path, g) or (g.startswith("**/") and fnmatch.fnmatch(path, g[3:]))
-           for g in spec["excludeGlobs"]):
+    if any(_glob_matches(path, g) for g in spec["excludeGlobs"]):
         return False
     return path.startswith(spec["prefixes"]) or path in spec["files"]
 
@@ -4944,7 +4943,7 @@ def base_delta_needs_reattest(base_delta_files: list) -> bool:
     if touches_pipeline_config(base_delta_files):
         return True
     for spec in REQUIRED_WORKFLOWS:
-        if any(p.startswith(spec["prefixes"]) or p in spec["files"] for p in base_delta_files):
+        if any(_workflow_covers(spec, p) for p in base_delta_files):
             return True
     return not all(_is_doc_path(p) for p in base_delta_files)
 

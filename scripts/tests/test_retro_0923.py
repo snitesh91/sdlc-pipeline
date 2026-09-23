@@ -242,3 +242,30 @@ def test_record_terminal_unit_single_epic_count_is_unchanged(monkeypatch, tmp_pa
     gh = FakeGh([{"number": 9, "labels": ["type:epic"]},
                  {"number": 5, "labels": ["type:task"], "parent": 9}])
     assert s.record_terminal_unit(gh, 5)["terminal_count"] == 2
+
+
+# --- Fix 6: one glob matcher; base_delta_needs_reattest honours excludeGlobs -----------
+
+_BACKEND = {"workflow": "Backend CI", "suite": "backend", "prefixes": ("backend/",),
+            "files": (), "excludeGlobs": ("**/*.md", "backend/test/fixtures/**"),
+            "bases": (), "attestable": True}
+
+
+def test_base_delta_of_a_suite_excluded_doc_needs_no_reattest(monkeypatch):
+    """Regression: a `backend/README.md` base delta forced a re-sync and re-attest though
+    the backend workflow's `!**/*.md` negation means it never runs for it."""
+    monkeypatch.setattr(s, "REQUIRED_WORKFLOWS", (_BACKEND,))
+    assert s.base_delta_needs_reattest(["backend/README.md"]) is False
+
+
+def test_base_delta_reattest_still_fires_for_covered_or_unexcluded_code(monkeypatch):
+    """Positive control: covered code, and excluded non-doc code, still need a re-attest."""
+    monkeypatch.setattr(s, "REQUIRED_WORKFLOWS", (_BACKEND,))
+    assert s.base_delta_needs_reattest(["backend/src/x.ts"]) is True
+    assert s.base_delta_needs_reattest(["backend/test/fixtures/seed.json"]) is True
+
+
+def test_workflow_covers_uses_the_root_level_double_star_rule():
+    spec = {**_BACKEND, "prefixes": ("",)}
+    assert s._workflow_covers(spec, "README.md") is False  # `**/*.md` matches at the root
+    assert s._workflow_covers(spec, "src/a.ts") is True
