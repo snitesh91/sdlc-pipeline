@@ -11,8 +11,7 @@ eligibility.
 
 ## Fan-out rules
 
-- Start every unit with `start-stage <n> --role <role>` (it creates the worktree, then
-  claims — the **Ordering rule**: never `claim` before the worktree exists).
+- Start every unit with `start-stage <n> --role <role>`, never a bare `claim`.
 - Dispatch all selected units in **one parallel `Agent` call**, one subagent per unit,
   each told its own worktree path. Track one stage agent per active unit.
 - **Hold the waiting yourself.** A subagent cannot wait across turns. When a stage is

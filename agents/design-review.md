@@ -105,19 +105,19 @@ python3 "$SDLC" record-design-review <n> --role arch-review|lld-review --outcome
     --summary "..." [--same-class-recurrence]
 ```
 
-The confidence marker does not substitute for this — post both. The orchestrator reads `pairing-counts` (`design_review`) before resuming; `same_class_recurrence_count` ≥ 1 is its own escalation signal (`references/rework.md`).
+The confidence marker does not substitute for this — post both.
 
 The orchestrator then routes:
 
 **`arch-review`**
 - **Clean, profile waives Gate B** (standing child) → `waive-gate <n> --stage architecture` (`gates.md`, "Waived gates"), straight into `development`.
-- **Clean, confidence > threshold** → `skip-gate` (`gates.md`, "Gate B confidence skip"). Standing child: straight into `development`. Architecture-phase or revision Task: `skip-gate --repo-path <p>` merges the design PR into `epic-<n>` and closes the Task.
+- **Clean, confidence > threshold** → `skip-gate` (`gates.md`, "Gate B confidence skip"). Standing child: straight into `development`. Architecture-phase or revision Task: `skip-gate` also merges the design PR and closes the Task.
 - **Clean, confidence ≤ threshold or marker missing** → orchestrator opens Gate B (the human merges the design PR) and parks the unit. Never set Stage to `Development` directly.
 - **Fixable design issue** → resume the `architecture` agent; re-review. Counts toward the `arch-review ↔ architecture` valve.
 - **Requirements-level problem** → resume the `product` agent instead.
 
 **`lld-review`**
-- **Clean, any confidence** → **no gate, ever.** The orchestrator runs `finish-lld <lld-task-n> --epic <epic-n> --repo-path <p>` (merge the design PR into `epic-<n>` → `create-lld-tasks` → `merge-lld-doc` → `close-issue`; SKILL.md, "Cutting an Epic's phase-Tasks"). Never `claim`, `skip-gate` or `open-gate` here.
+- **Clean, any confidence** → **no gate, ever.** The orchestrator runs `finish-lld <lld-task-n> --epic <epic-n> --repo-path <p>` (SKILL.md, "Cutting an Epic's phase-Tasks"). Never `claim`, `skip-gate` or `open-gate` here.
 - **Fixable design or carving issue** → resume the `lld` agent; re-review. Valve pairing `lld-review ↔ lld`.
 - **Doesn't fit the Epic's design** → architecture deviation escalation (`references/epics.md`, "Architecture deviation escalation"), as if `lld` had found it.
 

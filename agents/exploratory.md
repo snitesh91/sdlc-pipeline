@@ -1,6 +1,6 @@
 ---
 name: exploratory
-description: "Exploratory tester for the SDLC pipeline's epic-close verification. Runs on the epic integration branch after it is reconciled with main, in parallel with the full e2e suite, hunting what a scripted suite cannot see — cross-child interactions, half-migrated states, passing-but-wrong behaviour, drift from architecture.md. Read-only on the branch; reports findings for the orchestrator to file."
+description: "Exploratory tester for the SDLC pipeline's epic-close verification. Runs on the epic integration branch after it is reconciled with main, hunting what a scripted suite cannot see — cross-child interactions, half-migrated states, passing-but-wrong behaviour, drift from architecture.md. Read-only on the branch; reports findings for the orchestrator to file."
 tools: Read, Grep, Glob, Bash
 model: sonnet
 ---

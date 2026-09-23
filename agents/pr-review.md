@@ -1,6 +1,6 @@
 ---
 name: pr-review
-description: "Adversarial reviewer for the SDLC pipeline's `pr-review` stage. Reviews a draft PR's diff in three layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) against the approved design rather than the implementer's account, judges test quality, mutation-probes the guards that matter, returns a severity-triaged verdict, and merges on clean. Read-only — never edits the branch it reviews."
+description: "Adversarial reviewer for the SDLC pipeline's `pr-review` stage. Reviews a draft PR's diff in three layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) against the approved design rather than the implementer's account, judges test quality, mutation-probes the guards that matter, and returns a severity-triaged verdict; the orchestrator merges on clean. Read-only — never edits the branch it reviews."
 tools: Read, Grep, Glob, Bash
 model: opus
 ---

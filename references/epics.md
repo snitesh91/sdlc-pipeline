@@ -45,47 +45,32 @@ Task:                    development -> [pr-review] -> auto-merge into epic-<n> 
    ```bash
    python3 "$SDLC" cut-phase-tasks <epic-n> [--arch-body TEXT] [--lld-body TEXT] --repo-path <p>
    ```
-   Stands up `epic-<n>` on origin and its worktree (eagerly, so no child ever branches
-   from `main`), creates both, stages them `architecture` / `lld`, adds the lld-on-arch
-   `blockedBy` edge (the **only** thing ordering them) and the Architecture-phase
-   worktree. Idempotent. Returns `architecture_task`, `lld_task`. (An unstaged
-   phase-Task would be held back forever.)
+   Idempotent; returns `architecture_task`, `lld_task`. The lld-on-arch `blockedBy` edge it
+   adds is the **only** thing ordering them.
 2. **Every child of a non-standing Epic — phase-Tasks included — branches from
-   `origin/epic-<n>`**; `worktree-add` and `sync-branch` detect this themselves (`--base` is
-   only an override). Each writes its design doc at `<docRoot>/epic-<n>/architecture.md` /
-   `lld.md` on its own `issue-<n>` branch (a revision edits `architecture.md` in place).
+   `origin/epic-<n>`** (detected by `worktree-add`/`sync-branch`). Each writes its design
+   doc at `<docRoot>/epic-<n>/architecture.md` / `lld.md` on its own `issue-<n>` branch (a
+   revision edits `architecture.md` in place).
 3. When `architecture` or `lld` returns, `transition` raises the **design PR**
-   `issue-<n>` → `epic-<n>` (`open-design-pr`, marked so it is never mistaken for a gate or
-   development PR, no `Closes #`). `arch-review`/`lld-review` review on it and
-   `record-design-review` also comments the outcome there and stamps the marker with the
-   PR head it reviewed (`sha:`); `merge-design-pr` refuses (`review_stale`) when the head moved
-   and the doc changed since, so re-run the review on the new head and record it again (a
-   base-only `sync-branch` merge does not count).
-4. The **pipeline merges the design PR** (`merge-design-pr`, squash, branch kept):
-   `lld-review` clean always; `arch-review` clean only above the profile's skip threshold or
-   where Gate B is waived — otherwise `open-gate` gates that same PR and the human merges it
-   into `epic-<n>`. `skip-gate`/`waive-gate` merge then close the Architecture-phase Task
-   (`references/gates.md`).
+   `issue-<n>` → `epic-<n>`; `arch-review`/`lld-review` review on it. A review whose doc
+   changed after it was recorded is `review_stale`: re-run the review on the new head.
+4. The **pipeline merges the design PR** on `lld-review` clean always, on `arch-review`
+   clean only above the profile's skip threshold or where Gate B is waived (`skip-gate` /
+   `waive-gate`, which also close the Task) — otherwise `open-gate` gates that same PR and the
+   human merges it into `epic-<n>` (`references/gates.md`).
 5. After a clean `lld-review` (no human gate):
    ```bash
    python3 "$SDLC" finish-lld <lld-task-n> --epic <epic-n> --repo-path <p>
    ```
-   Runs `merge-design-pr` → `create-lld-tasks` → `merge-lld-doc` → `close-issue` and stops
-   at the first failure (`failed_step`, `completed_steps`; a `behind_base` refusal → `sync-branch
-   <lld-task-n>`, then re-run). All steps are idempotent: fix the cause and re-run it. Never
-   create Tasks before `lld.md` is on `epic-<n>`; never close first. Its numbering guard: a PR
-   whose `lld.md` is the unnumbered original of the epic's numbered one merges nothing
-   (`up_to_date`), so an LLD revision cannot revert `create-lld-tasks`.
+   It stops at the first failed step (`failed_step`, `completed_steps`; `behind_base` →
+   `sync-branch <lld-task-n>`); every step is idempotent — fix the cause and re-run it. Never
+   run its steps by hand.
 6. Close a phase-Task with `close-issue`, **never `mark-issue-closed`** — that only sets
    terminal fields after a close and leaves the issue open, Stage-less, handed out again.
 
-`merge-lld-doc` ends the design phase: verifies `epic-<n>/lld.md` on `origin/epic-<n>`,
-advances every Stage-less Task under the Epic **that the doc carved** (a `## Task #<n>`
-subsection carrying a `## Footprint`) to `development` (**not** claimed), clears the
-Epic's own Stage/Pipeline Status, adds `epic:architected`. A child with no such
-subsection, or one a Task `Realises:`, stays Stage-less and is reported in
+`finish-lld` ends the design phase: every Task the doc carved moves to `development`
+(unclaimed) and the Epic gets `epic:architected`. A child it did not advance is reported in
 `not_advanced` with its reason — never advance it by hand without settling that reason.
-**Tasks are never eligible before `epic:architected`.**
 
 Requirements: an Initiative-driven Epic uses its Initiative's `product.md`; an
 engineering-driven Epic has only its issue body (`architecture` returns its questions for
@@ -122,10 +107,9 @@ Stage options: `Product` / `Architecture` / `Development` / `Testing` / `PR Revi
 
 ## Doc layout at the epic level
 
-- Paths: `docs/sdlc/epic-<n>/architecture.md` and `.../lld.md` — the one path, authored
-  directly there on the phase-Tasks' `issue-<n>` branches and merged into `epic-<n>` by their
-  design PRs (`verify-exit`, `lld-section`, `create-lld-tasks`, `merge-lld-doc` and
-  `check-epics-closeable` all read exactly it). Standing children and Product-Roadmap Tasks
+- Paths: `docs/sdlc/epic-<n>/architecture.md` and `.../lld.md` — the one path every command
+  reads, authored directly there on the phase-Tasks' `issue-<n>` branches and merged into
+  `epic-<n>` by their design PRs. Standing children and Product-Roadmap Tasks
   keep `issue-<n>/`. Altitude rules: `references/design-doc-rules.md`. An Epic has no
   `product.md` of its own.
 - `architecture.md` describes the design by component/functional area. It never
@@ -236,10 +220,14 @@ Task in `development`, a review) first decides whether its work fits it:
      `epic-<n>/architecture.md`, edited in place; the revised doc reaches `epic-<n>` the same
      way (`skip-gate`/`waive-gate`, or the human's merge at Gate B) and the Task closes.
   3. Park the reporting unit at once:
-     `pause-for-epic-regate <n> --epic <epic-n> [--gate-pr <pr>] --found-by <stage>` (resets
-     Pipeline Status to `Todo` only, posts a linking comment; `--gate-pr` only once the
-     revision's design PR exists; the `blockedBy` edge holds it until the revision closes). An LLD-phase Task then resumes `lld` against the revised doc; if `lld.md`
-     must change, re-run the LLD pass before the affected Tasks proceed.
+     `pause-for-epic-regate <n> --epic <epic-n> [--gate-pr <pr>] --found-by <stage>`
+     (`--gate-pr` only once the revision's design PR exists); the `--blocks` edge holds it
+     until the revision closes. Then resume its agent directly (a replacement per
+     `references/rework.md` if it is gone) — **no `set-stage`**: the pause keeps Stage, and
+     once a Task's PR exists Stage stays `pr-review` for life (`open-dev-pr` sets it once;
+     `handoff-to-pr-review` never touches it), so a hand `set-stage development` desyncs it and
+     `transition`'s `verify-exit` refuses. An LLD-phase Task resumes `lld` against the revised
+     doc; if `lld.md` must change, re-run the LLD pass before the affected Tasks proceed.
   4. Valve: count the `lld`/`development` <-> `architecture-revision` pairing on its
      own. The third unsettled deviation on the same Epic swaps in the context-reset
      replacement architect for rounds 4–6; the sixth → `mark-needs-human` **on the Epic**.
@@ -248,9 +236,8 @@ All other rework follows `references/rework.md`.
 
 ## The epic integration branch
 
-- A non-standing Epic owns `epic-<n>`, created eagerly: `cut-phase-tasks` and
-  `open-arch-revision` run `worktree-add <n> --unit epic` (which pushes a fresh branch from
-  `main`), and any child's `worktree-add` cuts a missing one first.
+- A non-standing Epic owns `epic-<n>`, created eagerly from `main` by `cut-phase-tasks`,
+  `open-arch-revision` or a child's `start-stage`.
 - **Functional Tasks branch from `epic-<n>` and merge into it**, never into `main`. At
   close it takes one merge from `origin/main`, is verified whole, and merges to `main`
   once.
@@ -266,8 +253,6 @@ All other rework follows `references/rework.md`.
   drift. Run `sync-branch <epic> --unit epic --repo-path <p>` at the start of each
   invocation on the Epic and whenever `main` moved under it (SKILL.md, Step 1), so every
   branch cut from it starts close to `main` and `close-epic`'s reconcile stays small.
-- Epic git work (`merge-lld-doc`, `create-lld-tasks`, `close-epic`) never runs in the main
-  checkout — only in `epic-<n>`'s live or ephemeral worktree, under the branch lock.
 - **Runtime stack**: when `pipeline.stack.enabled`, run `provision-epic-stack <n>` at the
   epic's first touch and `teardown-epic-stack <n>` after the closing merge
   (`references/parallelism.md`, "Per-epic isolated stack").
