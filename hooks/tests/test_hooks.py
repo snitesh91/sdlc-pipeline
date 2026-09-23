@@ -394,6 +394,16 @@ ROLE_DENIED = [
     ("sdlc:exploratory", "echo $(" + CP + "close-epic 9)", "orchestrator"),
     ("sdlc:initiative-close", CP + "close-initiative 1", "orchestrator"),
     ("sdlc:development", CP + "route 5 --to merge --reason r", "orchestrator"),
+    # The 2026-09-23 composites are the orchestrator's: their steps are.
+    ("sdlc:development", CP + "skip-pr-review 5 --pr 9 --reason r", "orchestrator"),
+    ("sdlc:pr-review", CP + "skip-pr-review 5 --pr 9 --reason r", "orchestrator"),
+    ("sdlc:product", CP + "advance-standing 5 --from product --to development --reason r",
+     "orchestrator"),
+    ("sdlc:architecture", CP + "finish-gate-feedback 5 --expect-stage architecture "
+                               "--repo-path /w", "orchestrator"),
+    ("sdlc:development", CP + "prepare-rework 5", "orchestrator"),
+    ("sdlc:development", CP + "next-action 9 --run-id r --sync-epic", "orchestrator"),
+    ("sdlc:exploratory", CP + "close-epic 9 --clean-worktree", "orchestrator"),
     ("sdlc:design-review", CP + "waive-gate 5 --stage architecture --summary s", "orchestrator"),
     ("sdlc:product", CP + "post-comment 5 --role architecture --body-file f", "only your own stage"),
     ("sdlc:lld", CP + "post-comment 5 --body-file f", "only your own stage"),

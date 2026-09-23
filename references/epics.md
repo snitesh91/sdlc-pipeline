@@ -261,9 +261,9 @@ All other rework follows `references/rework.md`.
   `create-lld-tasks`' numbering commit — never commit to it by hand, never delete it while the
   Epic is open. The `close-epic` merge is the one deletion, once the Epic is done.
 - **Epic branch rot:** `epic-<n>` takes one merge from `main` at close, so long-lived Epics
-  drift. Run `sync-branch <epic> --unit epic --repo-path <p>` at the start of each
-  invocation on the Epic and whenever `main` moved under it (SKILL.md, Step 1), so every
-  branch cut from it starts close to `main` and `close-epic`'s reconcile stays small.
+  drift. `next-action --sync-epic` syncs it with `main` at each run's start, every third
+  merge and whenever `main` moved (`epic_sync`, SKILL.md Step 1), so every branch cut from
+  it starts close to `main` and `close-epic`'s reconcile stays small.
 - **Runtime stack**: when `pipeline.stack.enabled`, run `provision-epic-stack <n>` at the
   epic's first touch; `close-epic`'s merge tears it down (`references/parallelism.md`,
   "Per-epic isolated stack").
@@ -372,11 +372,11 @@ operator's say-so it runs the full lane. A fix that lands on `epic-<n>` after th
 is judged by "Evidence carry-forward" above: `close-epic`'s `evidence` field says what still
 stands and what must be re-run and re-recorded.
 
-**Clean the epic worktree before the closing merge.** The exploratory pass and the
-`unattested_suites` runs leave the epic-branch worktree dirty (evidence JSONs, `uploads/`,
-build output); `close-epic`'s reconcile/merge works from that worktree. Discard those
-untracked/working-tree changes yourself (they are never committed to `epic-<n>`) before the
-second `close-epic` call, or the merge carries them.
+**Pass `--clean-worktree` on the `close-epic` call after the closing run.** The exploratory
+pass and the `unattested_suites` runs leave untracked output in the epic worktree (evidence
+JSONs, `uploads/`), which would keep the merge's cleanup from releasing it; the flag discards
+it right before a reconcile or the merge (never on a refused call) and refuses, touching
+nothing, when the tree holds a tracked change (`worktree_clean.tracked_changes`).
 
 **Every manual-testing finding is its own `Bug` child of the epic**
 (`file-closing-delta <epic> --title .. --body .. [--priority P] [--effort High|Medium|Low]`),

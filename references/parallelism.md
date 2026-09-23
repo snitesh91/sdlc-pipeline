@@ -128,15 +128,15 @@ difference is minutes.
 
 ## Git-conflict handling
 
-- `sync-branch`/`transition` returns `conflict: true` + `conflicting_files` → rework:
+- `sync-branch`/`transition`/`prepare-rework` returns `conflict: true` + `conflicting_files` → rework:
   resume that child's own `development` agent with the files, it resolves in its own
   worktree, re-run `sync-branch`. Escalation pairing `sync-branch-conflict` ↔
   `development`, counted by `pairing-counts <n>` (→ `references/rework.md`).
 - `base_missing: true` → nothing to reconcile yet; proceed.
-- **Merge-time freshness gate:** `merge-pr` returns `merged: false` + `behind_base` →
-  `sync-branch`, wait for the new head's required-workflow checks (a suite with no PR-level
-  CI: resume `development` to re-run and `record-local-ci` the new head), re-run `merge-pr`.
-  `carried_attestation_forward: true` means it merged; nothing to do.
+- **Merge-time freshness gate:** `merge-pr` returns `merged: false` + `behind_base` (or
+  `transition` a `held`) → `prepare-rework <n>`; satisfy its `suites.needed` (SKILL.md,
+  Composites table), then re-run `merge-pr`. `carried_attestation_forward: true` means it
+  merged; nothing to do.
 - `merge-pr` fails because GitHub reports the PR non-mergeable → treat as a sync
   conflict (resume `development`); never blindly retry.
 - `finish-lld` / `create-lld-tasks` returns `conflict` → the numbered doc is not on origin;
@@ -144,7 +144,7 @@ difference is minutes.
   (merges `origin/epic-<e>` into the phase-Task's branch), then re-run. `review_stale` → the
   design PR's doc changed after its review: re-run the review and `record-design-review`.
   `merge-gate` returns `behind_base` the same way.
-- An `epic-<n>` ← `main` conflict (`close-epic`, `sync-branch --unit epic`) has no stage
+- An `epic-<n>` ← `main` conflict (`close-epic`, `next-action`'s `epic_sync`) has no stage
   agent: resolve it yourself in the epic worktree, or dispatch a `development` agent for
   that one reconcile — never a child's tracked agent. A clean textual merge is not enough:
   re-check what no file conflict shows (a count or allow-list both sides pinned, specs
@@ -165,8 +165,8 @@ difference is minutes.
   (skip it only right after `pass-gate`/`skip-gate`). Never run `sync-branch` while an
   agent of the same unit is live — it moves that worktree under the agent — and the guard
   denies every stage agent the command: a live agent that finds itself behind stops with
-  `blocked` naming `sync-branch <n>` (never a hand `git merge origin/<base>`); you sync,
-  then resume it on the new head.
+  `blocked` naming `sync-branch <n>` (never a hand `git merge origin/<base>`); you run
+  `prepare-rework <n>`, then resume it on the new head.
 - The gitignored `.env.<profile>` / `.secrets.<profile>` live only in the main checkout.
   For a stage that runs e2e or a live-credential check, symlink them into its worktree
   (`ln -s <repo-root>/.secrets.<profile> <worktree>/`) or name their main-checkout path

@@ -114,8 +114,8 @@ comments after the cutoff marker) decides whether there is something to address,
 job runs a runner on every comment in the repo, so it was dropped; a driven repo that wants
 the flip wires its own `issue_comment` / `pull_request_review` trigger to
 `mark-feedback-received --pr <n> --author <login> --body <text>`. `mark-feedback-addressed
-<issue>` flips it back (a no-op flip when nothing set it); **the orchestrator runs it, never
-the agent** ("Addressing gate feedback").
+<issue>` flips it back (a no-op flip when nothing set it); **the orchestrator runs it, via
+`finish-gate-feedback`, never the agent** ("Addressing gate feedback").
 
 ## Addressing gate feedback
 
@@ -142,10 +142,11 @@ updates the open PR (no new PR). Instruct the agent to:
    `done` ("feedback addressed and pushed"). Anything it could not finish is `blocked` /
    `needs-human` / `failed`. It never runs `mark-feedback-addressed`: that is yours.
 
-**Then you:** on `done`, `transition <n> --expect-stage <the gated doc's stage>`; only on
-`ready: true` run `python3 "$SDLC" mark-feedback-addressed <n>`, which returns the issue to
-`Awaiting Human Review`. On any other outcome leave the status at `Feedback Received` and
-handle the outcome as usual (`SKILL.md`, "After the subagent returns").
+**Then you:** on `done`, `finish-gate-feedback <n> --expect-stage <the gated doc's stage>
+--repo-path <the unit's worktree>` (back to `Awaiting Human Review` only when its transition is
+`ready`; otherwise act on `failed_step`/`reason` as for `transition`). On any other outcome
+leave the status at `Feedback Received` and handle the outcome as usual (`SKILL.md`, "After
+the subagent returns").
 
 **Escalation valve**: if the same thread or the same point survives three revisions
 without the human accepting it, dispatch the context-reset replacement for revisions 4–6
@@ -158,8 +159,8 @@ revision still doesn't land it, `mark-needs-human`.
 `merge-gate <pr> --issue <n> --stage product|architecture --operator-confirmed` merges an
 open gate PR (Gate A's `issue-<n>` → `main`, or a design PR held for the human). **Run it
 only when the operator explicitly tells you to merge that gate PR** — never on your own
-judgement, never because feedback looks resolved. On `behind_base`: `sync-branch <n>`, wait
-for fresh checks, re-run; its other refusals name their cause. It does not pass the gate:
+judgement, never because feedback looks resolved. On `behind_base`: `prepare-rework <n>`, wait
+for its `suites.needed`, re-run; its other refusals name their cause. It does not pass the gate:
 `next-action` (or the Action) then returns `pass-gate` for the merged PR.
 
 ## Passing a gate

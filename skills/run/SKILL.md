@@ -122,7 +122,7 @@ issue or is legacy:
   the two). Run `cut-phase-tasks <epic> --repo-path <p>` (next section), then call
   `next-action <initiative>` again.
 - **`run-epic`** (`epic`) — run that Epic's normal Step 1–3 loop inline: `next-action <epic>
-  --run-id "$RUN_ID"` and everything below, through its `none`, `check-epics-closeable` /
+  --run-id "$RUN_ID" --sync-epic` and everything below, through its `none`, `check-epics-closeable` /
   `close-epic` (when `pipeline.epicClose.auto` allows) and its Step 4 facts. Then return to
   `next-action <initiative>`. **Use the same `--run-id` for the Initiative and every Epic**:
   `parallelism.maxTasksPerRun` is shared across them, and `stop-at-cap` on either means
@@ -208,6 +208,10 @@ failure.
 |---|---|
 | `start-stage <n> --role <role> [--unit epic] [--base <ref>]` | (`epic-<n>`'s worktree first, for a child of a non-standing Epic) `worktree-add` then `claim` (Step 2) → worktree result, claim result. Refuses `development` on a unit with an open PR (`failed_step: check-claimable`): resume its agent instead (`references/rework.md`) |
 | `transition <n> --expect-stage <s> [--pr <pr>] [--repo-path <p>] [--base <ref>]` | After a subagent returns: `verify-exit` → `sync-branch` → `open-design-pr` (an Epic's `architecture`/`lld` phase-Task only) → `start-comment` when `<s>` is a review role → `ready`, `stopped_at`, per-step results (incl. `handoff_marker_present`, `conflict`, the design `pr`; `held` when a `pr-review` start lacks suite evidence on the post-sync head — `references/operations.md`, "Local-CI attestation"; `skip_confidence_threshold` for an `arch-review`) |
+| `advance-standing <n> --from none\|product\|product-review\|architecture\|arch-review --to product\|architecture\|development --reason "<one line>" [--repo-path <p>]` | Skip a standing child ahead ("Routing a standing child"): `transition --expect-stage <from>` (none at pickup; a review verifies as the stage it followed) → `route` → `start-stage --role <to>` → `routed`, `path`, `claimed`, `failed_step` (route's refusal is its `reason`) |
+| `skip-pr-review <n> --pr <pr> --reason "<one line>" --run-id <id>` | Merge a standing child's PR without `pr-review`: `verify-exit --expect-stage pr-review --pr` → `route --to merge` (refused after a `pr-review` bounce) → `merge-pr` → `merged`, `failed_step` (a `merge-pr` `behind_base` → `prepare-rework`, then re-run) |
+| `finish-gate-feedback <n> --expect-stage product\|architecture --repo-path <the unit's worktree>` | After a gate-feedback agent's `done`: `transition`, then `mark-feedback-addressed` only on `ready` → `ready`, `pipeline_status`, `failed_step` |
+| `prepare-rework <n> [--unit epic] [--repo-path <p>]` | Before resuming a rework or run-only agent, or after a `behind_base` / `held`: `worktree-add` (reuse, or re-create a released tree from origin) → `sync-branch` → `path`, post-sync `head`, `conflict` + `conflicting_files`, `pr`, `suites` (`needed`: each suite the new head still lacks, with its `check` — `pending` = wait for CI, `missing` = no PR-level CI: resume `development` to re-run it and `record-local-ci`; `carried`, `passed_by_check`) |
 | `cut-phase-tasks <epic> [--arch-body TEXT] [--lld-body TEXT] --repo-path <p>` | `epic-<n>` + its worktree, create + stage both phase-Tasks, LLD blocked by Architecture, Architecture worktree off `epic-<n>`; idempotent → `architecture_task`, `lld_task` |
 | `finish-lld <lld-task-n> --epic <e> --repo-path <p>` | `merge-design-pr` → `create-lld-tasks` → `merge-lld-doc` → `close-issue` → `completed_steps`, `failed_step`, per-step results |
 | `open-arch-revision <epic> --title TEXT --body TEXT [--blocks N ...] --repo-path <p>` | `epic-<n>` worktree + `create-issue` + `set-stage architecture` + worktree off `epic-<n>` + `add-blocked-by` per `--blocks` unit → `revision_task` |
@@ -221,14 +225,14 @@ an override only.
 
 | Command | What it owns |
 |---|---|
-| `next-action <epic\|initiative> --run-id <id> [--repo-path <p>] [--skip-epic <n> ...]` | The one unit to work (Step 1); on an Initiative, the Epic to descend into ("The Initiative loop"). `--repo-path` (default `.`) is where it reads the dev lane's slot holders |
+| `next-action <epic\|initiative> --run-id <id> --sync-epic [--repo-path <p>] [--skip-epic <n> ...]` | The one unit to work (Step 1); on an Initiative, the Epic to descend into ("The Initiative loop"). `--repo-path` (default `.`) is where it reads the dev lane's slot holders. `--sync-epic` keeps a non-standing Epic's `epic-<n>` current with `main` first (`epic_sync`, Step 1) |
 | `list-parallel-ready <epic> --repo-path <p> --run-id <id>` / `list-design-ready <epic> --repo-path <p>` / `list-ready-for-review <epic>` | Dev-lane / standing-epic design-lane / review pools |
 | `lld-section --epic <n> --task <m> --repo-path <p>` | Only Task #`<m>`'s subsection of `epic-<n>/lld.md` |
 | `worktree-add <n> [--unit epic] [--base <ref>]` | The only way to make a worktree: resumes from `origin/<branch>`, else branches off the integration base; `diverged: true` → `references/parallelism.md`, "Working on a branch" |
 | `review-worktree-add <n> --repo-path <p>` / `release-review-worktree <n>` | `pr-review`'s detached worktree at `origin/issue-<n>` / its removal (idempotent; `merge-pr` also runs it) |
 | `prune-stale --repo-path <p> [--dry-run]` | Closed units' worktrees (review ones included), landed branches on origin and locally, stale run-state files; then `worktree prune` + `fetch --prune`. Never touches open units, other branches or unmerged work |
-| `claim <n> --role <r>` / `start-comment <n> --role <r>` / `sync-branch <n> [--unit epic] [--base <ref>]` / `verify-exit <n> --expect-stage <s> [--pr <pr>]` | The steps inside `start-stage` / `transition` |
-| `route <n> --to product\|architecture\|development\|merge --reason "<one line>"` | Skip a standing child ahead ("Routing a standing child"); refuses (exit 0) anything but a forward move on a standing child |
+| `claim <n> --role <r>` / `start-comment <n> --role <r>` / `sync-branch <n> [--unit epic] [--base <ref>]` / `verify-exit <n> --expect-stage <s> [--pr <pr>]` | The steps inside `start-stage` / `transition` / `prepare-rework` / `skip-pr-review` |
+| `route <n> --to product\|architecture\|development\|merge --reason "<one line>"` | The step inside `advance-standing` / `skip-pr-review`; refuses (exit 0) anything but a forward move on a standing child |
 | `set-stage <n> --stage <s>` / `add-blocked-by <n> --on <dep>` / `create-issue --parent <n> --type <T> [--blocked-by <dep> ...]` / `repair-issue <n> [--parent <p>] [--type <T>]` | Stage a unit / order units (Epics: wave order, "Cutting Epics") / the only issue-creation path / fill an existing issue's missing fields |
 | `open-design-pr <n>` / `merge-design-pr <pr> --issue <n> [--repo-path <p>]` | A phase-Task's design PR `issue-<n>` → `epic-<e>`: `transition` opens it; `skip-gate`/`waive-gate`/`finish-lld` merge it — re-run those, not `merge-design-pr`. Its refusals (`behind_base`, `review_stale`, missing/`rework` review evidence, an `arch-review` below the skip bar) come back in their `design_pr` / `failed_step` |
 | `create-lld-tasks <epic> --repo-path <p>` / `merge-lld-doc <epic-n>` / `close-issue <n> [--repo-path <p>] [--not-planned --reason TEXT]` | The steps inside `finish-lld`; `close-issue` is the orchestrator's close (terminal fields, then `cleanup`: worktrees released, a branch whose work landed deleted on origin and locally, unmerged work kept); `--not-planned` drops a unit with its reason on the thread (`references/operations.md`, "Dropping a unit") |
@@ -241,9 +245,9 @@ an override only.
 | `pairing-counts <n>` / `show-config` | Valve strike counts + thresholds / effective tunables and the running `plugin` version (read once per invocation) |
 | `list-needs-human` / `check-epics-closeable` / `audit-issues [--epic <n>\|--initiative <n>]` | End-of-invocation sweeps; `audit-issues` also flags open Epics with no phase-Tasks, with the `cut-phase-tasks` repair |
 | `resolve-thread --thread-id <id> [--reply TEXT]` | Reply to and resolve a gate PR review thread; the gate-feedback agent runs it for the threads it addressed (`references/gates.md`) |
-| `close-epic <n> [--no-carry-forward]` / `record-epic-verification <n> --kind e2e\|exploratory --summary TEXT [--sha S]` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"; its merge also cleans up the epic and tears the stack down); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
+| `close-epic <n> [--no-carry-forward] [--clean-worktree]` / `record-epic-verification <n> --kind e2e\|exploratory --summary TEXT [--sha S]` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"; its merge also cleans up the epic and tears the stack down; `--clean-worktree` first discards the closing run's untracked output from the epic worktree, refusing — `worktree_clean.tracked_changes` — on any tracked change); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
 | `check-initiative-closeable <n>` / `record-initiative-verification <n> --outcome met\|unmet --summary` / `close-initiative <n>` | "Closing an Initiative" |
-| `mark-feedback-addressed <n>` | Yours, after a gate-feedback agent finished and `transition` verified its push (`references/gates.md`, "Addressing gate feedback"); never the agent's |
+| `mark-feedback-addressed <n>` | The step inside `finish-gate-feedback` (`references/gates.md`, "Addressing gate feedback"); never the agent's |
 | `auto-pass-gate` / `mark-feedback-received` | CI-triggered paths only — never run them yourself (the shipped workflow runs `auto-pass-gate`; `mark-feedback-received` only if the driven repo wires a comment trigger) |
 
 For most commands `--repo-path` may be any path inside the repo; `transition` /
@@ -308,7 +312,7 @@ run. At invocation start, run `python3 "$SDLC" prune-stale --repo-path <p>` (clo
 worktrees and landed branches; `--dry-run` to preview).
 
 ```bash
-python3 "$SDLC" next-action <epic> --run-id "$RUN_ID"
+python3 "$SDLC" next-action <epic> --run-id "$RUN_ID" --sync-epic
 ```
 
 Every result except `skip`/`none`/`stop-at-cap` carries `unit`: `"issue"`, or `"epic"` for
@@ -317,7 +321,7 @@ Every result except `skip`/`none`/`stop-at-cap` carries `unit`: `"issue"`, or `"
 | `action` | Meaning | What to do |
 |---|---|---|
 | `resume` | A claimed stage's session died | Resume at `stage` from comments + committed docs (Step 3) — unless you are driving that unit right now in this session: then skip it and survey again. When the result flags `likely_live` (a recent `claim_age_seconds`), another session may be driving it: do **not** launch an agent — ask the operator |
-| `route` | A fresh standing child | Pick its first stage and `route` it ("Routing a standing child"), then Step 1 again |
+| `route` | A fresh standing child | Pick its first stage and `advance-standing <n> --from none --to <stage>` ("Routing a standing child"; scope alignment first when `<stage>` is `product`, Step 2), then Step 3 |
 | `delegate` | A child is ready | Step 2, then Step 3 |
 | `pass-gate` | A gate PR was merged (or a human merged an Architecture-phase Task's design PR before its gate opened) | `references/gates.md`, "Passing a gate" — pass `issue`/`gate_pr`/`stage` verbatim |
 | `address-gate-feedback` | Gate PR has unresolved threads or new comments | `references/gates.md`, "Addressing gate feedback" |
@@ -337,19 +341,18 @@ Every result except `skip`/`none`/`stop-at-cap` carries `unit`: `"issue"`, or `"
 - **A `blockedBy` edge is not a whole-child stop.** It usually constrains `development`
   onward, not a standing child's `product`/`architecture` — start the design stage
   concurrently and sequence only the dependent stages. Keep the native edge.
-- **Keep `epic-<n>` from rotting against `main`.** At the start of each invocation on a
-  non-standing Epic, and again after every third merge of a sibling Task or whenever `main`
-  moved under it, run `python3 "$SDLC" sync-branch <epic> --unit epic --repo-path <p>`; a
-  `conflict` has no stage agent (`references/parallelism.md`, "Git-conflict handling"). It also
-  keeps every new phase/Task branch, cut from `epic-<n>`, close to `main`.
+- **`epic_sync`** (`--sync-epic`) keeps `epic-<n>` from rotting against `main`. On
+  `conflict` (reported once, then `pending` until `main` or the epic head moves) →
+  `references/parallelism.md`, "Git-conflict handling"; on `error` → report it (the
+  action still stands). `skipped`/`due: null` need nothing.
 - **Before ending on `none`:** `list-needs-human` (skim each reason; clear a stale one
   with a comment), `check-epics-closeable` (idempotent) and `audit-issues --epic <n>` (`--initiative <n>` on an Initiative)
   (run each flagged issue's `repair` command, filling any `<P>`/`<T>`; never re-create
   it), then `prune-stale --repo-path <p>`. All feed Step 4.
 - **When `check-epics-closeable` names an epic and `pipeline.epicClose.auto` is on**,
   close it yourself: `close-epic` (reconciles) → run the exploratory pass →
-  record it only if it ran clean → clean the epic worktree (the pass leaves it dirty) →
-  `close-epic` again (merges; it also cleans up the epic's branches, worktrees and stack).
+  record it only if it ran clean → `close-epic --clean-worktree` (discards the pass's
+  untracked output, then merges; it also cleans up the epic's branches, worktrees and stack).
   Escalate instead on the cases in "What you decide". Full
   mechanics: `references/epics.md`, "Epic closing". With the toggle off, just report it.
 
@@ -505,13 +508,10 @@ reads that branch's HEAD, and from the main checkout it falsely reports the doc 
   - **`conflict`** → `references/parallelism.md`, "Git-conflict handling".
   - A failed `verify-exit` → the previous stage's exit action did not run; resolve it
     before dispatching anything.
-- **Sync before resuming a rework or run-only agent — that is yours**, since stage agents
-  are denied `sync-branch` (the denial tells them to stop with `blocked` naming
-  `sync-branch <n>`; never sync under a live agent — `references/parallelism.md`, "Working
-  on a branch"). After a sibling merges, a `merge-pr` `behind_base` (or a
-  `transition` `held` on a stale attestation) means `sync-branch <n>`, then wait for the new
-  head's required-workflow checks; only a suite with no PR-level CI needs `development`
-  resumed to re-run and re-attest on the new head.
+- **Before resuming a rework or run-only agent** (stage agents are denied `sync-branch`;
+  never sync under a live agent — `references/parallelism.md`, "Working on a branch"), and
+  on a `merge-pr` `behind_base` or a `transition` `held`: `prepare-rework <n>`, then act on
+  its `conflict` and `suites.needed` (Composites table).
 - `pass-gate`/`skip-gate`/`waive-gate` reconcile or merge internally — no sync after them.
 - An Epic's `architecture`/`lld` phase-Task: `transition` raised the design PR; give the review
   agent its number (`steps.open-design-pr.pr`) — it reviews on that PR.
@@ -551,14 +551,12 @@ its place:
   change, saying why in `--reason`; never after `pr-review` bounced it.
 - Otherwise the default next stage.
 
-To skip ahead after a stage returns: `transition <n> --expect-stage <the stage just
-finished>`, then `route <n> --to <stage> --reason "<one line>"`, then Step 2 with
-`--role <stage>`. At pickup the child has no Stage and nothing to verify: go straight to
-`route` (or to Step 2 with `--role product` when it needs the full flow). To skip
-`pr-review`: `verify-exit <n> --expect-stage pr-review --pr <pr>`, `route <n> --to merge`,
-then `merge-pr` (the route marker is its evidence). `route` only moves forward; when a
-later stage finds an open product decision, `set-stage <n> --stage product` and run a
-fresh `product`.
+To skip ahead (after a stage returns, or `--from none` at pickup):
+`advance-standing <n> --from <stage just finished> --to <stage> --reason "<one line>"`, then
+delegate at `path` (Step 3); on `failed_step` act on its `reason`. To skip `pr-review`:
+`skip-pr-review <n> --pr <pr> --reason "<one line>" --run-id "$RUN_ID"`. `route` only moves
+forward; when a later stage finds an open product decision, `set-stage <n> --stage product`
+and run a fresh `product`.
 
 ### Stop at the run cap — reset your context between batches
 
