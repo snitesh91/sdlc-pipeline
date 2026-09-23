@@ -215,3 +215,30 @@ def test_repair_issue_parent_at_the_cap_reports_the_cap_not_a_crash():
     out = s.cmd_repair_issue(gh, n, parent=50, type_name="Bug")
     assert out["reason_code"] == "sub_issue_cap" and out["linked"] is False
     assert "issueType" in out["set"] and gh.issues[n]["issue_type"] == "Bug"
+
+
+# --- Fix 5: the terminal count is run-wide, like the cap it is reported against ---------
+
+def _two_epic_run(monkeypatch, tmp_path):
+    monkeypatch.setenv("SDLC_RUNS_DIR", str(tmp_path))
+    monkeypatch.setattr(s, "MAX_TASKS_PER_RUN", 4)
+    s._write_run_state(8, {"run_id": "run-1", "terminal": [30, 31]})
+    s._write_run_state(9, {"run_id": "run-1", "terminal": []})
+    return FakeGh([{"number": 8, "labels": ["type:epic"]}, {"number": 9, "labels": ["type:epic"]},
+                   {"number": 5, "labels": ["type:task"], "parent": 9}])
+
+
+def test_record_terminal_unit_reports_the_run_wide_count(monkeypatch, tmp_path):
+    """Regression: merge-pr reported 1/4 while the cap check counted 3/4 across epics."""
+    summary = s.record_terminal_unit(_two_epic_run(monkeypatch, tmp_path), 5, run_id="run-1")
+    assert summary["terminal_count"] == 3 and summary["epic_terminal_count"] == 1
+    assert summary["terminal_count"] == len(s.run_completed(s.read_run_state(9)))
+
+
+def test_record_terminal_unit_single_epic_count_is_unchanged(monkeypatch, tmp_path):
+    """Positive control: with one epic in the run the run-wide count is the epic's."""
+    monkeypatch.setenv("SDLC_RUNS_DIR", str(tmp_path))
+    s._write_run_state(9, {"run_id": "run-A", "terminal": [4]})
+    gh = FakeGh([{"number": 9, "labels": ["type:epic"]},
+                 {"number": 5, "labels": ["type:task"], "parent": 9}])
+    assert s.record_terminal_unit(gh, 5)["terminal_count"] == 2

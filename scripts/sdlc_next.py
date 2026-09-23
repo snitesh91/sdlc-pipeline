@@ -1613,8 +1613,10 @@ def record_terminal_unit(gh: WorkItemProvider, issue: int,
             state["terminal"].append(issue)
         state.get("in_flight", {}).pop(str(issue), None)
         _write_run_state(parent, state)
+    # The cap is run-wide (`run_completed`), so the count reported against it is too.
     return {"epic": parent, "run_id": state.get("run_id"),
-            "terminal_count": len(state["terminal"]), "cap": MAX_TASKS_PER_RUN}
+            "terminal_count": len(run_completed(state)),
+            "epic_terminal_count": len(state["terminal"]), "cap": MAX_TASKS_PER_RUN}
 
 
 PHASE_TASK_TITLES = {"architecture": "Architecture phase", "lld": "LLD phase"}
