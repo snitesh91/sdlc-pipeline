@@ -5,7 +5,7 @@ import json
 import pytest
 
 import sdlc_next as s
-from tests.test_sdlc_next import (ScriptedRunner, _NO_UNIT_WORKTREE, _clean_pipeline_comments,
+from tests.test_sdlc_next import (ScriptedRunner, _script_terminal_fields, _NO_UNIT_WORKTREE, _clean_pipeline_comments,
                                   _issue, _list_argv, _list_response)
 
 
@@ -105,6 +105,7 @@ def _merge_runner():
     runner.prefix_responses = {("gh", "pr", "merge", "42"): "",
                                ("gh", "pr", "comment", "42"): "",
                                ("gh", "issue", "comment", "9"): ""}
+    _script_terminal_fields(runner, 9)
     return runner
 
 

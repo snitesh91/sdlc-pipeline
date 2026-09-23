@@ -850,6 +850,26 @@ def test_claim_sets_stage_and_status_fields_and_posts_start_comment():
     assert list(status_mutation_argv) in runner.calls
 
 
+
+def _script_terminal_fields(runner, n):
+    """Script the calls `cmd_mark_issue_closed` makes for issue `n` (merge-pr sets them)."""
+    from sdlc_next import (_ISSUE_EPIC_CHECK_QUERY, _ISSUE_NODE_ID_QUERY,
+                            _DELETE_ISSUE_FIELD_VALUE_MUTATION, _SET_ISSUE_FIELD_MUTATION,
+                            STAGE_FIELD_ID, PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS)
+    q = lambda text: ("gh", "api", "graphql", "-f", f"query={text}")
+    runner.responses.update({
+        q(_ISSUE_EPIC_CHECK_QUERY.format(n=n)): json.dumps({"data": {"repository": {"issue": {
+            "issueType": {"name": "Task"}, "parent": None, "labels": {"nodes": []}}}}}),
+        q(_ISSUE_NODE_ID_QUERY.format(n=n)):
+            json.dumps({"data": {"repository": {"issue": {"id": f"ISSUE_{n}"}}}}),
+        q(_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id=f"ISSUE_{n}", field_id=STAGE_FIELD_ID)):
+            json.dumps({"data": {}}),
+        q(_SET_ISSUE_FIELD_MUTATION.format(issue_id=f"ISSUE_{n}", field_id=PIPELINE_STATUS_FIELD_ID,
+                                           option_id=PIPELINE_STATUS_OPTION_IDS["done"])):
+            json.dumps({"data": {}}),
+    })
+
+
 def test_mark_issue_closed_clears_stage_and_sets_done_for_epic():
     from sdlc_next import (GitHub, cmd_mark_issue_closed, _ISSUE_EPIC_CHECK_QUERY,
                             _ISSUE_NODE_ID_QUERY, _DELETE_ISSUE_FIELD_VALUE_MUTATION,
@@ -983,6 +1003,8 @@ def test_open_gate_creates_pr_sets_status_field_and_posts_marked_comment():
         status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
     })
     gh_runner.prefix_responses[("gh", "issue", "comment", "9", "--repo", "owner/repo")] = ""
+    gh_runner.prefix_responses[("gh", "label", "create")] = ""
+    gh_runner.prefix_responses[("gh", "pr", "edit")] = ""
     gh = GitHub(runner=gh_runner)
     result = cmd_open_gate(gh, "/repo", issue=9, title="Add widget", doc="product.md",
                             next_stage="architecture", summary="Adds a widget.", runner=git_runner)
@@ -1429,6 +1451,7 @@ def test_merge_pr_refuses_when_checks_not_passed():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
     })
+    _script_terminal_fields(runner, 9)
     gh = GitHub(runner=runner)
     try:
         cmd_merge_pr(gh, 42, issue=9)
@@ -1438,7 +1461,6 @@ def test_merge_pr_refuses_when_checks_not_passed():
 
 
 def test_merge_pr_merges_and_confirms_issue_closed_when_checks_pass():
-    # No field-mutation call is scripted: merge-pr must not touch Stage/Pipeline Status.
     from sdlc_next import GitHub, cmd_merge_pr
     from tests.test_sdlc_next import ScriptedRunner
     import json
@@ -1463,6 +1485,7 @@ def test_merge_pr_merges_and_confirms_issue_closed_when_checks_pass():
         ("gh", "pr", "comment", "42"): "",
         ("gh", "issue", "comment", "9"): "",
     }
+    _script_terminal_fields(runner, 9)
     gh = GitHub(runner=runner)
     result = cmd_merge_pr(gh, 42, issue=9)
     assert result == {"pr": 42, "issue": 9, "merged": True, "issue_closed": True, "config_changed": False,
@@ -1724,6 +1747,7 @@ def test_merge_pr_refuses_when_backend_workflow_reported_no_check():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
     })
+    _script_terminal_fields(runner, 9)
     gh = GitHub(runner=runner)
     try:
         cmd_merge_pr(gh, 42, issue=9)
@@ -1752,6 +1776,7 @@ def test_merge_pr_refuses_when_required_workflow_only_skipped():
         ("gh", "pr", "view", "42", "--repo", "owner/repo",
          "--json", "comments,headRefOid"): json.dumps({"comments": [], "headRefOid": "abc"}),
     })
+    _script_terminal_fields(runner, 9)
     gh = GitHub(runner=runner)
     try:
         cmd_merge_pr(gh, 42, issue=9)
@@ -1786,6 +1811,7 @@ def test_merge_pr_allows_docs_only_pr_with_no_checks():
         ("gh", "pr", "comment", "42"): "",
         ("gh", "issue", "comment", "9"): "",
     }
+    _script_terminal_fields(runner, 9)
     gh = GitHub(runner=runner)
     result = cmd_merge_pr(gh, 42, issue=9)
     assert result == {"pr": 42, "issue": 9, "merged": True, "issue_closed": True, "config_changed": False,
@@ -1818,6 +1844,7 @@ def test_merge_pr_reports_config_changed_when_the_merged_pr_touched_the_pipeline
         ("gh", "pr", "comment", "42"): "",
         ("gh", "issue", "comment", "9"): "",
     }
+    _script_terminal_fields(runner, 9)
     gh = GitHub(runner=runner)
     result = cmd_merge_pr(gh, 42, issue=9)
     assert result["merged"] is True
@@ -1840,6 +1867,7 @@ def test_merge_pr_refuses_as_structured_result_when_branch_behind_main():
             "backend/src/x.ts\n",
         tuple(_list_argv()): _list_response([_issue(9)]),
     })
+    _script_terminal_fields(runner, 9)
     gh = GitHub(runner=runner)
     result = cmd_merge_pr(gh, 42, issue=9)
     assert result["merged"] is False
@@ -1878,6 +1906,7 @@ def test_merge_pr_allows_when_both_required_workflows_pass():
         ("gh", "pr", "comment", "42"): "",
         ("gh", "issue", "comment", "9"): "",
     }
+    _script_terminal_fields(runner, 9)
     gh = GitHub(runner=runner)
     result = cmd_merge_pr(gh, 42, issue=9)
     assert result == {"pr": 42, "issue": 9, "merged": True, "issue_closed": True, "config_changed": False,
@@ -2258,6 +2287,8 @@ def test_open_gate_unit_issue_phase_task_opens_its_own_branch_against_main():
         ("gh", "pr", "create"): "https://github.com/owner/repo/pull/500\n",
         ("gh", "issue", "comment", "40"): "",
     }
+    gh_runner.prefix_responses[("gh", "label", "create")] = ""
+    gh_runner.prefix_responses[("gh", "pr", "edit")] = ""
     gh = GitHub(runner=gh_runner)
     result = cmd_open_gate(gh, "/repo", 40, "Product Roadmap Task", "product.md",
                             "architecture", "Locked Initiative-level requirements.",
@@ -2289,6 +2320,8 @@ def test_open_gate_targets_main_from_issue_branch():
         ("gh", "pr", "create"): "https://github.com/owner/repo/pull/41\n",
         ("gh", "issue", "comment", "9"): "",
     }
+    gh_runner.prefix_responses[("gh", "label", "create")] = ""
+    gh_runner.prefix_responses[("gh", "pr", "edit")] = ""
     gh = GitHub(runner=gh_runner)
     result = cmd_open_gate(gh, "/repo", 9, "Fix widget", "architecture.md", "development",
                             "Design locked.", runner=git_runner)
@@ -4048,6 +4081,7 @@ def test_merge_pr_closes_child_explicitly_when_merged_into_epic_branch():
         ("gh", "pr", "comment", "42"): "",
         ("gh", "issue", "comment", "9"): "",
     }
+    _script_terminal_fields(runner, 9)
     gh = GitHub(runner=runner)
     result = cmd_merge_pr(gh, 42, issue=9)
     assert result["merged"] is True and result["issue_closed"] is True
@@ -4078,6 +4112,7 @@ def test_merge_pr_does_not_close_the_issue_itself_when_the_base_is_main():
         **_NO_UNIT_WORKTREE,
     })
     runner.prefix_responses = {("gh", "pr", "comment", "42"): ""}
+    _script_terminal_fields(runner, 9)
     gh = GitHub(runner=runner)
     result = cmd_merge_pr(gh, 42, issue=9)
     assert result["merged"] is True and result["issue_closed"] is False
@@ -4101,6 +4136,8 @@ def test_open_gate_unit_issue_does_not_consult_the_gate_branch_guard():
         ("gh", "pr", "create"): "https://github.com/owner/repo/pull/131\n",
         ("gh", "issue", "comment", "9"): "",
     }
+    gh_runner.prefix_responses[("gh", "label", "create")] = ""
+    gh_runner.prefix_responses[("gh", "pr", "edit")] = ""
     gh = GitHub(runner=gh_runner)
     result = cmd_open_gate(gh, "/repo", 9, "Notification prefs", "product.md",
                             "architecture", "Locked requirements.", runner=git_runner)
@@ -5577,6 +5614,7 @@ def test_merge_pr_refuses_behind_base_when_delta_touches_suite_covered_files():
             "backend/src/service.ts\n",
         tuple(_list_argv()): _list_response([_issue(9)]),
     })
+    _script_terminal_fields(runner, 9)
     gh = GitHub(runner=runner)
     result = cmd_merge_pr(gh, 42, issue=9)
     assert result["merged"] is False
@@ -5612,6 +5650,7 @@ def test_merge_pr_carries_attestation_forward_when_behind_base_is_docs_only():
         ("gh", "pr", "comment", "42"): "",
         ("gh", "issue", "comment", "9"): "",
     }
+    _script_terminal_fields(runner, 9)
     gh = GitHub(runner=runner)
     result = cmd_merge_pr(gh, 42, issue=9)
     assert result["merged"] is True
@@ -5721,6 +5760,9 @@ def test_open_gate_uses_the_configured_branch_prefix_but_keeps_the_doc_dir(custo
             return 40
 
         def set_pipeline_status_field(self, issue, status):
+            pass
+
+        def pr_add_label(self, number, label):
             pass
 
         def issue_comment(self, issue, body):
@@ -6433,6 +6475,7 @@ def _merged_pr_bookkeeping(state_responses):
     })
     runner.prefix_responses = {("gh", "pr", "comment", "42"): "",
                                ("gh", "issue", "comment", "9"): ""}
+    _script_terminal_fields(runner, 9)
     states = iter(state_responses)
 
     def call(argv):
@@ -6508,3 +6551,58 @@ def test_missing_token_error_names_the_configured_token_env(monkeypatch, capsys)
     monkeypatch.setattr(sdlc_next, "TOKEN_ENV", "MY_GH_TOKEN")
     assert sdlc_next.main(["list-needs-human"]) == 1
     assert "tokenEnv ($MY_GH_TOKEN)" in json.loads(capsys.readouterr().out)["error"]
+
+
+# --- gate PR label (the workflow's cheap pre-filter) and merge-pr terminal fields ---
+
+def _open_gate_runner():
+    from sdlc_next import (_ISSUE_NODE_ID_QUERY, _SET_ISSUE_FIELD_MUTATION,
+                            PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS)
+    git_runner = ScriptedRunner({("git", "-C", "/repo", "fetch", "origin"): "",
+                                 ("git", "-C", "/repo", "rev-parse", "origin/issue-9"): "abc1234\n"})
+    gh_runner = ScriptedRunner({
+        ("gh", "api", "graphql", "-f", f"query={_ISSUE_NODE_ID_QUERY.format(n=9)}"):
+            json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
+        ("gh", "api", "graphql", "-f", "query=" + _SET_ISSUE_FIELD_MUTATION.format(
+            issue_id="ISSUE_9", field_id=PIPELINE_STATUS_FIELD_ID,
+            option_id=PIPELINE_STATUS_OPTION_IDS["awaiting-human-review"])):
+            json.dumps({"data": {}}),
+    })
+    gh_runner.prefix_responses = {
+        ("gh", "pr", "create"): "https://github.com/owner/repo/pull/40\n",
+        ("gh", "issue", "comment", "9"): "",
+        ("gh", "label", "create"): "",
+        ("gh", "pr", "edit"): "",
+    }
+    return git_runner, gh_runner
+
+
+def test_open_gate_labels_the_gate_pr_so_the_workflow_can_filter_on_it():
+    from sdlc_next import GitHub, cmd_open_gate
+    git_runner, gh_runner = _open_gate_runner()
+    cmd_open_gate(GitHub(runner=gh_runner), "/repo", issue=9, title="Add widget",
+                  doc="product.md", next_stage="architecture", summary="s", runner=git_runner)
+    assert ["gh", "label", "create", "sdlc:gate", "--repo", "owner/repo", "--force"] in gh_runner.calls
+    assert ["gh", "pr", "edit", "40", "--repo", "owner/repo", "--add-label", "sdlc:gate"] in gh_runner.calls
+
+
+def test_open_gate_still_opens_the_gate_when_labelling_fails():
+    from sdlc_next import GitHub, cmd_open_gate
+    git_runner, gh_runner = _open_gate_runner()
+    gh_runner.fail_on = {("gh", "pr", "edit", "40", "--repo", "owner/repo", "--add-label", "sdlc:gate")}
+    result = cmd_open_gate(GitHub(runner=gh_runner), "/repo", issue=9, title="Add widget",
+                           doc="product.md", next_stage="architecture", summary="s",
+                           runner=git_runner)
+    assert result["gate_pr"] == 40
+    assert any(c[:4] == ["gh", "issue", "comment", "9"] for c in gh_runner.calls)
+
+
+def test_merge_pr_sets_the_terminal_fields_on_the_closed_issue():
+    from sdlc_next import (GitHub, cmd_merge_pr, _SET_ISSUE_FIELD_MUTATION,
+                            PIPELINE_STATUS_FIELD_ID, PIPELINE_STATUS_OPTION_IDS)
+    runner, call = _merged_pr_bookkeeping(["MERGED"])
+    cmd_merge_pr(GitHub(runner=call), 42, issue=9)
+    done = ["gh", "api", "graphql", "-f", "query=" + _SET_ISSUE_FIELD_MUTATION.format(
+        issue_id="ISSUE_9", field_id=PIPELINE_STATUS_FIELD_ID,
+        option_id=PIPELINE_STATUS_OPTION_IDS["done"])]
+    assert done in runner.calls

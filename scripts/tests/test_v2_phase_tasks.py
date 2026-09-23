@@ -180,6 +180,9 @@ class FakeGh:
     def pr_comment(self, n, body):
         self.prs[n]["comments"].append(body)
 
+    def pr_add_label(self, n, label):
+        self.prs[n].setdefault("labels", []).append(label)
+
     def pr_list_for_branch(self, branch, state="open"):
         return [{"number": n, **p} for n, p in self.prs.items()
                 if p.get("headRefName") == branch and p.get("state", "OPEN") == "OPEN"]

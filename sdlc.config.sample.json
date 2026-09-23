@@ -92,7 +92,8 @@
     "labels": {
       "standing": "epic:standing",
       "legacy": "epic:legacy",
-      "architected": "epic:architected"
+      "architected": "epic:architected",
+      "gate": "sdlc:gate"
     },
     "branches": {
       "issuePrefix": "issue-",

@@ -287,6 +287,7 @@ def test_open_gate_on_an_epic_architecture_task_gates_the_existing_design_pr(rep
     assert f"`{DOC}/epic-9/architecture.md`" in comment
     # Reviewer comments made before the gate opened are not human feedback.
     assert "<!-- gate-comments-processed: " in gh.prs[pr]["comments"][-1]
+    assert gh.prs[pr]["labels"] == ["sdlc:gate"]
 
 
 def test_open_gate_refuses_when_the_design_pr_was_never_opened(repo):

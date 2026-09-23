@@ -247,7 +247,7 @@ an override only.
 | `close-epic <n> [--no-carry-forward]` / `record-epic-verification <n> --kind e2e\|exploratory [--sha S]` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
 | `check-initiative-closeable <n>` / `record-initiative-verification <n> --outcome met\|unmet --summary` / `close-initiative <n>` | "Closing an Initiative" |
 | `mark-feedback-addressed <n>` | Yours, after a gate-feedback agent finished and `transition` verified its push (`references/gates.md`, "Addressing gate feedback"); never the agent's |
-| `auto-pass-gate` / `mark-todo` / `mark-issue-closed` / `mark-feedback-received` | CI-triggered paths only — never run them yourself (the shipped workflow runs the first three; `mark-feedback-received` only if the driven repo wires a comment trigger) |
+| `auto-pass-gate` / `mark-feedback-received` | CI-triggered paths only — never run them yourself (the shipped workflow runs `auto-pass-gate`; `mark-feedback-received` only if the driven repo wires a comment trigger) |
 
 Branch-writing commands never write in the main checkout. For most commands `--repo-path`
 may be any path inside the repo, but **`transition` / `verify-exit` must get the unit's own

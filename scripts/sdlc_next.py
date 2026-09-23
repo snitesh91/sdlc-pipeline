@@ -97,7 +97,7 @@ with open(os.path.join(PLUGIN_ROOT, "hooks", "model_policy.json")) as _f:
 # config; every key has the default shown here so an older config keeps working.
 _PIPELINE_DEFAULTS = {
     "labels": {"standing": "epic:standing", "legacy": "epic:legacy",
-               "architected": "epic:architected"},
+               "architected": "epic:architected", "gate": "sdlc:gate"},
     "branches": {"issuePrefix": "issue-", "epicPrefix": "epic-"},
     # `ephemeralPrefix`: throwaway tree for a branch no live worktree holds, since
     # the main checkout is never a git-write target.
@@ -572,6 +572,11 @@ class GitHub:
 
     def pr_ready(self, number: int):
         self._run(["gh", "pr", "ready", str(number), "--repo", self.repo])
+
+    def pr_add_label(self, number: int, label: str):
+        """Add `label` to a PR, creating it in the repo first (idempotent)."""
+        self._run(["gh", "label", "create", label, "--repo", self.repo, "--force"])
+        self._run(["gh", "pr", "edit", str(number), "--repo", self.repo, "--add-label", label])
 
     def pr_merge(self, number: int, delete_branch: bool = True, method: str = "squash",
                  match_head: Optional[str] = None):
@@ -1359,8 +1364,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                           f"{', '.join(missing_workflows)})"}
     gh.pr_ready(pr_number)
     gh.pr_merge(pr_number)
-    # The PR's `Closes #<n>` closes the epic; set its terminal fields here too,
-    # so a repo without the `issues: closed` Action job is not left unset.
+    # The PR's `Closes #<n>` closes the epic; its terminal fields are set here.
     cmd_mark_issue_closed(gh, epic)
     return {"epic": epic, "merged": True, "pr": pr_number, "branch": branch, **evidence,
             "worktree": release_worktree(branch, runner=runner, base_repo=repo_path)}
@@ -3592,6 +3596,12 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
             f"Human review requested: merging this PR into `{base}` approves `{doc}`; leave "
             f"review comments on it to change something.\n\n"
             f"<!-- gate-comments-processed: {_utc_now_marker()} -->")
+    try:
+        # The workflow only wakes a runner for labelled PRs; unlabelled, `next-action` still
+        # detects the merge, just later.
+        gh.pr_add_label(pr_number, LABELS["gate"])
+    except GhError:
+        pass
     gh.set_pipeline_status_field(issue, "awaiting-human-review")
     timestamp = _utc_now_marker()
     doc_verb = "Requirements locked" if stage == "product" else "Design locked"
@@ -5017,7 +5027,7 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
     """Squash-merge the PR after its evidence and checks pass. Refuses (exit 0) when
     behind a base delta that needs re-attest; otherwise carries the attestation forward.
     Idempotent: an already-MERGED PR only gets the post-merge bookkeeping (`recovered`).
-    Stage/Pipeline Status are left to `mark-issue-closed` on the `issues: closed` event.
+    Sets the terminal Stage/Pipeline Status fields on the closed issue.
     `run_id` books the terminal-unit count under that run, not whatever id last wrote the
     epic's run-state file (which may be a throwaway probe run's)."""
     entry = next((i for i in gh.issue_list() if i["number"] == issue), None)
@@ -5095,6 +5105,7 @@ def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
         issue_closed = True
     realised = []
     if issue_closed:
+        cmd_mark_issue_closed(gh, issue)
         gh.issue_comment(issue, f"Merged via #{pr_number}.")
         realised = _close_realised_issues(gh, issue, view.get("body"), pr=pr_number)
     terminal = record_terminal_unit(gh, issue, run_id=run_id)

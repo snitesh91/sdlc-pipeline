@@ -97,16 +97,16 @@ check one gate alone: `python3 "$SDLC" check-gate <issue-number>`.
 ## Real-time backstop
 
 `.github/workflows/gate-auto-advance.yml` runs `auto-pass-gate --pr <n>` the instant a
-human closes a gate PR (`issue-<n>` head; `main` base, or an `epic-<n>` base carrying a
-`design-pr` marker — a design PR is a gate only while its issue is awaiting review, so the
-PR the pipeline merges itself is skipped):
+human closes a gate PR. `open-gate` labels every gate PR `sdlc:gate` (`labels.gate`), and
+the job runs only for labelled PRs, so a PR the pipeline merges itself never wakes a runner
+(`auto-pass-gate` still re-checks the head branch, base and `awaiting-human-review` status):
 
 - **Merged** → Stage advances but is **not claimed** (no `In Progress`, no start
   comment); a phase-Task is closed as `pass-gate` would. `next-action`
   proceeds from the advanced fields.
 - **Closed without merge** → `needs-human` (see "Edge cases").
-- If the Action didn't run (missing `SDLC_GH_TOKEN`, workflow disabled), `next-action`
-  detects the merge itself.
+- If the Action didn't run (missing `SDLC_GH_TOKEN`, workflow disabled, label not applied),
+  `next-action` detects the merge itself.
 
 ## Feedback visibility
 
