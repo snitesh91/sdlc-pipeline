@@ -57,8 +57,8 @@ existing work, never from zero**. Its dispatch must carry:
 
 Test: it must ask for what a `SendMessage` to the original would — not a fresh assignment.
 
-A rework round is resumed, never re-claimed: `claim`/`start-stage --role development` refuse
-a unit with an open PR. Give a replacement the worktree `worktree-add <n>` restores.
+A rework round is resumed, never re-claimed (`start-stage` refuses `development` on a unit
+with an open PR). Give a replacement the worktree `worktree-add <n>` restores.
 
 ## Rework rounds are scoped, not repeated from zero
 
@@ -155,6 +155,5 @@ escalate.
 
 ## Genuine cross-issue dependency
 
-The one case resuming can't fix: `python3 "$SDLC" mark-blocked <issue> --dep <dep-issue>`
-records the native `blockedBy` edge and posts the comment. `next-action` derives
-blocked-ness live, so the issue becomes eligible on its own when the blocker closes.
+The one case resuming can't fix: `python3 "$SDLC" mark-blocked <issue> --dep <dep-issue>`.
+The issue becomes eligible on its own when the blocker closes.

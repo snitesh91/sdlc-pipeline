@@ -30,7 +30,7 @@ handoff loop is live at once — never that anything decides on its own.
 | `${CLAUDE_PLUGIN_ROOT}/references/verification-rules.md` | Proving a claim by running it. Read by `architecture`, `lld`, `development`, `pr-review`, `design-review` |
 | `${CLAUDE_PLUGIN_ROOT}/references/review-fanout.md` | Review fan-out. Read by `design-review` |
 | `${CLAUDE_PLUGIN_ROOT}/references/epics.md` | Profiles, phase-Tasks, footprints, deviation, epic close, board status |
-| `${CLAUDE_PLUGIN_ROOT}/references/operations.md` | Token/repo access, issue fields, auto-merge, local-CI attestation |
+| `${CLAUDE_PLUGIN_ROOT}/references/operations.md` | Token/repo access, issue fields, auto-merge, local-CI attestation, auto-mode denials |
 | `${CLAUDE_PLUGIN_ROOT}/references/continuous-mode.md` | The operator asked for unattended looping |
 | `${CLAUDE_PLUGIN_ROOT}/references/history.md` | You want the incident behind a rule |
 
@@ -63,18 +63,12 @@ task:       development -> [pr-review] -> auto-merge into epic-<n> -> CLOSED
   **Legacy profile** (`driven: false`): skipped entirely, Tasks included.
 - **Every Epic has two standing Tasks** (Integration-test, e2e-test), specified by `lld`,
   running after every functional Task merges.
-- **Epic close does not run the full e2e suite:** the e2e-test Task owns that evidence, so
-  `close-epic` requires only the exploratory pass (`record-epic-verification --kind e2e`
-  is still accepted, informational). A failed or never-started GitHub Actions run never
-  blocks the epic merge by itself; each required suite the epic's changes cover needs a
-  passing check on the epic PR, a `record-local-ci` attestation at the epic head, or the
-  merged children's evidence (`unattested_suites`; `references/epics.md`, "Evidence
-  carry-forward"), and a non-attestable suite its check alone (`awaiting_checks`).
+- **Epic close runs no full e2e suite** (the e2e-test Task owns that evidence): it needs
+  the exploratory pass, and `close-epic`'s `unattested_suites` / `awaiting_checks` name the
+  suite evidence still owed (`references/epics.md`, "Epic closing").
 - **`product-review` follows every `product`** unless a standing child is routed past it:
   a blocker bounces `product`; clean goes to Gate A (waived when the profile sets
   `requiresHumanGateA: false` — `references/gates.md`, "Waived gates"). Reviews have no Stage value of their own.
-- A non-standing Epic's Tasks are never eligible before it is `epic:architected` (set by
-  `finish-lld`); the control plane enforces this.
 - **Route every `unstaged` child yourself** (listed in a `none` result, with
   `unstaged_reason`): `set-stage <n> --stage development` when the Epic's `lld.md`
   already covers it, else an Architecture revision (below).
@@ -149,11 +143,10 @@ engineering-driven Epic); do it yourself, never via a subagent:
 python3 "$SDLC" cut-phase-tasks <epic-n> --arch-body "..." --lld-body "..." --repo-path <p>
 ```
 
-It stands up `epic-<n>` on origin and its worktree first, then creates, stages and orders
-both phase-Tasks and adds the Architecture-phase Task's worktree off `origin/epic-<n>`;
-idempotent. Both phase-Tasks author their doc at `<docRoot>/epic-<n>/architecture.md` /
-`lld.md` on their own `issue-<n>` branch. When the stage returns, `transition` raises the
-design PR `issue-<n>` → `epic-<n>` and the review runs on it. Then:
+Idempotent (composites table). Both phase-Tasks author their doc at
+`<docRoot>/epic-<n>/architecture.md` / `lld.md` on their own `issue-<n>` branch; when the
+stage returns, `transition` raises the design PR `issue-<n>` → `epic-<n>` and the review
+runs on it. Then:
 
 - **Architecture-phase (or revision) Task, `arch-review` clean** → `skip-gate` (confidence
   above the threshold) or `waive-gate` (profile waives Gate B) — each merges the design PR
@@ -166,7 +159,7 @@ design PR `issue-<n>` → `epic-<n>` and the review runs on it. Then:
   cause and re-run it. Never claim the new Tasks; return to Step 1.
 - **Close a phase-Task only with `close-issue`, never `mark-issue-closed`.**
 
-Detail (why a Stage is mandatory, base detection, the epic branch):
+Detail (design PRs, base detection, the epic branch):
 `references/epics.md`, "How a non-standing Epic runs".
 
 ### Architecture deviation — a revision phase-Task
@@ -183,7 +176,8 @@ python3 "$SDLC" open-arch-revision <epic-n> --title "Architecture revision: <dev
 It runs `architecture` (editing `epic-<n>/architecture.md` in place) → design PR →
 `arch-review` → merge, like the Architecture-phase Task. Park the reporting unit right away
 with `pause-for-epic-regate <n> --epic <epic-n> [--gate-pr <pr>] --found-by <stage that found it>`
-(`--gate-pr` only once the revision's design PR exists). If `lld.md` must change too,
+(`--gate-pr` only once the revision's design PR exists); once the revision closes, resume its
+agent directly — never `set-stage` it. If `lld.md` must change too,
 resume or re-run the LLD pass before the affected Tasks proceed. Escalation (third /
 sixth deviation, `mark-needs-human` on the Epic): `references/epics.md`, "Architecture
 deviation escalation".
@@ -204,15 +198,16 @@ Every GitHub read, decision and mutation, and every fetch/checkout/merge/push, g
 through `python3 "$SDLC" <command>` — never hand-run `gh`/GraphQL/git. Each command
 prints one JSON object. **Exit 0** = valid result, including "nothing to do" and
 structured refusals (sync conflict, behind-main merge). **Exit 1** = operational
-failure: stop and report; never retry by hand.
+failure: stop and report; never retry by hand. An auto-mode classifier denial of a command:
+`references/operations.md`, "Auto-mode classifier denies a composite".
 
 **Composites — the normal path.** Each runs its steps in order, stopping at the first
 failure.
 
 | Command | Does → returns |
 |---|---|
-| `start-stage <n> --role <role> [--unit epic] [--base <ref>]` | `worktree-add` then `claim` (Step 2) → worktree result, claim result. Refuses `development` on a unit with an open PR (`failed_step: check-claimable`): resume its agent instead (`references/rework.md`) |
-| `transition <n> --expect-stage <s> [--pr <pr>] [--repo-path <p>] [--base <ref>]` | After a subagent returns: `verify-exit` → `sync-branch` → `open-design-pr` (an Epic's `architecture`/`lld` phase-Task only) → `start-comment` when `<s>` is a review role (refuses a `pr-review` when a required suite the PR touches has neither a `record-local-ci` attestation nor a passing check on the post-sync head — `held` names each suite, its check state and the reason; a docs-only sync carries an attestation forward; `arch-review` also returns `skip_confidence_threshold` for the reviewer) → `ready`, `stopped_at`, per-step results (incl. `handoff_marker_present`, `conflict`, the design `pr`) |
+| `start-stage <n> --role <role> [--unit epic] [--base <ref>]` | (`epic-<n>`'s worktree first, for a child of a non-standing Epic) `worktree-add` then `claim` (Step 2) → worktree result, claim result. Refuses `development` on a unit with an open PR (`failed_step: check-claimable`): resume its agent instead (`references/rework.md`) |
+| `transition <n> --expect-stage <s> [--pr <pr>] [--repo-path <p>] [--base <ref>]` | After a subagent returns: `verify-exit` → `sync-branch` → `open-design-pr` (an Epic's `architecture`/`lld` phase-Task only) → `start-comment` when `<s>` is a review role → `ready`, `stopped_at`, per-step results (incl. `handoff_marker_present`, `conflict`, the design `pr`; `held` when a `pr-review` start lacks suite evidence on the post-sync head — `references/operations.md`, "Local-CI attestation"; `skip_confidence_threshold` for an `arch-review`) |
 | `cut-phase-tasks <epic> [--arch-body TEXT] [--lld-body TEXT] --repo-path <p>` | `epic-<n>` + its worktree, create + stage both phase-Tasks, LLD blocked by Architecture, Architecture worktree off `epic-<n>`; idempotent → `architecture_task`, `lld_task` |
 | `finish-lld <lld-task-n> --epic <e> --repo-path <p>` | `merge-design-pr` → `create-lld-tasks` → `merge-lld-doc` → `close-issue` → `completed_steps`, `failed_step`, per-step results |
 | `open-arch-revision <epic> --title TEXT --body TEXT [--blocks N ...] --repo-path <p>` | `epic-<n>` worktree + `create-issue` + `set-stage architecture` + worktree off `epic-<n>` + `add-blocked-by` per `--blocks` unit → `revision_task` |
@@ -229,33 +224,31 @@ an override only.
 | `next-action <epic\|initiative> --run-id <id> [--repo-path <p>] [--skip-epic <n> ...]` | The one unit to work (Step 1); on an Initiative, the Epic to descend into ("The Initiative loop"). `--repo-path` (default `.`) is where it reads the dev lane's slot holders |
 | `list-parallel-ready <epic> --repo-path <p> --run-id <id>` / `list-design-ready <epic> --repo-path <p>` / `list-ready-for-review <epic>` | Dev-lane / standing-epic design-lane / review pools |
 | `lld-section --epic <n> --task <m> --repo-path <p>` | Only Task #`<m>`'s subsection of `epic-<n>/lld.md` |
-| `worktree-add <n> [--unit epic] [--base <ref>]` | The only way to make a worktree: resumes from `origin/<branch>` (fast-forwards; refuses a diverged branch), else branches off the integration base (recreates a stale local branch with no unique commits; refuses one with); makes the tree's `.sdlc-scratch/` |
+| `worktree-add <n> [--unit epic] [--base <ref>]` | The only way to make a worktree: resumes from `origin/<branch>`, else branches off the integration base; `diverged: true` → `references/parallelism.md`, "Working on a branch" |
 | `review-worktree-add <n> --repo-path <p>` / `release-review-worktree <n>` | `pr-review`'s detached worktree at `origin/issue-<n>` / its removal (idempotent; `merge-pr` also runs it) |
 | `prune-stale --repo-path <p> [--dry-run]` | Closed units' worktrees (review ones included), landed branches on origin and locally, stale run-state files; then `worktree prune` + `fetch --prune`. Never touches open units, other branches or unmerged work |
 | `claim <n> --role <r>` / `start-comment <n> --role <r>` / `sync-branch <n> [--unit epic] [--base <ref>]` / `verify-exit <n> --expect-stage <s> [--pr <pr>]` | The steps inside `start-stage` / `transition` |
 | `route <n> --to product\|architecture\|development\|merge --reason "<one line>"` | Skip a standing child ahead ("Routing a standing child"); refuses (exit 0) anything but a forward move on a standing child |
 | `set-stage <n> --stage <s>` / `add-blocked-by <n> --on <dep>` / `create-issue --parent <n> --type <T> [--blocked-by <dep> ...]` / `repair-issue <n> [--parent <p>] [--type <T>]` | Stage a unit / order units (Epics: wave order, "Cutting Epics") / the only issue-creation path / fill an existing issue's missing fields |
-| `open-design-pr <n>` / `merge-design-pr <pr> --issue <n> [--repo-path <p>]` | A phase-Task's design PR `issue-<n>` → `epic-<e>`: `transition` opens it (idempotent); `merge-design-pr` squash-merges it once the review is recorded clean (never closes the Task, keeps its branch; refuses `behind_base`, missing/`rework` evidence, a review of a head whose doc has since changed (`review_stale`), and an `arch-review` below the skip bar). `skip-gate`/`waive-gate`/`finish-lld` call it |
+| `open-design-pr <n>` / `merge-design-pr <pr> --issue <n> [--repo-path <p>]` | A phase-Task's design PR `issue-<n>` → `epic-<e>`: `transition` opens it; `skip-gate`/`waive-gate`/`finish-lld` merge it — re-run those, not `merge-design-pr`. Its refusals (`behind_base`, `review_stale`, missing/`rework` review evidence, an `arch-review` below the skip bar) come back in their `design_pr` / `failed_step` |
 | `create-lld-tasks <epic> --repo-path <p>` / `merge-lld-doc <epic-n>` / `close-issue <n> [--repo-path <p>] [--not-planned --reason TEXT]` | The steps inside `finish-lld`; `close-issue` is the orchestrator's close (terminal fields, then `cleanup`: worktrees released, a branch whose work landed deleted on origin and locally, unmerged work kept); `--not-planned` drops a unit with its reason on the thread (`references/operations.md`, "Dropping a unit") |
 | `detach-epic <epic> [--reason TEXT]` / `comment <n> --body TEXT\|--body-file <f>` | Take an Epic out of its Initiative (sub-issue link + sibling `blockedBy` edges, commented on both) / a plain audit-trail comment, no marker (`references/operations.md`, "Dropping a unit") |
 | `open-gate` / `check-gate` / `pass-gate` / `skip-gate` / `waive-gate` | Gates (`references/gates.md`); on a phase-Task pass/skip/waive close it (after merging its design PR) instead of claiming a next stage |
-| `merge-gate <pr> --issue <n> --stage product\|architecture --operator-confirmed` | Merge an open gate PR (Gate A, or a human-gated design PR) — **only when the operator explicitly told you to merge it** (`references/gates.md`, "Merging a gate PR for the operator"). Refuses without the flag, on `behind_base`, or without green checks; `pass-gate` finishes it |
-| `open-dev-pr [--allow-empty]` / `handoff-to-pr-review` / `record-pr-review` / `record-local-ci` / `record-design-review <n> --role <r> --outcome clean\|rework` (also comments on the design PR) / `post-comment <n> --role <r> --body-file <f>` | Stage-agent exit actions (their agent files own them); `--allow-empty` lets a verify-only Task (no code change) open its PR on an empty commit — tell `development` to pass it when the Task's design says verify-only; `post-comment` is `product`/`architecture`/`lld`'s handoff comment |
+| `merge-gate <pr> --issue <n> --stage product\|architecture --operator-confirmed` | Merge an open gate PR (Gate A, or a human-gated design PR) — **only when the operator explicitly told you to merge it** (`references/gates.md`, "Merging a gate PR for the operator"); `pass-gate` finishes it |
+| `open-dev-pr [--allow-empty]` / `handoff-to-pr-review` / `record-pr-review` / `record-local-ci` / `record-design-review` / `post-comment` | Stage-agent exit actions (their agent files own them); tell `development` to pass `--allow-empty` when the Task's design says verify-only (no code change) |
 | `pr-checks <pr>` / `merge-pr <pr> --issue <n> [--run-id <id>]` | CI status / the only merge gate (pass the run's id so the terminal count books under it; refuses behind-base; reports `config_changed`; on an already-merged PR only finishes the bookkeeping, `recovered: true`; `cleanup` as `close-issue`'s) |
-| `mark-blocked` / `mark-needs-human` / `pause-for-epic-regate <n> --epic <e> --gate-pr <pr> [--found-by <stage>]` | Park a unit (first two release its worktree) |
+| `mark-blocked <n> --dep <m>` / `mark-needs-human <n> --reason TEXT` / `pause-for-epic-regate <n> --epic <e> [--gate-pr <pr>] [--found-by <stage>]` | Park a unit (first two release its worktree) |
 | `pairing-counts <n>` / `show-config` | Valve strike counts + thresholds / effective tunables and the running `plugin` version (read once per invocation) |
 | `list-needs-human` / `check-epics-closeable` / `audit-issues [--epic <n>\|--initiative <n>]` | End-of-invocation sweeps; `audit-issues` also flags open Epics with no phase-Tasks, with the `cut-phase-tasks` repair |
 | `resolve-thread --thread-id <id> [--reply TEXT]` | Reply to and resolve a gate PR review thread; the gate-feedback agent runs it for the threads it addressed (`references/gates.md`) |
-| `close-epic <n> [--no-carry-forward]` / `record-epic-verification <n> --kind e2e\|exploratory [--sha S]` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"; its merge tears the stack down itself); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
+| `close-epic <n> [--no-carry-forward]` / `record-epic-verification <n> --kind e2e\|exploratory --summary TEXT [--sha S]` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"; its merge also cleans up the epic and tears the stack down); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
 | `check-initiative-closeable <n>` / `record-initiative-verification <n> --outcome met\|unmet --summary` / `close-initiative <n>` | "Closing an Initiative" |
 | `mark-feedback-addressed <n>` | Yours, after a gate-feedback agent finished and `transition` verified its push (`references/gates.md`, "Addressing gate feedback"); never the agent's |
 | `auto-pass-gate` / `mark-feedback-received` | CI-triggered paths only — never run them yourself (the shipped workflow runs `auto-pass-gate`; `mark-feedback-received` only if the driven repo wires a comment trigger) |
 
-Branch-writing commands never write in the main checkout. For most commands `--repo-path`
-may be any path inside the repo, but **`transition` / `verify-exit` must get the unit's own
-worktree** — they read that branch's HEAD, so from the main checkout they falsely report
-"architecture.md is missing on issue-<n>". Never check out a pipeline branch in the main
-checkout.
+For most commands `--repo-path` may be any path inside the repo; `transition` /
+`verify-exit` need the unit's own worktree (Step 3). Never check out a pipeline branch in
+the main checkout.
 
 **The CLI does not decide** — you do: which stage owns a defect found in rework, whether
 a bounce trips the valve, whether a reported ambiguity is genuine, and all subagent
@@ -365,14 +358,13 @@ Every result except `skip`/`none`/`stop-at-cap` carries `unit`: `"issue"`, or `"
 When `next-action` on the Initiative reports in a `none` `reason` that every cut Epic is
 closed:
 
-1. `python3 "$SDLC" check-initiative-closeable <initiative>`.
-2. Delegate `sdlc:initiative-close`: it starts the delivered application and validates
+1. Delegate `sdlc:initiative-close`: it starts the delivered application and validates
    it against every requirement in the Initiative's `product.md`, and always records
    `record-initiative-verification --outcome met|unmet`.
-3. **All met** (`clean`) → `python3 "$SDLC" close-initiative <initiative>` (one call — an
-   Initiative has no branch). It refuses while the latest record is `unmet`.
-4. **Anything not met** (`rework`) → file the gap (a Task against the relevant Epic, or
-   judge it out of scope and say why) and stop; re-run from step 2 once fixed.
+2. **All met** (`clean`) → `python3 "$SDLC" close-initiative <initiative>` (one call — an
+   Initiative has no branch; it re-checks closeability and the record itself).
+3. **Anything not met** (`rework`) → file the gap (a Task against the relevant Epic, or
+   judge it out of scope and say why) and stop; re-run from step 1 once fixed.
 
 No human gate here — Gate A already approved `product.md`.
 
@@ -393,37 +385,34 @@ Then:
 python3 "$SDLC" start-stage <n> --role <role>
 ```
 
-`<role>` is `next-action`'s `stage` verbatim. It creates (or resumes from origin) the
-worktree, then claims — never `claim` before the worktree exists. **At a non-standing Epic's first touch,
-run `python3 "$SDLC" worktree-add <epic> --unit epic --repo-path <p>`** (cut-phase-tasks and
-open-arch-revision already do; this covers an Epic that predates them) — every child's worktree
-is cut from `origin/epic-<n>`, which must exist first. **When `pipeline.stack.enabled`, also run
-`provision-epic-stack <n>`** — the epic's e2e-running children and closing run use that stack
-(`references/parallelism.md`, "Per-epic isolated stack").
+`<role>` is `next-action`'s `stage` verbatim; it makes the worktrees it needs (`epic-<n>`'s
+included) before claiming. Then tell the operator in chat, in one or two lines, what you
+picked up (unit, title, stage) before delegating. **When `pipeline.stack.enabled`, run
+`provision-epic-stack <n>` at the Epic's first touch** — the epic's e2e-running children and
+closing run use that stack (`references/parallelism.md`, "Per-epic isolated stack").
 
 ## Step 3 — Run this stage, then the next, then the next
 
 Delegate to exactly **one** fresh subagent of the role's `subagent_type` (this plugin's
 `sdlc:<role>` agents). There is no orchestrator-direct review path.
 
-| Role | Trigger | `subagent_type` | Model (policy) | Doc it owns |
-|---|---|---|---|---|
-| `product` | `stage:product` (Product-Roadmap Task or standing child) | `sdlc:product` | opus | `issue-<n>/product.md` |
-| `product-review` | right after `product` | `sdlc:product-review` | opus | none (comment); blocker bounces `product`, clean → Gate A |
-| `architecture` | `stage:architecture` (Architecture-phase/revision Task or standing child) | `sdlc:architecture` | opus | `epic-<e>/architecture.md` for an Epic's phase-Task (authored on its `issue-<n>` branch, merged into `epic-<e>` by the design PR), else `issue-<n>/architecture.md`; creates no issues; owns the architecture-depth assessment |
-| `arch-review` | right after `architecture` (on the design PR for an Epic's phase-Task) | `sdlc:design-review` | opus | none (comment + PR comment) |
-| `lld` | `stage:lld` (LLD-phase Task) | `sdlc:lld` | opus | `epic-<e>/lld.md` (authored on its `issue-<n>` branch), one `## Task <KEY>: <title>` section per Task; creates no issues |
-| `lld-review` | right after `lld`, on its design PR | `sdlc:design-review` | opus | none — **mandatory, never confidence-skipped, auto-merges on clean, no human gate**; one pass over the whole doc, also judges the Task carving |
-| `development` | `stage:development` (Task or standing child) | `sdlc:development` | sonnet | none — PR description; suite evidence is the PR's required-workflow checks, or `record-local-ci` attestations for suites with no PR-level CI (`references/operations.md`, "Local-CI attestation"); a normal Task writes unit tests only |
-| `pr-review` | right after `development` hands off | `sdlc:pr-review` | opus | none (comment); never bounces a normal Task for integration/e2e coverage owned by the standing Tasks |
+| Role | Trigger | `subagent_type` | Doc it owns |
+|---|---|---|---|
+| `product` | `stage:product` (Product-Roadmap Task or standing child) | `sdlc:product` | `issue-<n>/product.md` |
+| `product-review` | right after `product` | `sdlc:product-review` | none (comment); blocker bounces `product`, clean → Gate A |
+| `architecture` | `stage:architecture` (Architecture-phase/revision Task or standing child) | `sdlc:architecture` | `epic-<e>/architecture.md` for an Epic's phase-Task (authored on its `issue-<n>` branch, merged into `epic-<e>` by the design PR), else `issue-<n>/architecture.md`; creates no issues; owns the architecture-depth assessment |
+| `arch-review` | right after `architecture` (on the design PR for an Epic's phase-Task) | `sdlc:design-review` | none (comment + PR comment) |
+| `lld` | `stage:lld` (LLD-phase Task) | `sdlc:lld` | `epic-<e>/lld.md` (authored on its `issue-<n>` branch), one `## Task <KEY>: <title>` section per Task; creates no issues |
+| `lld-review` | right after `lld`, on its design PR | `sdlc:design-review` | none — **mandatory, never confidence-skipped, auto-merges on clean, no human gate**; one pass over the whole doc, also judges the Task carving |
+| `development` | `stage:development` (Task or standing child) | `sdlc:development` | none — PR description; suite evidence is the PR's required-workflow checks, or `record-local-ci` attestations for suites with no PR-level CI (`references/operations.md`, "Local-CI attestation"); a normal Task writes unit tests only |
+| `pr-review` | right after `development` hands off | `sdlc:pr-review` | none (comment); never bounces a normal Task for integration/e2e coverage owned by the standing Tasks |
 
-**There is no `testing` stage** (merged into `development`). Nothing writes the `Testing`
-Stage value; it is still read so a stranded child is picked up.
+**There is no `testing` stage** (merged into `development`); a child stranded at the
+retired `Testing` Stage is still picked up.
 
-**Model.** The Agent guard sets each agent's model from
-`${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json`; don't pick one. Tier aliases only — never
-pin a version (no `ANTHROPIC_DEFAULT_OPUS_MODEL`, no versioned id under `pipeline.models`).
-Retune the policy only via the retro, with a dated reason in `references/history.md`.
+**Model.** The Agent guard sets it ("Hooks"); never pick one or pin a version (no
+`ANTHROPIC_DEFAULT_OPUS_MODEL`, no versioned id under `pipeline.models`). Retune the policy
+only via the retro, with a dated reason in `references/history.md`.
 
 **Where rules live.** A rule binding every stage lives in `references/stage-playbooks.md`;
 a rule binding some roles lives in the narrower reference those roles' agent files name;
@@ -526,6 +515,9 @@ reads that branch's HEAD, and from the main checkout it falsely reports the doc 
 - `pass-gate`/`skip-gate`/`waive-gate` reconcile or merge internally — no sync after them.
 - An Epic's `architecture`/`lld` phase-Task: `transition` raised the design PR; give the review
   agent its number (`steps.open-design-pr.pr`) — it reviews on that PR.
+- **Summarise for the operator in chat** (a few bullets): after a clean `arch-review`, the
+  approved `architecture.md`; after a clean `product-review`, before Gate A, `product.md`.
+  Never for `lld`/`lld.md`.
 - A `pr-review` reporting its mutation probe was **denied by the auto-mode classifier** (a
   transient `src` edit): relay it so the operator can add the allow rule
   (`references/operations.md`, "Auto-mode allow rule for the `pr-review` mutation probe") —

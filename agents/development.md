@@ -188,13 +188,10 @@ cycle.
   belongs in the design doc / PR description, not the code. `pr-review` blocks on bloat.
 - **A code comment stating a guarantee is true for every input, or names what it excludes**
   (truncation, common-shape-only, best-effort) in the same sentence.
-- **Commits and pushes.** You are not a review role, so the guard lets you run ordinary git
-  in your worktree — `git commit`, `git stash`, `git checkout`, and `git push` of your own
-  `issue-<n>` branch. Denied to every role (you included): force-push, `git rebase` /
-  `git pull --rebase`, `git worktree add` (non-`--detach`), all `gh` GitHub mutations, and any
-  `$SDLC` command outside your set — the guard names the command to use. A base sync
-  (`sync-branch`) is the orchestrator's; never merge the base by hand. Small logical local
-  commits. Push **once per cycle**: once immediately before `open-dev-pr`, and on a
+- **Commits and pushes.** Ordinary git in your worktree (`commit`, `stash`, `checkout`,
+  `push` of your own `issue-<n>`) is yours; the Bash guard denies the rest and names the
+  command to use. A base sync (`sync-branch`) is the orchestrator's; never merge the base by
+  hand. Small logical local commits. Push **once per cycle**: once immediately before `open-dev-pr`, and on a
   rework round once after all fix commits, before re-handing off — each push re-triggers
   `pull_request` CI. Push mid-cycle only to hand off to a human or unblock a teammate. A
   rejected push: stop and report; never work around it.
@@ -250,10 +247,9 @@ else is settled; do not reopen it.
 
 1. Re-run "The completion gates", then push once.
 2. `python3 "$SDLC" open-dev-pr <n> --title "..." --body "..." --summary "..."` — opens the draft
-   PR (appends `Closes #<n>`, sets Stage to `PR Review`, posts the PR-opened comment). It posts
-   no queue marker. On a rework round it reports the already-open PR (`created: false`). A
-   verify-only Task with no code change adds `--allow-empty`; its body states what was
-   verified and the evidence.
+   PR (on a rework round it reports the open one, `created: false`); it does not queue the
+   review (step 4 does). A verify-only Task with no code change adds `--allow-empty`; its body
+   states what was verified and the evidence.
 3. For **each suite the config requires a local attestation for** that this round ran (suite
    keys from the config's `requiredWorkflows[].suite`; which ones →
    `references/operations.md`, "Local-CI attestation"), on the **current head, after the last
@@ -262,12 +258,12 @@ else is settled; do not reopen it.
    python3 "$SDLC" record-local-ci --pr <pr> --suite <suite> --sha <HEAD> \
        --command "<the exact command>" --output <path to that run's captured output>
    ```
-   It refuses a summary; it embeds the run's own output. A push after it stales it. A suite a
+   A push after it stales it. A suite a
    required workflow runs on the PR itself, or one your change never touches (confined to
    another suite's `prefixes`), needs none.
 4. `python3 "$SDLC" handoff-to-pr-review <n> --pr <pr> --summary "..."` — **always**, including
-   after rework, and only after the attestations. The marker is the review queue; never
-   hand-type it. The summary is the handoff comment below.
+   after rework, and only after the attestations: its marker is the review queue. The summary
+   is the handoff comment below.
 
 **Handoff comment** (evidence-carrying — size cap per `references/stage-playbooks.md`,
 "Comment size is a contract"):

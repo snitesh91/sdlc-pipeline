@@ -11,8 +11,7 @@ eligibility.
 
 ## Fan-out rules
 
-- Start every unit with `start-stage <n> --role <role>` (it creates the worktree, then
-  claims — the **Ordering rule**: never `claim` before the worktree exists).
+- Start every unit with `start-stage <n> --role <role>`, never a bare `claim`.
 - Dispatch all selected units in **one parallel `Agent` call**, one subagent per unit,
   each told its own worktree path. Track one stage agent per active unit.
 - **Hold the waiting yourself.** A subagent cannot wait across turns. When a stage is
@@ -56,8 +55,8 @@ via `next-action`, never fanned out.
 2. One worktree per PR, **detached** at `origin/issue-<n>` — never a local `issue-<n>`
    branch, which `development` must stay free to hold for rework:
    `python3 "$SDLC" review-worktree-add <n> --repo-path <repo-root>` (its `path`).
-3. `start-comment <n> --role pr-review` for each (skip where `transition` already posted
-   it), then one parallel `Agent` call — same `sdlc:pr-review` agent and prompt as a single
+3. `transition <n> --expect-stage pr-review --pr <pr> --repo-path <its dev worktree>` for
+   each (proceed only on `ready: true`), then one parallel `Agent` call — same `sdlc:pr-review` agent and prompt as a single
    review.
 4. If suites starve each other, lower `parallelism.prReview`; never make reviews shallower.
 5. Remove each review worktree when its review ends, crash included:

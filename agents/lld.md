@@ -224,9 +224,6 @@ orchestrator raises, and the pipeline merges it into `epic-<e>` on a clean revie
 2. Commit and push to `origin/issue-<n>`.
 3. Post a short handoff comment (`stage-playbooks.md`, "Posting a handoff comment").
 
-After `lld-review` clears, the orchestrator runs `finish-lld` (merge the design PR into
-`epic-<e>`, `create-lld-tasks`, `merge-lld-doc`, `close-issue`).
-
 A deviating piece: stop and report per "First move" (outcome `blocked`). **Rework round:**
 same worktree and branch; edit `lld.md` in place, commit, push. Genuine ambiguity: stop and
 report the specific question (`references/stage-playbooks.md`, "Rework and blockers — what
