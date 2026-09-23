@@ -126,7 +126,8 @@ such as `## Implement X (KEY)`, does not parse, and the Task is skipped as unver
 **Only a real Task gets a `## Task` heading** — one carrying a `## Footprint`. A carving
 summary (a Task-to-bug table, a sequencing overview) goes under a non-Task heading such as
 `## Carving summary`; `create-lld-tasks` skips any `## Task` section without a Footprint and
-reports it (`skipped_sections`).
+reports it (`skipped_sections`). Any heading shaped `## Task <word>: …` parses as a Task — an overview,
+carving rationale or mapping table never uses one.
 
 Each subsection covers:
 
@@ -134,6 +135,8 @@ Each subsection covers:
 - **How it maps to the Epic's design** — which part of `architecture.md` it realises, and any
   point where you interpret rather than transcribe.
 - **Task-local decisions**, numbered — made here so `development` does not make them.
+Write every metadata line below plain — never wrapped in backticks.
+
 - **`Depends on: <KEY>`** — one line, only when this Task genuinely cannot start before
   another's design settles. Name the slug exactly as its heading spells it. Omit it otherwise;
   `create-lld-tasks` turns each line into a native `blockedBy` edge.

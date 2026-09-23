@@ -146,7 +146,9 @@ Stage options: `Product` / `Architecture` / `Development` / `Testing` / `PR Revi
   `skipped_sections` — put such prose under a non-`Task` heading.
 - **`Depends on: <KEY>`** lines (comma- or `and`-separated) only for genuine ordering.
   `create-lld-tasks` creates each Task as a sibling of the LLD-phase Task, renumbers the
-  headings, and adds one `blockedBy` edge per dependency.
+  headings, and adds one `blockedBy` edge per dependency. A section naming a dependency
+  no key parses from is refused (`skipped_sections`, `dependency_parse_warnings`) and
+  `finish-lld` stops before the close: fix the line on `epic-<n>`, re-run `finish-lld`.
 - **`Realises: #<n>, #<m>`** — one line, only when the Task delivers issues that already
   exist (Epic children filed before the LLD, a bug it fixes). `create-lld-tasks` blocks
   each named issue on the new Task and records the relation in the Task's body;

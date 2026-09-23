@@ -3798,8 +3798,11 @@ def cmd_add_blocked_by(gh: GitHub, issue: int, dep: int) -> dict:
 
 
 def _task_line(name: str) -> re.Pattern:
-    """A `<name>: <value>` line in a Task section; bullet and bold markup tolerated."""
-    return re.compile(rf"^\s*(?:[-*]\s+)?(?:\*\*)?{name}(?:\*\*)?\s*:\s*(.+?)\s*$",
+    """A `<name>: <value>` field in a Task section: at line start (bullet, bold and backtick
+    wrappers tolerated) or after a ` / ` or ` | ` separating it from a sibling field."""
+    return re.compile(rf"(?:^[ \t]*(?:[-*][ \t]+)?|[ \t]+[/|][ \t]+)`?(?:\*\*)?`?{name}`?"
+                      rf"(?:\*\*)?`?[ \t]*:[ \t]*(?:\*\*)?[ \t]*"
+                      rf"(.+?)(?=`?(?:\*\*)?(?:[ \t]+[/|][ \t]|[ \t]*$))",
                       re.IGNORECASE | re.MULTILINE)
 
 
@@ -3851,10 +3854,30 @@ def parse_task_depends_on(section_text: str) -> list:
     keys = []
     for m in _DEPENDS_ON_LINE.finditer(section_text):
         for raw in re.split(r",|\band\b", m.group(1)):
-            key = raw.strip().strip("`").strip().rstrip(".")
-            if _TASK_KEY_RE.match(key) and key not in keys:
+            key = raw.strip("`*. \t")
+            if _TASK_KEY_RE.match(key) and key not in _NO_DEPENDENCY and key not in keys:
                 keys.append(key)
     return keys
+
+
+# Any `Depends on:` mention, however marked up -- to catch one the strict parser misses.
+_DEPENDS_ON_MENTION = re.compile(r"depends[ \t]+on[`* \t]{0,4}:[ \t]*(.*)$",
+                                 re.IGNORECASE | re.MULTILINE)
+_NO_DEPENDENCY = {"", "none", "n/a", "-", "\u2014", "nothing"}
+
+
+def task_dependency_defect(section_text: str) -> Optional[str]:
+    """Why a Task section's `Depends on:` cannot be trusted (None when it can): the section
+    names a dependency but no key parses, so the Task would be created with no edge."""
+    if parse_task_depends_on(section_text):
+        return None
+    for m in _DEPENDS_ON_MENTION.finditer(section_text):
+        if m.group(1).strip("`*. \t").lower() not in _NO_DEPENDENCY:
+            return (f"`{m.group(0).strip()}` names a dependency but no Task key parses from "
+                    f"it -- the Task would be created with no `blockedBy` edge and race its "
+                    f"dependency. Write the line plain (`Depends on: <key>`, no backtick "
+                    f"wrapper, slug keys), then re-run")
+    return None
 
 
 def _commit_doc_to_epic_branch(repo_path: Optional[str], epic: str, doc_path: str,
@@ -3922,13 +3945,18 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
     headings = parse_task_headings(doc)
     keyed = [h for h in headings if h["key"]]
     # A `## Task` heading over prose (a carving table, a summary) is never a Task issue.
-    defects = {h["key"]: task_section_defect(doc[h["line_end"]:h["end"]]) for h in keyed}
+    # So is one whose `Depends on:` doesn't parse: created, it would race its dependency.
+    dep_defects = {h["key"]: task_dependency_defect(doc[h["line_end"]:h["end"]])
+                   for h in keyed}
+    defects = {h["key"]: task_section_defect(doc[h["line_end"]:h["end"]])
+               or dep_defects[h["key"]] for h in keyed}
     pending = [h for h in keyed if defects[h["key"]] is None]
     result = {"epic": epic, "doc": doc_path, "created": [], "reused": [],
               "already_numbered": [h["number"] for h in headings if h["number"]],
               "skipped_sections": [
                   {"key": h["key"], "heading": doc[h["line_start"]:h["line_end"]].strip(),
                    "reason": defects[h["key"]]} for h in keyed if defects[h["key"]]],
+              "dependency_parse_warnings": [k for k, d in dep_defects.items() if d],
               "blocked_by": [], "blocked_by_failed": [], "realises": [], "realises_failed": []}
     if not pending:
         return {**result, "committed": None, "pushed": False, "tasks": {},
@@ -6044,7 +6072,8 @@ def cmd_finish_lld(gh: GitHub, lld_task: int, epic: int, repo_path: str = ".",
     # Nothing to create (`tasks == {}`) is a completed earlier run, not a failure.
     seq.run("create-lld-tasks", lambda: cmd_create_lld_tasks(gh, epic, repo_path,
                                                              runner=runner),
-            failed=lambda r: not r.get("pushed") and r.get("tasks") != {})
+            failed=lambda r: (not r.get("pushed") and r.get("tasks") != {})
+            or bool(r.get("dependency_parse_warnings")))
     seq.run("merge-lld-doc", lambda: cmd_merge_lld_doc(gh, repo_path, epic, runner=runner),
             failed=lambda r: not r.get("verified_on_origin"))
     closed = seq.run("close-issue", lambda: cmd_close_issue(gh, lld_task, repo_path=repo_path,
