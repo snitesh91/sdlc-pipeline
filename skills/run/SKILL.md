@@ -62,8 +62,10 @@ task:       development -> [pr-review] -> auto-merge into epic-<n> -> CLOSED
   [pr-review] -> CLOSED` ("Routing a standing child") and merges straight to `main`.
   **Legacy profile** (`driven: false`): skipped entirely, Tasks included.
 - **Every Epic has two standing Tasks** (Integration-test, e2e-test), specified by `lld`,
-  running after every functional Task merges.
-- **Epic close runs no full e2e suite** (the e2e-test Task owns that evidence): it needs
+  running after every functional Task merges. The e2e-test Task **authors** the Epic's new
+  specs and runs only those, against a stack built from `epic-<n>`.
+- **The pipeline never runs the full e2e suite** — not at epic close, not in a Task. The
+  driven repo runs it outside the pipeline (e.g. nightly). Epic close needs
   the exploratory pass, and `close-epic`'s `unattested_suites` / `awaiting_checks` name the
   suite evidence still owed (`references/epics.md`, "Epic closing").
 - **`product-review` follows every `product`** unless a standing child is routed past it:
@@ -187,7 +189,7 @@ deviation escalation".
 Run from the driven repo's root; everything project-specific is in its `sdlc-pipeline.config.json`.
 
 - **SessionStart** exports `$SDLC` (the control plane) and `GITHUB_TOKEN` (from the config's `tokenEnv` var, else `tokenPath`, overriding any ambient one). If it reports the token missing, get it from the operator first; relay its optional `rtk init` hint once, never block on it. After a compaction it restates the run you were driving; on an off-policy session model it tells you to have the operator restart with `sdlc-run <n>`.
-- **PreToolUse (Bash)** denies hand-run GitHub mutations, GraphQL, `git worktree add` (except `--detach`), force-push and rebase, and limits each stage agent to its role's commands. A denial names the `python3 "$SDLC"` command to run instead — run it; never work around the guard. The main thread is guarded only while its session drives a run (a run-state file written by `next-action --run-id` within `guard.mainThreadFreshnessHours`, default 8; `guard.mainThread: "always"` guards every session) — an unguarded call logs one stderr line, so a run without `--run-id` is visible, never silent.
+- **PreToolUse (Bash)** denies hand-run GitHub mutations, GraphQL, `git worktree add` (except `--detach`), force-push and rebase, and limits each stage agent to its role's commands (and denies it `git stash`). An operator-directed PR outside the pipeline passes on the main thread when it names a non-pipeline head: `gh pr create --head <branch> ...`. A denial names the `python3 "$SDLC"` command to run instead — run it; never work around the guard. The main thread is guarded only while its session drives a run (a run-state file written by `next-action --run-id` within `guard.mainThreadFreshnessHours`, default 8; `guard.mainThread: "always"` guards every session) — an unguarded call logs one stderr line, so a run without `--run-id` is visible, never silent.
 - **PreToolUse (Agent)** sets every `sdlc:*` agent's `model` from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (config `pipeline.models` / `pipeline.fanout` override it), caps review fan-out, and lets only its `explore` roles launch a read-only `Explore` search. It denies an `sdlc:design-review` prompt lacking the header when the two review roles' models differ.
 - **SubagentStart** gives each `sdlc:*` agent `$SDLC`, `docRoot`, `requirementsDir`, `docTemplates`, the references path and the `SDLC-RESULT` format.
 - **SubagentStop** keeps an `sdlc:*` agent running until its final message ends with an `SDLC-RESULT` line (`product`/`architecture`/`lld` finishing `done` also need a successful `post-comment` this round). It and **SessionEnd** record each agent's tokens, cost, tool calls and peak context (README, "Metrics"). Never record metrics yourself.
@@ -464,6 +466,8 @@ you are driving). Template:
 > Unit: #`<n>` — `<title>`. Worktree: `<path>` (`cd` there first). Doc you own: `<doc-path>`.
 > Then the 2–3 unit-specific facts only: the finding to fix, the deviation to judge, the
 > sibling PR that just landed. For body/thread/children, the `gh` command that fetches them.
+> For `arch-review`: `Skip threshold: <N>` — `transition`'s `skip_confidence_threshold`
+> (the unit's profile bar; the global config value can differ).
 
 **Track stage agents** for resume-based rework: note each `Agent` call's returned ID
 against its role for this unit (session-scoped, never written to GitHub). Send a
@@ -485,7 +489,7 @@ instead of grepping and reading inline.
 | `outcome` | Do |
 |---|---|
 | `done` / `clean` | The next step per the agent file's routing; `transition` (below) before the next stage. A `pr-review` `clean` → you run `merge-pr <pr> --issue <n> --run-id "$RUN_ID"` (behind-base refusal: `references/parallelism.md`, "Git-conflict handling") |
-| `rework` | Route the finding (`references/rework.md`) |
+| `rework` | Print the blocking findings in chat first, one line each: what, where (`file:line`), owning stage. Never just "bounced". Then route them (`references/rework.md`) |
 | `blocked` | Clear the named blocker: resume the stage that owns the question, `open-arch-revision` for a design that does not fit, `mark-blocked` for a cross-issue dependency |
 | `needs-human` | Ask the operator if present; else `mark-needs-human <n> --reason "..."`, park, Step 1 |
 | `failed` | Inspect the worktree and result yourself, then resume the agent |
@@ -583,6 +587,8 @@ what) and end with the Initiative's own `none` reason. Above the fold:
 
 - Every `needs-human` unit **with its reason text** (flag reasons that look stale).
 - Every blocked unit and what it waits on.
+- Every `rework` round per pairing, with its blocking findings one line each (what, where,
+  owning stage).
 - Every gate-pending unit: gate PR, doc, level, whether feedback was addressed.
 - Every merged PR and closed issue; every epic newly `epic:architected`; every Epic cut,
   run to completion or parked this run.

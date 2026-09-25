@@ -96,7 +96,8 @@ effort; never below a shippable slice). In addition:
   (`references/epics.md`, "`lld` specifies the Tasks"), specified like functional Tasks:
   each `Depends on:` every functional Task whose surfaces it proves, owns the integration /
   e2e coverage unit tests cannot, and carries its own `## Footprint` (the test trees it
-  adds to). An Epic with no `e2e-test` Task has no e2e evidence at all (epic close no longer runs its own).
+  adds to). An Epic with no `e2e-test` Task gets no new e2e specs. The e2e-test Task authors
+  specs and runs only those; the full suite runs outside the pipeline.
   Its section names the suites in scope, the specs it adds or extends, and the evidence
   goal — never how the suite runs ("A Task section holds design, never pipeline
   mechanics"). One with no spec to add says why existing coverage already proves every
@@ -150,8 +151,8 @@ Write every metadata line below plain — never wrapped in backticks.
   (`references/epics.md`, "`lld` specifies the Tasks"). Never carve a pre-existing issue as
   its own `## Task` section unless that issue *is* the Task; an issue neither carved nor
   realised stays parked.
-- **The e2e-test Task's section states its evidence goal**: what counts as a stable delta
-  versus a flake (`references/epics.md`, "Epic closing"). Not the run itself — see below.
+- **The e2e-test Task's section states its evidence goal**: the specs it adds, and what
+  counts as a stable pass of them versus a flake (`references/epics.md`, "Epic closing"). Not the run itself — see below.
 - **Acceptance criteria**, carried from the Epic (unchanged, or with the revision stated).
   Each is observable and unambiguous enough to write a failing test from without reading code.
   A criterion is a product behaviour, never a pipeline step.

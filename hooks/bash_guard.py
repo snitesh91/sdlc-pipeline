@@ -73,7 +73,7 @@ REASONS = {
     "issue edit": f"Issue fields are control-plane-owned: use {SDLC} set-stage / add-blocked-by / mark-blocked. Stage agents report the change in their handoff instead.",
     "issue close": f"Use {SDLC} close-issue <n> [--repo-path <p>] (orchestrator only).",
     "issue reopen": "Reopening an issue is the operator's call; report it (stage agents: outcome needs-human).",
-    "pr create": f"Use {SDLC} open-dev-pr (development), {SDLC} open-design-pr or {SDLC} open-gate (orchestrator).",
+    "pr create": f"Use {SDLC} open-dev-pr (development), {SDLC} open-design-pr or {SDLC} open-gate (orchestrator). An operator-directed PR outside the pipeline (main thread only) names its non-pipeline branch explicitly: gh pr create --head <branch> ...",
     "pr merge": f"Use {SDLC} merge-pr <pr> --issue <n>; it is the only code merge gate ({SDLC} merge-design-pr for a phase-Task's design PR; {SDLC} merge-gate <pr> --issue <n> --stage <s> --operator-confirmed for a gate PR, only when the operator explicitly said to merge it).",
     "pr ready": f"Use {SDLC} merge-pr <pr> --issue <n>; it marks the PR ready itself.",
     "pr close": "Closing a pipeline PR is the operator's call; report it instead.",
@@ -88,6 +88,10 @@ REASONS = {
                          "`sync-branch <n>` as the needed step); the orchestrator syncs the "
                          "branch and resumes you on the new head.",
     "post-comment-role": f"post-comment serves only your own stage: pass --role <your role> ({SDLC} post-comment <n> --role <r> --body-file <f>).",
+    "stash": "git stash is blocked for stage agents: every worktree of a repo shares one stash "
+             "stack, so a parallel agent's `stash pop` can take your work or you theirs. For a "
+             "mutation check copy the file to .sdlc-scratch/ and restore it, or commit and "
+             "revert.",
     "review-git-write": "Review roles are read-only on the branch: describe the fix in your "
                         "review; the owning stage applies it.",
 }
@@ -305,6 +309,8 @@ def check_role(words: list, role: str):
         return "sync-branch-agent"
     if cmd and cmd not in READ_ONLY_COMMANDS | ROLE_COMMANDS.get(role, set()):
         return "orchestrator-only"
+    if words[0] == "git" and _git_sub(words[1:])[0] == "stash":
+        return "stash"
     if cmd == "post-comment" and _flag_value(words, "--role") != role:
         return "post-comment-role"
     if role in REVIEW_ROLES and words[0] == "git":
@@ -315,7 +321,26 @@ def check_role(words: list, role: str):
     return None
 
 
-def verdict(command: str, role: str = ""):
+DEFAULT_BRANCH_PREFIXES = ("issue-", "epic-")
+
+
+def operator_pr(args: list, prefixes=DEFAULT_BRANCH_PREFIXES) -> bool:
+    """A main-thread `gh pr create` the operator directed outside the pipeline: it names
+    its head explicitly (`--head`/`-H`) and that head is no `<prefix><n>` pipeline branch."""
+    head = _flag_value(args, "--head") or _flag_value(args, "-H")
+    if not head:
+        return False
+    branch = head.split(":", 1)[-1]  # `owner:branch`
+    return not any(re.fullmatch(re.escape(p) + r"\d+", branch) for p in prefixes)
+
+
+def branch_prefixes(config: dict) -> tuple:
+    """`pipeline.branches` issue/epic prefixes, defaulting as sdlc_next.py does."""
+    b = (config.get("pipeline") or {}).get("branches") or {}
+    return (b.get("issuePrefix", "issue-"), b.get("epicPrefix", "epic-"))
+
+
+def verdict(command: str, role: str = "", prefixes=DEFAULT_BRANCH_PREFIXES):
     """The REASONS key for the first denied segment, or None to allow.
     `role` is the calling `sdlc:<role>` agent's role ("" on the main thread)."""
     for seg in segments(command):
@@ -324,14 +349,16 @@ def verdict(command: str, role: str = ""):
             continue
         if words[0] == "gh":
             key = check_gh(words[1:])
+            if key == "pr create" and not role and operator_pr(words[1:], prefixes):
+                key = None
         elif words[0] == "git":
             key = check_git(words[1:])
         elif words[0] == "eval":
-            key = verdict(" ".join(words[1:]), role)
+            key = verdict(" ".join(words[1:]), role, prefixes)
         elif words[0] in SHELLS:
             script = next((words[j + 1] for j in range(1, len(words) - 1)
                            if re.fullmatch(r"-[a-z]*c[a-z]*", words[j])), None)
-            key = verdict(script, role) if script else None
+            key = verdict(script, role, prefixes) if script else None
         else:
             key = None
         if not key and role:
@@ -368,14 +395,14 @@ def main() -> int:
     if not isinstance(command, str) or not config_path:
         return 0
     role = sdlc_role(data.get("agent_type"))
-    if not role and not main_thread_guarded(load_json(config_path),
-                                            str(data.get("session_id") or "")):
+    config = load_json(config_path)
+    if not role and not main_thread_guarded(config, str(data.get("session_id") or "")):
         # One line so an unguarded run is visible, never silent.
         print("sdlc guard: main thread unguarded -- no fresh run-state for this session "
               "(guard.mainThread=run-live; a run without --run-id writes none)", file=sys.stderr)
         return 0
     try:
-        key = verdict(command, role)
+        key = verdict(command, role, branch_prefixes(config))
     except ValueError:  # unbalanced quotes etc. -- let the shell report it
         return 0
     if key:

@@ -406,6 +406,16 @@ def test_start_stage_adds_the_worktree_before_claiming(repo, monkeypatch):
     assert gh.issues[10]["status"] == "in-progress"
 
 
+def test_start_stage_refuses_unit_epic_for_a_task(monkeypatch):
+    # #1233: `--unit epic` on a phase-Task cut a stray `epic-<n>` branch + worktree.
+    gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": "architecture"})
+    monkeypatch.setattr(s, "cmd_worktree_add", _must_not_run("worktree-add"))
+
+    with pytest.raises(s.GhError, match="not an Epic"):
+        s.cmd_start_stage(gh, 10, "architecture", unit="epic")
+    assert gh.issues[10]["status"] is None
+
+
 def test_start_stage_does_not_claim_when_worktree_add_refuses(monkeypatch):
     # Parentless (main-based): no epic-worktree step, so the child worktree-add is the one to fail.
     gh = _tree({"number": 10, "labels": ["type:task"]})

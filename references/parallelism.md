@@ -196,7 +196,7 @@ difference is minutes.
 When `pipeline.stack.enabled`: `provision-epic-stack <epic>` at the epic's first touch;
 `close-epic`'s merge runs `teardown-epic-stack` itself. Give every e2e-running stage the
 returned `use` line and ports, never the shared dev stack's. A child validating its own
-e2e fixes builds from its own worktree with the epic profile; the epic-close run builds
-from `epic-<n>`. One stack per epic: its children take turns (suite-heavy rule). With the
+e2e fixes builds from its own worktree with the epic profile; the e2e-test Task's new-spec
+run builds from `epic-<n>`. One stack per epic: its children take turns (suite-heavy rule). With the
 stack disabled, an e2e stage that needs a build of its own branch stands one up on
 remapped ports — never the shared dev stack, which serves `main`.

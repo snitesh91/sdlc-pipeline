@@ -19,7 +19,8 @@ orchestrator named.
 | Unit | Your design | Your test obligation |
 |---|---|---|
 | **Normal functional Task** (child of a non-standing Epic) | Only your own `## Task #<n>` subsection: `python3 "$SDLC" lld-section --epic <parent-n> --task <n> --repo-path <worktree>`. Never read the whole `epic-<n>/lld.md`. Read the Epic's `architecture.md` only where your subsection points you at a specific part. | **Unit tests only.** No integration or e2e tests, no integration suite run — deferred by design to the Epic's standing Integration-test and e2e-test Tasks. Not a gap. |
-| **Standing Integration-test / e2e-test Task** of an Epic | Same `lld-section` call. | Run the full integration (or e2e) suite once every functional Task has merged; write the missing coverage; fix every failure found. Every integration/e2e rule below applies in full. |
+| **Standing Integration-test Task** of an Epic | Same `lld-section` call. | Run the full integration suite once every functional Task has merged; write the missing coverage; fix every failure found. Every integration rule below applies in full. |
+| **Standing e2e-test Task** of an Epic | Same `lld-section` call. | **Author** the Epic's missing e2e specs. Run **only the specs you add or change**, never the full suite, against a stack built from `epic-<n>` (`references/epics.md`, "Epic closing"); fix every failure they show. Every e2e rule below applies to those specs. |
 | **Standing-epic child** | Your own `<docRoot>/issue-<n>/architecture.md` (with its `product.md`), in full; routed past both, the issue body. Recommend `"next": "merge"` only for a trivially low-risk diff (`stage-playbooks.md`, "The handback is terse"). | No Integration-test Task behind you: every integration rule below applies in full. |
 
 ## Working discipline — for the whole stage
@@ -159,8 +160,9 @@ cycle.
   (`…; echo SUITE_EXIT=$? >> <log>`), and wait on the sentinel with `Monitor` in-turn. The process
   outlives a forced handback: on a resume, poll the log for the sentinel — never re-launch
   while one is live; kill it by PID first if you must abandon it. Else an explicit ≥600s timeout.
-- **Never run the full e2e suite on a normal task** — over an hour, exceeds a tool call's
-  timeout, contends for shared ports and Docker stacks. It is the standing e2e-test Task's job.
+- **Never run the full e2e suite** — over an hour, exceeds a tool call's timeout, contends
+  for shared ports and Docker stacks. The driven repo runs it outside the pipeline; the
+  standing e2e-test Task runs only the specs it adds or changes.
   If you believe a normal task cannot be validated without it, say so in your handoff and stop.
 - **When the integration suite is yours** (not a normal functional Task): a new integration
   spec the LLD mandates is written and run together with the specs its change impacts — the
@@ -188,8 +190,8 @@ cycle.
   belongs in the design doc / PR description, not the code. `pr-review` blocks on bloat.
 - **A code comment stating a guarantee is true for every input, or names what it excludes**
   (truncation, common-shape-only, best-effort) in the same sentence.
-- **Commits and pushes.** Ordinary git in your worktree (`commit`, `stash`, `checkout`,
-  `push` of your own `issue-<n>`) is yours; the Bash guard denies the rest and names the
+- **Commits and pushes.** Ordinary git in your worktree (`commit`, `checkout`,
+  `push` of your own `issue-<n>`) is yours, except `git stash` (`verification-rules.md`); the Bash guard denies the rest and names the
   command to use. A base sync (`sync-branch`) is the orchestrator's; never merge the base by
   hand. Small logical local commits. Push **once per cycle**: once immediately before `open-dev-pr`, and on a
   rework round once after all fix commits, before re-handing off — each push re-triggers

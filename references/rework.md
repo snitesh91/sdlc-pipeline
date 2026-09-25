@@ -5,6 +5,10 @@ A deviation from an Epic's approved `architecture.md` has its own path
 
 ## Routing a finding
 
+**Tell the operator first.** On every `rework` outcome, print the blocking findings in chat
+before you route them: one line per finding, with what is wrong, where (`file:line`) and
+the owning stage. "Bounced" alone is not a report.
+
 When a later stage (`arch-review`/`lld-review`, `pr-review`) finds a problem owned by an
 earlier stage, **do not spawn a fresh subagent and do not open a GitHub issue.** Resume
 the original agent that owns the responsible stage (`SendMessage` to its tracked ID) with

@@ -152,7 +152,8 @@ closed sub-issues, or rotate a standing epic before it fills (e.g. `RTB-2`), the
   pre-existing issue unless that issue *is* the Task as carved.
 - **Every Epic carries two standing Tasks, Integration-test and e2e-test**, specified like
   functional Tasks; they run after the functional Tasks merge and own the coverage unit
-  tests don't.
+  tests don't. The e2e-test Task authors specs only: it runs the specs it adds or changes,
+  never the full suite ("Epic closing").
 - **`Priority:` / `Effort:`** lines are optional per Task (`agents/lld.md`, "The
   document"); `create-lld-tasks` sets them, else `pipeline.issueDefaults`.
 - A Task must carry its own Footprint and real `blockedBy` edges — `list-parallel-ready`
@@ -323,17 +324,18 @@ never reaches `main`; merge its design PR). Remaining items: closing verificatio
 - `close-epic <n> --no-carry-forward` accepts only evidence stamped at the epic head itself:
   no delta carry-forward, no child chain.
 
-**Preflight the machine before an e2e run** (the e2e-test Task's, or any you run yourself). An exhausted Docker VM makes a run
+**Preflight the machine before an e2e run** (the e2e-test Task's new specs, or any you run yourself). An exhausted Docker VM makes a run
 unrecordable (`Page crashed`, `ENOSPC`, container OOM kills). Check `docker system df`, VM disk
 use (under ~80%) and host free memory; prune build cache and stop stale stacks first; restart
 the frontend container between e2e chunks. A run with crash-class failures is an environment
 failure: fix it and re-run, never record it.
 
 **Closing verification — the exploratory pass** (`sdlc:exploratory`), run in the epic
-branch's worktree (`worktree-add <n> --unit epic`), never the main checkout. **The full e2e
-suite is not a close requirement:** every Epic has its own standing e2e-test Task, which owns
-that evidence, so `close-epic` no longer asks for it. `record-epic-verification --kind e2e` is
-still accepted (informational, never gates). Run every suite in `unattested_suites` with a
+branch's worktree (`worktree-add <n> --unit epic`), never the main checkout. **The pipeline
+never runs the full e2e suite** — at close or in any Task; the driven repo runs it outside
+the pipeline (e.g. nightly on its staging environment) and files what fails there.
+`close-epic` never asks for it. `record-epic-verification --kind e2e` is still accepted
+(informational, never gates). Run every suite in `unattested_suites` with a
 fresh `sdlc:development` agent and a run-only brief (fix nothing, report). **You** record the
 exploratory half with `record-epic-verification <n> --kind exploratory --summary "..."` (it
 stamps the tested epic-branch head; `--sha` names an earlier tested head; the summary is the
@@ -348,11 +350,13 @@ did not run clean.**
 - the exploratory pass could not be obtained. With no record `close-epic` refuses —
   report the epic as close-ready pending it, and stop. Never fabricate the record.
 
-**The full e2e suite runs once, in the epic's e2e-test Task** —
-sequence it after the Tasks whose surfaces it proves. Per-child `development` runs only
-the specs for surfaces that child moved.
+**The e2e-test Task authors this Epic's specs and runs only those** — the specs it adds or
+changes, never the full suite — against a stack built from `epic-<n>` (the Epic's isolated
+stack, or one stood up from the epic worktree). The shared dev stack serves `main` and lacks
+the Epic's changes, so a run there proves nothing. Sequence the Task after the Tasks whose
+surfaces it proves. Per-child `development` runs only the specs for surfaces that child moved.
 
-**Triage e2e-run and exploratory deltas:**
+**Triage new-spec and exploratory deltas:**
 
 - **Blocker / Critical** — a stable, re-confirmed delta on a spec for a surface this epic
   moved, plus **any** access-boundary delta or 5xx/crash → file against **the epic**; it
@@ -361,8 +365,8 @@ the specs for surfaces that child moved.
 - **Normal / Low** — unmapped surface, non-reproducible flake, or a pre-existing failure
   cluster with unchanged membership → file against the standing backlog epic.
 
-The e2e-test Task's `## Task` subsection states what counts as a stable delta (its
-evidence goal — two single zero-retry runs are not a comparison); how the suite runs is
+The e2e-test Task's `## Task` subsection names the specs it adds and what counts as a
+stable pass of them (its evidence goal — one zero-retry run is not stability); how the suite runs is
 `development`'s, never the LLD's (`agents/lld.md`, "The document").
 
 **Close-blocker lane — only with operator authorisation.** A Blocker/Critical fix that

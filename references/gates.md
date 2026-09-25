@@ -63,20 +63,12 @@ python3 "$SDLC" open-gate <n> --doc product.md --next-stage architecture \
   # --repo-path optional: the branch's live worktree is auto-resolved
 ```
 
-- It writes the PR body (or, for an Epic's Architecture-phase/revision Task, reuses its
-  design PR and posts a `gate-comments-processed` cutoff on it, so the reviewer's earlier
-  comments are not read as human feedback), sets `Awaiting Human Review`, posts the issue
-  comment. You
-  choose `--summary` and `--doc`/`--next-stage`
-  (A: `product.md` → `architecture`; B: `architecture.md` → `development`; on a
-  phase-Task `--next-stage` is required but nominal).
-- **The PR title is derived by `open-gate`** from the issue's title (a phase-Task's gets its
-  parent's appended); pass no `--title`. A `--title` is stripped of gate shorthand and
-  `- <doc> for review` (`title_normalized: true`). Never write "Gate",
-  "Gate A/B" or a bare "A"/"B" in PR titles, issue comments or commit messages — that
-  shorthand is internal to this skill.
-- The gate PR is **ready for review, not draft** (a scoped exception to the draft-PR
-  rule) and carries **no `Closes #<n>`** — it must not close the issue.
+- `open-gate` owns the PR (body, title, status, issue comment). You choose only
+  `--summary` and `--doc`/`--next-stage` (A: `product.md` → `architecture`; B:
+  `architecture.md` → `development`; on a phase-Task `--next-stage` is required but
+  nominal). Pass no `--title`.
+- Never write "Gate", "Gate A/B" or a bare "A"/"B" in PR titles, issue comments or commit
+  messages — that shorthand is internal to this skill.
 - **Merging** — a standing child's or parentless issue's gate PR is **never squashed and
   never deletes the branch** (`issue-<n>` lives on; a squash makes the next
   `sync-branch` a phantom diff). A phase-Task's gate PR **may be squashed**; do not delete

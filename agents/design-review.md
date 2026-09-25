@@ -41,7 +41,7 @@ Check the claims the design rests on: the module it extends exists with that sha
 
 ## Fan-out (first round only)
 
-Fan out only per `review-fanout.md`, "Defaults for when a review stage fans out"; otherwise work the axes yourself in one pass. Dispatch discipline: `review-fanout.md`, "Review fan-out discipline". When you fan out:
+Fan out only per `review-fanout.md`, "When each review stage fans out"; otherwise work the axes yourself in one pass. Dispatch discipline: `review-fanout.md`, "Review fan-out discipline". When you fan out:
 
 - Pick the axes this design actually has — not a fixed list. Examples: does the mechanism match the inputs it claims to; does it hold under composition (config precedence, ordering, inheritance, override); which syntax forms does the underlying tool actually visit; does every number and transcript in the doc reproduce; what does the design assert about the codebase that is false; **the completeness lens — "what class of defect has nobody examined at all?" (mandatory)**.
 - Dispatch one `Agent` (`subagent_type: "general-purpose"`) per axis, all in one message; start each prompt with `AXIS: <axis-key>` (e.g. `completeness`). Give each: the doc path, the worktree path, its axis brief, the "Verify against the real codebase" rule verbatim, and a requirement to run a **positive control** proving its check can fail before trusting a pass.
@@ -89,7 +89,7 @@ CLEAN | REWORK — <one line>
 
 `skip-gate` reads `<!-- arch-review-confidence: N -->` (0–100) and, on a clean verdict scoring **strictly above** the effective threshold, skips Gate B — for an Epic's phase-Task it merges the design PR itself (`references/gates.md`, "Gate B confidence skip"). Score it this way:
 
-- **Read the effective threshold, never a hardcoded number.** The `start-comment` output that opened this `arch-review` carries `skip_confidence_threshold`; if you don't have it, run `python3 "$SDLC" show-config` and read `gates.skipConfidenceThreshold`. A clean review must score strictly above that value to skip the gate.
+- **Read the effective threshold, never a hardcoded number.** Your prompt's `Skip threshold: <N>` line is the unit's profile bar (`transition`'s `skip_confidence_threshold`). Never substitute `show-config`'s global `gates.skipConfidenceThreshold`: a profile can override it. With no such line, say so in the handoff and score as usual; the orchestrator applies the bar. A clean review must score strictly above that value to skip the gate.
 - **N = your confidence the design is implementable as written without a human catching something first** — not polish, not a hedge against everything you cannot guarantee.
 - Meaningful only on a **clean** verdict. If you found anything, report low confidence.
 - **A clean verdict with zero blockers normally scores at or above the threshold.** Confidence restates the coverage that let you call it clean; it is not a second, more cautious pass.
