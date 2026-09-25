@@ -1,11 +1,13 @@
 # Review fan-out discipline
 
-Read by `design-review` (both halves), the only role that may fan out. Its agent file lists
-the axes; it does not repeat these rules. The Agent guard hook denies fan-out to every other
-role, caps the children and sets their model from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (`fanout.<role>`).
+Read by the review roles that may fan out: `design-review` (both halves), `product-review`
+and `pr-review`. Each agent file lists its axes; it does not repeat these rules. The Agent
+guard hook denies fan-out to every other role, caps the children and sets their model
+(opus by default) from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (`fanout.<role>`).
 
-**`maxChildren` caps the children running at once** (`arch-review` 2, `lld-review` 4 — a
-whole `lld.md` has more independent axes to cover). The guard seats each launch in a slot and
+**`maxChildren` caps the children running at once** (`product-review` 2, `arch-review` 2,
+`pr-review` 3 — one per layer, `lld-review` 4 — a whole `lld.md` has more independent axes
+to cover). The guard seats each launch in a slot and
 frees it when that child reports. **Wait-and-dispatch loop:** a launch denied at the cap
 carries `retry_after: {waiting_on: [holders], hint}` — it is not final. Wait for any holder
 to report, re-launch the denied axis, repeat until every axis ran. Work an axis yourself only
@@ -46,9 +48,19 @@ characters**:
 **Parent:** run `wc -c` on each reply. If a reply is over the cap, ask for a terse
 re-send before acting on it.
 
-## Defaults for when a review stage fans out — cost discipline
+## When each review stage fans out — cost discipline
 
-Default to a single pass. Fan out only on a first round over a design doc (`architecture.md`,
-`lld.md`) of roughly 500+ lines; on a rework round review the delta yourself, dispatching an
-axis only where the delta could reopen something an earlier round established. State any
-departure, with its reason, in the handoff comment.
+Default to a single pass. Fan out only on a first round, and only when the input is too big
+to hold in one careful pass:
+
+- `arch-review` / `lld-review`: a design doc (`architecture.md`, `lld.md`) of roughly 500+
+  lines.
+- `product-review`: a `product.md` of roughly 300+ lines, or one an Initiative splits into
+  several Epics.
+- `pr-review`: a diff of roughly 1,000+ changed lines, or one spanning several modules. Split
+  by layer (blind, edge, auditor) or by module slice; the parent still owns suites, mutation
+  probes and severity.
+
+On a rework round review the delta yourself, dispatching an axis only where the delta could
+reopen something an earlier round established. State any departure, with its reason, in the
+handoff comment.

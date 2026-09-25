@@ -244,6 +244,33 @@ def test_a_run_state_nothing_has_touched_for_a_day_is_not_live(tmp_path, sdlc_re
     assert "sdlc guard: " in guard("gh pr merge 3", sdlc_repo, **kw)
 
 
+def test_main_thread_operator_pr_with_an_explicit_non_pipeline_head_is_allowed(sdlc_repo, live):
+    # An operator-directed docs/config PR during a live run needs no `!` escape.
+    assert guard("gh pr create --head chore/agents --title t --body b", sdlc_repo, **live) is None
+    assert guard("gh pr create -H o:docs/x --title t --body b", sdlc_repo, **live) is None
+    for cmd in ("gh pr create --title t --body b",           # head not named
+                "gh pr create --head issue-5 --title t",       # a pipeline branch
+                "gh pr create --head=o:epic-9 --title t"):
+        assert "sdlc guard: " in guard(cmd, sdlc_repo, **live)
+    # never for a stage agent
+    assert "sdlc guard: " in guard("gh pr create --head chore/x --title t", sdlc_repo,
+                                   "sdlc:development")
+
+
+def test_custom_branch_prefixes_count_as_pipeline_branches(tmp_path):
+    cwd = _git_repo(tmp_path / "pfx", {"repo": "o/r", "guard": {"mainThread": "always"},
+                                       "pipeline": {"branches": {"issuePrefix": "sdlc-i-"}}})
+    assert "sdlc guard: " in guard("gh pr create --head sdlc-i-5 --title t", cwd)
+    assert guard("gh pr create --head issue-5 --title t", cwd) is None
+
+
+@pytest.mark.parametrize("agent", ["sdlc:development", "sdlc:pr-review", "sdlc:lld"])
+@pytest.mark.parametrize("command", ["git stash", "git stash pop", "git -C /tmp/w stash push -m x"])
+def test_stage_agents_never_stash(sdlc_repo, agent, command):
+    # #1186: one stash stack per repo; #1279's `stash pop` took #1317's WIP.
+    assert "stash stack" in guard(command, sdlc_repo, agent)
+
+
 def test_an_unknown_session_stays_guarded(sdlc_repo):
     assert "sdlc guard: " in guard("gh pr merge 3", sdlc_repo)
 
@@ -786,9 +813,9 @@ def _parent_transcript(tmp_path, agent_id, prompt):
 
 def test_agent_guard_forces_fanout_model(tmp_path, sdlc_repo):
     _parent_transcript(tmp_path, "p1", "ROLE: arch-review ISSUE: 5\nReview")
-    out = launch(sdlc_repo, tmp_path, "general-purpose", model="opus",
+    out = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet",
                  parent=("p1", "sdlc:design-review"))
-    assert forced_model(out) == "sonnet" and out["updatedInput"]["prompt"] == "do it"
+    assert forced_model(out) == "opus" and out["updatedInput"]["prompt"] == "do it"
 
 
 def test_agent_guard_axis_override(tmp_path):
@@ -806,9 +833,19 @@ def test_agent_guard_reads_design_review_role_from_parent_transcript(tmp_path):
     repo = _policy_repo(tmp_path, {"fanout": {"lld-review": {"allowed": False}}})
     _parent_transcript(tmp_path, "arch", "ROLE: arch-review ISSUE: 5\nReview")
     _parent_transcript(tmp_path, "lld", "ROLE: lld-review ISSUE: 6\nReview")
-    assert forced_model(launch(repo, tmp_path, "Explore", parent=("arch", "sdlc:design-review"))) == "sonnet"
-    out = launch(repo, tmp_path, "Explore", parent=("lld", "sdlc:design-review"))
+    assert forced_model(launch(repo, tmp_path, "Explore", model="sonnet", parent=("arch", "sdlc:design-review"))) == "opus"
+    out = launch(repo, tmp_path, "Explore", model="sonnet", parent=("lld", "sdlc:design-review"))
     assert out["permissionDecision"] == "deny" and "single pass" in out["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("parent,cap", [("sdlc:product-review", 2), ("sdlc:pr-review", 3)])
+def test_agent_guard_lets_product_and_pr_review_fan_out_at_opus(tmp_path, sdlc_repo, parent, cap):
+    # Operator 2026-09-24: every review may fan out when it needs to; children run opus.
+    for i in range(cap):
+        assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet",
+                                   parent=(f"fan{cap}", parent), prompt=f"AXIS: a{i}\nGo")) == "opus"
+    out = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=(f"fan{cap}", parent))
+    assert out["permissionDecision"] == "deny" and f"at most {cap}" in out["permissionDecisionReason"]
 
 
 def test_agent_guard_denies_nested_stage(tmp_path, sdlc_repo):
@@ -818,10 +855,9 @@ def test_agent_guard_denies_nested_stage(tmp_path, sdlc_repo):
 
 
 @pytest.mark.parametrize("parent,reason", [
-    ("sdlc:pr-review", "single pass"), ("sdlc:product-review", "single pass"),
     ("sdlc:development", "only the read-only Explore"), ("sdlc:exploratory", "no subagents")])
 def test_agent_guard_denies_fanout_where_not_allowed(tmp_path, sdlc_repo, parent, reason):
-    out = launch(sdlc_repo, tmp_path, "general-purpose", parent=("p1", parent))
+    out = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=("p1", parent))
     assert out["permissionDecision"] == "deny" and reason in out["permissionDecisionReason"]
 
 
@@ -835,14 +871,14 @@ def test_agent_guard_sets_stage_models_for_a_non_sdlc_parent(tmp_path, sdlc_repo
     out = launch(sdlc_repo, tmp_path, "sdlc:design-review", model="sonnet", parent=parent,
                  prompt="ROLE: lld-review ISSUE: 6\nReview")
     assert forced_model(out) == "opus"
-    assert launch(sdlc_repo, tmp_path, "general-purpose", parent=parent) is None
+    assert launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=parent) is None
 
 
 def test_agent_guard_lets_explore_roles_launch_explore_only(tmp_path, sdlc_repo):
     for role in ("development", "lld"):
-        assert launch(sdlc_repo, tmp_path, "Explore", parent=("p1", f"sdlc:{role}")) is None
-    out = launch(sdlc_repo, tmp_path, "Explore", parent=("p1", "sdlc:pr-review"))
-    assert out["permissionDecision"] == "deny" and "single pass" in out["permissionDecisionReason"]
+        assert launch(sdlc_repo, tmp_path, "Explore", model="sonnet", parent=("p1", f"sdlc:{role}")) is None
+    out = launch(sdlc_repo, tmp_path, "Explore", model="sonnet", parent=("p1", "sdlc:exploratory"))
+    assert out["permissionDecision"] == "deny" and "no subagents" in out["permissionDecisionReason"]
 
 
 def test_agent_guard_enforces_max_children(tmp_path, sdlc_repo):
@@ -850,20 +886,20 @@ def test_agent_guard_enforces_max_children(tmp_path, sdlc_repo):
     _parent_transcript(tmp_path, "p1", "ROLE: arch-review ISSUE: 5\nReview")
     _parent_transcript(tmp_path, "p2", "ROLE: arch-review ISSUE: 6\nReview")
     parent = ("p1", "sdlc:design-review")
-    assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)) == "sonnet"
-    assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)) == "sonnet"
-    out = launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)
+    assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=parent)) == "opus"
+    assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=parent)) == "opus"
+    out = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=parent)
     assert out["permissionDecision"] == "deny" and "at most 2" in out["permissionDecisionReason"]
-    other = launch(sdlc_repo, tmp_path, "general-purpose", parent=("p2", "sdlc:design-review"))
-    assert forced_model(other) == "sonnet"
+    other = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=("p2", "sdlc:design-review"))
+    assert forced_model(other) == "opus"
 
 
 def test_agent_guard_lld_review_caps_at_four(tmp_path, sdlc_repo):
     _parent_transcript(tmp_path, "p1", "ROLE: lld-review ISSUE: 5\nReview")
     parent = ("p1", "sdlc:design-review")
     for _ in range(4):
-        assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)) == "sonnet"
-    out = launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)
+        assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=parent)) == "opus"
+    out = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=parent)
     assert out["permissionDecision"] == "deny" and "at most 4" in out["permissionDecisionReason"]
 
 
@@ -894,18 +930,18 @@ def test_agent_guard_denied_launch_waits_on_the_holders_and_reclaims_when_one_re
     _parent_transcript(tmp_path, "p1", "ROLE: arch-review ISSUE: 5\nReview")
     parent = ("p1", "sdlc:design-review")
     for axis in ("flows", "completeness"):
-        assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", parent=parent,
-                                   prompt=f"AXIS: {axis}\nGo")) == "sonnet"
-    third = launch(sdlc_repo, tmp_path, "general-purpose", parent=parent, prompt="AXIS: security\nGo")
+        assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=parent,
+                                   prompt=f"AXIS: {axis}\nGo")) == "opus"
+    third = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=parent, prompt="AXIS: security\nGo")
     assert "at most 2" in third["permissionDecisionReason"]
     retry = _retry_after(third)
     assert retry["waiting_on"] == ["flows", "completeness"] and "re-run" in retry["hint"]
     # The flows child reports: its slot frees and the third axis seats.
     _child_stop(tmp_path, sdlc_repo, "c1", "p1", "AXIS: flows\nGo")
-    assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", parent=parent,
-                               prompt="AXIS: security\nGo")) == "sonnet"
+    assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=parent,
+                               prompt="AXIS: security\nGo")) == "opus"
     assert json.loads((tmp_path / "data" / "fanout" / "p1").read_text()) == ["completeness", "security"]
-    fourth = launch(sdlc_repo, tmp_path, "general-purpose", parent=parent, prompt="AXIS: perf\nGo")
+    fourth = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=parent, prompt="AXIS: perf\nGo")
     assert _retry_after(fourth)["waiting_on"] == ["completeness", "security"]
     # A child of a parent holding no slots frees nothing and leaves no file behind.
     _child_stop(tmp_path, sdlc_repo, "c2", "nobody", "AXIS: flows\nGo")
@@ -915,22 +951,22 @@ def test_agent_guard_denied_launch_waits_on_the_holders_and_reclaims_when_one_re
 def test_agent_guard_applies_the_stricter_cap_when_the_parent_role_is_unreadable(tmp_path, sdlc_repo):
     parent = ("nohdr", "sdlc:design-review")  # no parent transcript: the ROLE header is unreadable
     for _ in range(2):
-        out = launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)
-        assert forced_model(out) == "sonnet" and "stricter arch-review" in out["additionalContext"]
-    third = launch(sdlc_repo, tmp_path, "general-purpose", parent=parent)
+        out = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=parent)
+        assert forced_model(out) == "opus" and "stricter arch-review" in out["additionalContext"]
+    third = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=parent)
     assert third["permissionDecision"] == "deny"
     assert "at most 2" in third["permissionDecisionReason"]
     assert "stricter arch-review" in third["permissionDecisionReason"]
     # Denied outright when the stricter of the two policies forbids fan-out.
     repo = _policy_repo(tmp_path, {"fanout": {"lld-review": {"allowed": False}}})
-    out = launch(repo, tmp_path, "general-purpose", parent=("nohdr2", "sdlc:design-review"))
+    out = launch(repo, tmp_path, "general-purpose", model="sonnet", parent=("nohdr2", "sdlc:design-review"))
     assert out["permissionDecision"] == "deny" and "single pass" in out["permissionDecisionReason"]
     assert "stricter lld-review" in out["permissionDecisionReason"]
     # Positive control: a readable header gets its own cap and no warning.
     _parent_transcript(tmp_path, "hdr", "ROLE: lld-review ISSUE: 5\nReview")
     for _ in range(3):
-        out = launch(sdlc_repo, tmp_path, "general-purpose", parent=("hdr", "sdlc:design-review"))
-        assert forced_model(out) == "sonnet" and "additionalContext" not in out
+        out = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=("hdr", "sdlc:design-review"))
+        assert forced_model(out) == "opus" and "additionalContext" not in out
 
 
 def test_agent_guard_counts_parallel_launches_exactly(tmp_path, sdlc_repo):
@@ -953,13 +989,13 @@ def test_agent_guard_expires_stale_slots(tmp_path, sdlc_repo):
     slots.mkdir(parents=True)
     (slots / "p1").write_text("2")
     os.utime(slots / "p1", (0, 0))
-    assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose",
-                               parent=("p1", "sdlc:design-review"))) == "sonnet"
+    assert forced_model(launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet",
+                               parent=("p1", "sdlc:design-review"))) == "opus"
 
 
 def test_agent_guard_leaves_other_agents_alone(tmp_path, sdlc_repo, plain_repo):
     assert launch(sdlc_repo, tmp_path, "general-purpose") is None
-    assert launch(sdlc_repo, tmp_path, "Explore", parent=("g1", "general-purpose")) is None
+    assert launch(sdlc_repo, tmp_path, "Explore", model="sonnet", parent=("g1", "general-purpose")) is None
     assert launch(plain_repo, tmp_path, "sdlc:development", model="opus") is None
 
 

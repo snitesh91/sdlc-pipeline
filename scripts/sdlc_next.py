@@ -1053,8 +1053,8 @@ def missing_pipeline_evidence(comments: list) -> list:
     return problems
 
 
-# Closing evidence `close-epic` requires. The full e2e suite is not one: every Epic has its own
-# standing e2e-test Task, which owns that evidence. `record-epic-verification --kind e2e`
+# Closing evidence `close-epic` requires. The full e2e suite is not one: the pipeline never
+# runs it (the driven repo does, outside the pipeline); the e2e-test Task runs its new specs. `record-epic-verification --kind e2e`
 # is still accepted (informational), it just no longer gates the merge.
 EPIC_CLOSE_REQUIRED_EVIDENCE = (("exploratory", "exploratory pass"),)
 
@@ -6312,7 +6312,7 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
             f"{dependents_line}"
             f"{docs_line}"
             f"- [ ] Closing verification run on `{epic_branch(epic['number'])}` after merging "
-            "`origin/main` into it — the full e2e suite and an exploratory pass, run in parallel\n"
+            "`origin/main` into it — an exploratory pass\n"
             f"- [ ] `{epic_branch(epic['number'])}` merged to `main`\n\n"
             f"Run `sdlc_next.py close-epic {epic['number']}` to do all of it — it reconciles the "
             "epic branch with `main`, refuses while verification evidence is missing, and merges "
@@ -6777,6 +6777,10 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
     claimed without a live tree, and nothing runs when the claim would be refused.
     Returns `path`, `claimed` plus the steps."""
     role = RETIRED_ROLES.get(role, role)
+    if unit == "epic" and gh.classify_unit(number) != "epic":
+        # `--unit epic` on a Task would cut a stray `epic-<n>` branch + worktree.
+        raise GhError(f"#{number} is not an Epic -- start-stage --unit epic is only for an "
+                      f"Epic; a Task (phase-Task included) takes the default --unit issue")
     seq = StepSequence()
     seq.run("check-claimable", lambda: _check_claimable(gh, number, role))
     # A child of a non-standing Epic integrates into `epic-<parent>`. Ensure that branch AND its

@@ -51,6 +51,12 @@ halves; the completeness-sweep rule governs both `architecture.md` and `lld.md`)
   already hold) stays green. That means a bad discriminator, not a finding about the
   test. When a mutation stays green, first check it was a real mutation.
 
+**Never `git stash`** — not for a mutation check, not to park work. Every worktree of a
+repo shares one stash stack, so with parallel agents a `stash pop` takes another agent's
+work. Mutate a scratch copy
+(`cp f .sdlc-scratch/f.orig`, edit, run, `cp` back) or commit and `git revert`. The Bash
+guard denies `git stash` to every stage agent.
+
 Give your own tooling the same scrutiny. Check a script you just wrote for false
 positives before using its output as evidence, and say you did so in the handoff.
 

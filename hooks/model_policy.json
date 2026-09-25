@@ -15,9 +15,9 @@
   },
   "explore": ["development", "lld"],
   "fanout": {
-    "product-review": {"allowed": false},
-    "arch-review": {"allowed": true, "maxChildren": 2, "model": "sonnet", "axisModels": {}},
-    "lld-review": {"allowed": true, "maxChildren": 4, "model": "sonnet", "axisModels": {}},
-    "pr-review": {"allowed": false}
+    "product-review": {"allowed": true, "maxChildren": 2, "model": "opus", "axisModels": {}},
+    "arch-review": {"allowed": true, "maxChildren": 2, "model": "opus", "axisModels": {}},
+    "lld-review": {"allowed": true, "maxChildren": 4, "model": "opus", "axisModels": {}},
+    "pr-review": {"allowed": true, "maxChildren": 3, "model": "opus", "axisModels": {}}
   }
 }
