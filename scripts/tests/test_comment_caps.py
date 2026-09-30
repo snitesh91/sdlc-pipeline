@@ -31,6 +31,7 @@ ARGV = {
     "close-issue": ["close-issue", "5", "--not-planned", "--reason", "{text}"],
     "comment": ["comment", "5", "--body", "{text}"],
     "detach-epic": ["detach-epic", "9", "--reason", "{text}"],
+    "reparent-issue": ["reparent-issue", "9", "--parent", "8", "--reason", "{text}"],
 }
 
 

@@ -2411,9 +2411,45 @@ def _dev_pr_scope_refusal_reason(offenders: dict) -> Optional[str]:
                      f"{', '.join(offenders['foreign_footprint'])}")
     if not parts:
         return None
+    ack = (" A foreign-footprint touch that is an inherent side effect of this Task can be "
+           "acknowledged instead: list each such path in the PR body under a "
+           "`## Footprint deviations` heading as a bullet starting with the backticked path "
+           "(e.g. - `path/x.ts` — why). Epic design docs can never be acknowledged."
+           if offenders["foreign_footprint"] else "")
     return (f"this development diff {'; and '.join(parts)} -- {DEV_PR_SCOPE_RULE}. Revert those "
             f"paths and, if the design truly needs to change, escalate an Architecture/LLD "
-            f"revision rather than editing the doc from a development branch.")
+            f"revision rather than editing the doc from a development branch.{ack}")
+
+
+_FOOTPRINT_DEVIATIONS_HEADING = re.compile(r"^[ \t]*#{1,6}[ \t]*Footprint deviations[ \t]*$",
+                                           re.IGNORECASE | re.MULTILINE)
+_DEVIATION_BULLET = re.compile(r"^[ \t]*[-*][ \t]+`([^`\n]+)`")
+
+
+def acknowledged_footprint_deviations(pr_body: Optional[str]) -> list:
+    """Paths a PR body acknowledges as footprint deviations: each bullet under its
+    `## Footprint deviations` heading (up to the next heading) that starts with a backticked
+    path, in order, deduplicated. [] when the section is absent."""
+    m = _FOOTPRINT_DEVIATIONS_HEADING.search(pr_body or "")
+    if not m:
+        return []
+    rest = m.string[m.end():]
+    end = re.search(r"^[ \t]*#{1,6}[ \t]", rest, re.MULTILINE)
+    paths = []
+    for line in (rest[:end.start()] if end else rest).splitlines():
+        bm = _DEVIATION_BULLET.match(line)
+        if bm and bm.group(1).strip() not in paths:
+            paths.append(bm.group(1).strip())
+    return paths
+
+
+def acknowledge_footprint_deviations(offenders: dict, pr_body: Optional[str]) -> tuple:
+    """`(offenders, acknowledged)`: the foreign-footprint offenders the PR body acknowledges
+    move to `acknowledged`; design-doc offenders are never acknowledgeable."""
+    listed = set(acknowledged_footprint_deviations(pr_body))
+    acknowledged = [p for p in offenders["foreign_footprint"] if p in listed]
+    return ({**offenders, "foreign_footprint": [p for p in offenders["foreign_footprint"]
+                                                if p not in listed]}, acknowledged)
 
 
 def worktree_path_for_branch(branch: str, runner: Runner = _default_runner,
@@ -4201,16 +4237,20 @@ def cmd_add_blocked_by(gh: GitHub, issue: int, dep: int) -> dict:
     return {"issue": issue, "blocked_on": dep, "added": True}
 
 
-def _task_line(name: str) -> re.Pattern:
+def _task_line(name: str, after_separator: bool = True) -> re.Pattern:
     """A `<name>: <value>` field in a Task section: at line start (bullet, bold and backtick
-    wrappers tolerated) or after a ` / ` or ` | ` separating it from a sibling field."""
-    return re.compile(rf"(?:^[ \t]*(?:[-*][ \t]+)?|[ \t]+[/|][ \t]+)`?(?:\*\*)?`?{name}`?"
+    wrappers tolerated) or, with `after_separator`, after a ` / ` or ` | ` separating it from a
+    sibling field."""
+    lead = (r"(?:^[ \t]*(?:[-*][ \t]+)?|[ \t]+[/|][ \t]+)" if after_separator
+            else r"^[ \t]*(?:[-*][ \t]+)?")
+    return re.compile(rf"{lead}`?(?:\*\*)?`?{name}`?"
                       rf"(?:\*\*)?`?[ \t]*:[ \t]*(?:\*\*)?[ \t]*"
                       rf"(.+?)(?=`?(?:\*\*)?(?:[ \t]+[/|][ \t]|[ \t]*$))",
                       re.IGNORECASE | re.MULTILINE)
 
 
-_DEPENDS_ON_LINE = _task_line("Depends on")
+# `Depends on:` only ever starts a line of the Task's metadata block (`task_metadata_lines`).
+_DEPENDS_ON_LINE = _task_line("Depends on", after_separator=False)
 _PRIORITY_LINE = _task_line("Priority")
 _EFFORT_LINE = _task_line("Effort")
 _REALISES_LINE = _task_line("Reali[sz]es")
@@ -4252,16 +4292,61 @@ def parse_task_field(section_text: str, line: re.Pattern) -> Optional[str]:
     return m.group(1).strip("`*. ") if m else None
 
 
-def parse_task_depends_on(section_text: str) -> list:
-    """Task keys from a section's `Depends on:` line(s) (comma- or `and`-separated,
-    backticks and trailing period tolerated); [] when none."""
-    keys = []
-    for m in _DEPENDS_ON_LINE.finditer(section_text):
-        for raw in re.split(r",|\band\b", m.group(1)):
-            key = raw.strip("`*. \t")
-            if _TASK_KEY_RE.match(key) and key not in _NO_DEPENDENCY and key not in keys:
+# A metadata field line (`Depends on:`, `Priority:`, `Effort:`, `Realises:`), however marked up.
+_TASK_FIELD_START = re.compile(r"^[ \t]*(?:[-*][ \t]+)?`?(?:\*\*)?`?"
+                               r"(?:Depends on|Priority|Effort|Reali[sz]es)`?(?:\*\*)?`?[ \t]*:",
+                               re.IGNORECASE)
+_MD_HEADING_LINE = re.compile(r"^[ \t]*#{1,6}[ \t]")
+_LIST_ITEM_LINE = re.compile(r"^[ \t]*[-*][ \t]+")
+
+
+def task_metadata_lines(section_text: str) -> list:
+    """A Task section's metadata block: the lines before its first `#` subheading (fenced
+    blocks dropped) that start a paragraph or list item, or follow another metadata field line.
+    A wrapped prose line -- one continuing a prose line -- is never metadata, nor is anything
+    under a subheading (`### Task-local decisions`, `## Footprint`, ...)."""
+    lines, prev = [], ""
+    for line in _FENCED_BLOCK.sub("", section_text).splitlines():
+        if _MD_HEADING_LINE.match(line):
+            break
+        if line.strip() and (not prev.strip() or _TASK_FIELD_START.match(prev)
+                             or _LIST_ITEM_LINE.match(line)):
+            lines.append(line)
+        prev = line
+    return lines
+
+
+def _depends_on_value(section_text: str) -> Optional[str]:
+    """The value of the first `Depends on:` line of the metadata block, or None."""
+    for line in task_metadata_lines(section_text):
+        m = _DEPENDS_ON_LINE.search(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _split_depends_on(value: str) -> tuple:
+    """`(keys, unparsed)` from a `Depends on:` value: comma-separated Task keys (a standalone
+    ` and ` also separates; `search-and-filter` stays one key). No-dependency words drop out;
+    anything else that is not a key lands in `unparsed`."""
+    keys, unparsed = [], []
+    for raw in re.split(r",|[ \t]+and[ \t]+", value):
+        key = raw.strip("`*. \t")
+        if key.lower() in _NO_DEPENDENCY:
+            continue
+        if _TASK_KEY_RE.match(key):
+            if key not in keys:
                 keys.append(key)
-    return keys
+        elif key not in unparsed:
+            unparsed.append(key)
+    return keys, unparsed
+
+
+def parse_task_depends_on(section_text: str) -> list:
+    """Task keys from the first `Depends on:` line of a section's metadata block
+    (`task_metadata_lines`); backticks, bold and a trailing period tolerated. [] when none."""
+    value = _depends_on_value(section_text)
+    return _split_depends_on(value)[0] if value is not None else []
 
 
 # Any `Depends on:` mention, however marked up -- to catch one the strict parser misses.
@@ -4271,16 +4356,31 @@ _NO_DEPENDENCY = {"", "none", "n/a", "-", "\u2014", "nothing"}
 
 
 def task_dependency_defect(section_text: str) -> Optional[str]:
-    """Why a Task section's `Depends on:` cannot be trusted (None when it can): the section
-    names a dependency but no key parses, so the Task would be created with no edge."""
-    if parse_task_depends_on(section_text):
-        return None
-    for m in _DEPENDS_ON_MENTION.finditer(section_text):
+    """Why a Task section's `Depends on:` cannot be trusted (None when it can): its line names
+    something that is not a Task key (the whole value, or part of it), or the metadata block
+    mentions a dependency the strict parser does not read -- either way the Task would be
+    created missing a `blockedBy` edge and race its dependency."""
+    value = _depends_on_value(section_text)
+    if value is not None:
+        keys, unparsed = _split_depends_on(value)
+        if not unparsed:
+            return None
+        line = f"Depends on: {value.strip()}"
+        if not keys:
+            return (f"`{line}` names a dependency but no Task key parses from it -- the Task "
+                    f"would be created with no `blockedBy` edge and race its dependency. Write "
+                    f"the line plain (`Depends on: <key>, <key>`, slug keys), then re-run")
+        return (f"`{line}` parses only {', '.join(keys)}; "
+                f"{', '.join(repr(u) for u in unparsed)} is not a Task key -- that edge would "
+                f"be silently dropped. Write the line as comma-separated slug keys only, then "
+                f"re-run")
+    for m in _DEPENDS_ON_MENTION.finditer("\n".join(task_metadata_lines(section_text))):
         if m.group(1).strip("`*. \t").lower() not in _NO_DEPENDENCY:
             return (f"`{m.group(0).strip()}` names a dependency but no Task key parses from "
                     f"it -- the Task would be created with no `blockedBy` edge and race its "
-                    f"dependency. Write the line plain (`Depends on: <key>`, no backtick "
-                    f"wrapper, slug keys), then re-run")
+                    f"dependency. Put it on its own line (`Depends on: <key>`, no backtick "
+                    f"wrapper, slug keys) in the metadata block under the Task heading, then "
+                    f"re-run")
     return None
 
 
@@ -4333,6 +4433,32 @@ def task_type_name() -> str:
     return rule["value"] if rule.get("field") == "issueType" else "Task"
 
 
+def _wire_numbered_task_edges(gh: GitHub, doc: str, numbered: list, key_to_number: dict,
+                              all_issues: dict, result: dict) -> None:
+    """Add each already-numbered Task's missing `Depends on:` `blockedBy` edges (an open
+    dependency only, never twice) into `result["edges_added"]` / `result["edges_failed"]`."""
+    for h in numbered:
+        issue_number = h["number"]
+        if (all_issues.get(issue_number) or {}).get("state", "OPEN") != "OPEN":
+            continue  # a closed Task waits on nothing
+        for dep_key in parse_task_depends_on(doc[h["line_end"]:h["end"]]):
+            dep = key_to_number.get(dep_key)
+            if dep is None or dep == issue_number:
+                result["edges_failed"].append(
+                    {"issue": issue_number, "on_key": dep_key,
+                     "error": f"no other `## Task {dep_key}` section in the doc to depend on"})
+                continue
+            if (all_issues.get(dep) or {}).get("state", "OPEN") != "OPEN":
+                continue  # a closed dependency blocks nothing
+            try:
+                edge = _add_blocked_by_once(gh, issue_number, dep)
+            except GhError as e:
+                result["edges_failed"].append({"issue": issue_number, "on": dep, "error": str(e)})
+                continue
+            if edge.get("added"):
+                result["edges_added"].append({"issue": issue_number, "on": dep})
+
+
 def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
                           runner: Runner = _default_runner) -> dict:
     """Create one Task per `## Task <KEY>` section of the Epic's merged `lld.md`,
@@ -4355,28 +4481,38 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
     defects = {h["key"]: task_section_defect(doc[h["line_end"]:h["end"]])
                or dep_defects[h["key"]] for h in keyed}
     pending = [h for h in keyed if defects[h["key"]] is None]
+    # An already-numbered Task's `Depends on:` is re-read on every run, so a missed edge heals.
+    numbered = [h for h in headings if h["number"]]
+    numbered_defects = {h["task_key"] or f"#{h['number']}":
+                        task_dependency_defect(doc[h["line_end"]:h["end"]]) for h in numbered}
     result = {"epic": epic, "doc": doc_path, "created": [], "reused": [],
-              "already_numbered": [h["number"] for h in headings if h["number"]],
+              "already_numbered": [h["number"] for h in numbered],
               "skipped_sections": [
                   {"key": h["key"], "heading": doc[h["line_start"]:h["line_end"]].strip(),
                    "reason": defects[h["key"]]} for h in keyed if defects[h["key"]]],
-              "dependency_parse_warnings": [k for k, d in dep_defects.items() if d],
-              "blocked_by": [], "blocked_by_failed": [], "realises": [], "realises_failed": []}
-    if not pending:
-        return {**result, "committed": None, "pushed": False, "tasks": {},
-                "reason": "every `## Task` heading already carries an issue number -- "
-                          "nothing to create. A re-run after a completed pass lands here, "
-                          "which is what makes this command safe to retry."}
+              "dependency_parse_warnings": [k for k, d in {**dep_defects,
+                                                           **numbered_defects}.items() if d],
+              "blocked_by": [], "blocked_by_failed": [], "realises": [], "realises_failed": [],
+              "edges_added": [], "edges_failed": []}
     # A crash between create and push leaves issues the doc doesn't number yet.
     key_to_number = {h["task_key"]: h["number"] for h in headings
                      if h["number"] and h["task_key"]}
-    all_issues = {i["number"]: i for i in gh.issue_list()}
+    all_issues = {i["number"]: i for i in gh.issue_list()} if (pending or numbered) else {}
     for child in all_issues.values():
         if (child.get("parent") or {}).get("number") != epic:
             continue
         m = _TASK_KEY_MARKER.search(child.get("body") or "")
         if m:
             key_to_number.setdefault(m.group(1), child["number"])
+    _wire_numbered_task_edges(gh, doc, numbered, key_to_number, all_issues, result)
+    if not pending:
+        return {**result, "committed": None, "pushed": False, "tasks": {},
+                "reason": ("every `## Task` heading already carries an issue number -- "
+                           "nothing to create. A re-run after a completed pass lands here, "
+                           "which is what makes this command safe to retry.")
+                          + (" But a numbered Task's `blockedBy` edge could not be added "
+                             "(`edges_failed`) -- fix it, then re-run."
+                             if result["edges_failed"] else "")}
     # `merge-lld-doc` advances only issues that classify as Tasks.
     type_name = task_type_name()
     # Validate every section's Priority/Effort before creating any issue.
@@ -4907,12 +5043,14 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
         changed = gh.files_since(base, issue_branch(issue))
     except GhError:
         changed = []
-    offenders = dev_pr_scope_offenders(gh, issue, changed)
+    offenders, acknowledged = acknowledge_footprint_deviations(
+        dev_pr_scope_offenders(gh, issue, changed), body)
     reason = _dev_pr_scope_refusal_reason(offenders)
     if reason:
         return {"issue": issue, "created": False, "refused": True, "reason": reason,
                 "offending_design_docs": offenders["design_docs"],
-                "offending_footprint_paths": offenders["foreign_footprint"]}
+                "offending_footprint_paths": offenders["foreign_footprint"],
+                "acknowledged_deviations": acknowledged}
     pr_body = f"{body}\n\nCloses #{issue}"
     extra: dict = {}
     try:
@@ -4936,7 +5074,8 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
         f"Not yet queued for review: `development` still owes `record-local-ci` per "
         f"suite it ran and `handoff-to-pr-review`, which posts the marker "
         f"`list-ready-for-review` reads.")
-    return {"issue": issue, "pr": pr_number, "created": True, **extra}
+    return {"issue": issue, "pr": pr_number, "created": True,
+            **({"acknowledged_deviations": acknowledged} if acknowledged else {}), **extra}
 
 
 # --- citations: cite / verify-citations / verify-exit's citations_ok ---
@@ -5193,6 +5332,14 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
                                                    repo_path=repo_path, runner=runner)
             except GhError:
                 offenders = {"design_docs": [], "foreign_footprint": []}
+            acknowledged: list = []
+            if offenders["foreign_footprint"]:
+                # A foreign-footprint touch the PR body lists under `## Footprint deviations`
+                # is accepted; a design doc never is.
+                offenders, acknowledged = acknowledge_footprint_deviations(
+                    offenders, gh.pr_view(pr, fields="body").get("body"))
+            if acknowledged:
+                result["acknowledged_deviations"] = acknowledged
             result["dev_pr_scope"] = offenders
             scope_reason = _dev_pr_scope_refusal_reason(offenders)
             if scope_reason:
@@ -5760,10 +5907,16 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
     never merges through `merge-pr`. Counts toward the run cap."""
     if reason and not not_planned:
         raise GhError("--reason only goes with --not-planned")
-    body = gh.issue_view(issue).get("body")
-    if not_planned:
-        gh.issue_comment(issue, f"🚫 Closed as not planned — {reason or 'dropped by the operator'}.")
-    gh.issue_close(issue, "not planned" if not_planned else "completed")
+    view = gh.issue_view(issue)
+    body = view.get("body")
+    # A re-run (e.g. finish-lld from the top) on a closed issue skips the close itself but still
+    # does the idempotent bookkeeping below.
+    already_closed = str(view.get("state") or "").upper() == "CLOSED"
+    if not already_closed:
+        if not_planned:
+            gh.issue_comment(issue, f"🚫 Closed as not planned — "
+                                    f"{reason or 'dropped by the operator'}.")
+        gh.issue_close(issue, "not planned" if not_planned else "completed")
     marked = cmd_mark_issue_closed(gh, issue)
     realised = None if not_planned else _close_realised_issues(gh, issue, body)
     cleanup = cleanup_unit(gh, issue, "epic" if marked.get("is_epic") else "issue",
@@ -5772,7 +5925,8 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
     if released.get("released") or released.get("reason") != "no worktree":
         released = {**released, "branch": cleanup["branch"]}
     terminal = record_terminal_unit(gh, issue)
-    return {"issue": issue, "closed": True, "worktree": released, "cleanup": cleanup,
+    return {"issue": issue, "closed": True, "already_closed": already_closed,
+            "worktree": released, "cleanup": cleanup,
             **({"state_reason": "not_planned"} if not_planned else {}),
             **({"run_terminal": terminal} if terminal else {}),
             **({"realised_closed": realised} if realised else {})}
@@ -5964,6 +6118,38 @@ def cmd_detach_epic(gh: GitHub, epic: int, reason: Optional[str] = None) -> dict
                            f"that Initiative's Epic loop; its own state is unchanged.")
     gh.issue_comment(parent, f"🔗 Epic #{epic} detached from this Initiative{why}.")
     return {"epic": epic, "initiative": parent, "detached": True, "removed_edges": removed}
+
+
+def cmd_reparent_issue(gh: WorkItemProvider, issue: int, parent: int,
+                       reason: Optional[str] = None) -> dict:
+    """Move a plain issue (Task, Bug, ...) under `parent`: drop its current sub-issue link (if
+    any), link it under `parent`, and comment on the issue, the old parent and the new parent.
+    Idempotent (`already_parented`) when it is already under `parent`. Refuses (exit 0) an
+    Epic or Initiative -- `detach-epic` handles an Epic. Returns `{issue, old_parent,
+    new_parent, moved}`."""
+    info = gh.issue_epic_info(issue)
+    kind = classify_unit_from_issue(info)
+    old = (info.get("parent") or {}).get("number")
+    base = {"issue": issue, "old_parent": old, "new_parent": parent}
+    if kind in ("epic", "initiative"):
+        return {**base, "moved": False, "refused": True,
+                "reason": f"#{issue} is an {kind.title()} -- reparent-issue moves plain issues "
+                          f"only. Take an Epic out of its Initiative with `detach-epic {issue}`"}
+    if parent == issue:
+        return {**base, "moved": False, "refused": True,
+                "reason": f"#{issue} cannot be its own parent"}
+    if old == parent:
+        return {**base, "moved": False, "already_parented": True}
+    if old is not None:
+        gh.remove_sub_issue(old, issue)
+    gh.add_sub_issue(parent, issue)
+    why = f" — {reason}" if reason else ""
+    moved_from = f"from #{old} " if old is not None else ""
+    gh.issue_comment(issue, f"🔀 Moved {moved_from}to #{parent}{why}.")
+    if old is not None:
+        gh.issue_comment(old, f"🔀 #{issue} moved out of this issue to #{parent}{why}.")
+    gh.issue_comment(parent, f"🔀 #{issue} moved here{' from #' + str(old) if old else ''}{why}.")
+    return {**base, "moved": True}
 
 
 def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
@@ -6549,6 +6735,7 @@ class StepSequence:
     def __init__(self):
         self.steps: dict = {}
         self.completed: list = []
+        self.remaining: list = []  # steps never run because an earlier one stopped the sequence
         self.failed_step: Optional[str] = None
         self.ok = True
         self.error: Optional[str] = None
@@ -6557,10 +6744,17 @@ class StepSequence:
     def stopped(self) -> bool:
         return self.failed_step is not None
 
+    def skip(self, *names: str) -> None:
+        """Record steps a composite leaves out once stopped, so `remaining_steps` names them."""
+        if self.stopped:
+            self.remaining.extend(n for n in names
+                                  if n not in self.remaining and n not in self.steps)
+
     def run(self, name: str, call: Callable[[], dict],
             failed: Optional[Callable[[dict], bool]] = None) -> Optional[dict]:
         """The step's result, or None when it failed or an earlier step had."""
         if self.stopped:
+            self.skip(name)
             return None
         try:
             result = call()
@@ -6580,7 +6774,8 @@ class StepSequence:
 
     def report(self, failed_key: str = "failed_step", **fields) -> dict:
         out = {**fields, "ok": self.ok, "completed_steps": self.completed,
-               failed_key: self.failed_step, "steps": self.steps}
+               failed_key: self.failed_step, "remaining_steps": self.remaining,
+               "steps": self.steps}
         if self.error:
             out["error"] = self.error
         elif self.stopped:
@@ -6685,6 +6880,8 @@ def cmd_cut_phase_tasks(gh: GitHub, epic: int, arch_body: Optional[str] = None,
         else:
             seq.run("add-blocked-by", lambda: {"issue": l, "blocked_on": a, "added": False,
                                                "reason": "Architecture-phase Task is closed"})
+    seq.skip(*(f"{k}.{step}" for k in ("architecture", "lld")
+               for step in ("create-issue", "set-stage")), "add-blocked-by", "worktree-add")
     return seq.report(epic=epic, architecture_task=arch and arch["issue"],
                       lld_task=lld and lld["issue"])
 
@@ -6710,6 +6907,7 @@ def cmd_open_arch_revision(gh: GitHub, epic: int, title: str, body: str,
     if task:
         seq.run("worktree-add", lambda: cmd_worktree_add(
             gh, task["issue"], repo_path=repo_path, runner=runner), failed=_worktree_refused)
+    seq.skip("revision.create-issue", "revision.set-stage", "worktree-add")
     for unit in blocks or []:
         seq.run(f"add-blocked-by:{unit}",
                 lambda unit=unit: _add_blocked_by_once(gh, unit, task["issue"]))
@@ -6741,6 +6939,8 @@ def cmd_file_closing_delta(gh: GitHub, epic: int, title: str, body: str,
         seq.run("set-stage", lambda: cmd_set_stage(gh, number, "development"))
         seq.run("start-stage", lambda: cmd_start_stage(gh, number, "development", "issue",
                                                        repo_path, runner=runner))
+    if start:
+        seq.skip("set-stage", "start-stage")
     return seq.report(epic=epic, delta_issue=number)
 
 
@@ -6762,7 +6962,7 @@ def cmd_finish_lld(gh: GitHub, lld_task: int, epic: int, repo_path: str = ".",
     seq.run("create-lld-tasks", lambda: cmd_create_lld_tasks(gh, epic, repo_path,
                                                              runner=runner),
             failed=lambda r: (not r.get("pushed") and r.get("tasks") != {})
-            or bool(r.get("dependency_parse_warnings")))
+            or bool(r.get("dependency_parse_warnings")) or bool(r.get("edges_failed")))
     seq.run("merge-lld-doc", lambda: cmd_merge_lld_doc(gh, repo_path, epic, runner=runner),
             failed=lambda r: not r.get("verified_on_origin"))
     closed = seq.run("close-issue", lambda: cmd_close_issue(gh, lld_task, repo_path=repo_path,
@@ -6770,11 +6970,52 @@ def cmd_finish_lld(gh: GitHub, lld_task: int, epic: int, repo_path: str = ".",
     return seq.report(lld_task=lld_task, epic=epic, closed=bool(closed))
 
 
+def run_in_flight(state: Optional[dict]) -> set:
+    """Issue numbers handed out (`note_in_flight`) under `state`'s run id, in any Epic's
+    state file -- next-action notes them under the run's top-level issue."""
+    if not state:
+        return set()
+    found = {str(n) for n in state.get("in_flight", {})}
+    try:
+        names = sorted(os.listdir(_run_state_dir()))
+    except OSError:
+        names = []
+    for name in names:
+        try:
+            with open(os.path.join(_run_state_dir(), name)) as f:
+                other = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(other, dict) and other.get("run_id") == state.get("run_id"):
+            found.update(str(n) for n in (other.get("in_flight") or {}))
+    return {int(n) for n in found if n.isdigit()}
+
+
+def _start_stage_run_cap(gh: GitHub, number: int, role: str, unit: str,
+                         run_id: str) -> dict:
+    """start-stage's `run-cap` step: refuse (`stop_at_cap`) a unit this run has not handed
+    out once the run is at `maxTasksPerRun`. Returns the run-state `epic` it books under."""
+    parent = None if unit == "epic" else \
+        ((gh.issue_epic_info(number).get("parent") or {}).get("number"))
+    epic = parent or number
+    state = run_cap_state(epic, run_id)
+    if number not in run_in_flight(state) and run_cap_reached(state):
+        completed = run_completed(state)
+        return {"stop_at_cap": True, "cap": MAX_TASKS_PER_RUN, "completed": completed,
+                "reason": f"run {run_id} has driven {len(completed)} unit(s) to a terminal "
+                          f"state, at the maxTasksPerRun cap of {MAX_TASKS_PER_RUN}, and "
+                          f"#{number} is not in flight for it -- start no new work this run "
+                          f"(a fresh --run-id starts a new one)"}
+    return {"stop_at_cap": False, "epic": epic}
+
+
 def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
                     repo_path: str = ".", base: Optional[str] = None,
-                    runner: Runner = _default_runner) -> dict:
-    """Refusal check, `worktree-add`, then `claim` -- worktree first, so the unit is never
-    claimed without a live tree, and nothing runs when the claim would be refused.
+                    runner: Runner = _default_runner, run_id: Optional[str] = None) -> dict:
+    """Run-cap check (with `run_id`), refusal check, `worktree-add`, then `claim` -- worktree
+    first, so the unit is never claimed without a live tree, and nothing runs when the claim
+    would be refused. With `run_id`, a unit not already in flight for that run is refused
+    (`failed_step: "run-cap"`, `stop_at_cap`, exit 0) once the run is at its cap.
     Returns `path`, `claimed` plus the steps."""
     role = RETIRED_ROLES.get(role, role)
     if unit == "epic" and gh.classify_unit(number) != "epic":
@@ -6782,6 +7023,13 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
         raise GhError(f"#{number} is not an Epic -- start-stage --unit epic is only for an "
                       f"Epic; a Task (phase-Task included) takes the default --unit issue")
     seq = StepSequence()
+    if run_id:
+        cap = seq.run("run-cap", lambda: _start_stage_run_cap(gh, number, role, unit, run_id),
+                      failed=lambda r: r.get("stop_at_cap"))
+        if cap is None and seq.failed_step == "run-cap":
+            seq.skip("check-claimable", "worktree-add", "claim")
+            return seq.report(issue=number, role=role, path=None, claimed=False,
+                              stop_at_cap=True)
     seq.run("check-claimable", lambda: _check_claimable(gh, number, role))
     # A child of a non-standing Epic integrates into `epic-<parent>`. Ensure that branch AND its
     # worktree exist first (idempotently, exactly as cut-phase-tasks does) so `next-action` never
@@ -6796,6 +7044,8 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
     worktree = seq.run("worktree-add", lambda: cmd_worktree_add(
         gh, number, unit, repo_path, runner=runner, base=base), failed=_worktree_refused)
     claim = seq.run("claim", lambda: cmd_claim(gh, number, role))
+    if run_id and claim:
+        note_in_flight(seq.steps["run-cap"]["epic"], run_id, {number: role})
     return seq.report(issue=number, role=role, path=(worktree or {}).get("path"),
                       claimed=bool(claim))
 
@@ -6956,6 +7206,7 @@ COMMENT_CAPS = {
     "close-issue": ("reason", HANDOFF_CAP),
     "comment": ("body", HANDOFF_CAP),
     "detach-epic": ("reason", HANDOFF_CAP),
+    "reparent-issue": ("reason", HANDOFF_CAP),
 }
 
 
@@ -7466,8 +7717,12 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--base", default=None,
                     help="Override the auto-detected integration base (e.g. origin/main)")
     p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.add_argument("--run-id", default=None,
+                    help="This run's id: refuse a unit not already in flight once the run is at "
+                         "the maxTasksPerRun cap (omit = no cap)")
     p.set_defaults(func=lambda a: cmd_start_stage(
-        get_work_item_provider(), a.number, a.role, a.unit, a.repo_path, a.base))
+        get_work_item_provider(), a.number, a.role, a.unit, a.repo_path, a.base,
+        run_id=a.run_id))
     p = sub.add_parser("transition",
                         help="verify-exit -> sync-branch -> start-comment (review roles)")
     p.add_argument("issue", type=int)
@@ -7522,6 +7777,13 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("epic", type=int)
     p.add_argument("--reason", default=None, help="Why, for the comments on both issues")
     p.set_defaults(func=lambda a: cmd_detach_epic(get_work_item_provider(), a.epic, a.reason))
+    p = sub.add_parser("reparent-issue",
+                        help="Move a plain issue (Task/Bug) under another parent, with comments")
+    p.add_argument("issue", type=int)
+    p.add_argument("--parent", type=int, required=True, help="The new parent")
+    p.add_argument("--reason", default=None, help="Why, for the comments on all three issues")
+    p.set_defaults(func=lambda a: cmd_reparent_issue(get_work_item_provider(), a.issue,
+                                                      a.parent, a.reason))
     p = sub.add_parser("comment", help="Post a plain comment on an issue (no marker)")
     p.add_argument("issue", type=int)
     text = p.add_mutually_exclusive_group(required=True)
