@@ -605,7 +605,7 @@ def test_close_epic_sets_the_terminal_fields_when_it_merges():
     merged = []
     gh.files_since = lambda sha, branch: []
     gh.branch_behind_by = lambda branch, base="main": 0
-    gh.pr_list_for_branch = lambda branch: []
+    gh.pr_list_for_branch = lambda branch, state="open": []
     gh.pr_create = lambda **kw: 38
     gh.pr_checks = lambda n: []
     gh.pr_view = lambda n, fields="": {"comments": [], "headRefOid": "abc"}
