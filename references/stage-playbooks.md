@@ -51,6 +51,7 @@ names the exact path.
   needed, say so in your handoff; do not create it.
 - Write each doc so the next stage can work from it alone, without the comment history.
   A doc may hold your working checklist; never use alternate filenames.
+- Edit a doc under `<docRoot>` only with `Edit`/`Write`, never a `python`/`sed` script.
 - Every `## Task` subsection of an Epic's `lld.md`, and a standing child's
   `architecture.md`, carries a `## Footprint` section in the exact parseable shape from
   `references/epics.md`, "How to size the Tasks": backticked paths, one per bullet.
@@ -200,6 +201,10 @@ a pipeline problem in your handoff.
 - **Stop only containers you started.** Label every container you start
   `sdlc.issue=<n>`; check `docker ps` before any `docker stop`/`kill`, and never touch
   an unlabelled container or another issue's — it is a concurrent Task's evidence.
+- **Name every compose project, container and volume you create with your unit prefix** —
+  your worktree's basename followed by `-`/`_` (e.g. compose `-p sdlc-dev-<n>`, container
+  `sdlc-dev-<n>-api`) — and tear your stack down before your handback. When the unit
+  closes, `cleanup_unit` removes anything left with that prefix.
 
 ## Rework and blockers — what it means for you
 

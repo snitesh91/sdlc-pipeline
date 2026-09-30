@@ -52,15 +52,14 @@ via `next-action`, never fanned out.
 
 1. `list-ready-for-review <epic> [--limit N]` → `ready_for_review` (up to
    `parallelism.prReview`).
-2. One worktree per PR, **detached** at `origin/issue-<n>` — never a local `issue-<n>`
-   branch, which `development` must stay free to hold for rework:
-   `python3 "$SDLC" review-worktree-add <n> --repo-path <repo-root>` (its `path`).
-3. `transition <n> --expect-stage pr-review --pr <pr> --repo-path <its dev worktree>` for
+2. `transition <n> --expect-stage pr-review --pr <pr> --repo-path <its dev worktree>` for
    each (proceed only on `ready: true`), then one parallel `Agent` call — same `sdlc:pr-review` agent and prompt as a single
-   review.
-4. If suites starve each other, lower `parallelism.prReview`; never make reviews shallower.
-5. Remove each review worktree when its review ends, crash included:
-   `python3 "$SDLC" release-review-worktree <n>` (`merge-pr` runs it too).
+   review. Each agent makes its own worktree **detached** at `origin/issue-<n>` (never a
+   local `issue-<n>` branch, which `development` must stay free to hold for rework) with
+   `review-worktree-add` and releases it with `release-review-worktree`.
+3. If suites starve each other, lower `parallelism.prReview`; never make reviews shallower.
+4. A review agent that crashed leaves its tree: run `release-review-worktree <n>` yourself
+   (`merge-pr` runs it too).
 
 ### The two queue markers
 
@@ -69,7 +68,7 @@ The review queue is two script-posted comment markers. Never hand-type them.
 | Marker | Posted by | When |
 |---|---|---|
 | `<!-- stage-transition: development->pr-review @ … -->` | `handoff-to-pr-review <n> --pr <pr> --summary "..."` | Every `development` finish, rework rounds included, after any `record-local-ci` it owes |
-| `<!-- pr-review-outcome: clean\|rework:<pr> @ … -->` | `record-pr-review <n> --pr <pr> --outcome clean\|rework --summary "..."` | `pr-review`'s last action, clean included, before `merge-pr` or resuming `development` |
+| `<!-- pr-review-outcome: clean\|rework:<pr> @ … -->` | `record-pr-review <n> --pr <pr> --outcome clean\|rework --summary "..."` | `pr-review`'s verdict, clean included, before `merge-pr` or resuming `development` |
 
 `handoff_marker_present: false` from `transition`/`verify-exit` → resume `development` to
 post the missing marker before any review.
@@ -86,6 +85,12 @@ worktree.
 
 The caps bound agents, not suite runs; the machine's memory/CPU is the real limit.
 
+- **Preflight the machine before dispatching any stack-building stage** (`development` /
+  `pr-review` of a Task whose design needs a running stack, the e2e-test Task, the
+  exploratory pass, `initiative-close`). An exhausted Docker VM makes a run unrecordable
+  (`Page crashed`, `ENOSPC`, container OOM kills): check `docker system df`, VM disk use
+  (under ~80%) and host free memory; prune build cache and stop stale stacks first. A run
+  with crash-class failures is an environment failure: fix it and re-run, never record it.
 - Run **at most one suite-heavy stage at a time** machine-wide (a `development` or
   `pr-review` running the integration or e2e suite), whatever the cap. A light stage
   (`lld`, a design review not running suites) may run alongside. Hold the second

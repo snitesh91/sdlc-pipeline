@@ -16,8 +16,11 @@ A session runs the marketplace `ref` pinned in the `.claude/settings.json` of th
 starts in (the driven repo's main checkout, on `main`), read once at session start — never
 from a unit's branch or worktree; CI uses the `SDLC_PIPELINE_REF` Actions variable. So a
 bump merged to `main` reaches every unit, in-flight epics included, from the next session
-(after `claude plugin marketplace update sdlc-pipeline`); bump only while no run is live,
-since agents read the playbook mid-run.
+once installed; bump only while no run is live, since agents read the playbook mid-run.
+`claude plugin marketplace update` never re-reads the pinned ref. Install the new tag with
+`claude plugin marketplace add "<owner>/sdlc-pipeline#<tag>" --scope project` (then revert
+the reformat it makes to `.claude/settings.json`), then
+`claude plugin update sdlc@sdlc-pipeline --scope project`.
 
 ## Auto-mode classifier denies a composite
 
@@ -26,6 +29,12 @@ creates plus a merge) even under a `Bash(python3 "$SDLC" *)` allow rule. You can
 yourself an auto-mode override: ask the operator to run the pipeline in manual permission
 mode (switch the session out of auto, or restart with `sdlc-run <n> --permission-mode
 default`), then re-run the command (composites are idempotent).
+
+A classifier **outage** (no verdict or a classifier error on every state-changing call while
+reads work) is neither a denial nor a stage failure. An agent's `failed` / `blocked` citing
+it is resumed to retry its exit action once the classifier answers again (a review's
+reported verdict you may record yourself: SKILL.md, "After the subagent returns"); never
+re-run the stage.
 
 ## Auto-mode allow rule for the `pr-review` mutation probe
 
@@ -163,9 +172,11 @@ human gates on product/architecture are separate and unaffected.
   `open-dev-pr` refuses (before opening) a branch diff that edits any Epic design doc under
   `<docRoot>/epic-*/` (e.g. `lld.md`) or a file listed in another open Task's `## Footprint`
   of the Epic's `lld.md`; files in the unit's own footprint are fine. `verify-exit` reports
-  the same offenders on the pr-review handoff (`dev_pr_scope`). If the design truly needs to
-  change, escalate an Architecture/LLD revision and record the deviation in the PR
-  description — do not edit the doc from a development branch.
+  the same offenders on the pr-review handoff (`dev_pr_scope`). A foreign-Footprint path the
+  PR body acknowledges under `## Footprint deviations` passes both, returned as
+  `acknowledged_deviations` for `pr-review` to adjudicate (`agents/development.md`, gate 6);
+  a design-doc path never does. If the design truly needs to change, escalate an
+  Architecture/LLD revision — do not edit the doc from a development branch.
 - Never delete the per-issue docs folder after merge.
 - `merge-pr` is the only merge gate (branch protection is unavailable — don't look for
   it). It refuses on a non-passing check, a code-touching PR whose required suite has
@@ -228,6 +239,14 @@ is set, `pr-checks` returns a `hint` field naming the causes in likelihood order
 - A still-required GHA workflow never reported (renamed out of step with
   `requiredWorkflows`, disabled, `paths:` mismatch) → config defect: `pr-review` stops
   with `needs-human` (`agents/pr-review.md`, exit actions); you run `mark-needs-human`.
+
+## A check the runner failed
+
+`pr-checks` gives each failed check a `failure_excerpt` and `infra_suspect`, plus a top-level
+`infra_suspect` and `hint`; `merge-pr`'s refusal and `close-epic`'s `failing_checks` /
+`infra_suspect` carry the same. On `infra_suspect`, get the runner fixed (the operator's or
+infra's job), then `rerun-checks <pr>` (reruns the head's failed runs → `pr`, `head`,
+`rerun`, `failed`, `nothing_to_rerun`) — never a code rework.
 
 ## Break-glass: local merge while the PR API is down
 
