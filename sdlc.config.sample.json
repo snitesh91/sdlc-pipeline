@@ -100,13 +100,14 @@
       "epicPrefix": "epic-"
     },
     "worktrees": {
-      "_comment": "`releaseCommand`: shell command run inside a unit's worktree right before the pipeline removes it (e.g. `make it-down` to tear down a per-worktree test env); failure is reported, never fatal. Empty = none.",
+      "_comment": "`releaseCommand`: shell command run inside a unit's worktree right before the pipeline removes it (e.g. `make it-down` to tear down a per-worktree test env); failure is reported, never fatal. Empty = none. `dockerCleanup` (default true): when a unit is cleaned up, remove every docker container (by name or compose project label), volume and network named `<worktree basename>-...` or `<worktree basename>_...` (e.g. `sdlc-dev-12_db`), and retry a `worktree remove` blocked by root-owned files by emptying the tree through `docker run --rm alpine`; docker absent = skipped.",
       "root": "/tmp",
       "devPrefix": "sdlc-dev-",
       "epicPrefix": "sdlc-epic-",
       "reviewPrefix": "sdlc-review-",
       "ephemeralPrefix": "sdlc-tmp-",
-      "releaseCommand": ""
+      "releaseCommand": "",
+      "dockerCleanup": true
     },
     "locks": {
       "_comment": "Per-branch flock every branch-writing command takes; `{worktreesRoot}` expands to worktrees.root. SDLC_LOCK_DIR in the environment overrides `dir`.",

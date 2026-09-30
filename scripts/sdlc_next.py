@@ -103,9 +103,12 @@ _PIPELINE_DEFAULTS = {
     # the main checkout is never a git-write target.
     # `releaseCommand`: shell command run inside a worktree right before it is removed
     # (tear down per-worktree resources); failure is reported, never fatal. "" = none.
+    # `dockerCleanup`: on unit cleanup, remove docker containers/volumes/networks named
+    # `<unit_docker_prefix>-*` / `_*`, and fall back to a docker `rm -rf` when a
+    # root-owned file blocks `worktree remove`.
     "worktrees": {"root": "/tmp", "devPrefix": "sdlc-dev-", "epicPrefix": "sdlc-epic-",
                   "reviewPrefix": "sdlc-review-", "ephemeralPrefix": "sdlc-tmp-",
-                  "releaseCommand": ""},
+                  "releaseCommand": "", "dockerCleanup": True},
     # Per-branch flock; `SDLC_LOCK_DIR` in the environment overrides `dir`.
     "locks": {"dir": "{worktreesRoot}/.sdlc-locks", "waitSeconds": 600},
     # Per-epic runtime stack. The driven repo's compose must honour the `ports`
@@ -2623,6 +2626,116 @@ def _run_release_command(path: str, shell: Optional[Callable] = None) -> Optiona
     return {"command": command, "ok": True}
 
 
+def unit_docker_prefix(number: int, unit: str = "issue") -> str:
+    """The docker name prefix a unit's agents give its compose projects, containers and
+    volumes (followed by `-` or `_`): its worktree's basename, `sdlc-dev-<n>` (an epic:
+    `sdlc-epic-<n>`). `cleanup_unit` removes whatever carries it."""
+    return os.path.basename(worktree_path(unit, number))
+
+
+def _docker_cleanup_enabled() -> bool:
+    return bool(PIPELINE["worktrees"].get("dockerCleanup", True))
+
+
+def _docker_unavailable(runner: Runner) -> Optional[str]:
+    """Why docker cannot be used through `runner` (binary missing, daemon down), else None."""
+    try:
+        runner(["docker", "version", "--format", "{{.Server.Version}}"])
+    except (GhError, OSError) as exc:
+        msg = str(exc).strip()
+        return f"docker unavailable: {msg.splitlines()[0] if msg else repr(exc)}"
+    return None
+
+
+_COMPOSE_PROJECT_LABEL = '{{.Label "com.docker.compose.project"}}'
+
+
+def docker_sweep(prefix: str, runner: Runner, dry_run: bool = False) -> dict:
+    """Remove the docker containers (by name or compose project label), then volumes and
+    networks (by name or label) that equal `<prefix>` or start `<prefix>-` / `<prefix>_`
+    (compose's default project name is the worktree's basename itself) -- never a bare
+    prefix, so `sdlc-dev-14` never takes `sdlc-dev-145`'s. Listed and matched in Python.
+    Never raises: `{skipped}` when docker is unavailable; `dry_run` lists `would_remove`."""
+    reason = _docker_unavailable(runner)
+    if reason:
+        return {"prefix": prefix, "skipped": reason}
+    pattern = re.compile(rf"^{re.escape(prefix)}(?:$|[-_])")
+    errors: list = []
+
+    def listed(argv: list) -> list:
+        try:
+            out = runner(argv)
+        except (GhError, OSError) as exc:
+            errors.append(f"{' '.join(argv[:3])}: {exc}")
+            return []
+        return [line.split("\t") for line in out.splitlines() if line.strip()]
+
+    containers = {}
+    for row in listed(["docker", "ps", "-a", "--format",
+                       "{{.ID}}\t{{.Names}}\t" + _COMPOSE_PROJECT_LABEL]):
+        cid, name, project = (row + ["", ""])[:3]
+        if pattern.match(name) or pattern.match(project):
+            containers[cid] = name
+    found = {"containers": containers}
+    for kind in ("volume", "network"):
+        found[f"{kind}s"] = {
+            name: name for name, project in
+            ((row + [""])[:2] for row in listed(["docker", kind, "ls", "--format",
+                                                  "{{.Name}}\t" + _COMPOSE_PROJECT_LABEL]))
+            if pattern.match(name) or pattern.match(project)}
+    if dry_run:
+        return {"prefix": prefix, "would_remove": {k: sorted(v.values()) for k, v in found.items()},
+                "errors": errors}
+    out: dict = {"prefix": prefix}
+    for kind, rm in (("containers", ["docker", "rm", "-f", "-v"]),
+                     ("volumes", ["docker", "volume", "rm", "-f"]),
+                     ("networks", ["docker", "network", "rm"])):
+        removed = []
+        for ident, name in sorted(found[kind].items(), key=lambda kv: kv[1]):
+            try:
+                runner(rm + [ident])
+                removed.append(name)
+            except (GhError, OSError) as exc:
+                errors.append(f"{kind[:-1]} {name}: {exc}")
+        out[f"{kind}_removed"] = removed
+    out["errors"] = errors
+    return out
+
+
+_PERMISSION_ERROR_RE = re.compile(r"Permission denied|Operation not permitted", re.I)
+
+
+def _remove_worktree(repo_path: str, path: str, runner: Runner) -> dict:
+    """`git worktree remove --force path`; `{}` on success, else raises GhError. When a
+    permission error (root-owned files a container wrote) blocks it and docker cleanup is
+    on, empties the tree once through `docker run --rm alpine` -- only for a path under
+    `worktrees.root` -- then removes/prunes it: `{"forced_docker_rm": True}`."""
+    try:
+        runner(["git", "-C", repo_path, "worktree", "remove", "--force", path])
+        return {}
+    except GhError as exc:
+        if not _PERMISSION_ERROR_RE.search(str(exc)) or not _docker_cleanup_enabled():
+            raise
+        root = os.path.realpath(PIPELINE["worktrees"]["root"])
+        real = os.path.realpath(path)
+        if real == root or os.path.commonpath([real, root]) != root:
+            raise GhError(f"{exc}\nnot retrying through docker: {path} is outside the "
+                          f"worktrees root {root}")
+        unavailable = _docker_unavailable(runner)
+        if unavailable:
+            raise GhError(f"{exc}\nnot retrying through docker: {unavailable}")
+        runner(["docker", "run", "--rm", "-v", f"{real}:/w", "alpine",
+                "sh", "-c", "rm -rf /w/* /w/.[!.]*"])
+    try:  # its `.git` file is gone with the contents, so `remove` may refuse; prune drops it
+        runner(["git", "-C", repo_path, "worktree", "remove", "--force", path])
+    except GhError:
+        pass
+    runner(["git", "-C", repo_path, "worktree", "prune"])
+    with contextlib.suppress(OSError):
+        os.rmdir(path)
+    return {"forced_docker_rm": True}
+
+
 def _is_ancestor(repo_path: str, rev: str, ref: str, runner: Runner) -> bool:
     """Whether `rev` is `ref` or an ancestor of it (False when either is unknown locally)."""
     try:
@@ -2705,10 +2818,11 @@ def release_worktree(branch: str, runner: Runner = _default_runner,
         release = _run_release_command(path, shell)
         # Safe: the refusals above guarantee a clean tree. Plain `remove` refuses
         # any tree containing submodules.
-        runner(["git", "-C", base_repo, "worktree", "remove", "--force", path])
+        forced = _remove_worktree(base_repo, path, runner)
     except GhError as exc:
         return {"released": False, "path": path, "reason": str(exc)}
-    return {"released": True, "path": path, **({"release_command": release} if release else {})}
+    return {"released": True, "path": path, **forced,
+            **({"release_command": release} if release else {})}
 
 
 # Agent scratch (logs, captured output, probe files) lives inside the unit's worktree, so it
@@ -2816,10 +2930,11 @@ def cmd_release_review_worktree(number: int, repo_path: str = ".",
         return {"released": False, "path": path, "would_release": True}
     release = _run_release_command(path, shell)
     try:
-        runner(["git", "-C", repo_path, "worktree", "remove", "--force", path])
+        forced = _remove_worktree(repo_path, path, runner)
     except GhError as exc:
         return {"released": False, "path": path, "reason": str(exc)}
-    return {"released": True, "path": path, **({"release_command": release} if release else {})}
+    return {"released": True, "path": path, **forced,
+            **({"release_command": release} if release else {})}
 
 
 def release_detached_dev_worktree(number: int, repo_path: str = ".",
@@ -2852,10 +2967,11 @@ def release_detached_dev_worktree(number: int, repo_path: str = ".",
         return {"released": False, "path": path, "would_release": True}
     release = _run_release_command(path, shell)
     try:
-        runner(["git", "-C", repo_path, "worktree", "remove", "--force", path])
+        forced = _remove_worktree(repo_path, path, runner)
     except GhError as exc:
         return {"released": False, "path": path, "reason": str(exc)}
-    return {"released": True, "path": path, **({"release_command": release} if release else {})}
+    return {"released": True, "path": path, **forced,
+            **({"release_command": release} if release else {})}
 
 
 def resolve_repo_path(repo_path: Optional[str], branch: str,
@@ -5800,9 +5916,11 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
                  runner: Optional[Runner] = None, base: Optional[str] = None,
                  dry_run: bool = False, shell: Optional[Callable] = None) -> dict:
     """Idempotent cleanup of a terminal unit, in the order that never strands work: its
+    docker resources (`docker_sweep` of `unit_docker_prefix`, when `dockerCleanup` is on),
     review worktree, its worktree (releaseCommand first), `origin/<branch>`, then the local
     ref, then `git worktree prune`. Never raises; each part reports what it did or why not
-    (`review_worktree`, `worktree`, `remote_branch`, `local_branch`, `worktree_pruned`).
+    (`docker`, `review_worktree`, `worktree`, `remote_branch`, `local_branch`,
+    `worktree_pruned`).
     `base` defaults to the unit's integration base, resolved only when needed."""
     runner = runner or gh._run
     repo_path = repo_path or "."
@@ -5829,6 +5947,9 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
                         if b]
 
     out: dict = {"branch": branch}
+    if _docker_cleanup_enabled():
+        # First: a container holding the tree's files (bind mounts) must go before it does.
+        out["docker"] = docker_sweep(unit_docker_prefix(number, unit), runner, dry_run)
     if unit == "issue":
         out["review_worktree"] = cmd_release_review_worktree(number, repo_path, runner, shell,
                                                              dry_run)
