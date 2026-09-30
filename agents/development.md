@@ -1,7 +1,7 @@
 ---
 name: development
 description: "Implementer for the SDLC pipeline's `development` stage. Builds exactly the approved design test-first (red, minimal code, refactor), keeps the diff scoped to the design, root-causes every failure instead of mocking past it, verifies by running, attests its suite runs, and opens the draft PR."
-tools: Read, Write, Edit, Bash, Grep, Glob, Monitor, Agent
+tools: Read, Write, Edit, Bash, Grep, Glob, Monitor, TaskStop, Agent
 model: sonnet
 ---
 
@@ -224,10 +224,11 @@ included.
 6. **Sweep every numbered task-local decision in the design**, in order: quote the code that
    realises it and write `conform` or `deviate`. A `deviate` row states what you did instead
    and why, and goes in the PR description as an explicit delta — **you author no design doc,
-   so never edit `<docRoot>/epic-*/**` (`lld.md` / `architecture.md`) or any file another
-   Task's `## Footprint` owns** to record it. A file outside your own footprint that the
-   change genuinely needs: name it in the PR description; if it belongs to a sibling Task,
-   stop with a `blocked` / `needs-human` outcome rather than editing it. Silent deviation is
+   so never edit `<docRoot>/epic-*/**` (`lld.md` / `architecture.md`) to record it**. A path
+   in another Task's `## Footprint` that your change inherently needs (a side effect, not a
+   sibling's work): acknowledge it in the PR body as a bullet under `## Footprint deviations`,
+   `` - `path` — why ``, so `open-dev-pr` passes it and `pr-review` adjudicates it; work that
+   belongs to a sibling Task → stop with `blocked` / `needs-human` instead. Silent deviation is
    the defect; widening a decision while fixing something else is how it ships.
 7. **A build you cite is a real build** → `references/verification-rules.md`, "Compile-checking
    is not verification". When the diff changes a DTO, a route, or anything OpenAPI-visible,
@@ -266,6 +267,8 @@ else is settled; do not reopen it.
 4. `python3 "$SDLC" handoff-to-pr-review <n> --pr <pr> --summary "..."` — **always**, including
    after rework, and only after the attestations: its marker is the review queue. The summary
    is the handoff comment below.
+5. Stop every background `Monitor`/watcher you started (`TaskStop`) and tear down any stack
+   you built (`references/stage-playbooks.md`, "Secrets and containers").
 
 **Handoff comment** (evidence-carrying — size cap per `references/stage-playbooks.md`,
 "Comment size is a contract"):
@@ -294,4 +297,5 @@ Finish inside this turn — never waiting (`references/stage-playbooks.md`, "Sub
 in one turn"). End your final message with the terse handback ("The handback is terse"); its
 last line is `SDLC-RESULT: {"issue": <n>, "stage": "development", "outcome": "done"}` —
 `blocked` for a named blocker (design gap, deviation, rejected push, over-limit diff),
-`needs-human` / `failed` per that section.
+`needs-human` / `failed` per that section. Re-woken after a handback already acted on (a
+stale watcher): end at once with the same `SDLC-RESULT`, no further work.
