@@ -15,3 +15,14 @@ os.environ.setdefault("SDLC_LOCK_DIR", tempfile.mkdtemp(prefix="sdlc-test-locks-
 os.environ.setdefault("SDLC_RUNS_DIR", tempfile.mkdtemp(prefix="sdlc-test-runs-"))
 # Run state records the calling Claude session; tests run outside one.
 os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_host_docker(monkeypatch):
+    """Unit cleanup sweeps docker by default; no test may reach the host's docker (some run
+    real runners), so it is off unless a test turns `dockerCleanup` back on with a fake."""
+    import sdlc_next
+    monkeypatch.setitem(sdlc_next.PIPELINE["worktrees"], "dockerCleanup", False)
