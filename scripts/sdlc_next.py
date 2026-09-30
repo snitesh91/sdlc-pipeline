@@ -138,6 +138,13 @@ _PIPELINE_DEFAULTS = {
     # A `resume` action younger than `liveWindowMinutes` is flagged `likely_live`: another
     # session may still be driving it, so the orchestrator asks the operator before taking over.
     "resume": {"liveWindowMinutes": 30},
+    # A failed CI check whose failed-step log matches one of these (regex, case-insensitive)
+    # is flagged `infra_suspect`: the runner broke, not the code -- fix it, `rerun-checks`.
+    "ci": {"infraFailurePatterns": [
+        "No space left on device", "ENOSPC", "Cannot connect to the Docker daemon",
+        "docker daemon not running", "Is the docker daemon running",
+        "The runner has received a shutdown signal", "lost communication with the server",
+        "exit code 137", "Killed", "OOMKilled"]},
     # `auto`: the orchestrator runs the final `close-epic` itself; close-epic's own
     # refusals (open children, stale verification, failing checks) still apply.
     # `evidenceCarryForward.paths`: globs a commit after the tested head may touch without
@@ -195,6 +202,8 @@ ESCALATION = PIPELINE["escalation"]
 PRODUCT_WIP_CAP = PIPELINE["productWip"]["maxGateAPending"]
 # A resume younger than this is treated as possibly still live (item: liveness signal).
 RESUME_LIVE_WINDOW_MINUTES = PIPELINE["resume"]["liveWindowMinutes"]
+# Read at call time so a test can override it on the module.
+CI_INFRA_FAILURE_PATTERNS = tuple(PIPELINE["ci"]["infraFailurePatterns"])
 EVIDENCE_CARRY_FORWARD_GLOBS = tuple(
     g.replace("{docRoot}", DOC_ROOT.rstrip("/"))
     for g in ((PIPELINE["epicClose"].get("evidenceCarryForward") or {}).get("paths")
@@ -526,6 +535,15 @@ class GitHub:
                 return []
             raise
         return json.loads(out)
+
+    def job_failed_log(self, job_id: int) -> str:
+        """The failed steps' log of one Actions job (`gh run view --job --log-failed`)."""
+        return self._run(["gh", "run", "view", "--job", str(job_id), "--log-failed",
+                          "--repo", self.repo])
+
+    def run_rerun_failed(self, run_id: int) -> None:
+        """Re-run only the failed (and cancelled) jobs of one Actions run."""
+        self._run(["gh", "run", "rerun", str(run_id), "--failed", "--repo", self.repo])
 
     def pr_files(self, number: int) -> list:
         """Every changed path of a PR, via paginated REST `pulls/{n}/files`. `gh pr view
@@ -1232,7 +1250,7 @@ def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
             (awaiting if suite in NON_ATTESTABLE_SUITES else unattested).append(suite)
         suites[suite] = status
     return {"suites": suites, "unattested": unattested, "awaiting": awaiting, "missing": missing,
-            "breaks": breaks, "carried_files": carried}
+            "breaks": breaks, "carried_files": carried, "checks": checks}
 
 
 def _chain_suite_evidence(gh, spec: dict, chain: dict, branch: str, carried: set) -> tuple:
@@ -1302,6 +1320,11 @@ def _close_epic_evidence(gh, epic: int, branch: str, children: list, epic_pr: Op
         result["missing_verification"] = problems
     if suites["breaks"]:
         result["evidence_breaks"] = suites["breaks"]
+    failing = [c for c in suites["checks"] if _is_failed_check(c)]
+    if failing:
+        # Reported only; the suite gate above already decides whether the epic merges.
+        result["infra_suspect"] = enrich_failed_checks(gh, failing)
+        result["failing_checks"] = failing
     return result
 
 
@@ -5441,17 +5464,98 @@ def pr_stale_attestations(gh: WorkItemProvider, issue: int, pr: int) -> dict:
     return {"stale": stale, "carried": carried, "passed_by_check": passed_by_check}
 
 
+_CHECK_LINK_RE = re.compile(r"/actions/runs/(\d+)(?:/job/(\d+))?")
+_FAILURE_EXCERPT_LINES = 20
+
+
+def _check_run_and_job(check: dict) -> tuple:
+    """`(run_id, job_id)` parsed from an Actions check's `link`; either is None when absent."""
+    m = _CHECK_LINK_RE.search(check.get("link") or "")
+    if not m:
+        return None, None
+    return int(m.group(1)), (int(m.group(2)) if m.group(2) else None)
+
+
+def _is_failed_check(check: dict) -> bool:
+    return check.get("bucket") in ("fail", "cancel")
+
+
+def infra_suspect_text(text: Optional[str]) -> bool:
+    """Whether a failure log matches any `pipeline.ci.infraFailurePatterns` entry."""
+    if not text:
+        return False
+    for pattern in CI_INFRA_FAILURE_PATTERNS:
+        try:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        except re.error:
+            if pattern.lower() in text.lower():
+                return True
+    return False
+
+
+def enrich_failed_checks(gh, checks: list) -> bool:
+    """Add `failure_excerpt` (last <=20 non-empty lines of the job's failed-step log, or None
+    when it cannot be fetched/parsed) and `infra_suspect` to every fail/cancel check, in place.
+    Fetches nothing for other checks and never raises. Returns whether any is infra-suspect."""
+    any_suspect = False
+    for check in checks:
+        if not _is_failed_check(check):
+            continue
+        excerpt = None
+        try:
+            _, job = _check_run_and_job(check)
+            if job is not None:
+                lines = [l for l in gh.job_failed_log(job).splitlines() if l.strip()]
+                excerpt = "\n".join(lines[-_FAILURE_EXCERPT_LINES:]) or None
+        except Exception:  # a missing log must never mask the check result itself
+            excerpt = None
+        check["failure_excerpt"] = excerpt
+        check["infra_suspect"] = infra_suspect_text(excerpt)
+        any_suspect = any_suspect or check["infra_suspect"]
+    return any_suspect
+
+
+def _infra_hint(pr_number: int) -> str:
+    return (f"A failed check's log matches a CI-infrastructure pattern (runner disk, docker "
+            f"daemon, lost runner, OOM) -- infra_suspect, not a code failure. Fix the runner, "
+            f"then `rerun-checks {pr_number}`.")
+
+
 def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
     checks = gh.pr_checks(pr_number)
     view = gh.pr_view(pr_number, "comments,headRefOid,baseRefName")
     status, missing = merge_gate_status(
         gh.pr_files(pr_number), checks,
         view.get("comments", []), view.get("headRefOid"), view.get("baseRefName"))
+    infra = enrich_failed_checks(gh, checks)
     result = {"pr": pr_number, "status": status,
-              "missing_required_workflows": missing, "checks": checks}
-    if missing:
-        result["hint"] = _MISSING_WORKFLOW_HINT
+              "missing_required_workflows": missing, "checks": checks, "infra_suspect": infra}
+    hints = ([_MISSING_WORKFLOW_HINT] if missing else []) + ([_infra_hint(pr_number)] if infra else [])
+    if hints:
+        result["hint"] = " ".join(hints)
     return result
+
+
+def cmd_rerun_checks(gh: GitHub, pr_number: int) -> dict:
+    """Re-run the failed/cancelled jobs of every Actions run behind the PR head's failed
+    checks (`gh run rerun <run> --failed`, once per run). A rerun that errors is reported in
+    `failed`, never raised; only failing to resolve the PR raises."""
+    head = gh.pr_view(pr_number, "headRefOid").get("headRefOid")
+    runs = []
+    for check in gh.pr_checks(pr_number):
+        run, _ = _check_run_and_job(check)
+        if _is_failed_check(check) and run is not None and run not in runs:
+            runs.append(run)
+    rerun, failed = [], []
+    for run in runs:
+        try:
+            gh.run_rerun_failed(run)
+            rerun.append(run)
+        except GhError as e:
+            failed.append({"run": run, "error": str(e)})
+    return {"pr": pr_number, "head": head, "rerun": rerun, "failed": failed,
+            "nothing_to_rerun": not runs}
 
 
 def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
@@ -5509,6 +5613,12 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
     if status != "passed":
         detail = f" (no passing check or fresh local-ci attestation from: {', '.join(missing)})" if missing else ""
         hint = f" {_MISSING_WORKFLOW_HINT}" if status == "missing-checks" and missing else ""
+        infra = enrich_failed_checks(gh, checks)
+        failing = [c.get("name") or "?" for c in checks if _is_failed_check(c)]
+        if failing:
+            detail += f"; failing checks: {', '.join(failing)}"
+        if infra:
+            hint += f" {_infra_hint(pr_number)}"
         raise GhError(f"PR #{pr_number} checks not passed (status={status}){detail}{hint}")
     gh.pr_ready(pr_number)
     try:
@@ -7297,6 +7407,9 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("pr-checks")
     p.add_argument("pr", type=int)
     p.set_defaults(func=lambda a: cmd_pr_checks(get_work_item_provider(), a.pr))
+    p = sub.add_parser("rerun-checks")
+    p.add_argument("pr", type=int)
+    p.set_defaults(func=lambda a: cmd_rerun_checks(get_work_item_provider(), a.pr))
     p = sub.add_parser("merge-pr")
     p.add_argument("pr", type=int)
     p.add_argument("--issue", type=int, required=True)
