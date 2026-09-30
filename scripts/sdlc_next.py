@@ -1265,18 +1265,35 @@ def _chain_suite_evidence(gh, spec: dict, chain: dict, branch: str, carried: set
 
 
 def cmd_record_epic_verification(gh: GitHub, epic: int, kind: str, summary: str,
-                                 sha: Optional[str] = None) -> dict:
+                                 sha: Optional[str] = None, repo_path: Optional[str] = None,
+                                 runner: Runner = _default_runner) -> dict:
     """Post one half (`e2e` | `exploratory`) of an epic's closing verification marker, stamped
-    with the tested epic-branch head (`sha`, default: the branch head now)."""
+    with the tested epic-branch head: `sha`, else `repo_path`'s HEAD (the tree actually
+    tested), else the origin branch head now (`sha_source` arg | worktree | origin). A
+    worktree HEAD off the origin tip adds `behind_origin` and `origin_sha`; the close-epic
+    delta then judges the record against what landed since."""
     if sha is not None and not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
         raise GhError(f"--sha must be a 7-40 char hex commit id, got {sha!r}")
-    sha = sha or gh.branch_head_sha(epic_branch(epic))
+    extra: dict = {}
+    if sha:
+        source = "arg"
+    elif repo_path:
+        source, sha = "worktree", runner(["git", "-C", repo_path, "rev-parse", "HEAD"]).strip()
+        try:
+            origin_sha = gh.branch_head_sha(epic_branch(epic))
+        except GhError:
+            origin_sha = None
+        if origin_sha and origin_sha != sha:
+            extra = {"behind_origin": True, "origin_sha": origin_sha}
+    else:
+        source, sha = "origin", gh.branch_head_sha(epic_branch(epic))
     timestamp = _utc_now_marker()
     label = "Full e2e suite" if kind == "e2e" else "Exploratory pass"
     gh.issue_comment(epic,
         f"🧪 {label} — closing verification for #{epic} at `{sha[:10]}`. {summary}\n\n"
         f"<!-- epic-verification: {kind}:{epic} sha:{sha} @ {timestamp} -->")
-    return {"epic": epic, "kind": kind, "sha": sha, "recorded": True}
+    return {"epic": epic, "kind": kind, "sha": sha, "sha_source": source, **extra,
+            "recorded": True}
 
 
 def _close_epic_evidence(gh, epic: int, branch: str, children: list, epic_pr: Optional[int],
@@ -1300,9 +1317,28 @@ def _close_epic_evidence(gh, epic: int, branch: str, children: list, epic_pr: Op
               "_missing_workflows": suites["missing"]}
     if problems:
         result["missing_verification"] = problems
+    stale = _stale_evidence_delta(comments, delta)
+    if stale:
+        result["stale_delta"] = stale
     if suites["breaks"]:
         result["evidence_breaks"] = suites["breaks"]
     return result
+
+
+def _stale_evidence_delta(comments: list, delta: _EpicEvidenceDelta) -> dict:
+    """`{kind: {files (first 50), count}}` for each required kind whose latest record is
+    `stale`, so the orchestrator can brief a re-pass scoped to what landed since."""
+    latest = {}
+    for c in comments:
+        m = _EPIC_VERIFICATION_MARKER.search(c.get("body", ""))
+        if m:
+            latest[m.group(1)] = m.group(3)
+    out = {}
+    for kind, _ in EPIC_CLOSE_REQUIRED_EVIDENCE:
+        d = delta.deltas.get(latest.get(kind) or "")
+        if d and d["status"] == "stale":
+            out[kind] = {"files": d["files"][:50], "count": len(d["files"])}
+    return out
 
 
 def _close_epic_exploratory_problems(gh, epic: int, branch: str, carry_forward: bool) -> list:
@@ -1340,7 +1376,8 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                     clean_worktree: bool = False) -> dict:
     """Reconcile the epic branch with `main` (first call, then stop), or merge it once
     closing evidence is recorded (second call). Returns `merged`; refusals carry `reason`.
-    Two calls because verification must run between the two merges. `carry_forward=False`
+    Two calls because verification must run between the two merges. Idempotent: once the
+    epic PR is MERGED, only the post-merge bookkeeping runs (`recovered`). `carry_forward=False`
     accepts only evidence stamped at the epic head itself. `clean_worktree` runs
     `clean_epic_worktree` right before a reconcile or the merge -- never on a refusal --
     and refuses the call when the tree holds tracked changes (`worktree_clean`)."""
@@ -1352,6 +1389,11 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     branch = epic_branch(epic)
     all_issues = gh.issue_list()
     children = [i for i in all_issues if i.get("parent") and i["parent"]["number"] == epic]
+    merged_prs = gh.pr_list_for_branch(branch, state="merged")
+    if merged_prs:
+        # A repeat call after the merge: `origin/epic-<n>` is gone, so never compare it.
+        return _finish_epic_close(gh, epic, detail, merged_prs[0]["number"], children,
+                                  all_issues, repo_path, runner, {"recovered": True})
     open_children = [c["number"] for c in children if c["state"] != "CLOSED"]
     if open_children:
         return {"epic": epic, "merged": False, "open_children": open_children,
@@ -1426,12 +1468,26 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         return {**refused, "pr": pr_number, **evidence}
     gh.pr_ready(pr_number)
     gh.pr_merge(pr_number)
-    # The PR's `Closes #<n>` closes the epic; its terminal fields are set here.
+    return _finish_epic_close(gh, epic, None, pr_number, children, all_issues, repo_path,
+                              runner, {**evidence, **cleaned})
+
+
+def _finish_epic_close(gh, epic: int, detail: Optional[dict], pr_number: int, children: list,
+                       all_issues: list, repo_path: str, runner: Runner, extra: dict) -> dict:
+    """Post-merge bookkeeping, each step safe to repeat: close the Epic issue unless GitHub's
+    `Closes #<n>` already has (it lands asynchronously, and `next-action` must see it closed
+    now), its terminal fields, the unit cleanup, run-state archive and stack teardown."""
+    detail = detail or gh.issue_view(epic)
+    if detail.get("state") != "CLOSED":
+        try:
+            gh.issue_close(epic)
+        except GhError:
+            pass  # GitHub closed it in between; mark-issue-closed below still runs
     cmd_mark_issue_closed(gh, epic)
     cleanup = cleanup_unit(gh, epic, "epic", repo_path, runner, base="main")
     closed_children = {c["number"] for c in children}
-    return {"epic": epic, "merged": True, "pr": pr_number, "branch": branch, **evidence,
-            **cleaned, "worktree": cleanup.pop("worktree"), "cleanup": cleanup,
+    return {"epic": epic, "merged": True, **extra, "pr": pr_number, "branch": epic_branch(epic),
+            "worktree": cleanup.pop("worktree"), "cleanup": cleanup,
             "children_cleanup": sweep_units(gh, repo_path, runner, only=closed_children,
                                             issues=all_issues)["units"],
             "run_state": archive_run_state(epic),
@@ -7382,9 +7438,12 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--kind", required=True, choices=["e2e", "exploratory"])
     p.add_argument("--summary", required=True)
     p.add_argument("--sha", default=None,
-                    help="Epic-branch head that was tested (default: the branch head now)")
+                    help="Epic-branch head that was tested (default: --repo-path's HEAD, "
+                         "else the origin branch head now)")
+    p.add_argument("--repo-path", default=None,
+                    help="The worktree that was tested: record its HEAD, not the origin tip")
     p.set_defaults(func=lambda a: cmd_record_epic_verification(
-        get_work_item_provider(), a.epic, a.kind, a.summary, a.sha))
+        get_work_item_provider(), a.epic, a.kind, a.summary, a.sha, repo_path=a.repo_path))
     p = sub.add_parser("check-epics-closeable")
     p.set_defaults(func=lambda a: cmd_check_epics_closeable(get_work_item_provider()))
     p = sub.add_parser("close-initiative",

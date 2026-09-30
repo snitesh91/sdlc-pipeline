@@ -252,7 +252,7 @@ def test_close_epic_sweeps_the_epic_and_its_childrens_branches(repo, tmp_path, m
         "<!-- epic-verification: exploratory:9 sha:abc1234 @ 2026-09-15T00:01:00Z -->"]
     gh.files_since = lambda sha, branch: []
     gh.branch_behind_by = lambda branch, base="main": 0
-    gh.pr_list_for_branch = lambda branch: []
+    gh.pr_list_for_branch = lambda branch, state="open": []
     gh.pr_create = lambda **kw: 38
     gh.pr_checks = lambda n: []
     gh.pr_view = lambda n, fields="": {"comments": [], "headRefOid": "abc"}
