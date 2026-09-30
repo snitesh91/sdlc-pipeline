@@ -135,6 +135,9 @@ def test_default_infra_patterns_cover_the_known_runner_failures():
                  "lost communication with the server", "exit code 137", "Killed", "OOMKilled"]:
         assert s.infra_suspect_text(text.upper()), text
     assert not s.infra_suspect_text("AssertionError: expected 3, got 2")
+    # A bare OOM "Killed" line is infra; the word inside ordinary log text is not.
+    assert s.infra_suspect_text("job\tstep\t2026-09-30T10:00:00Z Killed\nnext")
+    assert not s.infra_suspect_text("test killed the stale session and asserted 404")
     assert s.PIPELINE["ci"]["infraFailurePatterns"] == list(s.CI_INFRA_FAILURE_PATTERNS)
 
 

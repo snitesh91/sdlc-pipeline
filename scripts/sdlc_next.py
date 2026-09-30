@@ -147,7 +147,7 @@ _PIPELINE_DEFAULTS = {
         "No space left on device", "ENOSPC", "Cannot connect to the Docker daemon",
         "docker daemon not running", "Is the docker daemon running",
         "The runner has received a shutdown signal", "lost communication with the server",
-        "exit code 137", "Killed", "OOMKilled"]},
+        "exit code 137", r"\bKilled\s*$", "OOMKilled"]},
     # `auto`: the orchestrator runs the final `close-epic` itself; close-epic's own
     # refusals (open children, stale verification, failing checks) still apply.
     # `evidenceCarryForward.paths`: globs a commit after the tested head may touch without
@@ -5658,7 +5658,7 @@ def infra_suspect_text(text: Optional[str]) -> bool:
         return False
     for pattern in CI_INFRA_FAILURE_PATTERNS:
         try:
-            if re.search(pattern, text, re.IGNORECASE):
+            if re.search(pattern, text, re.IGNORECASE | re.MULTILINE):
                 return True
         except re.error:
             if pattern.lower() in text.lower():
