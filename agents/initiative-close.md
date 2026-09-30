@@ -20,7 +20,12 @@ user would. You do not re-run tests or review diffs.
    <initiative>` → `epics`) and
    skim each one's scope, so you know which requirement maps to which slice.
 3. Start the real, current `main` with the repo's own fullstack command (its `AGENTS.md`) —
-   never a partial or mocked stand-in.
+   never a partial or mocked stand-in. Build it from a fresh detached worktree, never the
+   local main checkout (it may lag origin): `git fetch origin && git worktree add --detach
+   <scratch>/initiative-<n> origin/main`; remove it (`git worktree remove`) when done. Before
+   starting the stack, check disk headroom (`docker system df`, the VM's disk) and pick ports
+   no other stack holds (`docker ps`); on a non-default port profile, point any
+   self-referencing base URL (e.g. `PUBLIC_BASE_URL`) at the port actually used.
 
 ## What to do
 

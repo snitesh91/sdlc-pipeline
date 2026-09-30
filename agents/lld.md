@@ -139,8 +139,10 @@ Each subsection covers:
 Write every metadata line below plain — never wrapped in backticks.
 
 - **`Depends on: <KEY>`** — one line, only when this Task genuinely cannot start before
-  another's design settles. Name the slug exactly as its heading spells it. Omit it otherwise;
-  `create-lld-tasks` turns each line into a native `blockedBy` edge.
+  another's design settles. Name the slug exactly as its heading spells it; separate several
+  with commas (a slug may contain `-and-`). Omit it otherwise; `create-lld-tasks` turns it into
+  native `blockedBy` edges, reading only the first line starting `Depends on:` in the metadata
+  block under the `## Task` heading — never quote a `Depends on:` line elsewhere in the section.
 - **`Priority: <Urgent|High|Medium|Low>` / `Effort: <High|Medium|Low>`** — optional, one line
   each; `create-lld-tasks` sets them on the Task (omitted → `pipeline.issueDefaults`). Any
   other value refuses the whole run before an issue is created.
@@ -166,7 +168,10 @@ Write every metadata line below plain — never wrapped in backticks.
   - the top-level test tree (`test/**`), not just `src/**`;
   - the Task's own specs and test doubles, even when the change never opens them — a sibling
     that rewrites the mechanism a fake imitates breaks that spec without touching it;
-  - the spec of any class whose constructor or signature this design changes.
+  - the spec of any class whose constructor or signature this design changes;
+  - the barrel a symbol must be imported through: before claiming a file stays untouched
+    because it is "imported by path", check the repo's import-boundary lint rules (e.g.
+    ESLint `no-restricted-imports`, barrel-only slices).
   Verify each Footprint spec actually exists with a grep. Enumerate the generated artifacts a
   Task's edits invalidate — e.g. `shared-boot-members.generated.json`,
   `module-scope-state.generated.json`, OpenAPI goldens, the frontend `api-schema.d.ts`
@@ -221,7 +226,7 @@ orchestrator raises, and the pipeline merges it into `epic-<e>` on a clean revie
 
 1. Write `<docRoot>/epic-<e>/lld.md` per "The document" — exactly that path, not
    `issue-<n>/`; `verify-exit` fails otherwise. `Write` the skeleton once, then `Edit` one
-   Task subsection at a time — not one huge `Write`, and never a `python` patch script.
+   Task subsection at a time — not one huge `Write`.
 2. Commit and push to `origin/issue-<n>`.
 3. Post a short handoff comment (`stage-playbooks.md`, "Posting a handoff comment").
 

@@ -370,6 +370,9 @@ ROLE_ALLOWED = [
     ("sdlc:development", 'git commit -m x && git push origin issue-5'),
     ("sdlc:pr-review", CP + "record-pr-review 5 --pr 9 --outcome clean --summary s"),
     ("sdlc:pr-review", "git restore src/a.ts && git status"),
+    # The pr-review agent makes its review tree first and releases it last.
+    ("sdlc:pr-review", CP + "review-worktree-add 5 --repo-path /r"),
+    ("sdlc:pr-review", CP + "release-review-worktree 5"),
     ("sdlc:design-review", CP + "record-design-review 5 --role lld-review --outcome clean --summary s"),
     ("sdlc:design-review", CP + "record-design-review 5 --role arch-review --outcome rework --summary s --same-class-recurrence"),
     ("sdlc:product-review", CP + "record-design-review 5 --role product-review --outcome rework --summary s"),
@@ -414,9 +417,9 @@ ROLE_DENIED = [
     ("sdlc:product", CP + "mark-feedback-addressed 5", "orchestrator"),
     ("sdlc:architecture", CP + "cut-phase-tasks 9 --repo-path /w", "orchestrator"),
     ("sdlc:pr-review", CP + "claim 5 --role pr-review", "orchestrator"),
-    # The orchestrator makes and removes the review tree around the pr-review agent.
-    ("sdlc:pr-review", CP + "review-worktree-add 5 --repo-path /r", "orchestrator"),
-    ("sdlc:pr-review", CP + "release-review-worktree 5", "orchestrator"),
+    # Only pr-review makes and removes its own review tree.
+    ("sdlc:development", CP + "review-worktree-add 5 --repo-path /r", "orchestrator"),
+    ("sdlc:development", CP + "release-review-worktree 5", "orchestrator"),
     ("sdlc:development", CP + "prune-stale --dry-run", "orchestrator"),
     ("sdlc:exploratory", "echo $(" + CP + "close-epic 9)", "orchestrator"),
     ("sdlc:initiative-close", CP + "close-initiative 1", "orchestrator"),
@@ -462,6 +465,13 @@ def test_orchestrator_and_other_agents_keep_every_command(sdlc_repo, agent_type)
     assert guard(CP + "review-worktree-add 5 --repo-path /r", sdlc_repo, agent_type) is None
     assert guard(CP + "prune-stale --repo-path /r", sdlc_repo, agent_type) is None
     assert guard("git commit -m x && git reset --hard", sdlc_repo, agent_type) is None
+
+
+def test_a_run_driving_main_thread_may_finish_a_reviewers_exit_actions(sdlc_repo, live):
+    # After a classifier outage the orchestrator records the reported verdict itself.
+    assert guard(CP + "record-pr-review 5 --pr 9 --outcome clean --summary s", sdlc_repo,
+                 **live) is None
+    assert guard(CP + "release-review-worktree 5", sdlc_repo, **live) is None
 
 
 # --- SubagentStop -----------------------------------------------------------------------

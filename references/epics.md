@@ -301,10 +301,11 @@ never reaches `main`; merge its design PR). Remaining items: closing verificatio
    it only leaves a suite unsatisfied, which matters for one in `awaiting_checks`. The epic
    PR exists only from this call, so attest each suite it names right after it
    (`record-local-ci --pr <pr>` on the epic head), wait for `awaiting_checks` to pass, and
-   call again. After the merge it cleans up (`cleanup`, `children_cleanup`): the epic's and
-   its closed children's worktrees and landed branches on origin and locally, the run-state
-   file archived (`run_state`; `prune-stale` deletes it once stale), and
-   `teardown-epic-stack` (`stack`; no-op unless provisioned).
+   call again. After the merge it closes the Epic issue and cleans up (`cleanup`,
+   `children_cleanup`): the epic's and its closed children's worktrees and landed branches on
+   origin and locally, the run-state file archived (`run_state`; `prune-stale` deletes it once
+   stale), and `teardown-epic-stack` (`stack`; no-op unless provisioned). On an
+   already-merged epic it only finishes that bookkeeping (`recovered: true`).
 
 **Evidence carry-forward — what a later commit on `epic-<n>` does to recorded evidence:**
 
@@ -324,11 +325,9 @@ never reaches `main`; merge its design PR). Remaining items: closing verificatio
 - `close-epic <n> --no-carry-forward` accepts only evidence stamped at the epic head itself:
   no delta carry-forward, no child chain.
 
-**Preflight the machine before an e2e run** (the e2e-test Task's new specs, or any you run yourself). An exhausted Docker VM makes a run
-unrecordable (`Page crashed`, `ENOSPC`, container OOM kills). Check `docker system df`, VM disk
-use (under ~80%) and host free memory; prune build cache and stop stale stacks first; restart
-the frontend container between e2e chunks. A run with crash-class failures is an environment
-failure: fix it and re-run, never record it.
+**Preflight the machine** before the closing run and any e2e run (`references/parallelism.md`,
+"Resource cap — serialize suite-heavy stages"); restart the frontend container between e2e
+chunks.
 
 **Closing verification — the exploratory pass** (`sdlc:exploratory`), run in the epic
 branch's worktree (`worktree-add <n> --unit epic`), never the main checkout. **The pipeline
@@ -337,12 +336,14 @@ the pipeline (e.g. nightly on its staging environment) and files what fails ther
 `close-epic` never asks for it. `record-epic-verification --kind e2e` is still accepted
 (informational, never gates). Run every suite in `unattested_suites` with a
 fresh `sdlc:development` agent and a run-only brief (fix nothing, report). **You** record the
-exploratory half with `record-epic-verification <n> --kind exploratory --summary "..."` (it
-stamps the tested epic-branch head; `--sha` names an earlier tested head; the summary is the
-findings comment the agent returned) — an agent never records it. Evidence predating a later
-change on `epic-<n>` outside the carry-forward set ("Evidence carry-forward" above), a
-reconcile's included, counts as missing. **Never record a verification you
-did not run clean.**
+exploratory half with `record-epic-verification <n> --kind exploratory --summary "..."
+--repo-path <the epic worktree the pass ran in>` (it stamps that worktree's HEAD —
+`sha_source`, `behind_origin`, `origin_sha`; `--sha` names an earlier tested head; the summary
+is the findings comment the agent returned) — an agent never records it. Evidence predating a
+later change on `epic-<n>` outside the carry-forward set ("Evidence carry-forward" above), a
+reconcile's included, counts as missing; `close-epic` then returns `stale_delta` (`{<kind>:
+{files, count}}`): brief a delta re-pass scoped to those files, never a full pass. **Never
+record a verification you did not run clean.**
 
 **With `epicClose.auto` on, escalate instead of closing when:**
 

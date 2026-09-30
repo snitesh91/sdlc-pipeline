@@ -54,7 +54,9 @@ ROLE_COMMANDS = {
     "product-review": {"record-design-review"},
     "design-review": {"record-design-review"},
     "development": {"open-dev-pr", "record-local-ci", "handoff-to-pr-review"},
-    "pr-review": {"record-pr-review", "record-local-ci"},
+    # pr-review makes its own review tree first and releases it last.
+    "pr-review": {"record-pr-review", "record-local-ci", "review-worktree-add",
+                  "release-review-worktree"},
     "initiative-close": {"record-initiative-verification"},
 }
 REVIEW_ROLES = {"product-review", "design-review", "pr-review"}

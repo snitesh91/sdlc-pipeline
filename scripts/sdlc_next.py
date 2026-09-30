@@ -103,9 +103,12 @@ _PIPELINE_DEFAULTS = {
     # the main checkout is never a git-write target.
     # `releaseCommand`: shell command run inside a worktree right before it is removed
     # (tear down per-worktree resources); failure is reported, never fatal. "" = none.
+    # `dockerCleanup`: on unit cleanup, remove docker containers/volumes/networks named
+    # `<unit_docker_prefix>-*` / `_*`, and fall back to a docker `rm -rf` when a
+    # root-owned file blocks `worktree remove`.
     "worktrees": {"root": "/tmp", "devPrefix": "sdlc-dev-", "epicPrefix": "sdlc-epic-",
                   "reviewPrefix": "sdlc-review-", "ephemeralPrefix": "sdlc-tmp-",
-                  "releaseCommand": ""},
+                  "releaseCommand": "", "dockerCleanup": True},
     # Per-branch flock; `SDLC_LOCK_DIR` in the environment overrides `dir`.
     "locks": {"dir": "{worktreesRoot}/.sdlc-locks", "waitSeconds": 600},
     # Per-epic runtime stack. The driven repo's compose must honour the `ports`
@@ -138,6 +141,13 @@ _PIPELINE_DEFAULTS = {
     # A `resume` action younger than `liveWindowMinutes` is flagged `likely_live`: another
     # session may still be driving it, so the orchestrator asks the operator before taking over.
     "resume": {"liveWindowMinutes": 30},
+    # A failed CI check whose failed-step log matches one of these (regex, case-insensitive)
+    # is flagged `infra_suspect`: the runner broke, not the code -- fix it, `rerun-checks`.
+    "ci": {"infraFailurePatterns": [
+        "No space left on device", "ENOSPC", "Cannot connect to the Docker daemon",
+        "docker daemon not running", "Is the docker daemon running",
+        "The runner has received a shutdown signal", "lost communication with the server",
+        "exit code 137", r"\bKilled\s*$", "OOMKilled"]},
     # `auto`: the orchestrator runs the final `close-epic` itself; close-epic's own
     # refusals (open children, stale verification, failing checks) still apply.
     # `evidenceCarryForward.paths`: globs a commit after the tested head may touch without
@@ -195,6 +205,8 @@ ESCALATION = PIPELINE["escalation"]
 PRODUCT_WIP_CAP = PIPELINE["productWip"]["maxGateAPending"]
 # A resume younger than this is treated as possibly still live (item: liveness signal).
 RESUME_LIVE_WINDOW_MINUTES = PIPELINE["resume"]["liveWindowMinutes"]
+# Read at call time so a test can override it on the module.
+CI_INFRA_FAILURE_PATTERNS = tuple(PIPELINE["ci"]["infraFailurePatterns"])
 EVIDENCE_CARRY_FORWARD_GLOBS = tuple(
     g.replace("{docRoot}", DOC_ROOT.rstrip("/"))
     for g in ((PIPELINE["epicClose"].get("evidenceCarryForward") or {}).get("paths")
@@ -526,6 +538,15 @@ class GitHub:
                 return []
             raise
         return json.loads(out)
+
+    def job_failed_log(self, job_id: int) -> str:
+        """The failed steps' log of one Actions job (`gh run view --job --log-failed`)."""
+        return self._run(["gh", "run", "view", "--job", str(job_id), "--log-failed",
+                          "--repo", self.repo])
+
+    def run_rerun_failed(self, run_id: int) -> None:
+        """Re-run only the failed (and cancelled) jobs of one Actions run."""
+        self._run(["gh", "run", "rerun", str(run_id), "--failed", "--repo", self.repo])
 
     def pr_files(self, number: int) -> list:
         """Every changed path of a PR, via paginated REST `pulls/{n}/files`. `gh pr view
@@ -1232,7 +1253,7 @@ def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
             (awaiting if suite in NON_ATTESTABLE_SUITES else unattested).append(suite)
         suites[suite] = status
     return {"suites": suites, "unattested": unattested, "awaiting": awaiting, "missing": missing,
-            "breaks": breaks, "carried_files": carried}
+            "breaks": breaks, "carried_files": carried, "checks": checks}
 
 
 def _chain_suite_evidence(gh, spec: dict, chain: dict, branch: str, carried: set) -> tuple:
@@ -1265,18 +1286,35 @@ def _chain_suite_evidence(gh, spec: dict, chain: dict, branch: str, carried: set
 
 
 def cmd_record_epic_verification(gh: GitHub, epic: int, kind: str, summary: str,
-                                 sha: Optional[str] = None) -> dict:
+                                 sha: Optional[str] = None, repo_path: Optional[str] = None,
+                                 runner: Runner = _default_runner) -> dict:
     """Post one half (`e2e` | `exploratory`) of an epic's closing verification marker, stamped
-    with the tested epic-branch head (`sha`, default: the branch head now)."""
+    with the tested epic-branch head: `sha`, else `repo_path`'s HEAD (the tree actually
+    tested), else the origin branch head now (`sha_source` arg | worktree | origin). A
+    worktree HEAD off the origin tip adds `behind_origin` and `origin_sha`; the close-epic
+    delta then judges the record against what landed since."""
     if sha is not None and not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
         raise GhError(f"--sha must be a 7-40 char hex commit id, got {sha!r}")
-    sha = sha or gh.branch_head_sha(epic_branch(epic))
+    extra: dict = {}
+    if sha:
+        source = "arg"
+    elif repo_path:
+        source, sha = "worktree", runner(["git", "-C", repo_path, "rev-parse", "HEAD"]).strip()
+        try:
+            origin_sha = gh.branch_head_sha(epic_branch(epic))
+        except GhError:
+            origin_sha = None
+        if origin_sha and origin_sha != sha:
+            extra = {"behind_origin": True, "origin_sha": origin_sha}
+    else:
+        source, sha = "origin", gh.branch_head_sha(epic_branch(epic))
     timestamp = _utc_now_marker()
     label = "Full e2e suite" if kind == "e2e" else "Exploratory pass"
     gh.issue_comment(epic,
         f"🧪 {label} — closing verification for #{epic} at `{sha[:10]}`. {summary}\n\n"
         f"<!-- epic-verification: {kind}:{epic} sha:{sha} @ {timestamp} -->")
-    return {"epic": epic, "kind": kind, "sha": sha, "recorded": True}
+    return {"epic": epic, "kind": kind, "sha": sha, "sha_source": source, **extra,
+            "recorded": True}
 
 
 def _close_epic_evidence(gh, epic: int, branch: str, children: list, epic_pr: Optional[int],
@@ -1300,9 +1338,33 @@ def _close_epic_evidence(gh, epic: int, branch: str, children: list, epic_pr: Op
               "_missing_workflows": suites["missing"]}
     if problems:
         result["missing_verification"] = problems
+    stale = _stale_evidence_delta(comments, delta)
+    if stale:
+        result["stale_delta"] = stale
     if suites["breaks"]:
         result["evidence_breaks"] = suites["breaks"]
+    failing = [c for c in suites["checks"] if _is_failed_check(c)]
+    if failing:
+        # Reported only; the suite gate above already decides whether the epic merges.
+        result["infra_suspect"] = enrich_failed_checks(gh, failing)
+        result["failing_checks"] = failing
     return result
+
+
+def _stale_evidence_delta(comments: list, delta: _EpicEvidenceDelta) -> dict:
+    """`{kind: {files (first 50), count}}` for each required kind whose latest record is
+    `stale`, so the orchestrator can brief a re-pass scoped to what landed since."""
+    latest = {}
+    for c in comments:
+        m = _EPIC_VERIFICATION_MARKER.search(c.get("body", ""))
+        if m:
+            latest[m.group(1)] = m.group(3)
+    out = {}
+    for kind, _ in EPIC_CLOSE_REQUIRED_EVIDENCE:
+        d = delta.deltas.get(latest.get(kind) or "")
+        if d and d["status"] == "stale":
+            out[kind] = {"files": d["files"][:50], "count": len(d["files"])}
+    return out
 
 
 def _close_epic_exploratory_problems(gh, epic: int, branch: str, carry_forward: bool) -> list:
@@ -1340,7 +1402,8 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                     clean_worktree: bool = False) -> dict:
     """Reconcile the epic branch with `main` (first call, then stop), or merge it once
     closing evidence is recorded (second call). Returns `merged`; refusals carry `reason`.
-    Two calls because verification must run between the two merges. `carry_forward=False`
+    Two calls because verification must run between the two merges. Idempotent: once the
+    epic PR is MERGED, only the post-merge bookkeeping runs (`recovered`). `carry_forward=False`
     accepts only evidence stamped at the epic head itself. `clean_worktree` runs
     `clean_epic_worktree` right before a reconcile or the merge -- never on a refusal --
     and refuses the call when the tree holds tracked changes (`worktree_clean`)."""
@@ -1352,6 +1415,11 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     branch = epic_branch(epic)
     all_issues = gh.issue_list()
     children = [i for i in all_issues if i.get("parent") and i["parent"]["number"] == epic]
+    merged_prs = gh.pr_list_for_branch(branch, state="merged")
+    if merged_prs:
+        # A repeat call after the merge: `origin/epic-<n>` is gone, so never compare it.
+        return _finish_epic_close(gh, epic, detail, merged_prs[0]["number"], children,
+                                  all_issues, repo_path, runner, {"recovered": True})
     open_children = [c["number"] for c in children if c["state"] != "CLOSED"]
     if open_children:
         return {"epic": epic, "merged": False, "open_children": open_children,
@@ -1426,12 +1494,26 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         return {**refused, "pr": pr_number, **evidence}
     gh.pr_ready(pr_number)
     gh.pr_merge(pr_number)
-    # The PR's `Closes #<n>` closes the epic; its terminal fields are set here.
+    return _finish_epic_close(gh, epic, None, pr_number, children, all_issues, repo_path,
+                              runner, {**evidence, **cleaned})
+
+
+def _finish_epic_close(gh, epic: int, detail: Optional[dict], pr_number: int, children: list,
+                       all_issues: list, repo_path: str, runner: Runner, extra: dict) -> dict:
+    """Post-merge bookkeeping, each step safe to repeat: close the Epic issue unless GitHub's
+    `Closes #<n>` already has (it lands asynchronously, and `next-action` must see it closed
+    now), its terminal fields, the unit cleanup, run-state archive and stack teardown."""
+    detail = detail or gh.issue_view(epic)
+    if detail.get("state") != "CLOSED":
+        try:
+            gh.issue_close(epic)
+        except GhError:
+            pass  # GitHub closed it in between; mark-issue-closed below still runs
     cmd_mark_issue_closed(gh, epic)
     cleanup = cleanup_unit(gh, epic, "epic", repo_path, runner, base="main")
     closed_children = {c["number"] for c in children}
-    return {"epic": epic, "merged": True, "pr": pr_number, "branch": branch, **evidence,
-            **cleaned, "worktree": cleanup.pop("worktree"), "cleanup": cleanup,
+    return {"epic": epic, "merged": True, **extra, "pr": pr_number, "branch": epic_branch(epic),
+            "worktree": cleanup.pop("worktree"), "cleanup": cleanup,
             "children_cleanup": sweep_units(gh, repo_path, runner, only=closed_children,
                                             issues=all_issues)["units"],
             "run_state": archive_run_state(epic),
@@ -2411,9 +2493,45 @@ def _dev_pr_scope_refusal_reason(offenders: dict) -> Optional[str]:
                      f"{', '.join(offenders['foreign_footprint'])}")
     if not parts:
         return None
+    ack = (" A foreign-footprint touch that is an inherent side effect of this Task can be "
+           "acknowledged instead: list each such path in the PR body under a "
+           "`## Footprint deviations` heading as a bullet starting with the backticked path "
+           "(e.g. - `path/x.ts` — why). Epic design docs can never be acknowledged."
+           if offenders["foreign_footprint"] else "")
     return (f"this development diff {'; and '.join(parts)} -- {DEV_PR_SCOPE_RULE}. Revert those "
             f"paths and, if the design truly needs to change, escalate an Architecture/LLD "
-            f"revision rather than editing the doc from a development branch.")
+            f"revision rather than editing the doc from a development branch.{ack}")
+
+
+_FOOTPRINT_DEVIATIONS_HEADING = re.compile(r"^[ \t]*#{1,6}[ \t]*Footprint deviations[ \t]*$",
+                                           re.IGNORECASE | re.MULTILINE)
+_DEVIATION_BULLET = re.compile(r"^[ \t]*[-*][ \t]+`([^`\n]+)`")
+
+
+def acknowledged_footprint_deviations(pr_body: Optional[str]) -> list:
+    """Paths a PR body acknowledges as footprint deviations: each bullet under its
+    `## Footprint deviations` heading (up to the next heading) that starts with a backticked
+    path, in order, deduplicated. [] when the section is absent."""
+    m = _FOOTPRINT_DEVIATIONS_HEADING.search(pr_body or "")
+    if not m:
+        return []
+    rest = m.string[m.end():]
+    end = re.search(r"^[ \t]*#{1,6}[ \t]", rest, re.MULTILINE)
+    paths = []
+    for line in (rest[:end.start()] if end else rest).splitlines():
+        bm = _DEVIATION_BULLET.match(line)
+        if bm and bm.group(1).strip() not in paths:
+            paths.append(bm.group(1).strip())
+    return paths
+
+
+def acknowledge_footprint_deviations(offenders: dict, pr_body: Optional[str]) -> tuple:
+    """`(offenders, acknowledged)`: the foreign-footprint offenders the PR body acknowledges
+    move to `acknowledged`; design-doc offenders are never acknowledgeable."""
+    listed = set(acknowledged_footprint_deviations(pr_body))
+    acknowledged = [p for p in offenders["foreign_footprint"] if p in listed]
+    return ({**offenders, "foreign_footprint": [p for p in offenders["foreign_footprint"]
+                                                if p not in listed]}, acknowledged)
 
 
 def worktree_path_for_branch(branch: str, runner: Runner = _default_runner,
@@ -2600,6 +2718,116 @@ def _run_release_command(path: str, shell: Optional[Callable] = None) -> Optiona
     return {"command": command, "ok": True}
 
 
+def unit_docker_prefix(number: int, unit: str = "issue") -> str:
+    """The docker name prefix a unit's agents give its compose projects, containers and
+    volumes (followed by `-` or `_`): its worktree's basename, `sdlc-dev-<n>` (an epic:
+    `sdlc-epic-<n>`). `cleanup_unit` removes whatever carries it."""
+    return os.path.basename(worktree_path(unit, number))
+
+
+def _docker_cleanup_enabled() -> bool:
+    return bool(PIPELINE["worktrees"].get("dockerCleanup", True))
+
+
+def _docker_unavailable(runner: Runner) -> Optional[str]:
+    """Why docker cannot be used through `runner` (binary missing, daemon down), else None."""
+    try:
+        runner(["docker", "version", "--format", "{{.Server.Version}}"])
+    except (GhError, OSError) as exc:
+        msg = str(exc).strip()
+        return f"docker unavailable: {msg.splitlines()[0] if msg else repr(exc)}"
+    return None
+
+
+_COMPOSE_PROJECT_LABEL = '{{.Label "com.docker.compose.project"}}'
+
+
+def docker_sweep(prefix: str, runner: Runner, dry_run: bool = False) -> dict:
+    """Remove the docker containers (by name or compose project label), then volumes and
+    networks (by name or label) that equal `<prefix>` or start `<prefix>-` / `<prefix>_`
+    (compose's default project name is the worktree's basename itself) -- never a bare
+    prefix, so `sdlc-dev-14` never takes `sdlc-dev-145`'s. Listed and matched in Python.
+    Never raises: `{skipped}` when docker is unavailable; `dry_run` lists `would_remove`."""
+    reason = _docker_unavailable(runner)
+    if reason:
+        return {"prefix": prefix, "skipped": reason}
+    pattern = re.compile(rf"^{re.escape(prefix)}(?:$|[-_])")
+    errors: list = []
+
+    def listed(argv: list) -> list:
+        try:
+            out = runner(argv)
+        except (GhError, OSError) as exc:
+            errors.append(f"{' '.join(argv[:3])}: {exc}")
+            return []
+        return [line.split("\t") for line in out.splitlines() if line.strip()]
+
+    containers = {}
+    for row in listed(["docker", "ps", "-a", "--format",
+                       "{{.ID}}\t{{.Names}}\t" + _COMPOSE_PROJECT_LABEL]):
+        cid, name, project = (row + ["", ""])[:3]
+        if pattern.match(name) or pattern.match(project):
+            containers[cid] = name
+    found = {"containers": containers}
+    for kind in ("volume", "network"):
+        found[f"{kind}s"] = {
+            name: name for name, project in
+            ((row + [""])[:2] for row in listed(["docker", kind, "ls", "--format",
+                                                  "{{.Name}}\t" + _COMPOSE_PROJECT_LABEL]))
+            if pattern.match(name) or pattern.match(project)}
+    if dry_run:
+        return {"prefix": prefix, "would_remove": {k: sorted(v.values()) for k, v in found.items()},
+                "errors": errors}
+    out: dict = {"prefix": prefix}
+    for kind, rm in (("containers", ["docker", "rm", "-f", "-v"]),
+                     ("volumes", ["docker", "volume", "rm", "-f"]),
+                     ("networks", ["docker", "network", "rm"])):
+        removed = []
+        for ident, name in sorted(found[kind].items(), key=lambda kv: kv[1]):
+            try:
+                runner(rm + [ident])
+                removed.append(name)
+            except (GhError, OSError) as exc:
+                errors.append(f"{kind[:-1]} {name}: {exc}")
+        out[f"{kind}_removed"] = removed
+    out["errors"] = errors
+    return out
+
+
+_PERMISSION_ERROR_RE = re.compile(r"Permission denied|Operation not permitted", re.I)
+
+
+def _remove_worktree(repo_path: str, path: str, runner: Runner) -> dict:
+    """`git worktree remove --force path`; `{}` on success, else raises GhError. When a
+    permission error (root-owned files a container wrote) blocks it and docker cleanup is
+    on, empties the tree once through `docker run --rm alpine` -- only for a path under
+    `worktrees.root` -- then removes/prunes it: `{"forced_docker_rm": True}`."""
+    try:
+        runner(["git", "-C", repo_path, "worktree", "remove", "--force", path])
+        return {}
+    except GhError as exc:
+        if not _PERMISSION_ERROR_RE.search(str(exc)) or not _docker_cleanup_enabled():
+            raise
+        root = os.path.realpath(PIPELINE["worktrees"]["root"])
+        real = os.path.realpath(path)
+        if real == root or os.path.commonpath([real, root]) != root:
+            raise GhError(f"{exc}\nnot retrying through docker: {path} is outside the "
+                          f"worktrees root {root}")
+        unavailable = _docker_unavailable(runner)
+        if unavailable:
+            raise GhError(f"{exc}\nnot retrying through docker: {unavailable}")
+        runner(["docker", "run", "--rm", "-v", f"{real}:/w", "alpine",
+                "sh", "-c", "rm -rf /w/* /w/.[!.]*"])
+    try:  # its `.git` file is gone with the contents, so `remove` may refuse; prune drops it
+        runner(["git", "-C", repo_path, "worktree", "remove", "--force", path])
+    except GhError:
+        pass
+    runner(["git", "-C", repo_path, "worktree", "prune"])
+    with contextlib.suppress(OSError):
+        os.rmdir(path)
+    return {"forced_docker_rm": True}
+
+
 def _is_ancestor(repo_path: str, rev: str, ref: str, runner: Runner) -> bool:
     """Whether `rev` is `ref` or an ancestor of it (False when either is unknown locally)."""
     try:
@@ -2682,10 +2910,11 @@ def release_worktree(branch: str, runner: Runner = _default_runner,
         release = _run_release_command(path, shell)
         # Safe: the refusals above guarantee a clean tree. Plain `remove` refuses
         # any tree containing submodules.
-        runner(["git", "-C", base_repo, "worktree", "remove", "--force", path])
+        forced = _remove_worktree(base_repo, path, runner)
     except GhError as exc:
         return {"released": False, "path": path, "reason": str(exc)}
-    return {"released": True, "path": path, **({"release_command": release} if release else {})}
+    return {"released": True, "path": path, **forced,
+            **({"release_command": release} if release else {})}
 
 
 # Agent scratch (logs, captured output, probe files) lives inside the unit's worktree, so it
@@ -2793,10 +3022,11 @@ def cmd_release_review_worktree(number: int, repo_path: str = ".",
         return {"released": False, "path": path, "would_release": True}
     release = _run_release_command(path, shell)
     try:
-        runner(["git", "-C", repo_path, "worktree", "remove", "--force", path])
+        forced = _remove_worktree(repo_path, path, runner)
     except GhError as exc:
         return {"released": False, "path": path, "reason": str(exc)}
-    return {"released": True, "path": path, **({"release_command": release} if release else {})}
+    return {"released": True, "path": path, **forced,
+            **({"release_command": release} if release else {})}
 
 
 def release_detached_dev_worktree(number: int, repo_path: str = ".",
@@ -2829,10 +3059,11 @@ def release_detached_dev_worktree(number: int, repo_path: str = ".",
         return {"released": False, "path": path, "would_release": True}
     release = _run_release_command(path, shell)
     try:
-        runner(["git", "-C", repo_path, "worktree", "remove", "--force", path])
+        forced = _remove_worktree(repo_path, path, runner)
     except GhError as exc:
         return {"released": False, "path": path, "reason": str(exc)}
-    return {"released": True, "path": path, **({"release_command": release} if release else {})}
+    return {"released": True, "path": path, **forced,
+            **({"release_command": release} if release else {})}
 
 
 def resolve_repo_path(repo_path: Optional[str], branch: str,
@@ -4201,16 +4432,20 @@ def cmd_add_blocked_by(gh: GitHub, issue: int, dep: int) -> dict:
     return {"issue": issue, "blocked_on": dep, "added": True}
 
 
-def _task_line(name: str) -> re.Pattern:
+def _task_line(name: str, after_separator: bool = True) -> re.Pattern:
     """A `<name>: <value>` field in a Task section: at line start (bullet, bold and backtick
-    wrappers tolerated) or after a ` / ` or ` | ` separating it from a sibling field."""
-    return re.compile(rf"(?:^[ \t]*(?:[-*][ \t]+)?|[ \t]+[/|][ \t]+)`?(?:\*\*)?`?{name}`?"
+    wrappers tolerated) or, with `after_separator`, after a ` / ` or ` | ` separating it from a
+    sibling field."""
+    lead = (r"(?:^[ \t]*(?:[-*][ \t]+)?|[ \t]+[/|][ \t]+)" if after_separator
+            else r"^[ \t]*(?:[-*][ \t]+)?")
+    return re.compile(rf"{lead}`?(?:\*\*)?`?{name}`?"
                       rf"(?:\*\*)?`?[ \t]*:[ \t]*(?:\*\*)?[ \t]*"
                       rf"(.+?)(?=`?(?:\*\*)?(?:[ \t]+[/|][ \t]|[ \t]*$))",
                       re.IGNORECASE | re.MULTILINE)
 
 
-_DEPENDS_ON_LINE = _task_line("Depends on")
+# `Depends on:` only ever starts a line of the Task's metadata block (`task_metadata_lines`).
+_DEPENDS_ON_LINE = _task_line("Depends on", after_separator=False)
 _PRIORITY_LINE = _task_line("Priority")
 _EFFORT_LINE = _task_line("Effort")
 _REALISES_LINE = _task_line("Reali[sz]es")
@@ -4252,16 +4487,61 @@ def parse_task_field(section_text: str, line: re.Pattern) -> Optional[str]:
     return m.group(1).strip("`*. ") if m else None
 
 
-def parse_task_depends_on(section_text: str) -> list:
-    """Task keys from a section's `Depends on:` line(s) (comma- or `and`-separated,
-    backticks and trailing period tolerated); [] when none."""
-    keys = []
-    for m in _DEPENDS_ON_LINE.finditer(section_text):
-        for raw in re.split(r",|\band\b", m.group(1)):
-            key = raw.strip("`*. \t")
-            if _TASK_KEY_RE.match(key) and key not in _NO_DEPENDENCY and key not in keys:
+# A metadata field line (`Depends on:`, `Priority:`, `Effort:`, `Realises:`), however marked up.
+_TASK_FIELD_START = re.compile(r"^[ \t]*(?:[-*][ \t]+)?`?(?:\*\*)?`?"
+                               r"(?:Depends on|Priority|Effort|Reali[sz]es)`?(?:\*\*)?`?[ \t]*:",
+                               re.IGNORECASE)
+_MD_HEADING_LINE = re.compile(r"^[ \t]*#{1,6}[ \t]")
+_LIST_ITEM_LINE = re.compile(r"^[ \t]*[-*][ \t]+")
+
+
+def task_metadata_lines(section_text: str) -> list:
+    """A Task section's metadata block: the lines before its first `#` subheading (fenced
+    blocks dropped) that start a paragraph or list item, or follow another metadata field line.
+    A wrapped prose line -- one continuing a prose line -- is never metadata, nor is anything
+    under a subheading (`### Task-local decisions`, `## Footprint`, ...)."""
+    lines, prev = [], ""
+    for line in _FENCED_BLOCK.sub("", section_text).splitlines():
+        if _MD_HEADING_LINE.match(line):
+            break
+        if line.strip() and (not prev.strip() or _TASK_FIELD_START.match(prev)
+                             or _LIST_ITEM_LINE.match(line)):
+            lines.append(line)
+        prev = line
+    return lines
+
+
+def _depends_on_value(section_text: str) -> Optional[str]:
+    """The value of the first `Depends on:` line of the metadata block, or None."""
+    for line in task_metadata_lines(section_text):
+        m = _DEPENDS_ON_LINE.search(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _split_depends_on(value: str) -> tuple:
+    """`(keys, unparsed)` from a `Depends on:` value: comma-separated Task keys (a standalone
+    ` and ` also separates; `search-and-filter` stays one key). No-dependency words drop out;
+    anything else that is not a key lands in `unparsed`."""
+    keys, unparsed = [], []
+    for raw in re.split(r",|[ \t]+and[ \t]+", value):
+        key = raw.strip("`*. \t")
+        if key.lower() in _NO_DEPENDENCY:
+            continue
+        if _TASK_KEY_RE.match(key):
+            if key not in keys:
                 keys.append(key)
-    return keys
+        elif key not in unparsed:
+            unparsed.append(key)
+    return keys, unparsed
+
+
+def parse_task_depends_on(section_text: str) -> list:
+    """Task keys from the first `Depends on:` line of a section's metadata block
+    (`task_metadata_lines`); backticks, bold and a trailing period tolerated. [] when none."""
+    value = _depends_on_value(section_text)
+    return _split_depends_on(value)[0] if value is not None else []
 
 
 # Any `Depends on:` mention, however marked up -- to catch one the strict parser misses.
@@ -4271,16 +4551,31 @@ _NO_DEPENDENCY = {"", "none", "n/a", "-", "\u2014", "nothing"}
 
 
 def task_dependency_defect(section_text: str) -> Optional[str]:
-    """Why a Task section's `Depends on:` cannot be trusted (None when it can): the section
-    names a dependency but no key parses, so the Task would be created with no edge."""
-    if parse_task_depends_on(section_text):
-        return None
-    for m in _DEPENDS_ON_MENTION.finditer(section_text):
+    """Why a Task section's `Depends on:` cannot be trusted (None when it can): its line names
+    something that is not a Task key (the whole value, or part of it), or the metadata block
+    mentions a dependency the strict parser does not read -- either way the Task would be
+    created missing a `blockedBy` edge and race its dependency."""
+    value = _depends_on_value(section_text)
+    if value is not None:
+        keys, unparsed = _split_depends_on(value)
+        if not unparsed:
+            return None
+        line = f"Depends on: {value.strip()}"
+        if not keys:
+            return (f"`{line}` names a dependency but no Task key parses from it -- the Task "
+                    f"would be created with no `blockedBy` edge and race its dependency. Write "
+                    f"the line plain (`Depends on: <key>, <key>`, slug keys), then re-run")
+        return (f"`{line}` parses only {', '.join(keys)}; "
+                f"{', '.join(repr(u) for u in unparsed)} is not a Task key -- that edge would "
+                f"be silently dropped. Write the line as comma-separated slug keys only, then "
+                f"re-run")
+    for m in _DEPENDS_ON_MENTION.finditer("\n".join(task_metadata_lines(section_text))):
         if m.group(1).strip("`*. \t").lower() not in _NO_DEPENDENCY:
             return (f"`{m.group(0).strip()}` names a dependency but no Task key parses from "
                     f"it -- the Task would be created with no `blockedBy` edge and race its "
-                    f"dependency. Write the line plain (`Depends on: <key>`, no backtick "
-                    f"wrapper, slug keys), then re-run")
+                    f"dependency. Put it on its own line (`Depends on: <key>`, no backtick "
+                    f"wrapper, slug keys) in the metadata block under the Task heading, then "
+                    f"re-run")
     return None
 
 
@@ -4333,6 +4628,32 @@ def task_type_name() -> str:
     return rule["value"] if rule.get("field") == "issueType" else "Task"
 
 
+def _wire_numbered_task_edges(gh: GitHub, doc: str, numbered: list, key_to_number: dict,
+                              all_issues: dict, result: dict) -> None:
+    """Add each already-numbered Task's missing `Depends on:` `blockedBy` edges (an open
+    dependency only, never twice) into `result["edges_added"]` / `result["edges_failed"]`."""
+    for h in numbered:
+        issue_number = h["number"]
+        if (all_issues.get(issue_number) or {}).get("state", "OPEN") != "OPEN":
+            continue  # a closed Task waits on nothing
+        for dep_key in parse_task_depends_on(doc[h["line_end"]:h["end"]]):
+            dep = key_to_number.get(dep_key)
+            if dep is None or dep == issue_number:
+                result["edges_failed"].append(
+                    {"issue": issue_number, "on_key": dep_key,
+                     "error": f"no other `## Task {dep_key}` section in the doc to depend on"})
+                continue
+            if (all_issues.get(dep) or {}).get("state", "OPEN") != "OPEN":
+                continue  # a closed dependency blocks nothing
+            try:
+                edge = _add_blocked_by_once(gh, issue_number, dep)
+            except GhError as e:
+                result["edges_failed"].append({"issue": issue_number, "on": dep, "error": str(e)})
+                continue
+            if edge.get("added"):
+                result["edges_added"].append({"issue": issue_number, "on": dep})
+
+
 def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
                           runner: Runner = _default_runner) -> dict:
     """Create one Task per `## Task <KEY>` section of the Epic's merged `lld.md`,
@@ -4355,28 +4676,38 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
     defects = {h["key"]: task_section_defect(doc[h["line_end"]:h["end"]])
                or dep_defects[h["key"]] for h in keyed}
     pending = [h for h in keyed if defects[h["key"]] is None]
+    # An already-numbered Task's `Depends on:` is re-read on every run, so a missed edge heals.
+    numbered = [h for h in headings if h["number"]]
+    numbered_defects = {h["task_key"] or f"#{h['number']}":
+                        task_dependency_defect(doc[h["line_end"]:h["end"]]) for h in numbered}
     result = {"epic": epic, "doc": doc_path, "created": [], "reused": [],
-              "already_numbered": [h["number"] for h in headings if h["number"]],
+              "already_numbered": [h["number"] for h in numbered],
               "skipped_sections": [
                   {"key": h["key"], "heading": doc[h["line_start"]:h["line_end"]].strip(),
                    "reason": defects[h["key"]]} for h in keyed if defects[h["key"]]],
-              "dependency_parse_warnings": [k for k, d in dep_defects.items() if d],
-              "blocked_by": [], "blocked_by_failed": [], "realises": [], "realises_failed": []}
-    if not pending:
-        return {**result, "committed": None, "pushed": False, "tasks": {},
-                "reason": "every `## Task` heading already carries an issue number -- "
-                          "nothing to create. A re-run after a completed pass lands here, "
-                          "which is what makes this command safe to retry."}
+              "dependency_parse_warnings": [k for k, d in {**dep_defects,
+                                                           **numbered_defects}.items() if d],
+              "blocked_by": [], "blocked_by_failed": [], "realises": [], "realises_failed": [],
+              "edges_added": [], "edges_failed": []}
     # A crash between create and push leaves issues the doc doesn't number yet.
     key_to_number = {h["task_key"]: h["number"] for h in headings
                      if h["number"] and h["task_key"]}
-    all_issues = {i["number"]: i for i in gh.issue_list()}
+    all_issues = {i["number"]: i for i in gh.issue_list()} if (pending or numbered) else {}
     for child in all_issues.values():
         if (child.get("parent") or {}).get("number") != epic:
             continue
         m = _TASK_KEY_MARKER.search(child.get("body") or "")
         if m:
             key_to_number.setdefault(m.group(1), child["number"])
+    _wire_numbered_task_edges(gh, doc, numbered, key_to_number, all_issues, result)
+    if not pending:
+        return {**result, "committed": None, "pushed": False, "tasks": {},
+                "reason": ("every `## Task` heading already carries an issue number -- "
+                           "nothing to create. A re-run after a completed pass lands here, "
+                           "which is what makes this command safe to retry.")
+                          + (" But a numbered Task's `blockedBy` edge could not be added "
+                             "(`edges_failed`) -- fix it, then re-run."
+                             if result["edges_failed"] else "")}
     # `merge-lld-doc` advances only issues that classify as Tasks.
     type_name = task_type_name()
     # Validate every section's Priority/Effort before creating any issue.
@@ -4907,12 +5238,14 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
         changed = gh.files_since(base, issue_branch(issue))
     except GhError:
         changed = []
-    offenders = dev_pr_scope_offenders(gh, issue, changed)
+    offenders, acknowledged = acknowledge_footprint_deviations(
+        dev_pr_scope_offenders(gh, issue, changed), body)
     reason = _dev_pr_scope_refusal_reason(offenders)
     if reason:
         return {"issue": issue, "created": False, "refused": True, "reason": reason,
                 "offending_design_docs": offenders["design_docs"],
-                "offending_footprint_paths": offenders["foreign_footprint"]}
+                "offending_footprint_paths": offenders["foreign_footprint"],
+                "acknowledged_deviations": acknowledged}
     pr_body = f"{body}\n\nCloses #{issue}"
     extra: dict = {}
     try:
@@ -4936,7 +5269,8 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
         f"Not yet queued for review: `development` still owes `record-local-ci` per "
         f"suite it ran and `handoff-to-pr-review`, which posts the marker "
         f"`list-ready-for-review` reads.")
-    return {"issue": issue, "pr": pr_number, "created": True, **extra}
+    return {"issue": issue, "pr": pr_number, "created": True,
+            **({"acknowledged_deviations": acknowledged} if acknowledged else {}), **extra}
 
 
 # --- citations: cite / verify-citations / verify-exit's citations_ok ---
@@ -5193,6 +5527,14 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
                                                    repo_path=repo_path, runner=runner)
             except GhError:
                 offenders = {"design_docs": [], "foreign_footprint": []}
+            acknowledged: list = []
+            if offenders["foreign_footprint"]:
+                # A foreign-footprint touch the PR body lists under `## Footprint deviations`
+                # is accepted; a design doc never is.
+                offenders, acknowledged = acknowledge_footprint_deviations(
+                    offenders, gh.pr_view(pr, fields="body").get("body"))
+            if acknowledged:
+                result["acknowledged_deviations"] = acknowledged
             result["dev_pr_scope"] = offenders
             scope_reason = _dev_pr_scope_refusal_reason(offenders)
             if scope_reason:
@@ -5441,17 +5783,98 @@ def pr_stale_attestations(gh: WorkItemProvider, issue: int, pr: int) -> dict:
     return {"stale": stale, "carried": carried, "passed_by_check": passed_by_check}
 
 
+_CHECK_LINK_RE = re.compile(r"/actions/runs/(\d+)(?:/job/(\d+))?")
+_FAILURE_EXCERPT_LINES = 20
+
+
+def _check_run_and_job(check: dict) -> tuple:
+    """`(run_id, job_id)` parsed from an Actions check's `link`; either is None when absent."""
+    m = _CHECK_LINK_RE.search(check.get("link") or "")
+    if not m:
+        return None, None
+    return int(m.group(1)), (int(m.group(2)) if m.group(2) else None)
+
+
+def _is_failed_check(check: dict) -> bool:
+    return check.get("bucket") in ("fail", "cancel")
+
+
+def infra_suspect_text(text: Optional[str]) -> bool:
+    """Whether a failure log matches any `pipeline.ci.infraFailurePatterns` entry."""
+    if not text:
+        return False
+    for pattern in CI_INFRA_FAILURE_PATTERNS:
+        try:
+            if re.search(pattern, text, re.IGNORECASE | re.MULTILINE):
+                return True
+        except re.error:
+            if pattern.lower() in text.lower():
+                return True
+    return False
+
+
+def enrich_failed_checks(gh, checks: list) -> bool:
+    """Add `failure_excerpt` (last <=20 non-empty lines of the job's failed-step log, or None
+    when it cannot be fetched/parsed) and `infra_suspect` to every fail/cancel check, in place.
+    Fetches nothing for other checks and never raises. Returns whether any is infra-suspect."""
+    any_suspect = False
+    for check in checks:
+        if not _is_failed_check(check):
+            continue
+        excerpt = None
+        try:
+            _, job = _check_run_and_job(check)
+            if job is not None:
+                lines = [l for l in gh.job_failed_log(job).splitlines() if l.strip()]
+                excerpt = "\n".join(lines[-_FAILURE_EXCERPT_LINES:]) or None
+        except Exception:  # a missing log must never mask the check result itself
+            excerpt = None
+        check["failure_excerpt"] = excerpt
+        check["infra_suspect"] = infra_suspect_text(excerpt)
+        any_suspect = any_suspect or check["infra_suspect"]
+    return any_suspect
+
+
+def _infra_hint(pr_number: int) -> str:
+    return (f"A failed check's log matches a CI-infrastructure pattern (runner disk, docker "
+            f"daemon, lost runner, OOM) -- infra_suspect, not a code failure. Fix the runner, "
+            f"then `rerun-checks {pr_number}`.")
+
+
 def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
     checks = gh.pr_checks(pr_number)
     view = gh.pr_view(pr_number, "comments,headRefOid,baseRefName")
     status, missing = merge_gate_status(
         gh.pr_files(pr_number), checks,
         view.get("comments", []), view.get("headRefOid"), view.get("baseRefName"))
+    infra = enrich_failed_checks(gh, checks)
     result = {"pr": pr_number, "status": status,
-              "missing_required_workflows": missing, "checks": checks}
-    if missing:
-        result["hint"] = _MISSING_WORKFLOW_HINT
+              "missing_required_workflows": missing, "checks": checks, "infra_suspect": infra}
+    hints = ([_MISSING_WORKFLOW_HINT] if missing else []) + ([_infra_hint(pr_number)] if infra else [])
+    if hints:
+        result["hint"] = " ".join(hints)
     return result
+
+
+def cmd_rerun_checks(gh: GitHub, pr_number: int) -> dict:
+    """Re-run the failed/cancelled jobs of every Actions run behind the PR head's failed
+    checks (`gh run rerun <run> --failed`, once per run). A rerun that errors is reported in
+    `failed`, never raised; only failing to resolve the PR raises."""
+    head = gh.pr_view(pr_number, "headRefOid").get("headRefOid")
+    runs = []
+    for check in gh.pr_checks(pr_number):
+        run, _ = _check_run_and_job(check)
+        if _is_failed_check(check) and run is not None and run not in runs:
+            runs.append(run)
+    rerun, failed = [], []
+    for run in runs:
+        try:
+            gh.run_rerun_failed(run)
+            rerun.append(run)
+        except GhError as e:
+            failed.append({"run": run, "error": str(e)})
+    return {"pr": pr_number, "head": head, "rerun": rerun, "failed": failed,
+            "nothing_to_rerun": not runs}
 
 
 def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
@@ -5509,6 +5932,12 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
     if status != "passed":
         detail = f" (no passing check or fresh local-ci attestation from: {', '.join(missing)})" if missing else ""
         hint = f" {_MISSING_WORKFLOW_HINT}" if status == "missing-checks" and missing else ""
+        infra = enrich_failed_checks(gh, checks)
+        failing = [c.get("name") or "?" for c in checks if _is_failed_check(c)]
+        if failing:
+            detail += f"; failing checks: {', '.join(failing)}"
+        if infra:
+            hint += f" {_infra_hint(pr_number)}"
         raise GhError(f"PR #{pr_number} checks not passed (status={status}){detail}{hint}")
     gh.pr_ready(pr_number)
     try:
@@ -5690,9 +6119,11 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
                  runner: Optional[Runner] = None, base: Optional[str] = None,
                  dry_run: bool = False, shell: Optional[Callable] = None) -> dict:
     """Idempotent cleanup of a terminal unit, in the order that never strands work: its
+    docker resources (`docker_sweep` of `unit_docker_prefix`, when `dockerCleanup` is on),
     review worktree, its worktree (releaseCommand first), `origin/<branch>`, then the local
     ref, then `git worktree prune`. Never raises; each part reports what it did or why not
-    (`review_worktree`, `worktree`, `remote_branch`, `local_branch`, `worktree_pruned`).
+    (`docker`, `review_worktree`, `worktree`, `remote_branch`, `local_branch`,
+    `worktree_pruned`).
     `base` defaults to the unit's integration base, resolved only when needed."""
     runner = runner or gh._run
     repo_path = repo_path or "."
@@ -5719,6 +6150,9 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
                         if b]
 
     out: dict = {"branch": branch}
+    if _docker_cleanup_enabled():
+        # First: a container holding the tree's files (bind mounts) must go before it does.
+        out["docker"] = docker_sweep(unit_docker_prefix(number, unit), runner, dry_run)
     if unit == "issue":
         out["review_worktree"] = cmd_release_review_worktree(number, repo_path, runner, shell,
                                                              dry_run)
@@ -5760,10 +6194,16 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
     never merges through `merge-pr`. Counts toward the run cap."""
     if reason and not not_planned:
         raise GhError("--reason only goes with --not-planned")
-    body = gh.issue_view(issue).get("body")
-    if not_planned:
-        gh.issue_comment(issue, f"🚫 Closed as not planned — {reason or 'dropped by the operator'}.")
-    gh.issue_close(issue, "not planned" if not_planned else "completed")
+    view = gh.issue_view(issue)
+    body = view.get("body")
+    # A re-run (e.g. finish-lld from the top) on a closed issue skips the close itself but still
+    # does the idempotent bookkeeping below.
+    already_closed = str(view.get("state") or "").upper() == "CLOSED"
+    if not already_closed:
+        if not_planned:
+            gh.issue_comment(issue, f"🚫 Closed as not planned — "
+                                    f"{reason or 'dropped by the operator'}.")
+        gh.issue_close(issue, "not planned" if not_planned else "completed")
     marked = cmd_mark_issue_closed(gh, issue)
     realised = None if not_planned else _close_realised_issues(gh, issue, body)
     cleanup = cleanup_unit(gh, issue, "epic" if marked.get("is_epic") else "issue",
@@ -5772,7 +6212,8 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
     if released.get("released") or released.get("reason") != "no worktree":
         released = {**released, "branch": cleanup["branch"]}
     terminal = record_terminal_unit(gh, issue)
-    return {"issue": issue, "closed": True, "worktree": released, "cleanup": cleanup,
+    return {"issue": issue, "closed": True, "already_closed": already_closed,
+            "worktree": released, "cleanup": cleanup,
             **({"state_reason": "not_planned"} if not_planned else {}),
             **({"run_terminal": terminal} if terminal else {}),
             **({"realised_closed": realised} if realised else {})}
@@ -5964,6 +6405,38 @@ def cmd_detach_epic(gh: GitHub, epic: int, reason: Optional[str] = None) -> dict
                            f"that Initiative's Epic loop; its own state is unchanged.")
     gh.issue_comment(parent, f"🔗 Epic #{epic} detached from this Initiative{why}.")
     return {"epic": epic, "initiative": parent, "detached": True, "removed_edges": removed}
+
+
+def cmd_reparent_issue(gh: WorkItemProvider, issue: int, parent: int,
+                       reason: Optional[str] = None) -> dict:
+    """Move a plain issue (Task, Bug, ...) under `parent`: drop its current sub-issue link (if
+    any), link it under `parent`, and comment on the issue, the old parent and the new parent.
+    Idempotent (`already_parented`) when it is already under `parent`. Refuses (exit 0) an
+    Epic or Initiative -- `detach-epic` handles an Epic. Returns `{issue, old_parent,
+    new_parent, moved}`."""
+    info = gh.issue_epic_info(issue)
+    kind = classify_unit_from_issue(info)
+    old = (info.get("parent") or {}).get("number")
+    base = {"issue": issue, "old_parent": old, "new_parent": parent}
+    if kind in ("epic", "initiative"):
+        return {**base, "moved": False, "refused": True,
+                "reason": f"#{issue} is an {kind.title()} -- reparent-issue moves plain issues "
+                          f"only. Take an Epic out of its Initiative with `detach-epic {issue}`"}
+    if parent == issue:
+        return {**base, "moved": False, "refused": True,
+                "reason": f"#{issue} cannot be its own parent"}
+    if old == parent:
+        return {**base, "moved": False, "already_parented": True}
+    if old is not None:
+        gh.remove_sub_issue(old, issue)
+    gh.add_sub_issue(parent, issue)
+    why = f" — {reason}" if reason else ""
+    moved_from = f"from #{old} " if old is not None else ""
+    gh.issue_comment(issue, f"🔀 Moved {moved_from}to #{parent}{why}.")
+    if old is not None:
+        gh.issue_comment(old, f"🔀 #{issue} moved out of this issue to #{parent}{why}.")
+    gh.issue_comment(parent, f"🔀 #{issue} moved here{' from #' + str(old) if old else ''}{why}.")
+    return {**base, "moved": True}
 
 
 def cmd_pairing_counts(gh: GitHub, issue: int) -> dict:
@@ -6549,6 +7022,7 @@ class StepSequence:
     def __init__(self):
         self.steps: dict = {}
         self.completed: list = []
+        self.remaining: list = []  # steps never run because an earlier one stopped the sequence
         self.failed_step: Optional[str] = None
         self.ok = True
         self.error: Optional[str] = None
@@ -6557,10 +7031,17 @@ class StepSequence:
     def stopped(self) -> bool:
         return self.failed_step is not None
 
+    def skip(self, *names: str) -> None:
+        """Record steps a composite leaves out once stopped, so `remaining_steps` names them."""
+        if self.stopped:
+            self.remaining.extend(n for n in names
+                                  if n not in self.remaining and n not in self.steps)
+
     def run(self, name: str, call: Callable[[], dict],
             failed: Optional[Callable[[dict], bool]] = None) -> Optional[dict]:
         """The step's result, or None when it failed or an earlier step had."""
         if self.stopped:
+            self.skip(name)
             return None
         try:
             result = call()
@@ -6580,7 +7061,8 @@ class StepSequence:
 
     def report(self, failed_key: str = "failed_step", **fields) -> dict:
         out = {**fields, "ok": self.ok, "completed_steps": self.completed,
-               failed_key: self.failed_step, "steps": self.steps}
+               failed_key: self.failed_step, "remaining_steps": self.remaining,
+               "steps": self.steps}
         if self.error:
             out["error"] = self.error
         elif self.stopped:
@@ -6685,6 +7167,8 @@ def cmd_cut_phase_tasks(gh: GitHub, epic: int, arch_body: Optional[str] = None,
         else:
             seq.run("add-blocked-by", lambda: {"issue": l, "blocked_on": a, "added": False,
                                                "reason": "Architecture-phase Task is closed"})
+    seq.skip(*(f"{k}.{step}" for k in ("architecture", "lld")
+               for step in ("create-issue", "set-stage")), "add-blocked-by", "worktree-add")
     return seq.report(epic=epic, architecture_task=arch and arch["issue"],
                       lld_task=lld and lld["issue"])
 
@@ -6710,6 +7194,7 @@ def cmd_open_arch_revision(gh: GitHub, epic: int, title: str, body: str,
     if task:
         seq.run("worktree-add", lambda: cmd_worktree_add(
             gh, task["issue"], repo_path=repo_path, runner=runner), failed=_worktree_refused)
+    seq.skip("revision.create-issue", "revision.set-stage", "worktree-add")
     for unit in blocks or []:
         seq.run(f"add-blocked-by:{unit}",
                 lambda unit=unit: _add_blocked_by_once(gh, unit, task["issue"]))
@@ -6741,6 +7226,8 @@ def cmd_file_closing_delta(gh: GitHub, epic: int, title: str, body: str,
         seq.run("set-stage", lambda: cmd_set_stage(gh, number, "development"))
         seq.run("start-stage", lambda: cmd_start_stage(gh, number, "development", "issue",
                                                        repo_path, runner=runner))
+    if start:
+        seq.skip("set-stage", "start-stage")
     return seq.report(epic=epic, delta_issue=number)
 
 
@@ -6762,7 +7249,7 @@ def cmd_finish_lld(gh: GitHub, lld_task: int, epic: int, repo_path: str = ".",
     seq.run("create-lld-tasks", lambda: cmd_create_lld_tasks(gh, epic, repo_path,
                                                              runner=runner),
             failed=lambda r: (not r.get("pushed") and r.get("tasks") != {})
-            or bool(r.get("dependency_parse_warnings")))
+            or bool(r.get("dependency_parse_warnings")) or bool(r.get("edges_failed")))
     seq.run("merge-lld-doc", lambda: cmd_merge_lld_doc(gh, repo_path, epic, runner=runner),
             failed=lambda r: not r.get("verified_on_origin"))
     closed = seq.run("close-issue", lambda: cmd_close_issue(gh, lld_task, repo_path=repo_path,
@@ -6770,11 +7257,52 @@ def cmd_finish_lld(gh: GitHub, lld_task: int, epic: int, repo_path: str = ".",
     return seq.report(lld_task=lld_task, epic=epic, closed=bool(closed))
 
 
+def run_in_flight(state: Optional[dict]) -> set:
+    """Issue numbers handed out (`note_in_flight`) under `state`'s run id, in any Epic's
+    state file -- next-action notes them under the run's top-level issue."""
+    if not state:
+        return set()
+    found = {str(n) for n in state.get("in_flight", {})}
+    try:
+        names = sorted(os.listdir(_run_state_dir()))
+    except OSError:
+        names = []
+    for name in names:
+        try:
+            with open(os.path.join(_run_state_dir(), name)) as f:
+                other = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(other, dict) and other.get("run_id") == state.get("run_id"):
+            found.update(str(n) for n in (other.get("in_flight") or {}))
+    return {int(n) for n in found if n.isdigit()}
+
+
+def _start_stage_run_cap(gh: GitHub, number: int, role: str, unit: str,
+                         run_id: str) -> dict:
+    """start-stage's `run-cap` step: refuse (`stop_at_cap`) a unit this run has not handed
+    out once the run is at `maxTasksPerRun`. Returns the run-state `epic` it books under."""
+    parent = None if unit == "epic" else \
+        ((gh.issue_epic_info(number).get("parent") or {}).get("number"))
+    epic = parent or number
+    state = run_cap_state(epic, run_id)
+    if number not in run_in_flight(state) and run_cap_reached(state):
+        completed = run_completed(state)
+        return {"stop_at_cap": True, "cap": MAX_TASKS_PER_RUN, "completed": completed,
+                "reason": f"run {run_id} has driven {len(completed)} unit(s) to a terminal "
+                          f"state, at the maxTasksPerRun cap of {MAX_TASKS_PER_RUN}, and "
+                          f"#{number} is not in flight for it -- start no new work this run "
+                          f"(a fresh --run-id starts a new one)"}
+    return {"stop_at_cap": False, "epic": epic}
+
+
 def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
                     repo_path: str = ".", base: Optional[str] = None,
-                    runner: Runner = _default_runner) -> dict:
-    """Refusal check, `worktree-add`, then `claim` -- worktree first, so the unit is never
-    claimed without a live tree, and nothing runs when the claim would be refused.
+                    runner: Runner = _default_runner, run_id: Optional[str] = None) -> dict:
+    """Run-cap check (with `run_id`), refusal check, `worktree-add`, then `claim` -- worktree
+    first, so the unit is never claimed without a live tree, and nothing runs when the claim
+    would be refused. With `run_id`, a unit not already in flight for that run is refused
+    (`failed_step: "run-cap"`, `stop_at_cap`, exit 0) once the run is at its cap.
     Returns `path`, `claimed` plus the steps."""
     role = RETIRED_ROLES.get(role, role)
     if unit == "epic" and gh.classify_unit(number) != "epic":
@@ -6782,6 +7310,13 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
         raise GhError(f"#{number} is not an Epic -- start-stage --unit epic is only for an "
                       f"Epic; a Task (phase-Task included) takes the default --unit issue")
     seq = StepSequence()
+    if run_id:
+        cap = seq.run("run-cap", lambda: _start_stage_run_cap(gh, number, role, unit, run_id),
+                      failed=lambda r: r.get("stop_at_cap"))
+        if cap is None and seq.failed_step == "run-cap":
+            seq.skip("check-claimable", "worktree-add", "claim")
+            return seq.report(issue=number, role=role, path=None, claimed=False,
+                              stop_at_cap=True)
     seq.run("check-claimable", lambda: _check_claimable(gh, number, role))
     # A child of a non-standing Epic integrates into `epic-<parent>`. Ensure that branch AND its
     # worktree exist first (idempotently, exactly as cut-phase-tasks does) so `next-action` never
@@ -6796,6 +7331,8 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
     worktree = seq.run("worktree-add", lambda: cmd_worktree_add(
         gh, number, unit, repo_path, runner=runner, base=base), failed=_worktree_refused)
     claim = seq.run("claim", lambda: cmd_claim(gh, number, role))
+    if run_id and claim:
+        note_in_flight(seq.steps["run-cap"]["epic"], run_id, {number: role})
     return seq.report(issue=number, role=role, path=(worktree or {}).get("path"),
                       claimed=bool(claim))
 
@@ -6956,6 +7493,7 @@ COMMENT_CAPS = {
     "close-issue": ("reason", HANDOFF_CAP),
     "comment": ("body", HANDOFF_CAP),
     "detach-epic": ("reason", HANDOFF_CAP),
+    "reparent-issue": ("reason", HANDOFF_CAP),
 }
 
 
@@ -7297,6 +7835,9 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("pr-checks")
     p.add_argument("pr", type=int)
     p.set_defaults(func=lambda a: cmd_pr_checks(get_work_item_provider(), a.pr))
+    p = sub.add_parser("rerun-checks")
+    p.add_argument("pr", type=int)
+    p.set_defaults(func=lambda a: cmd_rerun_checks(get_work_item_provider(), a.pr))
     p = sub.add_parser("merge-pr")
     p.add_argument("pr", type=int)
     p.add_argument("--issue", type=int, required=True)
@@ -7382,9 +7923,12 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--kind", required=True, choices=["e2e", "exploratory"])
     p.add_argument("--summary", required=True)
     p.add_argument("--sha", default=None,
-                    help="Epic-branch head that was tested (default: the branch head now)")
+                    help="Epic-branch head that was tested (default: --repo-path's HEAD, "
+                         "else the origin branch head now)")
+    p.add_argument("--repo-path", default=None,
+                    help="The worktree that was tested: record its HEAD, not the origin tip")
     p.set_defaults(func=lambda a: cmd_record_epic_verification(
-        get_work_item_provider(), a.epic, a.kind, a.summary, a.sha))
+        get_work_item_provider(), a.epic, a.kind, a.summary, a.sha, repo_path=a.repo_path))
     p = sub.add_parser("check-epics-closeable")
     p.set_defaults(func=lambda a: cmd_check_epics_closeable(get_work_item_provider()))
     p = sub.add_parser("close-initiative",
@@ -7466,8 +8010,12 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--base", default=None,
                     help="Override the auto-detected integration base (e.g. origin/main)")
     p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.add_argument("--run-id", default=None,
+                    help="This run's id: refuse a unit not already in flight once the run is at "
+                         "the maxTasksPerRun cap (omit = no cap)")
     p.set_defaults(func=lambda a: cmd_start_stage(
-        get_work_item_provider(), a.number, a.role, a.unit, a.repo_path, a.base))
+        get_work_item_provider(), a.number, a.role, a.unit, a.repo_path, a.base,
+        run_id=a.run_id))
     p = sub.add_parser("transition",
                         help="verify-exit -> sync-branch -> start-comment (review roles)")
     p.add_argument("issue", type=int)
@@ -7522,6 +8070,13 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("epic", type=int)
     p.add_argument("--reason", default=None, help="Why, for the comments on both issues")
     p.set_defaults(func=lambda a: cmd_detach_epic(get_work_item_provider(), a.epic, a.reason))
+    p = sub.add_parser("reparent-issue",
+                        help="Move a plain issue (Task/Bug) under another parent, with comments")
+    p.add_argument("issue", type=int)
+    p.add_argument("--parent", type=int, required=True, help="The new parent")
+    p.add_argument("--reason", default=None, help="Why, for the comments on all three issues")
+    p.set_defaults(func=lambda a: cmd_reparent_issue(get_work_item_provider(), a.issue,
+                                                      a.parent, a.reason))
     p = sub.add_parser("comment", help="Post a plain comment on an issue (no marker)")
     p.add_argument("issue", type=int)
     text = p.add_mutually_exclusive_group(required=True)

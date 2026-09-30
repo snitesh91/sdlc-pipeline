@@ -40,8 +40,9 @@ rework valve. Work in your own **detached** worktree; sibling reviews run concur
 
 ## Step 1 — Establish the review target, without asking anyone
 
-1. `cd` to the worktree the orchestrator gave you (with the issue and PR numbers; it made
-   it with `review-worktree-add` and removes it) and `git fetch origin`.
+1. Make your worktree: `python3 "$SDLC" review-worktree-add <n> --repo-path <repo root from
+   your prompt>`; `cd` to its `path` and `git fetch origin`. Never review in the unit's
+   development worktree.
 2. Diff: `git diff origin/<base>...HEAD` (three dots), `<base>` being the PR's base branch
    (`epic-<n>` for a Task of a non-standing Epic, else `main`; the orchestrator's prompt or
    `gh pr view <pr> --json baseRefName` names it). Empty is a **finding**: report that the PR
@@ -80,7 +81,8 @@ mutation probes), and state layer coverage in the report.
   paths.
 - **Acceptance Auditor** *(skip in no-spec mode)* — the diff against the acceptance criteria
   and design: violated criteria, deviation from design intent, specified behaviour not
-  implemented, code contradicting a stated constraint.
+  implemented, code contradicting a stated constraint. Adjudicate each path the PR body lists under
+  `## Footprint deviations`: a legitimate inherent side effect passes; scope creep is blocking.
 
 **Test quality is your call.** Nobody else judges `development`'s tests.
 
@@ -234,7 +236,7 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
 
 ## Exit actions — yours, in order
 
-1. **Whatever the verdict, as the review's last action:**
+1. **Whatever the verdict, once the review is done:**
    `python3 "$SDLC" record-pr-review <n> --pr <pr> --outcome clean|rework --summary "..." [--same-class-recurrence]`
    (CLEAN and CONDITIONAL ACCEPT → `clean`; REWORK → `rework`).
 2. Then by branch:
@@ -255,6 +257,8 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
     runs `mark-needs-human` — *unless* the PR's own diff touches `.github/workflows/**`: then
     report REWORK naming the missing workflows.
 - **CI pending** → re-check `pr-checks` with reasonable backoff.
+- **CI failed with `infra_suspect`** → not REWORK: outcome `blocked`, BLOCKER naming the
+  check and its `hint` (`references/operations.md`, "A check the runner failed").
 - **Real findings, or CI failed** → REWORK. The orchestrator resumes `development` with your
   findings and runs a fresh `pr-review` once fixed; the escalation valve and the test-only
   merge-and-file exception are its call (`references/rework.md`). If every outstanding finding
@@ -271,6 +275,9 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
   (`references/epics.md`, "Architecture deviation escalation" — a revision Task is cut and this
   Task parked with `pause-for-epic-regate`). If the resumed agent needs the human, the
   orchestrator runs `mark-needs-human` (on the Epic if its architecture is in question).
+
+3. Tear down any stack you built (`references/stage-playbooks.md`, "Secrets and
+   containers"), then `python3 "$SDLC" release-review-worktree <n>`.
 
 Finish inside this turn — never waiting (`references/stage-playbooks.md`, "Subagents finish
 in one turn"). End your final message with the terse handback ("The handback is terse"); its
