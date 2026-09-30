@@ -63,6 +63,7 @@ def test_an_explicit_sha_wins_over_repo_path():
 
 def test_the_cli_passes_repo_path(monkeypatch, capsys):
     seen = {}
+    monkeypatch.setenv("GITHUB_TOKEN", "x")
     monkeypatch.setattr(s, "get_work_item_provider", lambda: _epic([]))
     monkeypatch.setattr(s, "cmd_record_epic_verification",
                         lambda gh, epic, kind, summary, sha, repo_path=None:

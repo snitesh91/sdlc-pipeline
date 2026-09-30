@@ -182,6 +182,7 @@ def test_rerun_checks_reports_a_partial_failure_and_exits_zero(monkeypatch, caps
                             {"name": "b", "bucket": "fail", "link": _link(13, 131)}])
     runner.responses[_rerun_argv(13)] = ""
     runner.fail_on.add(_rerun_argv(11))
+    monkeypatch.setenv("GITHUB_TOKEN", "x")
     monkeypatch.setattr(s, "get_work_item_provider", lambda: s.GitHub(runner=runner))
     assert s.main(["rerun-checks", "42"]) == 0
     out = json.loads(capsys.readouterr().out)

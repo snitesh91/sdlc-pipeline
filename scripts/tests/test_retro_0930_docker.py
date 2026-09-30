@@ -204,7 +204,9 @@ def test_root_owned_worktree_is_emptied_through_docker_then_removed(docker_on):
                         ["git", "-C", "/repo", "worktree", "prune"]]
 
 
-def test_docker_rm_retry_is_refused_outside_the_worktrees_root(docker_on, tmp_path):
+def test_docker_rm_retry_is_refused_outside_the_worktrees_root(docker_on, tmp_path, monkeypatch):
+    # Pin the root: the default `/tmp` contains pytest's tmp_path on Linux runners.
+    monkeypatch.setitem(s.PIPELINE["worktrees"], "root", str(tmp_path / "root"))
     path = str(tmp_path / "elsewhere" / "sdlc-dev-12")
     runner = _blocked_release(path, {VERSION: ""})
 
