@@ -118,6 +118,9 @@ the PR description, issue comment, or committed doc. Send these fields and nothi
 - **HEAD / PR:** the head SHA, and the PR number if one exists.
 - **BLOCKER:** one line, only for `blocked` / `needs-human` / `failed` — the named
   blocker, the exact question, or the failed command.
+- **QUESTIONS** (`needs-human` only): up to 4 lines `Q: <question> — options: <a> | <b> | …`,
+  each answerable on its own. You never ask the operator yourself: the orchestrator asks
+  them (in session or on GitHub) and resumes you with the answers.
 - **DETAIL:** a link to the PR description or issue comment that holds the evidence.
   Send the link, not the evidence.
 - **Last line, always:** `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "<outcome>"}`

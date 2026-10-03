@@ -88,7 +88,7 @@ Each recurring problem gets its own counter per stage pairing (e.g. `arch-review
 |---|---|
 | 1–3 | Resume the pairing's own tracked agent. |
 | 3rd unresolved | Do **not** park. Retire the incumbent and dispatch a context-reset replacement (below). The counter does not reset; the replacement owns bounces 4–6. |
-| 6th unresolved | `python3 "$SDLC" mark-needs-human <n> --reason "..."` — summarize the repeated pattern **and** what the replacement round changed and did not change. Park the issue, return to Step 1. |
+| 6th unresolved | `python3 "$SDLC" mark-needs-human <n> --reason "..."` — summarize the repeated pattern **and** what the replacement round changed and did not change. Park the issue, return to Step 1. With `pipeline.humanChannel: "session"`, ask the operator first (`references/cloud-mode.md`, "Human channel"). |
 
 - **One replacement per pairing per unit.** Never respawn a second one at bounce 6.
 - **Read counts from `python3 "$SDLC" pairing-counts <issue>` before deciding a bounce is

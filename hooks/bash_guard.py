@@ -97,6 +97,9 @@ REASONS = {
              "revert.",
     "review-git-write": "Review roles are read-only on the branch: describe the fix in your "
                         "review; the owning stage applies it.",
+    "claude-session": "Starting or messaging Claude sessions (`claude`, `claude --cloud`) is the "
+                      "orchestrator's: put what you need in your handoff (a question for the "
+                      "operator: outcome needs-human).",
 }
 
 
@@ -307,6 +310,8 @@ def _flag_value(words: list, flag: str):
 
 def check_role(words: list, role: str):
     """A stage agent's limits: its role's control-plane commands; reviewers never write git."""
+    if words[0] == "claude":
+        return "claude-session"
     cmd = control_plane_command(words)
     if cmd == "sync-branch":
         return "sync-branch-agent"

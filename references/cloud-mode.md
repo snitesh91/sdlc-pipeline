@@ -41,20 +41,30 @@ python3 "$SDLC" place <n> --where cloud|local [--force] --repo-path <p>
 - `--where local` on an Epic whose Initiative is cloud-placed refuses (`inherited_from`):
   place the Initiative instead. An Initiative moved local lists its own cloud-labelled Epics
   in `still_cloud`.
-- **Laptop → cloud:** stop the local run of `<n>`, then
-  `place <n> --where cloud --repo-path <p>`, then
-  `claude --cloud "/sdlc:run <n>"`. The session runs on the CLI's default cloud environment,
-  which the operator picks once with `/remote-env` (`--environment` takes only self-hosted
-  environment ids, not claude.ai ones).
+- **Laptop → cloud:** stop the local run of `<n>`, then `launch-cloud-epic <n> --repo-path <p>`
+  for an Epic (it places it, starts the session and records it), or by hand
+  `place <n> --where cloud --repo-path <p>`, then `claude --cloud "/sdlc:run <n>"`. The
+  session runs on the CLI's default cloud environment, which the operator picks once with
+  `/remote-env` (`--environment` takes only self-hosted environment ids, not claude.ai ones).
 - **Cloud → laptop:** let the cloud run end (or stop it), then `place <n> --where local`
   from either side, then `/sdlc:run <n>` on the laptop.
 
 ## A cloud run
 
 A cloud session drives its one Epic (or Initiative) through the normal Steps 1–4 loop until
-the Epic closes — through `close-epic` when `pipeline.epicClose.auto` allows — then reports
-(Step 4) and ends. It parks nothing for later pickup: whatever it cannot finish (a human gate,
-`needs-human`) it reports, and the run ends when `next-action` returns `none`.
+the Epic closes — through `close-epic` when `pipeline.epicClose.auto` allows. It never uses
+continuous mode or `ScheduleWakeup`: with `pipeline.humanChannel: "session"` it waits on the
+operator in session ("Human channel"); with `"github"` it ends once `next-action` returns
+`none`, reporting what is parked on GitHub. Before it ends, an Epic's cloud run posts its end
+marker:
+
+```bash
+python3 "$SDLC" end-cloud-session <epic> --outcome closed|waiting-human|stopped [--note "<one line>"]
+```
+
+`closed` once the Epic merged; `waiting-human` when a gate or `needs-human` is parked on
+GitHub; `stopped` for anything else (`abandoned` is the laptop's, "Status and stalls").
+Then Step 4.
 
 ## GitHub access in the cloud
 
@@ -87,6 +97,94 @@ the Epic closes — through `close-epic` when `pipeline.epicClose.auto` allows �
 
 ## Human channel
 
-TODO: in-session questions from a cloud run to the operator — a separate change adds them.
-Until then a cloud run surfaces every operator decision through the issue thread
-(`mark-needs-human`, gates) and its Step 4 report.
+`pipeline.humanChannel` (`show-config` → `human_channel`) decides where the operator answers,
+on the laptop and in the cloud alike. `"github"` (default): today's flow — `mark-needs-human`,
+gate PRs merged on GitHub. `"session"`: you ask in this session with `AskUserQuestion`, which
+reaches the operator's phone from a cloud session. Never `PushNotification`, never
+`ScheduleWakeup`.
+
+- **What you ask:** everything that would otherwise park a unit for the operator — a
+  `needs-human` handback (scope questions, an escalation, a design ambiguity), the escalation
+  valve's sixth bounce (`references/rework.md`), an open gate, `escalate: true` from
+  `nudge-cloud-epic`, and an epic close when `pipeline.epicClose.auto` is off.
+- **First dispatch every other runnable unit the lane caps allow** (the pool queries,
+  `references/parallelism.md`), so background agents keep working while the question waits;
+  then ask. Batch up to 4 questions in one call.
+- **A question:** the stage agent's exact question with its options, plus one line of context
+  (unit, stage, what it blocks). Always add an option "Decide later on GitHub".
+- **The answer:** `record-operator-answer <n> --question "<gist>" --answer "<answer>"` on the
+  unit it settles (a `needs-human` unit goes back to `todo`), then resume or re-delegate the
+  owning stage with the answer verbatim in its prompt. A valve trip answered "keep going" gets
+  one more context-reset round.
+- **"Decide later on GitHub":** `mark-needs-human <n> --reason "<the question>"` and park, as
+  with `"github"`.
+- **Gates:** open the gate PR as usual, then ask (`references/gates.md`, "Deciding a gate in
+  session").
+- **Stage agents never ask the operator.** They return questions in their handback
+  (`references/stage-playbooks.md`, "The handback is terse").
+
+## Initiative → cloud Epics
+
+With `pipeline.placement.initiativeEpics: "cloud"` a laptop Initiative run keeps the Initiative's
+own work (product, Gate A, cutting Epics, the close) and gives each Epic its own claude.ai
+cloud session instead of driving it.
+
+- **`next-action <initiative>`** returns `launch-cloud-epics` (`epics`, `cloud`) for the Epics
+  to start now, after the Initiative's own Tasks. Run, for each:
+
+  ```bash
+  python3 "$SDLC" launch-cloud-epic <epic> --repo-path <p>
+  ```
+
+  It runs `place <epic> --where cloud`, then `claude --cloud "/sdlc:run <epic>"`, and posts the
+  session marker. Then call `next-action <initiative>` again.
+- **Launchable:** open, not legacy, not blocked by an open issue, no live session, footprint
+  disjoint from every live cloud Epic's (the union of its `lld.md` Tasks' footprints, else a
+  `## Footprint` in the Epic's body; an unknown one cannot be shown disjoint from a known
+  one), within `parallelism.cloudSessions` (default 3) live sessions repo-wide. An Epic whose
+  last session ended waits for new GitHub activity on it (`--relaunch` overrides).
+- **Idempotent:** an Epic with a live session marker is never relaunched (`already_running`).
+  `ok: false` with `output_tail` means the CLI printed no session id: the marker records
+  `id=unknown`; relay the tail to the operator.
+- **`none`** names each open Epic's cloud state. Report (Step 4) and end the run. Re-running
+  `/sdlc:run <initiative>` re-surveys: it launches Epics that became runnable, and once every
+  Epic is closed it returns the normal close (`SKILL.md`, "Closing an Initiative"), run locally.
+- **Optional watching** (ask the operator once at the end of the run): a `Monitor` on
+
+  ```bash
+  until python3 "$SDLC" cloud-status <initiative> | grep -q '"attention": true'; do sleep 600; done
+  ```
+
+  When it fires, re-run `next-action <initiative>` and act on `cloud-status` ("Status and
+  stalls"). The loop lives only while this session is open; a closed laptop is fine — the next
+  run picks up.
+
+### Markers
+
+On the Epic's issue, written only by these commands:
+
+- `<!-- sdlc:cloud-session id=<session_…> url=<url> launched=<iso> -->` — `launch-cloud-epic`.
+- `<!-- sdlc:cloud-session-nudge id=… n=<k> at=<iso> -->` — `nudge-cloud-epic`.
+- `<!-- sdlc:cloud-session-end id=… outcome=<outcome> ended=<iso> -->` — `end-cloud-session`.
+
+A session is live from its launch marker until an end marker. These comments never count as
+activity.
+
+### Status and stalls
+
+```bash
+python3 "$SDLC" cloud-status <initiative|epic> [--repo-path <p>]   # read-only, any placement
+python3 "$SDLC" nudge-cloud-epic <epic>
+```
+
+- **`cloud-status`** gives, per cloud Epic: `session` (url), state, children `by_stage` /
+  `by_status`, `open_prs`, `gates_pending`, `needs_human`, `last_activity` (comments, child
+  issue updates, PR updates, in-progress branch heads), `idle_minutes`, `stalled` (live session,
+  open Epic, idle ≥ `pipeline.placement.stallMinutes`, default 90), `end_marker`,
+  `nudges_since_activity`, `escalate`. On a cloud-mode Initiative also `launchable`, `waiting`,
+  `all_closed`, and `attention`.
+- **A stalled Epic:** `nudge-cloud-epic <epic>` sends `claude -p "continue: /sdlc:run <epic>"
+  --cloud <session id>` and records it. After two nudges with no activity since it sends nothing
+  and returns `escalate: true`: ask the operator ("Human channel"), with the session url. On
+  "abandon": `end-cloud-session <epic> --outcome abandoned`, then `launch-cloud-epic <epic>
+  --relaunch` if they want a fresh session.

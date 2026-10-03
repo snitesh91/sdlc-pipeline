@@ -219,7 +219,8 @@ def test_issue_list_has_the_graphql_shape_and_drops_pull_requests():
                type={"id": 1, "name": "Epic"}, state="closed",
                issue_field_values=[_fv(11, "Stage", "LLD"), _fv(13, "Priority", "High"),
                                    {"issue_field_id": 15, "data_type": "date", "value": "x"}],
-               milestone={"title": "M1"}, body="scope" + FOOTER),
+               milestone={"title": "M1"}, body="scope" + FOOTER,
+               updated_at="2026-08-02T00:00:00Z"),
         _issue(6, parent_issue_url="https://api.github.com/repos/owner/repo/issues/5",
                issue_field_values=[{**_fv(12, None, "In Progress"), "issue_field_name": None}]),
         {**_issue(7), "pull_request": {"url": "x"}},
@@ -228,10 +229,10 @@ def test_issue_list_has_the_graphql_shape_and_drops_pull_requests():
                       raw})
     assert gh.issue_list() == [
         {"number": 5, "title": "Epic", "body": "scope", "createdAt": "2026-08-01T00:00:00Z",
-         "state": "CLOSED", "labels": [{"name": "type:epic"}], "issueType": {"name": "Epic"},
+         "updatedAt": "2026-08-02T00:00:00Z", "state": "CLOSED", "labels": [{"name": "type:epic"}], "issueType": {"name": "Epic"},
          "parent": None, "milestone": "M1", "fields": {"Stage": "LLD", "Priority": "High"}},
         {"number": 6, "title": "issue 6", "body": "", "createdAt": "2026-08-01T00:00:00Z",
-         "state": "OPEN", "labels": [], "issueType": None, "parent": {"number": 5},
+         "updatedAt": None, "state": "OPEN", "labels": [], "issueType": None, "parent": {"number": 5},
          "milestone": None, "fields": {"Pipeline Status": "In Progress"}},
     ]
     # Fields come inline: no per-issue field call.
@@ -561,3 +562,27 @@ def test_locally_every_other_operation_still_goes_over_rest():
     gh.set_stage_field(7, "lld")
     gh.pr_merge(41)
     assert runner.other == [] and len(runner.writes()) == 2
+
+
+# --- what the cloud-session commands read and write ---------------------------------------
+
+def test_open_prs_lists_every_open_pr_in_the_gh_shape():
+    gh, _ = _gh({("GET", f"{R}/pulls?state=open&per_page=100"): [
+        {"number": 40, "head": {"ref": "issue-5", "sha": "a"}, "title": "Build",
+         "draft": True, "updated_at": "2026-10-03T00:00:00Z"}]})
+    assert gh.open_prs() == [{"number": 40, "headRefName": "issue-5", "title": "Build",
+                              "isDraft": True, "updatedAt": "2026-10-03T00:00:00Z"}]
+
+
+def test_pr_remove_label_deletes_it_through_the_issues_endpoint():
+    gh, runner = _gh({("DELETE", f"{R}/issues/40/labels/sdlc%3Agate"): None})
+    gh.pr_remove_label(40, "sdlc:gate")
+    assert runner.writes() == [("DELETE", f"{R}/issues/40/labels/sdlc%3Agate", [])]
+
+
+def test_branch_last_commit_at_reads_the_head_commit_date_or_none():
+    gh, _ = _gh({("GET", f"{R}/branches/issue-5"):
+                 {"commit.commit.committer.date": "2026-10-03T00:00:00Z"},
+                 ("GET", f"{R}/branches/gone"): GhError("HTTP 404")})
+    assert gh.branch_last_commit_at("issue-5") == "2026-10-03T00:00:00Z"
+    assert gh.branch_last_commit_at("gone") is None

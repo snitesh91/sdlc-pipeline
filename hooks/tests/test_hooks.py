@@ -408,6 +408,17 @@ ROLE_DENIED = [
     ("sdlc:development", CP + "set-stage 5 --stage pr-review", "orchestrator"),
     ("sdlc:development", CP + "merge-pr 9 --issue 5", "orchestrator"),
     ("sdlc:development", CP + "place 9 --where cloud", "orchestrator"),
+    # The human channel and the cloud sessions are the orchestrator's.
+    ("sdlc:architecture", CP + "record-operator-answer 5 --question q --answer a", "orchestrator"),
+    ("sdlc:product", CP + "approve-gate 5 --by-operator-session", "orchestrator"),
+    ("sdlc:product", CP + "request-gate-changes 5 --feedback f", "orchestrator"),
+    ("sdlc:development", CP + "launch-cloud-epic 9", "orchestrator"),
+    ("sdlc:exploratory", CP + "cloud-status 9", "orchestrator"),
+    ("sdlc:development", CP + "nudge-cloud-epic 9", "orchestrator"),
+    ("sdlc:development", CP + "end-cloud-session 9 --outcome closed", "orchestrator"),
+    ("sdlc:development", 'claude --cloud "/sdlc:run 9"', "orchestrator's"),
+    ("sdlc:architecture", 'claude -p "continue: /sdlc:run 9" --cloud session_01', "orchestrator's"),
+    ("sdlc:pr-review", "echo $(claude -p hi)", "orchestrator's"),
     ("sdlc:pr-review", CP + "merge-pr 9 --issue 5", "orchestrator"),
     ("sdlc:pr-review", CP + "sync-branch 5", "orchestrator"),
     ("sdlc:exploratory", CP + "record-epic-verification 9 --kind exploratory --summary s",
@@ -484,6 +495,22 @@ def test_a_run_driving_main_thread_may_finish_a_reviewers_exit_actions(sdlc_repo
     assert guard(CP + "record-pr-review 5 --pr 9 --outcome clean --summary s", sdlc_repo,
                  **live) is None
     assert guard(CP + "release-review-worktree 5", sdlc_repo, **live) is None
+
+
+@pytest.mark.parametrize("command", [
+    'claude --cloud "/sdlc:run 9"',
+    'claude -p "continue: /sdlc:run 9" --cloud session_01XYZ',
+    CP + "launch-cloud-epic 9 --repo-path /r",
+    CP + "cloud-status 6",
+    CP + "nudge-cloud-epic 9",
+    CP + "end-cloud-session 9 --outcome closed",
+    CP + "approve-gate 10 --by-operator-session",
+    CP + "request-gate-changes 10 --feedback 'drop the export'",
+    CP + "record-operator-answer 10 --question 'Q?' --answer 'A'",
+])
+def test_the_orchestrator_runs_the_cloud_and_session_commands(sdlc_repo, live, command):
+    assert guard(command, sdlc_repo, **live) is None
+
 
 
 # --- SubagentStop -----------------------------------------------------------------------
