@@ -64,7 +64,7 @@ sdlc.config.sample.json          config template
 6. Optional: a repo-specific `<docRoot>/<pipeline.docTemplates>/{product,architecture}.template.md`
    (default `_templates`) overrides the plugin's templates.
 7. Start a run with `sdlc-run <initiative-or-epic-number> [claude args]`: it launches `claude`
-   on the policy's orchestrator model with `/sdlc:run <n>` (a skill's `model:` does not
+   on the orchestrator model (`pipeline.orchestrator.model`, else the policy's) with `/sdlc:run <n>` (a skill's `model:` does not
    outlast its turn).
 
 **Upgrading**: bump the `ref` in `.claude/settings.json` and `SDLC_PIPELINE_REF` together,
@@ -114,6 +114,7 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `pipeline.escalation.replaceAt` / `.needsHumanAt` | 3 / 6 | Bounces before a context-reset replacement / `needs-human` |
 | `pipeline.continuous.cycleCap` | 8 | Merges per unattended run before pausing |
 | `pipeline.resume.liveWindowMinutes` | 30 | A `next-action` resume claimed sooner than this is flagged `likely_live` (another session may be driving it) |
+| `pipeline.orchestrator.model` | `hooks/model_policy.json` (`sonnet`) | Model `sdlc-run` starts the orchestrator on, and the one the session-start hook expects; a family (`opus`) or a full model id |
 | `pipeline.models.<role>` / `pipeline.fanout.<role>` | `hooks/model_policy.json` | Model per stage; which reviews fan out, how wide, at which model |
 | `pipeline.epicClose.auto` | `false` | Whether the orchestrator closes a verified epic itself |
 | `pipeline.issueDefaults.priority` / `.effort` | `Medium` / `Medium` | Priority / Effort `create-issue` sets when no flag or lld line names one |

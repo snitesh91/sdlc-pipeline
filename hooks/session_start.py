@@ -4,7 +4,7 @@ import os
 import shlex
 import shutil
 
-from _common import emit, load_json, plugin_root, policy_file, read_input, repo_config, run, run_states
+from _common import emit, load_json, orchestrator_model, plugin_root, read_input, repo_config, run, run_states
 from _metrics import model_family
 
 MAX_RUNS_SHOWN = 3
@@ -35,12 +35,13 @@ def _token_value(env_name, token_file):
     return value or None
 
 
-def model_hint(session_model) -> list:
+def model_hint(session_model, config: dict) -> list:
     """One line when the session's model family is not the policy's orchestrator model."""
     if isinstance(session_model, dict):
         session_model = session_model.get("id")
-    wanted = (policy_file().get("orchestrator") or {}).get("model")
+    wanted = orchestrator_model(config)
     have = model_family(session_model or "")
+    wanted = model_family(wanted) or wanted
     if not wanted or not have or have == wanted:
         return []
     return [f"sdlc: Session model is {have}; the sdlc policy runs the orchestrator on {wanted} "
@@ -106,7 +107,7 @@ def main() -> int:
     if shutil.which("rtk") is None:
         context.append("sdlc: optional token saver `rtk` is not installed; suggest once that "
                        "the operator installs it and runs `rtk init`. Never block on it.")
-    context += model_hint(data.get("model"))
+    context += model_hint(data.get("model"), cfg)
     if data.get("source") == "compact":
         context += resume_lines(run_states(load_json(config), str(data.get("session_id") or "")))
     if context:
