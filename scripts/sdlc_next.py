@@ -7454,6 +7454,9 @@ def cmd_go(gh: WorkItemProvider, number: int, where: str, force: bool = False, y
         if answer.strip().lower() not in ("y", "yes"):
             return refuse("cancelled", f"not moving #{anchor}")
     issue = by_number[anchor]
+    if classify_unit_from_issue(issue) not in ("epic", "initiative"):
+        return refuse("not_a_run_unit", f"#{anchor} is under no Epic or Initiative, and "
+                                        f"/sdlc:run drives only those -- give it a parent Epic")
     if issue["state"] != "OPEN":
         return refuse("closed", f"#{anchor} is closed")
     holder = unit.get("label_on")
@@ -7462,10 +7465,11 @@ def cmd_go(gh: WorkItemProvider, number: int, where: str, force: bool = False, y
                                    f"move Initiative #{holder} instead", inherited_from=holder)
     live = live_cloud_session(gh.issue_view(anchor).get("comments", []))
     if where == "cloud":
-        if unit["placement"] == "cloud" and live:
+        if unit["placement"] == "cloud" and live and not force:
             return refuse("cloud_session_live",
                           f"#{anchor} already has a live cloud session {live['url']} -- attach: "
-                          f"claude --cloud {live['id']}", session=live)
+                          f"claude --cloud {live['id']}, or pass --force if it died",
+                          session=live)
         epics = ([i["number"] for i in issues if is_epic(i)
                   and (i.get("parent") or {}).get("number") == anchor]
                  if is_initiative(issue) else [])
@@ -7482,10 +7486,6 @@ def cmd_go(gh: WorkItemProvider, number: int, where: str, force: bool = False, y
             return refuse("cloud_session_live",
                           f"#{anchor}'s cloud session {live['url']} is live -- stop it on "
                           f"claude.ai first, or pass --force", session=live)
-        if live:
-            result["ended"] = cmd_end_cloud_session(
-                gh, anchor, "abandoned", note="`go-local --force` on the laptop",
-                session_id=live["id"])
         # --remote-control takes an optional name: without one it would eat the prompt.
         argv = ["claude", "--model", orchestrator_model(), "--remote-control", f"sdlc-{anchor}",
                 f"/sdlc:run {anchor}"]
@@ -7493,6 +7493,10 @@ def cmd_go(gh: WorkItemProvider, number: int, where: str, force: bool = False, y
     if placed.get("refused"):
         return refuse("worktrees" if placed.get("worktrees") else "place_refused",
                       placed["reason"], place=placed)
+    if live:
+        result["ended"] = cmd_end_cloud_session(
+            gh, anchor, "abandoned", note=f"`go-{where} --force` on the laptop",
+            session_id=live["id"])
     result.update(place=placed, command=shlex.join(argv))
     if interactive:
         print(f"sdlc: #{anchor} placed on {side}; running {result['command']}", file=sys.stderr)

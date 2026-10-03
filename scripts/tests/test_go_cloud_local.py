@@ -78,7 +78,7 @@ def _run_state(n, minutes_ago=1, **state):
 
 # --- anchor ---------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("n, anchor", [(6, 6), (9, 9), (10, 9), (7, 6), (20, 20)])
+@pytest.mark.parametrize("n, anchor", [(6, 6), (9, 9), (10, 9), (7, 6)])
 def test_go_cloud_moves_the_anchor_of_any_issue(n, anchor):
     gh = _gh()
     result, ex, _ = _go(gh, n, yes=True)
@@ -113,6 +113,22 @@ def test_go_local_asks_about_the_laptop():
 
 
 # --- go-cloud refusals ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("where", ["cloud", "local"])
+def test_a_parentless_issue_is_refused_since_sdlc_run_cannot_drive_it(where):
+    gh = _gh()
+    result, ex, _ = _go(gh, 20, where=where, tty=True)
+    assert result["error"] == "not_a_run_unit" and "give it a parent Epic" in result["reason"]
+    assert CLOUD not in gh.issues[20]["labels"] and ex.calls == []
+
+
+def test_go_cloud_force_abandons_a_dead_session_and_relaunches():
+    gh = _gh(epic=[CLOUD], epic_comments=[_session()])
+    result, ex, _ = _go(gh, 9, tty=True, force=True)
+    assert result["ended"]["outcome"] == "abandoned" and result["ended"]["id"] == "session_01AAA"
+    assert ex.calls == [("claude", ["claude", "--cloud", "/sdlc:run 9"])]
+    assert s.live_cloud_session(gh.issue_view(9)["comments"]) is None
+
 
 def test_go_cloud_refuses_a_closed_anchor():
     gh = _gh()

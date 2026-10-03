@@ -36,12 +36,14 @@ sdlc-cloud <n> [--force] [--yes]   # go-cloud: place it in the cloud, start `cla
 sdlc-local <n> [--force] [--yes]   # go-local: place it local, start `claude --model <m> --remote-control sdlc-<a> "/sdlc:run <a>"`
 ```
 
-- **The anchor moves:** an Initiative, an Epic or a parentless issue is its own anchor; a
-  Task moves its Epic, an Initiative's own Task its Initiative. For a child, a terminal asks
-  "move #A?"; without one, `--yes` is required.
+- **The anchor moves:** an Initiative or an Epic is its own anchor; a Task moves its Epic, an
+  Initiative's own Task its Initiative. For a child, a terminal asks "move #A?"; without one,
+  `--yes` is required. A parentless issue is refused (`/sdlc:run` drives only Epics and
+  Initiatives).
 - **`sdlc-cloud` refuses** (exit 1, `{error, reason}`): a closed anchor; an Epic placed through
   its Initiative (move the Initiative); a cloud unit whose session is live (`reason` names its
-  url — attach with `claude --cloud <id>`); a laptop run driving it — a run-state file of the
+  url — attach with `claude --cloud <id>`; `--force`, for a session that died, records it
+  `abandoned` and relaunches); a laptop run driving it — a run-state file of the
   anchor, or of an Initiative's Epic, written within `pipeline.placement.localRunMinutes`
   (default 30; `--force` overrides); a live local worktree holding any of its units (`place`'s
   refusal; push or release them, `--force` only on the operator's word). A cloud unit whose
@@ -69,7 +71,7 @@ python3 "$SDLC" end-cloud-session <n> --outcome closed|waiting-human|stopped [--
 ```
 
 `closed` once the unit merged; `waiting-human` when a gate or `needs-human` is parked on
-GitHub; `stopped` for anything else (`abandoned` is `sdlc-local --force`'s). Then Step 4.
+GitHub; `stopped` for anything else (`abandoned` is `--force`'s). Then Step 4.
 
 Markers, on the unit that carries the label:
 
