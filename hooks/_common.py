@@ -111,6 +111,15 @@ def model_policy(config: dict) -> dict:
     return {**merged, "explore": policy.get("explore") or []}
 
 
+def orchestrator_model(config: dict) -> str:
+    """The config's `pipeline.orchestrator.model`, else the policy's orchestrator model."""
+    user = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
+    custom = (user.get("orchestrator") or {}).get("model") if isinstance(user.get("orchestrator"), dict) else None
+    if isinstance(custom, str) and custom.strip():
+        return custom.strip()
+    return (policy_file().get("orchestrator") or {}).get("model") or "sonnet"
+
+
 def sdlc_role(agent_type) -> str:
     """`<role>` for an `sdlc:<role>` agent type, else ""."""
     agent_type = str(agent_type or "")

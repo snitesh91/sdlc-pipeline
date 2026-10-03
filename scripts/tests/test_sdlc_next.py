@@ -6645,3 +6645,8 @@ def test_merge_pr_sets_the_terminal_fields_on_the_closed_issue():
         issue_id="ISSUE_9", field_id=PIPELINE_STATUS_FIELD_ID,
         option_id=PIPELINE_STATUS_OPTION_IDS["done"])]
     assert done in runner.calls
+
+
+def test_pipeline_config_defaults_the_orchestrator_model_from_the_policy():
+    import sdlc_next
+    assert sdlc_next.PIPELINE["orchestrator"]["model"] == sdlc_next._MODEL_POLICY["orchestrator"]["model"]

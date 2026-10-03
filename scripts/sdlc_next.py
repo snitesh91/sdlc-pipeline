@@ -157,6 +157,7 @@ _PIPELINE_DEFAULTS = {
     # Priority / Effort `create-issue` sets when no flag names one (fields configured only).
     "issueDefaults": {"priority": "Medium", "effort": "Medium"},
     # Stage models and fan-out: one home, hooks/model_policy.json (agent_guard enforces it).
+    "orchestrator": {"model": (_MODEL_POLICY.get("orchestrator") or {}).get("model", "sonnet")},
     "models": _MODEL_POLICY.get("models", {}),
     "fanout": _MODEL_POLICY.get("fanout", {}),
     # {"initiative"|"epic"|"task": {"field": "issueType"|"label", "value": ...}};

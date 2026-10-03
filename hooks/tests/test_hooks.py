@@ -1216,13 +1216,14 @@ def test_session_start_flags_an_off_policy_orchestrator_model(tmp_path, sdlc_rep
 SDLC_RUN = os.path.join(os.path.dirname(HOOKS), "bin", "sdlc-run")
 
 
-def _sdlc_run(tmp_path, *args):
+def _sdlc_run(tmp_path, *args, cwd=None):
     fake = tmp_path / "fakebin"
     fake.mkdir(exist_ok=True)
     (fake / "claude").write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
     (fake / "claude").chmod(0o755)
     env = {**os.environ, "PATH": f"{fake}:{os.path.dirname(sys.executable)}:/usr/bin:/bin"}
-    return subprocess.run([SDLC_RUN, *args], capture_output=True, text=True, env=env, timeout=10)
+    return subprocess.run([SDLC_RUN, *args], capture_output=True, text=True, env=env, timeout=10,
+                          cwd=cwd)
 
 
 def test_sdlc_run_starts_claude_on_the_policy_orchestrator_model(tmp_path):
@@ -1231,6 +1232,42 @@ def test_sdlc_run_starts_claude_on_the_policy_orchestrator_model(tmp_path):
     proc = _sdlc_run(tmp_path, "9", "--permission-mode", "auto")
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.splitlines() == ["--model", model, "/sdlc:run 9", "--permission-mode", "auto"]
+
+
+def _repo_with_orchestrator(tmp_path, model):
+    return _git_repo(tmp_path / "driven", {"repo": "o/r", "docRoot": "docs/sdlc",
+                                           "pipeline": {"orchestrator": {"model": model}}})
+
+
+def test_sdlc_run_uses_the_configured_orchestrator_model(tmp_path):
+    repo = _repo_with_orchestrator(tmp_path, "opus")
+    proc = _sdlc_run(tmp_path, "9", cwd=repo)
+    assert proc.stdout.splitlines() == ["--model", "opus", "/sdlc:run 9"], proc.stderr
+
+
+def test_sdlc_run_falls_back_to_the_policy_model_without_a_config(tmp_path):
+    with open(os.path.join(HOOKS, "model_policy.json")) as f:
+        model = json.load(f)["orchestrator"]["model"]
+    proc = _sdlc_run(tmp_path, "9", cwd=_git_repo(tmp_path / "plain"))
+    assert proc.stdout.splitlines()[:2] == ["--model", model]
+
+
+def test_sdlc_run_ignores_a_blank_configured_model(tmp_path):
+    with open(os.path.join(HOOKS, "model_policy.json")) as f:
+        model = json.load(f)["orchestrator"]["model"]
+    proc = _sdlc_run(tmp_path, "9", cwd=_repo_with_orchestrator(tmp_path, "  "))
+    assert proc.stdout.splitlines()[:2] == ["--model", model]
+
+
+@pytest.mark.parametrize("configured,session,hint", [
+    ("opus", "claude-opus-5-5", False), ("opus", "claude-sonnet-5-5", True),
+    ("claude-opus-5-5", "claude-opus-5-5", False), ("claude-opus-5-5", "claude-sonnet-5-5", True)])
+def test_session_start_hint_follows_the_configured_orchestrator_model(tmp_path, configured, session, hint):
+    repo = _repo_with_orchestrator(tmp_path, configured)
+    ctx = _session_start(repo, tmp_path, source="startup", model=session)
+    assert ("sdlc-run <n>" in ctx) is hint
+    if hint:
+        assert "orchestrator on opus" in ctx
 
 
 def test_sdlc_run_needs_a_number(tmp_path):
