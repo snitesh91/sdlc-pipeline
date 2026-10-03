@@ -628,3 +628,37 @@ def test_api_items_reads_a_keyed_list_and_stops_on_a_short_page():
     assert gh._api_items(f"repos/{s.REPO}/commits/abc/check-runs?per_page=100", ".check_runs[]") == [
         {"id": 1}, {"id": 2}]
     assert len(runner.calls) == 1
+
+
+def test_a_config_snapshot_of_the_org_fields_replaces_the_org_endpoint(monkeypatch):
+    # The cloud's GitHub proxy allows only repo-scoped paths: `orgs/{owner}/issue-fields`
+    # 403s, which stopped the first real cloud run at its first field write. With
+    # projectFields.issueFieldsRest set, the org endpoint is never called.
+    monkeypatch.setitem(s._PF, "issueFieldsRest", ORG_FIELDS)
+    runner = RestRunner({("POST", f"{R}/issues/7/issue-field-values"): {}})
+    GitHubRest(runner=runner).set_stage_field(7, "lld")
+    assert not any(c[1].startswith("orgs/") for c in runner.calls)
+    assert runner.writes()[0][1] == f"{R}/issues/7/issue-field-values"
+
+
+def test_a_stale_snapshot_says_so():
+    import sdlc_next
+    runner = RestRunner({})
+    gh = GitHubRest(runner=runner)
+    gh._org_fields = ORG_FIELDS[1:]
+    sdlc_next._PF["issueFieldsRest"] = ORG_FIELDS[1:]
+    try:
+        with pytest.raises(GhError, match="issueFieldsRest .stale"):
+            gh.set_stage_field(7, "lld")
+    finally:
+        sdlc_next._PF.pop("issueFieldsRest")
+
+
+def test_show_issue_fields_prints_the_snapshot_shape():
+    runner = RestRunner({("GET", "orgs/owner/issue-fields"): [
+        {**ORG_FIELDS[0], "data_type": "single_select", "extra": 1}]})
+    out = s.cmd_show_issue_fields(runner=runner)
+    assert out == [{"id": ORG_FIELDS[0]["id"], "node_id": ORG_FIELDS[0]["node_id"],
+                    "name": ORG_FIELDS[0]["name"],
+                    "options": [{"id": o["id"], "name": o["name"]}
+                                for o in ORG_FIELDS[0]["options"]]}]
