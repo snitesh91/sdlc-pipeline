@@ -32,7 +32,7 @@ handoff loop is live at once — never that anything decides on its own.
 | `${CLAUDE_PLUGIN_ROOT}/references/epics.md` | Profiles, phase-Tasks, footprints, deviation, epic close, board status |
 | `${CLAUDE_PLUGIN_ROOT}/references/operations.md` | Token/repo access, issue fields, auto-merge, local-CI attestation, auto-mode denials |
 | `${CLAUDE_PLUGIN_ROOT}/references/continuous-mode.md` | The operator asked for unattended looping |
-| `${CLAUDE_PLUGIN_ROOT}/references/cloud-mode.md` | A `placement_mismatch`; handing an Epic to or from a cloud session; running in one, and its GitHub access; asking the operator with `pipeline.humanChannel: "session"`; `launch-cloud-epics`, `cloud-status`, a stalled cloud Epic |
+| `${CLAUDE_PLUGIN_ROOT}/references/cloud-mode.md` | A `placement_mismatch`; the operator moving a unit (`sdlc-cloud` / `sdlc-local`); running in a cloud session, its end marker and GitHub access; asking the operator with `pipeline.humanChannel: "session"` |
 | `${CLAUDE_PLUGIN_ROOT}/references/history.md` | You want the incident behind a rule |
 
 ## The lifecycle model
@@ -130,10 +130,6 @@ issue or is legacy:
   `next-action <initiative>`. **Use the same `--run-id` for the Initiative and every Epic**:
   `parallelism.maxTasksPerRun` is shared across them, and `stop-at-cap` on either means
   finish the in-flight unit, stop and report.
-- **`launch-cloud-epics`** (`epics`) — `pipeline.placement.initiativeEpics` is `cloud`: the
-  Epics run in their own cloud sessions, never inline. `launch-cloud-epic <epic> --repo-path <p>`
-  for each, then `next-action <initiative>` again (`references/cloud-mode.md`, "Initiative →
-  cloud Epics").
 - An Epic whose loop ends still open (waiting on a human gate, `needs-human`, blocked) is
   parked: call `next-action <initiative> --skip-epic <epic>` (repeatable) for the rest of the
   run so the loop moves to the next runnable Epic. Never re-descend into a parked Epic.
@@ -245,12 +241,13 @@ an override only.
 | `set-stage <n> --stage <s>` / `add-blocked-by <n> --on <dep>` / `create-issue --parent <n> --type <T> [--blocked-by <dep> ...]` / `repair-issue <n> [--parent <p>] [--type <T>]` | Stage a unit / order units (Epics: wave order, "Cutting Epics") / the only issue-creation path / fill an existing issue's missing fields |
 | `open-design-pr <n>` / `merge-design-pr <pr> --issue <n> [--repo-path <p>]` | A phase-Task's design PR `issue-<n>` → `epic-<e>`: `transition` opens it; `skip-gate`/`waive-gate`/`finish-lld` merge it — re-run those, not `merge-design-pr`. Its refusals (`behind_base`, `review_stale`, missing/`rework` review evidence, an `arch-review` below the skip bar) come back in their `design_pr` / `failed_step` |
 | `create-lld-tasks <epic> --repo-path <p>` / `merge-lld-doc <epic-n>` / `close-issue <n> [--repo-path <p>] [--not-planned --reason TEXT]` | The steps inside `finish-lld`; `create-lld-tasks` on an already-numbered doc adds only missing `blocked_by` edges (`edges_added`); `close-issue` is the orchestrator's close (terminal fields, then `cleanup`: worktrees released, a branch whose work landed deleted on origin and locally, unmerged work kept; an already-closed issue → `already_closed: true`); `--not-planned` drops a unit with its reason on the thread (`references/operations.md`, "Dropping a unit") |
-| `place <epic\|initiative> --where cloud\|local [--force] --repo-path <p>` | Hand an Epic or Initiative to a cloud or local session (the `pipeline.placement.cloudLabel` label); refuses (`refused`, `worktrees`) while local worktrees hold its units unless `--force` (`references/cloud-mode.md`) |
+| `place <epic\|initiative> --where cloud\|local [--force] --repo-path <p>` | Move only the `pipeline.placement.cloudLabel` label of an Epic, Initiative or parentless issue; refuses (`refused`, `worktrees`) while local worktrees hold its units unless `--force` (`references/cloud-mode.md`) |
 | `detach-epic <epic> [--reason TEXT]` / `reparent-issue <n> --parent <p> [--reason TEXT]` / `comment <n> --body TEXT\|--body-file <f>` | Take an Epic out of its Initiative (sub-issue link + sibling `blockedBy` edges, commented on both) / move a plain issue under another parent (never an Epic: `detach-epic`) / a plain audit-trail comment, no marker (`references/operations.md`, "Dropping a unit") |
 | `open-gate` / `check-gate` / `pass-gate` / `skip-gate` / `waive-gate` | Gates (`references/gates.md`); on a phase-Task pass/skip/waive close it (after merging its design PR) instead of claiming a next stage |
 | `approve-gate <n> --by-operator-session [--note TEXT]` / `request-gate-changes <n> --feedback TEXT\|--feedback-file <f>` | The operator's in-session gate decision: merge + `pass-gate` with an audit comment / their change request posted on the gate PR (`references/gates.md`, "Deciding a gate in session") |
 | `record-operator-answer <n> --question TEXT --answer TEXT` | An in-session answer recorded on the unit it settles; a `needs-human` unit returns to `todo` (`references/cloud-mode.md`, "Human channel") |
-| `launch-cloud-epic <epic> [--relaunch] --repo-path <p>` / `cloud-status <initiative\|epic>` / `nudge-cloud-epic <epic> [--force]` / `end-cloud-session <epic> --outcome closed\|waiting-human\|stopped\|abandoned [--note TEXT]` | Place an Epic and start its cloud session (idempotent) / read-only cloud state, any placement / continue a stalled session (`escalate` after two) / the session's end marker (`references/cloud-mode.md`, "Initiative → cloud Epics") |
+| `end-cloud-session <n> --outcome closed\|waiting-human\|stopped\|abandoned [--note TEXT]` | A cloud run's end marker, on the unit carrying the label (`references/cloud-mode.md`, "A cloud run") |
+| `go-cloud` / `go-local <n>` | The operator's (`sdlc-cloud` / `sdlc-local`): never run them; name them when the operator wants a unit moved (`references/cloud-mode.md`, "Moving a unit") |
 | `merge-gate <pr> --issue <n> --stage product\|architecture --operator-confirmed` | Merge an open gate PR (Gate A, or a human-gated design PR) — **only when the operator explicitly told you to merge it** (`references/gates.md`, "Merging a gate PR for the operator"); `pass-gate` finishes it |
 | `open-dev-pr [--allow-empty]` / `handoff-to-pr-review` / `record-pr-review` / `record-local-ci` / `record-design-review` / `post-comment` | Stage-agent exit actions (their agent files own them); tell `development` to pass `--allow-empty` when the Task's design says verify-only (no code change) |
 | `pr-checks <pr>` / `rerun-checks <pr>` / `merge-pr <pr> --issue <n> [--run-id <id>]` | CI status / rerun the head's failed runs after an `infra_suspect` fix (`references/operations.md`, "A check the runner failed") / the only merge gate (pass the run's id so the terminal count books under it; refuses behind-base; reports `config_changed`; on an already-merged PR only finishes the bookkeeping, `recovered: true`; `cleanup` as `close-issue`'s) |
@@ -284,10 +281,10 @@ Epic, to be picked; link with `create-issue --parent`.
 
 ## Placement
 
-A cloud session drives only cloud-placed Epics, a local session only the rest; one Epic is
+A cloud session drives only cloud-placed units, a local session only the rest; one unit is
 never driven from both. A `placement_mismatch` error: stop, relay its `hint`, start
-nothing (`references/cloud-mode.md`). A cloud Epic run posts `end-cloud-session` before it
-ends (`references/cloud-mode.md`, "A cloud run").
+nothing (`references/cloud-mode.md`). A cloud run posts `end-cloud-session` before it ends
+(`references/cloud-mode.md`, "A cloud run").
 
 ## Config can move under you
 
@@ -349,7 +346,6 @@ Every result except `skip`/`none`/`stop-at-cap` carries `unit`: `"issue"`, or `"
 | `finish-lld` | An LLD-phase Task's design PR was merged by a human | `finish-lld <issue> --epic <epic> --repo-path <p>` ("Cutting an Epic's phase-Tasks") |
 | `cut-phase-tasks` | The Epic named in `epic` has no phase-Tasks (or only one): the next runnable Epic of an Initiative, or the bare Epic you are driving | `cut-phase-tasks <epic> --repo-path <p>`, then Step 1 again ("Cutting an Epic's phase-Tasks") |
 | `run-epic` | (Initiative) the next runnable Epic | Run that Epic's Step 1–3 loop inline with the same run-id, then Step 1 on the Initiative again |
-| `launch-cloud-epics` | (Initiative, `initiativeEpics: cloud`) Epics to start in the cloud | `launch-cloud-epic <epic>` for each in `epics`, then Step 1 on the Initiative again ("The Initiative loop") |
 | `stop-at-cap` | This run-id hit `parallelism.maxTasksPerRun` (across all Epics of the run) | Finish in-flight units, then stop ("Stop at the run cap") |
 | `none` | Nothing actionable | Route any `unstaged` child, then `list-needs-human` + `check-epics-closeable`, then Step 4 |
 | `skip` | Epic is legacy | Say so (quote `reason`), then Step 4 |
@@ -617,8 +613,7 @@ what) and end with the Initiative's own `none` reason. Above the fold:
 - Every merged PR and closed issue; every epic newly `epic:architected`; every Epic cut,
   run to completion or parked this run.
 - Every `warnings` line any command returned (a branch deletion that failed), verbatim.
-- Every cloud session launched or still running, with its url; every stalled, escalated or
-  ended one (`cloud-status`).
+- In a cloud session: its url (`cloud_session`) and the `end-cloud-session` outcome.
 - Any epic `check-epics-closeable` newly notified; any `product_cap` deferral.
 - Every issue `audit-issues` flagged (an Epic with no phase-Tasks included) and whether you repaired it.
 - One cost line: `python3 "$(dirname "$SDLC")/sdlc_metrics.py" report --run <run-id>` →

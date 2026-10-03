@@ -585,28 +585,12 @@ def test_locally_every_other_operation_still_goes_over_rest():
     assert runner.other == [] and len(runner.writes()) == 2
 
 
-# --- what the cloud-session commands read and write ---------------------------------------
-
-def test_open_prs_lists_every_open_pr_in_the_gh_shape():
-    gh, _ = _gh({("GET", f"{R}/pulls?state=open&per_page=100"): [
-        {"number": 40, "head": {"ref": "issue-5", "sha": "a"}, "title": "Build",
-         "draft": True, "updated_at": "2026-10-03T00:00:00Z"}]})
-    assert gh.open_prs() == [{"number": 40, "headRefName": "issue-5", "title": "Build",
-                              "isDraft": True, "updatedAt": "2026-10-03T00:00:00Z"}]
-
+# --- labels -------------------------------------------------------------------------------
 
 def test_pr_remove_label_deletes_it_through_the_issues_endpoint():
     gh, runner = _gh({("DELETE", f"{R}/issues/40/labels/sdlc%3Agate"): None})
     gh.pr_remove_label(40, "sdlc:gate")
     assert runner.writes() == [("DELETE", f"{R}/issues/40/labels/sdlc%3Agate", [])]
-
-
-def test_branch_last_commit_at_reads_the_head_commit_date_or_none():
-    gh, _ = _gh({("GET", f"{R}/branches/issue-5"):
-                 {"commit.commit.committer.date": "2026-10-03T00:00:00Z"},
-                 ("GET", f"{R}/branches/gone"): GhError("HTTP 404")})
-    assert gh.branch_last_commit_at("issue-5") == "2026-10-03T00:00:00Z"
-    assert gh.branch_last_commit_at("gone") is None
 
 
 def test_api_items_pages_by_page_number_never_by_link_following():
