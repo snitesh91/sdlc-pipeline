@@ -32,6 +32,7 @@ handoff loop is live at once — never that anything decides on its own.
 | `${CLAUDE_PLUGIN_ROOT}/references/epics.md` | Profiles, phase-Tasks, footprints, deviation, epic close, board status |
 | `${CLAUDE_PLUGIN_ROOT}/references/operations.md` | Token/repo access, issue fields, auto-merge, local-CI attestation, auto-mode denials |
 | `${CLAUDE_PLUGIN_ROOT}/references/continuous-mode.md` | The operator asked for unattended looping |
+| `${CLAUDE_PLUGIN_ROOT}/references/cloud-mode.md` | A `placement_mismatch`; handing an Epic to or from a cloud session; running in one |
 | `${CLAUDE_PLUGIN_ROOT}/references/history.md` | You want the incident behind a rule |
 
 ## The lifecycle model
@@ -240,6 +241,7 @@ an override only.
 | `set-stage <n> --stage <s>` / `add-blocked-by <n> --on <dep>` / `create-issue --parent <n> --type <T> [--blocked-by <dep> ...]` / `repair-issue <n> [--parent <p>] [--type <T>]` | Stage a unit / order units (Epics: wave order, "Cutting Epics") / the only issue-creation path / fill an existing issue's missing fields |
 | `open-design-pr <n>` / `merge-design-pr <pr> --issue <n> [--repo-path <p>]` | A phase-Task's design PR `issue-<n>` → `epic-<e>`: `transition` opens it; `skip-gate`/`waive-gate`/`finish-lld` merge it — re-run those, not `merge-design-pr`. Its refusals (`behind_base`, `review_stale`, missing/`rework` review evidence, an `arch-review` below the skip bar) come back in their `design_pr` / `failed_step` |
 | `create-lld-tasks <epic> --repo-path <p>` / `merge-lld-doc <epic-n>` / `close-issue <n> [--repo-path <p>] [--not-planned --reason TEXT]` | The steps inside `finish-lld`; `create-lld-tasks` on an already-numbered doc adds only missing `blocked_by` edges (`edges_added`); `close-issue` is the orchestrator's close (terminal fields, then `cleanup`: worktrees released, a branch whose work landed deleted on origin and locally, unmerged work kept; an already-closed issue → `already_closed: true`); `--not-planned` drops a unit with its reason on the thread (`references/operations.md`, "Dropping a unit") |
+| `place <epic\|initiative> --where cloud\|local [--force] --repo-path <p>` | Hand an Epic or Initiative to a cloud or local session (the `pipeline.placement.cloudLabel` label); refuses (`refused`, `worktrees`) while local worktrees hold its units unless `--force` (`references/cloud-mode.md`) |
 | `detach-epic <epic> [--reason TEXT]` / `reparent-issue <n> --parent <p> [--reason TEXT]` / `comment <n> --body TEXT\|--body-file <f>` | Take an Epic out of its Initiative (sub-issue link + sibling `blockedBy` edges, commented on both) / move a plain issue under another parent (never an Epic: `detach-epic`) / a plain audit-trail comment, no marker (`references/operations.md`, "Dropping a unit") |
 | `open-gate` / `check-gate` / `pass-gate` / `skip-gate` / `waive-gate` | Gates (`references/gates.md`); on a phase-Task pass/skip/waive close it (after merging its design PR) instead of claiming a next stage |
 | `merge-gate <pr> --issue <n> --stage product\|architecture --operator-confirmed` | Merge an open gate PR (Gate A, or a human-gated design PR) — **only when the operator explicitly told you to merge it** (`references/gates.md`, "Merging a gate PR for the operator"); `pass-gate` finishes it |
@@ -272,6 +274,12 @@ being driven (`/sdlc:run <n>`); the pipeline never scans the repo. No number nam
 descends into its Epics sequentially ("The Initiative loop") — two invocations on the same
 one race, and an Initiative run and an Epic run of its Epic do too. Every Epic must be a native sub-issue of its Initiative, and every Task of its
 Epic, to be picked; link with `create-issue --parent`.
+
+## Placement
+
+A cloud session drives only cloud-placed Epics, a local session only the rest; one Epic is
+never driven from both. A `placement_mismatch` error: stop, relay its `hint`, start
+nothing (`references/cloud-mode.md`).
 
 ## Config can move under you
 
@@ -597,6 +605,7 @@ what) and end with the Initiative's own `none` reason. Above the fold:
 - Every gate-pending unit: gate PR, doc, level, whether feedback was addressed.
 - Every merged PR and closed issue; every epic newly `epic:architected`; every Epic cut,
   run to completion or parked this run.
+- Every `warnings` line any command returned (a branch deletion that failed), verbatim.
 - Any epic `check-epics-closeable` newly notified; any `product_cap` deferral.
 - Every issue `audit-issues` flagged (an Epic with no phase-Tasks included) and whether you repaired it.
 - One cost line: `python3 "$(dirname "$SDLC")/sdlc_metrics.py" report --run <run-id>` →

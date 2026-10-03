@@ -141,6 +141,10 @@ _PIPELINE_DEFAULTS = {
     # A `resume` action younger than `liveWindowMinutes` is flagged `likely_live`: another
     # session may still be driving it, so the orchestrator asks the operator before taking over.
     "resume": {"liveWindowMinutes": 30},
+    # An Epic (or its Initiative) carrying `cloudLabel` is driven only by a cloud session,
+    # every other one only by a local session. `cloudEnvironment`: the `claude --cloud
+    # --environment` a handoff names.
+    "placement": {"cloudLabel": "sdlc:cloud", "cloudEnvironment": ""},
     # A failed CI check whose failed-step log matches one of these (regex, case-insensitive)
     # is flagged `infra_suspect`: the runner broke, not the code -- fix it, `rerun-checks`.
     "ci": {"infraFailurePatterns": [
@@ -326,6 +330,7 @@ class WorkItemProvider(Protocol):
     def clear_stage_field(self, number: int) -> None: ...
     def add_sub_issue(self, parent_number: int, child_number: int) -> None: ...
     def remove_sub_issue(self, parent_number: int, child_number: int) -> None: ...
+    def ensure_label(self, label: str) -> None: ...
 
     def classify_unit(self, number: int) -> str:
         """"initiative", "epic", "task" or "other" for `number`."""
@@ -596,9 +601,13 @@ class GitHub:
     def pr_ready(self, number: int):
         self._run(["gh", "pr", "ready", str(number), "--repo", self.repo])
 
+    def ensure_label(self, label: str):
+        """Create `label` in the repo when missing (idempotent)."""
+        self._run(["gh", "label", "create", label, "--repo", self.repo, "--force"])
+
     def pr_add_label(self, number: int, label: str):
         """Add `label` to a PR, creating it in the repo first (idempotent)."""
-        self._run(["gh", "label", "create", label, "--repo", self.repo, "--force"])
+        self.ensure_label(label)
         self._run(["gh", "pr", "edit", str(number), "--repo", self.repo, "--add-label", label])
 
     def pr_heads_for_branch(self, branch: str) -> list:
@@ -732,6 +741,99 @@ def is_epic_architected(issue: dict) -> bool:
     """Whether the Epic's design phase is done (label set by `merge-lld-doc`). A label, not
     a marker, so it is readable from the bulk `issue_list()` fetch."""
     return has_label(issue, LABELS["architected"])
+
+
+PLACEMENTS = ("cloud", "local")
+
+
+def cloud_label() -> str:
+    return PIPELINE["placement"]["cloudLabel"]
+
+
+def session_placement() -> dict:
+    """Where this session runs, and the `signal` that decided it: `SDLC_PLACEMENT`
+    (cloud|local, anything else raises), else a truthy `CLAUDE_CODE_REMOTE` (cloud), else local."""
+    explicit = os.environ.get("SDLC_PLACEMENT", "").strip()
+    if explicit:
+        if explicit.lower() not in PLACEMENTS:
+            raise GhError(f"SDLC_PLACEMENT={explicit!r} is neither 'cloud' nor 'local' -- "
+                          f"fix or unset it")
+        return {"placement": explicit.lower(), "signal": "SDLC_PLACEMENT"}
+    if os.environ.get("CLAUDE_CODE_REMOTE", "").strip().lower() in ("true", "1"):
+        return {"placement": "cloud", "signal": "CLAUDE_CODE_REMOTE"}
+    return {"placement": "local", "signal": "default"}
+
+
+def unit_placement(number: int, lookup: Callable[[int], Optional[dict]]) -> dict:
+    """`{placement, epic}` (+ `label_on` when cloud): a unit belongs to its Epic (an Initiative,
+    or an Initiative's own Task, to the Initiative), which is cloud-placed when it or an ancestor
+    carries the cloud label. `lookup(n)` returns an issue dict with flattened `labels`, `parent`,
+    `issueType`."""
+    label = cloud_label()
+    anchor, n = None, number
+    for _ in range(4):
+        info = lookup(n)
+        if info is None:
+            break
+        kind = classify_unit_from_issue(info)
+        if anchor is None and kind in ("epic", "initiative"):
+            anchor = n
+        if anchor is not None and has_label(info, label):
+            return {"placement": "cloud", "epic": anchor, "label_on": n}
+        parent = (info.get("parent") or {}).get("number")
+        if kind == "initiative" or not parent:
+            break
+        n = parent
+    if anchor is None:
+        info = lookup(number)
+        if info and has_label(info, label):
+            return {"placement": "cloud", "epic": number, "label_on": number}
+        return {"placement": "local", "epic": number}
+    return {"placement": "local", "epic": anchor}
+
+
+class PlacementMismatch(GhError):
+    """This session's placement differs from the unit's; `payload` is the JSON refusal."""
+
+    def __init__(self, payload: dict):
+        super().__init__(f"placement_mismatch: {payload['hint']}")
+        self.payload = payload
+
+
+def check_placement(number: int, lookup: Callable[[int], Optional[dict]]) -> dict:
+    """Raise `PlacementMismatch` unless this session's placement is the unit's; returns
+    the session placement."""
+    session = session_placement()
+    unit = unit_placement(number, lookup)
+    if session["placement"] == unit["placement"]:
+        return session
+    epic, label = unit["epic"], cloud_label()
+    if unit["placement"] == "cloud":
+        holder = unit["label_on"]
+        on = "" if holder == epic else f" on #{holder}"
+        hint = (f"#{epic} is placed in the cloud (label `{label}`{on}): only a cloud session "
+                f"drives it. Leave it to that session; to take it back, `place {holder} --where "
+                f"local` once no cloud session is driving it.")
+    else:
+        hint = (f"#{epic} is placed local (no `{label}` label): only a local session drives it. "
+                f"Hand it over from the laptop with `place {epic} --where cloud` first.")
+    hint += (f" Session placement came from {session['signal']}; set SDLC_PLACEMENT=cloud|local "
+             f"only if that is wrong.")
+    raise PlacementMismatch({"error": "placement_mismatch",
+                             "session_placement": session["placement"],
+                             "signal": session["signal"],
+                             "unit_placement": unit["placement"], "epic": epic, "hint": hint})
+
+
+def _issue_info_lookup(gh: WorkItemProvider) -> Callable[[int], Optional[dict]]:
+    """A memoised `issue_epic_info` for `unit_placement`, so each issue is fetched once."""
+    cache: dict = {}
+
+    def lookup(n: int) -> Optional[dict]:
+        if n not in cache:
+            cache[n] = gh.issue_epic_info(n)
+        return cache[n]
+    return lookup
 
 
 def default_stage(parent: Optional[dict]) -> Optional[str]:
@@ -1513,12 +1615,14 @@ def _finish_epic_close(gh, epic: int, detail: Optional[dict], pr_number: int, ch
     cmd_mark_issue_closed(gh, epic)
     cleanup = cleanup_unit(gh, epic, "epic", repo_path, runner, base="main")
     closed_children = {c["number"] for c in children}
-    return {"epic": epic, "merged": True, **extra, "pr": pr_number, "branch": epic_branch(epic),
-            "worktree": cleanup.pop("worktree"), "cleanup": cleanup,
-            "children_cleanup": sweep_units(gh, repo_path, runner, only=closed_children,
-                                            issues=all_issues)["units"],
-            "run_state": archive_run_state(epic),
-            "stack": _teardown_stack_after_close(epic)}
+    children_cleanup = sweep_units(gh, repo_path, runner, only=closed_children,
+                                   issues=all_issues)["units"]
+    return _with_warnings(
+        {"epic": epic, "merged": True, **extra, "pr": pr_number, "branch": epic_branch(epic),
+         "worktree": cleanup.pop("worktree"), "cleanup": cleanup,
+         "children_cleanup": children_cleanup,
+         "run_state": archive_run_state(epic),
+         "stack": _teardown_stack_after_close(epic)}, cleanup, *children_cleanup)
 
 
 def _teardown_stack_after_close(epic: int) -> dict:
@@ -1805,9 +1909,13 @@ def epic_lacks_phase_tasks(all_issues: list, epic: int) -> bool:
 
 
 def _epic_wait_reason(gh: GitHub, epic_issue: dict) -> Optional[str]:
-    """Why an open Epic cannot be run yet (`legacy`, or `blocked by #n`), else None."""
+    """Why an open Epic cannot be run yet (`legacy`, placed in the cloud while this session
+    is local, or `blocked by #n`), else None."""
     if is_epic_legacy(epic_issue):
         return "not driven (legacy profile)"
+    # Under a cloud-placed Initiative every Epic is cloud, and next-action refused a local session.
+    if has_label(epic_issue, cloud_label()) and session_placement()["placement"] != "cloud":
+        return f"placed in the cloud (`{cloud_label()}`) -- a cloud session drives it"
     blockers = gh.blocked_by(epic_issue["number"])
     return f"blocked by {', '.join(f'#{n}' for n in blockers)}" if blockers else None
 
@@ -1866,7 +1974,8 @@ def _merged_design_action(gh: GitHub, issue: dict, epic: int) -> Optional[dict]:
 
 def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                        skip_epics: Optional[list] = None, repo_path: str = ".",
-                       runner: Runner = _default_runner) -> dict:
+                       runner: Runner = _default_runner,
+                       all_issues: Optional[list] = None) -> dict:
     """Pick the next action among the named Epic's/Initiative's open non-Epic children: `skip` |
     `resume` | `pass-gate` | `finish-lld` | `address-gate-feedback` | `route` | `delegate` |
     `stop-at-cap` | `none`; an Initiative with no such child walks its open Epics: `cut-phase-tasks`
@@ -1875,7 +1984,7 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
     a fresh dev-lane unit needs a free slot and a footprint disjoint from the holders'
     (`dev_lane_slots`); `slots` reports that arithmetic on a dev-lane `delegate` or `none`."""
     skip_epics = skip_epics or []
-    all_issues = gh.issue_list()
+    all_issues = gh.issue_list() if all_issues is None else all_issues
     by_number = {i["number"]: i for i in all_issues}
     epic_issue = by_number.get(epic)
     if epic_issue is None:
@@ -2125,7 +2234,7 @@ def _origin_sha(repo_path: str, branch: str, runner: Runner) -> Optional[str]:
 
 
 def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: str = ".",
-                     runner: Runner = _default_runner) -> dict:
+                     runner: Runner = _default_runner, issues: Optional[list] = None) -> dict:
     """Keep a non-standing Epic's `epic-<n>` from rotting against `main`: `sync-branch <epic>
     --unit epic` on this run-id's first call, after `EPIC_SYNC_EVERY_MERGES` terminal units
     since the last sync, or when `origin/main` moved since then (run-state `epic_sync`).
@@ -2136,7 +2245,7 @@ def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: st
     if not run_id:
         return {"skipped": "no --run-id: the sync cadence is tracked per run"}
     try:
-        issues = gh.issue_list()
+        issues = gh.issue_list() if issues is None else issues
         entry = next((i for i in issues if i["number"] == epic), None)
         if (entry is None or not is_epic(entry) or is_epic_standing(entry)
                 or is_epic_legacy(entry) or entry["state"] != "OPEN"):
@@ -2190,14 +2299,17 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     """`next-action`: `decide_next_action` plus `cap_enforced` (true only with a
     `--run-id` and a nonzero cap), which describes the invocation, not the decision.
     A `resume` also carries liveness hints (`_resume_liveness`). With `--sync-epic`,
-    `sync_epic_if_due` runs first and its result is `epic_sync`."""
+    `sync_epic_if_due` runs first and its result is `epic_sync`. Refuses a unit placed
+    on the other side (`check_placement`) before anything else runs."""
     run_id = getattr(args, "run_id", None)
     repo_path = getattr(args, "repo_path", None) or "."
-    epic_sync = (sync_epic_if_due(gh, args.epic, run_id, repo_path)
+    issues = gh.issue_list()
+    check_placement(args.epic, {i["number"]: i for i in issues}.get)
+    epic_sync = (sync_epic_if_due(gh, args.epic, run_id, repo_path, issues=issues)
                  if getattr(args, "sync_epic", False) else None)
     result = decide_next_action(gh, args.epic, run_id=run_id,
                                 skip_epics=getattr(args, "skip_epic", None),
-                                repo_path=repo_path)
+                                repo_path=repo_path, all_issues=issues)
     # Read liveness before note_in_flight re-stamps this run onto the unit.
     liveness = (_resume_liveness(gh, args.epic, result["issue"])
                 if result.get("action") == "resume" else {})
@@ -2214,6 +2326,7 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
     Read-only. Returns `ready_for_review`, `count`, `eligible_total`, `skipped`."""
     limit = PR_REVIEW_PARALLELISM if limit is None else limit
     all_issues = gh.issue_list()
+    check_placement(epic, {i["number"]: i for i in all_issues}.get)
     open_issues = [i for i in all_issues if i["state"] == "OPEN"]
 
     ready, skipped = [], []
@@ -2589,7 +2702,15 @@ def cmd_show_config(runner: Runner = _default_runner) -> dict:
             "requiredWorkflows": CONFIG["requiredWorkflows"],
             "localCiSuites": list(LOCAL_CI_SUITES),
             "plugin": plugin_version_info(runner),
+            "session_placement": _session_placement_or_error(),
             **PIPELINE}
+
+
+def _session_placement_or_error() -> dict:
+    try:
+        return session_placement()
+    except GhError as e:
+        return {"error": str(e)}
 
 
 # Network failures a single immediate retry usually clears; anything else fails at once.
@@ -3377,6 +3498,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
     if epic_issue is None or not is_epic(epic_issue):
         raise GhError(f"#{epic} is not an epic (pipeline.classification does not call it "
                        f"\"epic\") -- pass the epic's own issue number, not a child issue's")
+    check_placement(epic, by_number.get)
     cap_state = run_cap_state(epic, run_id)
     cap_enforced = bool(run_id) and MAX_TASKS_PER_RUN > 0
     base = {"parallel_ready": [], "count": 0, "eligible_total": 0, "active_count": 0,
@@ -3473,6 +3595,7 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
     if epic_issue is None or not is_epic(epic_issue):
         raise GhError(f"#{epic} is not an epic (pipeline.classification does not call it "
                        f"\"epic\") -- pass the epic's own issue number, not a child issue's")
+    check_placement(epic, by_number.get)
     # An auto-passing Gate A never queues on the human, so it is exempt from the WIP cap.
     product_headroom = (product_wip_headroom(all_issues)
                         if effective_gates(epic_issue)["requiresHumanGateA"] else None)
@@ -4820,7 +4943,8 @@ def _complete_phase_task(gh: GitHub, repo_path: Optional[str], issue: int, stage
         f"{markers}<!-- phase-task-complete: {stage} @ {_utc_now_marker()} -->")
     closed = cmd_close_issue(gh, issue, repo_path=repo_path, runner=runner)
     return {**result, "phase_task_complete": True, "closed": True, "worktree": closed["worktree"],
-            "cleanup": closed["cleanup"]}
+            "cleanup": closed["cleanup"],
+            **({"warnings": closed["warnings"]} if closed.get("warnings") else {})}
 
 
 def _merged_design_pr(gh: GitHub, comments: list, pr: int) -> Optional[tuple]:
@@ -5972,12 +6096,13 @@ def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
         realised = _close_realised_issues(gh, issue, view.get("body"), pr=pr_number)
     terminal = record_terminal_unit(gh, issue, run_id=run_id)
     cleanup = cleanup_unit(gh, issue, "issue", repo_path, gh._run, base=base)
-    return {"pr": pr_number, "issue": issue, "merged": True, "issue_closed": issue_closed,
-            "config_changed": touches_pipeline_config(files),
-            **extra,
-            **({"run_terminal": terminal} if terminal else {}),
-            **({"realised_closed": realised} if realised else {}),
-            "worktree": cleanup.pop("worktree"), "cleanup": cleanup}
+    return _with_warnings(
+        {"pr": pr_number, "issue": issue, "merged": True, "issue_closed": issue_closed,
+         "config_changed": touches_pipeline_config(files),
+         **extra,
+         **({"run_terminal": terminal} if terminal else {}),
+         **({"realised_closed": realised} if realised else {}),
+         "worktree": cleanup.pop("worktree"), "cleanup": cleanup}, cleanup)
 
 
 def _close_realised_issues(gh: GitHub, issue: int, body: Optional[str],
@@ -6084,7 +6209,7 @@ def _cleanup_remote_branch(gh: GitHub, repo_path: str, branch: str, runner: Runn
         except GhError:
             still = head
         if still:
-            return {"deleted": False, "head": head, "reason": str(exc)}
+            return {"deleted": False, "head": head, "error": True, "reason": str(exc)}
     return {"deleted": True, "head": head}
 
 
@@ -6095,7 +6220,7 @@ def _cleanup_local_branch(repo_path: str, branch: str, runner: Runner, safe_refs
     try:
         listed = runner(["git", "-C", repo_path, "branch", "--list", branch]).strip()
     except GhError as exc:
-        return {"deleted": False, "reason": f"branch lookup failed: {exc}"}
+        return {"deleted": False, "error": True, "reason": f"branch lookup failed: {exc}"}
     if not listed:
         return {"deleted": False, "absent": True}
     kept = {"deleted": False, "retained_local_branch": True}
@@ -6112,7 +6237,7 @@ def _cleanup_local_branch(repo_path: str, branch: str, runner: Runner, safe_refs
     try:
         runner(["git", "-C", repo_path, "branch", "-D", branch])
     except GhError as exc:
-        return {**kept, "reason": str(exc)}
+        return {**kept, "error": True, "reason": str(exc)}
     return {"deleted": True}
 
 
@@ -6186,6 +6311,32 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
     return out
 
 
+def cleanup_warnings(cleanup: dict) -> list:
+    """One operator-facing line per branch deletion that failed (`error`); an intentional
+    keep (open PR, unmerged work, checked out) is no warning."""
+    branch = cleanup.get("branch", "?")
+    out = []
+    remote, local = cleanup.get("remote_branch") or {}, cleanup.get("local_branch") or {}
+    if remote.get("error"):
+        out.append(f"origin/{branch} could not be deleted ({_first_line(remote.get('reason'))})"
+                   f" -- the operator deletes it on GitHub")
+    if local.get("error"):
+        out.append(f"local branch {branch} could not be deleted "
+                   f"({_first_line(local.get('reason'))}) -- the operator runs `git branch -D {branch}`")
+    return out
+
+
+def _first_line(text: Optional[str]) -> str:
+    lines = (text or "").strip().splitlines()
+    return lines[0] if lines else "unknown error"
+
+
+def _with_warnings(result: dict, *cleanups: dict) -> dict:
+    """`result` plus a top-level `warnings` list when any cleanup failed a deletion."""
+    warnings = [w for c in cleanups for w in cleanup_warnings(c)]
+    return {**result, "warnings": warnings} if warnings else result
+
+
 def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
                     runner: Runner = _default_runner, not_planned: bool = False,
                     reason: Optional[str] = None) -> dict:
@@ -6213,11 +6364,12 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
     if released.get("released") or released.get("reason") != "no worktree":
         released = {**released, "branch": cleanup["branch"]}
     terminal = record_terminal_unit(gh, issue)
-    return {"issue": issue, "closed": True, "already_closed": already_closed,
-            "worktree": released, "cleanup": cleanup,
-            **({"state_reason": "not_planned"} if not_planned else {}),
-            **({"run_terminal": terminal} if terminal else {}),
-            **({"realised_closed": realised} if realised else {})}
+    return _with_warnings(
+        {"issue": issue, "closed": True, "already_closed": already_closed,
+         "worktree": released, "cleanup": cleanup,
+         **({"state_reason": "not_planned"} if not_planned else {}),
+         **({"run_terminal": terminal} if terminal else {}),
+         **({"realised_closed": realised} if realised else {})}, cleanup)
 
 
 _UNIT_BRANCH_RE = re.compile(rf"^(?:(?P<issue>{re.escape(ISSUE_BRANCH_PREFIX)})|"
@@ -6244,20 +6396,28 @@ def present_units(repo_path: str, runner: Runner = _default_runner) -> set:
     names = local.split() + [line.split("refs/heads/", 1)[1] for line in remote.splitlines()
                              if "refs/heads/" in line]
     units.update(u for u in map(_unit_of_branch, names) if u)
+    units.update(u for _, u in unit_worktrees(repo_path, runner))
+    return units
+
+
+def unit_worktrees(repo_path: str, runner: Runner = _default_runner) -> list:
+    """`(entry, (unit, n))` for every worktree but the main checkout that holds a pipeline
+    branch, or is a detached review/dev tree under `worktrees.root`."""
     w = PIPELINE["worktrees"]
     review_re = re.compile(rf"^(?:{re.escape(w['reviewPrefix'])}|{re.escape(w['devPrefix'])})(\d+)$")
     root = os.path.realpath(w["root"])
+    found = []
     for i, entry in enumerate(worktree_entries(repo_path, runner)):
         if i == 0:
             continue  # the main checkout
         unit = _unit_of_branch(entry["branch"])
-        if unit:
-            units.add(unit)
-        elif entry["branch"] is None and os.path.dirname(os.path.realpath(entry["path"])) == root:
+        if not unit and entry["branch"] is None \
+                and os.path.dirname(os.path.realpath(entry["path"])) == root:
             m = review_re.match(os.path.basename(entry["path"]))
-            if m:
-                units.add(("issue", int(m.group(1))))
-    return units
+            unit = ("issue", int(m.group(1))) if m else None
+        if unit:
+            found.append((entry, unit))
+    return found
 
 
 def sweep_units(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] = None,
@@ -6337,9 +6497,10 @@ def cmd_prune_stale(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] =
     issues = gh.issue_list()
     swept = sweep_units(gh, repo_path, runner, issues=issues, dry_run=dry_run)
     closed = {i["number"] for i in issues if i["state"] == "CLOSED"}
-    result = {"dry_run": dry_run, **swept,
-              ("would_remove_run_states" if dry_run else "run_states_removed"):
-                  _stale_run_states(closed, dry_run)}
+    result = _with_warnings({"dry_run": dry_run, **swept,
+                             ("would_remove_run_states" if dry_run else "run_states_removed"):
+                                 _stale_run_states(closed, dry_run)},
+                            *swept["units"])
     if not dry_run:
         for key, argv in (("worktree_pruned", ["git", "-C", repo_path, "worktree", "prune"]),
                           ("fetch_pruned", ["git", "-C", repo_path, "fetch", "--prune", "origin"])):
@@ -6350,6 +6511,82 @@ def cmd_prune_stale(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] =
                 result[key] = False
                 result[f"{key}_error"] = str(exc)
     return result
+
+
+def _placement_units(number: int, issues: list) -> set:
+    """`(unit, n)` of Epic/Initiative `number` and every descendant: an Epic's `epic-<n>`
+    branch, every other issue's `issue-<n>`."""
+    kids: dict = {}
+    for i in issues:
+        p = (i.get("parent") or {}).get("number")
+        if p:
+            kids.setdefault(p, []).append(i)
+    by_number = {i["number"]: i for i in issues}
+    units, todo = set(), [number]
+    while todo:
+        n = todo.pop()
+        issue = by_number.get(n)
+        if issue is not None and is_epic(issue):
+            units.add(("epic", n))
+        elif issue is not None and n != number:
+            units.add(("issue", n))
+        todo.extend(k["number"] for k in kids.get(n, []))
+    return units
+
+
+def cmd_place(gh: WorkItemProvider, number: int, where: str, force: bool = False,
+              repo_path: str = ".", runner: Runner = _default_runner) -> dict:
+    """Place Epic/Initiative `number` in the cloud (add the cloud label, creating it) or
+    local (remove it). Refuses (`refused`) while a unit under it holds a local worktree,
+    unless `force`, and an Epic's `local` while its Initiative carries the label. Idempotent."""
+    if where not in PLACEMENTS:
+        raise GhError(f"--where must be one of {', '.join(PLACEMENTS)}")
+    label = cloud_label()
+    issues = gh.issue_list()
+    by_number = {i["number"]: i for i in issues}
+    issue = by_number.get(number)
+    if issue is None or classify_unit_from_issue(issue) not in ("epic", "initiative"):
+        raise GhError(f"#{number} is not an Epic or Initiative -- placement is set on the "
+                      f"Epic or its Initiative; pass that number")
+    own = has_label(issue, label)
+    parent = by_number.get((issue.get("parent") or {}).get("number"))
+    inherited = (parent is not None and is_initiative(parent) and has_label(parent, label))
+    current = "cloud" if own or inherited else "local"
+    result = {"issue": number, "placed": current, "label": label,
+              "label_added": False, "label_removed": False, "worktrees": []}
+    if where == "local" and inherited:
+        return {**result, "refused": True, "inherited_from": parent["number"],
+                "reason": f"Initiative #{parent['number']} carries `{label}`, so every Epic "
+                          f"under it is cloud-placed -- `place {parent['number']} --where "
+                          f"local` instead"}
+    if current == where:
+        return {**result, "already": True}
+    units = _placement_units(number, issues)
+    held = [{"issue": n, "unit": unit, "path": entry["path"], "branch": entry["branch"]}
+            for entry, (unit, n) in unit_worktrees(repo_path, runner) if (unit, n) in units]
+    result["worktrees"] = held
+    if held and not force:
+        return {**result, "refused": True,
+                "reason": f"{len(held)} local worktree(s) still hold units of #{number}: "
+                          f"{', '.join(w['path'] for w in held)}. Work not pushed from them "
+                          f"is invisible to the other side -- push or release them (or "
+                          f"pass --force), then re-run"}
+    if where == "cloud":
+        gh.ensure_label(label)
+        gh.issue_edit(number, add_labels=[label])
+        result["label_added"] = True
+    else:
+        gh.issue_edit(number, remove_labels=[label])
+        result["label_removed"] = True
+    if held:
+        result["forced"] = True
+    if where == "local" and is_initiative(issue):
+        still = sorted(k["number"] for k in issues
+                       if (k.get("parent") or {}).get("number") == number
+                       and is_epic(k) and has_label(k, label) and k["state"] == "OPEN")
+        if still:
+            result["still_cloud"] = still
+    return {**result, "placed": where}
 
 
 def cmd_comment(gh: WorkItemProvider, issue: int, body: Optional[str] = None,
@@ -7064,6 +7301,9 @@ class StepSequence:
         out = {**fields, "ok": self.ok, "completed_steps": self.completed,
                failed_key: self.failed_step, "remaining_steps": self.remaining,
                "steps": self.steps}
+        warnings = [w for step in self.steps.values() for w in (step.get("warnings") or [])]
+        if warnings:
+            out["warnings"] = warnings
         if self.error:
             out["error"] = self.error
         elif self.stopped:
@@ -7306,7 +7546,9 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
     (`failed_step: "run-cap"`, `stop_at_cap`, exit 0) once the run is at its cap.
     Returns `path`, `claimed` plus the steps."""
     role = RETIRED_ROLES.get(role, role)
-    if unit == "epic" and gh.classify_unit(number) != "epic":
+    lookup = _issue_info_lookup(gh)
+    check_placement(number, lookup)
+    if unit == "epic" and classify_unit_from_issue(lookup(number)) != "epic":
         # `--unit epic` on a Task would cut a stray `epic-<n>` branch + worktree.
         raise GhError(f"#{number} is not an Epic -- start-stage --unit epic is only for an "
                       f"Epic; a Task (phase-Task included) takes the default --unit issue")
@@ -8078,6 +8320,16 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--reason", default=None, help="Why, for the comments on all three issues")
     p.set_defaults(func=lambda a: cmd_reparent_issue(get_work_item_provider(), a.issue,
                                                       a.parent, a.reason))
+    p = sub.add_parser("place",
+                        help="Place an Epic/Initiative in the cloud or local (the cloud label)")
+    p.add_argument("number", type=int, help="The Epic or Initiative")
+    p.add_argument("--where", required=True, choices=list(PLACEMENTS))
+    p.add_argument("--force", action="store_true",
+                    help="Place it even while local worktrees hold its units")
+    p.add_argument("--repo-path", default=".",
+                    help="Repo whose `git worktree list` is checked for its units")
+    p.set_defaults(func=lambda a: cmd_place(get_work_item_provider(), a.number, a.where,
+                                            a.force, a.repo_path))
     p = sub.add_parser("comment", help="Post a plain comment on an issue (no marker)")
     p.add_argument("issue", type=int)
     text = p.add_mutually_exclusive_group(required=True)
@@ -8095,6 +8347,9 @@ def main(argv: Optional[list] = None) -> int:
         print(json.dumps(result))
         # Commands that report their own `ok: False` (auto-pass-gate, composites) exit 1.
         return 0 if result.get("ok", True) else 1
+    except PlacementMismatch as e:
+        print(json.dumps(e.payload))
+        return 1
     except GhError as e:
         print(json.dumps({"error": str(e)}))
         return 1

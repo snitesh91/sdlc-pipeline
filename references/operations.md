@@ -131,6 +131,11 @@ or the kept origin branch (`retained_local_branch` otherwise), then `git worktre
 `close-epic` does the same for the epic and its children; `prune-stale` sweeps every
 closed unit.
 
+A deletion that failed (not a keep) comes back as a top-level `warnings` list, one line
+per branch, on `merge-pr`, `close-issue`, `close-epic`, `prune-stale` and the composites
+that run them. Relay every line to the operator as soon as you see it and again in Step 4; the
+operator removes the branch.
+
 ## Assignee convention
 
 Only the operator's login is assignable; there is no agent account. Unassigned is the

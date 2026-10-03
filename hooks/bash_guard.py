@@ -72,7 +72,7 @@ REASONS = {
     "graphql": f"Hand-run GraphQL is blocked: the control plane owns GitHub reads and writes. Use {SDLC} <command> (next-action, check-gate, pr-checks, resolve-thread, audit-issues, ...).",
     "api-mutation": f"Hand-run GitHub REST mutations are blocked. Use the {SDLC} command that owns the change (set-stage, create-issue, mark-blocked, open-gate, ...).",
     "issue create": f"Use {SDLC} create-issue --parent <n> --title ... --body ... --type T [--priority P] [--effort E] (orchestrator only; stage agents report it in their handoff).",
-    "issue edit": f"Issue fields are control-plane-owned: use {SDLC} set-stage / add-blocked-by / mark-blocked. Stage agents report the change in their handoff instead.",
+    "issue edit": f"Issue fields are control-plane-owned: use {SDLC} set-stage / add-blocked-by / mark-blocked, or {SDLC} place <n> --where cloud|local for the placement label. Stage agents report the change in their handoff instead.",
     "issue close": f"Use {SDLC} close-issue <n> [--repo-path <p>] (orchestrator only).",
     "issue reopen": "Reopening an issue is the operator's call; report it (stage agents: outcome needs-human).",
     "pr create": f"Use {SDLC} open-dev-pr (development), {SDLC} open-design-pr or {SDLC} open-gate (orchestrator). An operator-directed PR outside the pipeline (main thread only) names its non-pipeline branch explicitly: gh pr create --head <branch> ...",

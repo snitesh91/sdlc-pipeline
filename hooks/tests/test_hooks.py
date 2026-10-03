@@ -177,6 +177,7 @@ def test_guard_reason_names_control_plane_command(sdlc_repo):
     assert "open-design-pr" in guard("gh pr create --base x", sdlc_repo)
     assert "create-issue" in guard("gh issue create -t x", sdlc_repo)
     assert "set-stage" in guard("gh issue edit 5 --add-label bug", sdlc_repo)
+    assert "place <n> --where" in guard("gh issue edit 5 --add-label sdlc:cloud", sdlc_repo)
     assert "resolve-thread" in guard("gh api graphql -f query='mutation { resolveReviewThread }'", sdlc_repo)
     assert "start-stage" in guard("git worktree add /tmp/x", sdlc_repo)
     assert "review-worktree-add" in guard("git worktree add /tmp/x", sdlc_repo)
@@ -208,6 +209,12 @@ def test_main_thread_without_a_run_is_not_guarded(tmp_path, sdlc_repo, command):
 @pytest.mark.parametrize("command", MAIN_THREAD_WRITES)
 def test_main_thread_with_a_live_run_is_guarded(sdlc_repo, live, command):
     assert "sdlc guard: " in guard(command, sdlc_repo, **live)
+
+
+def test_main_thread_with_a_live_run_may_run_place(sdlc_repo, live):
+    assert guard(CP + "place 9 --where cloud --repo-path /r", sdlc_repo, **live) is None
+    # Positive control: the hand-run label edit it replaces stays denied.
+    assert "sdlc guard: " in guard("gh issue edit 9 --add-label sdlc:cloud", sdlc_repo, **live)
 
 
 @pytest.mark.parametrize("command", MAIN_THREAD_WRITES)
@@ -396,6 +403,7 @@ ROLE_DENIED = [
     ("sdlc:product", CP + "mark-feedback-addressed 5", "orchestrator"),
     ("sdlc:development", CP + "set-stage 5 --stage pr-review", "orchestrator"),
     ("sdlc:development", CP + "merge-pr 9 --issue 5", "orchestrator"),
+    ("sdlc:development", CP + "place 9 --where cloud", "orchestrator"),
     ("sdlc:pr-review", CP + "merge-pr 9 --issue 5", "orchestrator"),
     ("sdlc:pr-review", CP + "sync-branch 5", "orchestrator"),
     ("sdlc:exploratory", CP + "record-epic-verification 9 --kind exploratory --summary s",
