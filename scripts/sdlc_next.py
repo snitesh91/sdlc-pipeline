@@ -72,7 +72,7 @@ REPO = CONFIG["repo"]
 # GraphQL templates name the repository inline (gh's `--repo` doesn't reach `api graphql`).
 _OWNER, _NAME = REPO.split("/", 1)
 DOC_ROOT = CONFIG["docRoot"]
-TOKEN_PATH = CONFIG["tokenPath"]
+TOKEN_PATH = CONFIG.get("tokenPath")  # optional: a config may name only tokenEnv
 TOKEN_ENV = CONFIG.get("tokenEnv")
 STAGE_AFTER_GATE = {"product": "architecture", "architecture": "development"}
 
@@ -8916,11 +8916,13 @@ def _open_gate_cli(a) -> dict:
 
 def main(argv: Optional[list] = None) -> int:
     if not os.environ.get("GITHUB_TOKEN"):
-        source = f"tokenEnv (${TOKEN_ENV}) or " if TOKEN_ENV else ""
+        sources = " or ".join(([f"tokenEnv (${TOKEN_ENV})"] if TOKEN_ENV else [])
+                              + ([f"tokenPath ({TOKEN_PATH})"] if TOKEN_PATH else [])) or "no source"
+        prefix = (f"GITHUB_TOKEN=\"${TOKEN_ENV}\"" if TOKEN_ENV
+                  else f"GITHUB_TOKEN=$(cat {TOKEN_PATH})" if TOKEN_PATH else "GITHUB_TOKEN=<classic PAT>")
         print(json.dumps({"error": "GITHUB_TOKEN not set — the sdlc plugin's SessionStart hook "
-                                    f"exports it from {source}tokenPath ({TOKEN_PATH}); start a new "
-                                    "session in the driven repo, or prefix the call with "
-                                    f"GITHUB_TOKEN=$(cat {TOKEN_PATH})"}))
+                                    f"exports it from {sources}; start a new session in the driven "
+                                    f"repo, or prefix the call with {prefix}"}))
         return 1
     parser = argparse.ArgumentParser(prog="sdlc_next.py")
     repo_path_help = "Any path inside the repository; never used as the git-write target"
