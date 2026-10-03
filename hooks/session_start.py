@@ -1,4 +1,4 @@
-"""SessionStart: export $SDLC, and GITHUB_TOKEN from the config's tokenEnv var or tokenPath, for later Bash calls;
+"""SessionStart: export $SDLC, and GITHUB_TOKEN + GH_TOKEN from the config's tokenEnv var or tokenPath, for later Bash calls;
 flag an orchestrator model off policy; after a compaction, restate the run being driven."""
 import os
 import shlex
@@ -77,14 +77,17 @@ def main() -> int:
     env_name = _token_env(cfg)
     token_file = token if token and os.path.isfile(token) else None
     if env_name or token_file:
-        # Evaluated per Bash call; the configured source overrides any ambient GITHUB_TOKEN
-        # (a stray one would otherwise shadow it), and the secret never lands in the file.
+        # Evaluated per Bash call; the configured source overrides any ambient GITHUB_TOKEN or
+        # GH_TOKEN (gh prefers GH_TOKEN, and a cloud session presets both to a proxy
+        # placeholder), and the secret never lands in the file.
         branches = []
         if env_name:
-            branches.append(f'if [ -n "${{{env_name}:-}}" ]; then export GITHUB_TOKEN="${env_name}"')
+            branches.append(f'if [ -n "${{{env_name}:-}}" ]; then '
+                            f'export GITHUB_TOKEN="${env_name}" GH_TOKEN="${env_name}"')
         if token_file:
             branches.append(f'{"elif" if env_name else "if"} [ -f {shlex.quote(token_file)} ]; '
-                            f'then export GITHUB_TOKEN="$(cat {shlex.quote(token_file)})"')
+                            f'then export GITHUB_TOKEN="$(cat {shlex.quote(token_file)})"; '
+                            f'export GH_TOKEN="$GITHUB_TOKEN"')
         exports.append("; ".join(branches) + "; fi")
         value = _token_value(env_name, token_file)
         if value is None:

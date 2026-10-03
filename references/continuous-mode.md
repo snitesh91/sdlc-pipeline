@@ -4,6 +4,8 @@ Enter only when the operator explicitly asks (e.g. "keep this running on epic 11
 adds survival across unattended real time: `ScheduleWakeup` pacing and a fresh agent per
 unit so context stays bounded.
 
+- **Laptop only.** A cloud run and the Initiative → cloud Epics orchestration never use this
+  mode (`references/cloud-mode.md`).
 - **One Initiative or Epic per loop.** If the operator didn't name it, ask — never infer.
   An Initiative loop descends into its own Epics sequentially (`SKILL.md`, "The Initiative
   loop"); several Initiatives/Epics = several loops, one `ScheduleWakeup` chain each.

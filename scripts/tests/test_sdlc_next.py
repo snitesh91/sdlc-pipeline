@@ -4818,10 +4818,10 @@ def test_verify_exit_still_refuses_review_roles_with_no_stage_value(tmp_path):
         assert "misuse" in result, role
 
 
-def test_get_work_item_provider_defaults_to_github():
-    from sdlc_next import GitHub, get_work_item_provider
+def test_get_work_item_provider_defaults_to_github_over_rest():
+    from sdlc_next import GitHubRest, get_work_item_provider
     provider = get_work_item_provider(runner=ScriptedRunner({}))
-    assert isinstance(provider, GitHub)
+    assert type(provider) is GitHubRest
 
 
 def test_get_work_item_provider_honours_a_configured_github_type():
@@ -6590,6 +6590,23 @@ def test_missing_token_error_names_the_configured_token_env(monkeypatch, capsys)
     monkeypatch.setattr(sdlc_next, "TOKEN_ENV", "MY_GH_TOKEN")
     assert sdlc_next.main(["list-needs-human"]) == 1
     assert "tokenEnv ($MY_GH_TOKEN)" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_a_config_with_only_token_env_loads_and_names_it(tmp_path, monkeypatch):
+    # tokenPath is optional: a repo that reads its token only from tokenEnv (laptop and cloud
+    # alike) must load, and the missing-token error must not mention a tokenPath.
+    cfg = json.loads((Path(__file__).resolve().parents[2] / "sdlc.config.sample.json").read_text())
+    cfg.pop("tokenPath")
+    cfg["tokenEnv"] = "MY_GH_TOKEN"
+    path = tmp_path / "sdlc-pipeline.config.json"
+    path.write_text(json.dumps(cfg))
+    env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "MY_GH_TOKEN")}
+    out = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "sdlc_next.py"),
+                          "list-needs-human"], env={**env, "SDLC_CONFIG": str(path)},
+                         capture_output=True, text=True)
+    err = json.loads(out.stdout)["error"]
+    assert out.returncode == 1 and "tokenEnv ($MY_GH_TOKEN)" in err and "tokenPath" not in err
+    assert 'GITHUB_TOKEN="$MY_GH_TOKEN"' in err
 
 
 # --- gate PR label (the workflow's cheap pre-filter) and merge-pr terminal fields ---

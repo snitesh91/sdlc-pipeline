@@ -60,10 +60,13 @@ sdlc.config.sample.json          config template
 5. **Token**: point the config's `tokenPath` at a file holding a classic PAT (`ghp_`), or name an
    env var in `tokenEnv`; fine-grained PATs cannot read check-runs or write the custom fields.
    The SessionStart hook exports the `tokenEnv` var, else the `tokenPath` file, as
-   `GITHUB_TOKEN`, overriding any ambient one, and warns when it is not a `ghp_` token.
+   `GITHUB_TOKEN` and `GH_TOKEN`, overriding any ambient one, and warns when it is not a `ghp_` token.
 6. Optional: a repo-specific `<docRoot>/<pipeline.docTemplates>/{product,architecture}.template.md`
    (default `_templates`) overrides the plugin's templates.
-7. Start a run with `sdlc-run <initiative-or-epic-number> [claude args]`: it launches `claude`
+7. Recommended: enable the repo setting **Settings → General → Automatically delete head
+   branches**. The pipeline still deletes each landed branch itself (an already-deleted one
+   is fine) and reports any deletion that fails in a `warnings` list.
+8. Start a run with `sdlc-run <initiative-or-epic-number> [claude args]`: it launches `claude`
    on the orchestrator model (`pipeline.orchestrator.model`, else the policy's) with `/sdlc:run <n>` (a skill's `model:` does not
    outlast its turn).
 
@@ -82,8 +85,8 @@ They are stdlib Python, and they fail open on internal errors.
 
 | Hook | Enforces |
 |---|---|
-| `SessionStart` | Exports `$SDLC` and `GITHUB_TOKEN` (from `tokenEnv` / `tokenPath`) for every Bash call; warns when no token is available; suggests `rtk init` if `rtk` is absent; flags a session model off the policy's orchestrator model; after a compaction, restates this session's run (epic, run-id, units in flight) |
-| `PreToolUse` (Bash) | Denies hand-run `gh api graphql`, `gh issue create/edit/close/reopen`, `gh pr create/merge/ready/close`, mutating `gh api`, `git worktree add` (except `--detach`), force-push and rebase, naming the `python3 "$SDLC"` command to use instead; limits each `sdlc:<role>` agent to its role's control-plane commands (`post-comment` only with its own `--role`), denies `git stash` to every stage agent (one stash stack per repo) and review roles any git write. A main-thread `gh pr create --head <branch>` naming a non-pipeline branch (an operator-directed PR) is allowed. Only each segment's leading words count. Stage agents are always guarded; the main thread only while its session drives a run (a run-state file written in the last 8 h, stamped by `next-action --run-id`), so hand-run backlog or issue cleanup outside a run is allowed. `guard.mainThread: "always"` guards every main-thread session |
+| `SessionStart` | Exports `$SDLC`, `GITHUB_TOKEN` and `GH_TOKEN` (from `tokenEnv` / `tokenPath`) for every Bash call; warns when no token is available; suggests `rtk init` if `rtk` is absent; flags a session model off the policy's orchestrator model; after a compaction, restates this session's run (epic, run-id, units in flight) |
+| `PreToolUse` (Bash) | Denies hand-run `gh api graphql`, `gh issue create/edit/close/reopen`, `gh pr create/merge/ready/close`, mutating `gh api`, `git worktree add` (except `--detach`), force-push and rebase, naming the `python3 "$SDLC"` command to use instead; limits each `sdlc:<role>` agent to its role's control-plane commands (`post-comment` only with its own `--role`), denies `git stash` and `claude` to every stage agent (one stash stack per repo; sessions are the orchestrator's) and review roles any git write. A main-thread `gh pr create --head <branch>` naming a non-pipeline branch (an operator-directed PR) is allowed. Only each segment's leading words count. Stage agents are always guarded; the main thread only while its session drives a run (a run-state file written in the last 8 h, stamped by `next-action --run-id`), so hand-run backlog or issue cleanup outside a run is allowed. `guard.mainThread: "always"` guards every main-thread session |
 | `PreToolUse` (Agent) | Sets every `sdlc:*` agent's `model` from `hooks/model_policy.json` (overridable per role by `pipeline.models` / `pipeline.fanout`), whether the main thread or a continuous-mode cycle agent launches it; denies nested stages and fan-out a role may not do or has exhausted; lets the policy's `explore` roles (`development`, `lld`) launch a read-only `Explore` search |
 | `SubagentStart` | Gives each `sdlc:*` agent `$SDLC`, `docRoot`, `requirementsDir`, `docTemplates`, the references path and the `SDLC-RESULT` format |
 | `SubagentStop` | An `sdlc:*` agent cannot stop until its final message ends with `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "done\|clean\|rework\|blocked\|needs-human\|failed"}` (optional `"next"`/`"why"`: a standing child's recommended next stage); and, for `product`/`architecture`/`lld` finishing `done`, until its handoff went out via `post-comment`; records every finished agent's metrics |
@@ -99,6 +102,7 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `parallelism.devLane` / `.prReview` / `.designLane` | 1 / 1 / 1 | Lane caps; set a lane above 1 to fan it out |
 | `parallelism.crossEpicFootprintCheck` | false | Also check dev-lane footprints against other epics' live worktrees (they never hold a slot) |
 | `parallelism.maxTasksPerRun` | 0 (unlimited) | Units driven to a terminal state per run |
+| `parallelism.cloudSessions` | 3 | Live claude.ai cloud sessions (one per Epic) `launch-cloud-epic` allows repo-wide |
 | `repo` / `docRoot` / `requirementsDir` / `tokenPath` / `humanAssignee` | — (required) | `owner/name`, doc tree, requirements docs (IRDs), PAT file, the operator login `check-epics-closeable` assigns |
 | `pipeline.docTemplates` | `_templates` | Directory under `docRoot` whose `product.template.md` / `architecture.template.md` override the plugin's |
 | `guard.mainThread` | `run-live` | `run-live`: the Bash guard denies the main thread's hand-run mutations only while its session drives a run; `always`: in every session |
@@ -114,6 +118,10 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `pipeline.escalation.replaceAt` / `.needsHumanAt` | 3 / 6 | Bounces before a context-reset replacement / `needs-human` |
 | `pipeline.continuous.cycleCap` | 8 | Merges per unattended run before pausing |
 | `pipeline.resume.liveWindowMinutes` | 30 | A `next-action` resume claimed sooner than this is flagged `likely_live` (another session may be driving it) |
+| `pipeline.placement.cloudLabel` | `sdlc:cloud` | Label that hands an Epic (or its Initiative) to a cloud session — a local session never drives it, a cloud session drives nothing else (`references/cloud-mode.md`) |
+| `pipeline.placement.initiativeEpics` | `local` | `cloud`: a laptop Initiative run launches each runnable Epic in its own cloud session (`launch-cloud-epic`) instead of driving it (`references/cloud-mode.md`, "Initiative → cloud Epics") |
+| `pipeline.placement.stallMinutes` | 90 | A live cloud Epic with no GitHub activity this long is `stalled` in `cloud-status` |
+| `pipeline.humanChannel` | `github` | Where the operator answers: `github` (needs-human, gate PRs) or `session` (the orchestrator asks with `AskUserQuestion` and records the answer; `references/cloud-mode.md`, "Human channel") |
 | `pipeline.orchestrator.model` | `hooks/model_policy.json` (`sonnet`) | Model `sdlc-run` starts the orchestrator on, and the one the session-start hook expects; a family (`opus`) or a full model id |
 | `pipeline.models.<role>` / `pipeline.fanout.<role>` | `hooks/model_policy.json` | Model per stage; which reviews fan out, how wide, at which model |
 | `pipeline.epicClose.auto` | `false` | Whether the orchestrator closes a verified epic itself |
@@ -144,6 +152,8 @@ python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<proj
   (`create-issue --blocked-by`). `/sdlc:run <initiative>` then loops: `next-action` returns
   `cut-phase-tasks` for the next runnable Epic that has none and `run-epic` to drive it, one Epic
   at a time under one run id and one `maxTasksPerRun` cap (`--skip-epic` parks a stalled one).
+  With `pipeline.placement.initiativeEpics: cloud` it instead launches each runnable Epic in
+  its own claude.ai cloud session (`launch-cloud-epic`, watched with `cloud-status`).
   `merge-gate --operator-confirmed` merges a gate PR, only when the operator says to.
 - **Engineering-driven**: a bare Epic with its scope in the body starts at architecture.
 - Each non-standing Epic owns a branch `epic-<n>`, created eagerly, and **every child branches
@@ -158,7 +168,9 @@ python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<proj
   authors and runs only the Epic's new specs), and an Initiative closes after a PM-style
   validation of its `product.md`.
 - Issue tracking sits behind a `WorkItemProvider` interface, and GitHub is the only
-  implementation. Code hosting is GitHub.
+  implementation, a REST client on the laptop and in the cloud; only PR ready-for-review and
+  review threads differ by placement (`references/cloud-mode.md`, "GitHub access in the
+  cloud"). `SDLC_GITHUB_API=graphql` selects the old GraphQL client. Code hosting is GitHub.
 
 ## Running the tests
 

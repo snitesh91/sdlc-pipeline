@@ -3,10 +3,13 @@
 ## Repo access
 
 - `GITHUB_TOKEN` must be set for every `gh` and control-plane call; the SessionStart
-  hook exports it from the config's `tokenEnv` var, else `tokenPath`, overriding any ambient one.
+  hook exports it and `GH_TOKEN` from the config's `tokenEnv` var, else `tokenPath`,
+  overriding any ambient one.
 - The token must be a **classic** PAT (`ghp_`); fine-grained PATs cannot read check-runs
   or write the custom Stage/Pipeline Status fields.
 - `gh` reads and comments work; issue creation is `create-issue` only ("Issue taxonomy").
+- In a cloud session GraphQL and every `gh issue`/`gh pr` subcommand are blocked: read with
+  `gh api` GETs (`references/cloud-mode.md`, "GitHub access in the cloud").
 - The pipeline neither reads nor writes Projects v2 board state; Pipeline Status is the
   only status it maintains (`references/epics.md`, "Epic board Status").
 
@@ -131,6 +134,11 @@ or the kept origin branch (`retained_local_branch` otherwise), then `git worktre
 `close-epic` does the same for the epic and its children; `prune-stale` sweeps every
 closed unit.
 
+A deletion that failed (not a keep) comes back as a top-level `warnings` list, one line
+per branch, on `merge-pr`, `close-issue`, `close-epic`, `prune-stale` and the composites
+that run them. Relay every line to the operator as soon as you see it and again in Step 4; the
+operator removes the branch.
+
 ## Assignee convention
 
 Only the operator's login is assignable; there is no agent account. Unassigned is the
@@ -143,6 +151,7 @@ Before creating a branch for any ad-hoc PR (doc landing, pipeline fix):
 
 ```bash
 gh pr list --state open --json number,title,headRefName
+# cloud session: gh api 'repos/<repo>/pulls?state=open' --jq '.[] | {number, title, head: .head.ref}'
 git worktree list          # a worktree you did not create = another session is on it
 ```
 
@@ -256,8 +265,9 @@ as a shortcut, never skipping a check `merge-pr` enforces:
 1. Verify by hand what `merge-pr` would: passing checks or a fresh matching local-CI
    attestation, the `development->pr-review` handoff with a clean `pr-review`, and the
    freshness gate (`sync-branch` first when behind on anything but docs).
-2. Read each affected PR's real state (`gh pr view <pr> --json state,mergedAt`); a
-   `MERGED` PR needs no second merge.
+2. Read each affected PR's real state (`gh pr view <pr> --json state,mergedAt`; in a cloud
+   session `gh api repos/<repo>/pulls/<pr> --jq '{state, merged_at}'`); a merged PR needs
+   no second merge.
 3. Squash, never a merge commit, in an ephemeral worktree on `origin/<base>` (`epic-<n>` for
    a Task of a non-standing Epic, else `main`): `git merge --squash origin/issue-<n>`,
    `git commit -m "<title> (Closes #<n>)"`, `git push origin <base>`. Never force-push

@@ -26,6 +26,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Callable, Optional, Protocol, Union, runtime_checkable
 
@@ -71,7 +72,7 @@ REPO = CONFIG["repo"]
 # GraphQL templates name the repository inline (gh's `--repo` doesn't reach `api graphql`).
 _OWNER, _NAME = REPO.split("/", 1)
 DOC_ROOT = CONFIG["docRoot"]
-TOKEN_PATH = CONFIG["tokenPath"]
+TOKEN_PATH = CONFIG.get("tokenPath")  # optional: a config may name only tokenEnv
 TOKEN_ENV = CONFIG.get("tokenEnv")
 STAGE_AFTER_GATE = {"product": "architecture", "architecture": "development"}
 
@@ -86,6 +87,8 @@ CROSS_EPIC_FOOTPRINT_CHECK = bool(_PARALLELISM.get("crossEpicFootprintCheck", Fa
 # Units one orchestrator run drives to a terminal state before a resumable stop,
 # bounding the orchestrator's own context growth. 0 = unlimited.
 MAX_TASKS_PER_RUN = _PARALLELISM.get("maxTasksPerRun", 0)
+# Concurrent claude.ai cloud sessions an Initiative run launches for its Epics.
+CLOUD_SESSIONS = _PARALLELISM.get("cloudSessions", 3)
 
 HUMAN_ASSIGNEE = CONFIG["humanAssignee"]
 
@@ -141,6 +144,15 @@ _PIPELINE_DEFAULTS = {
     # A `resume` action younger than `liveWindowMinutes` is flagged `likely_live`: another
     # session may still be driving it, so the orchestrator asks the operator before taking over.
     "resume": {"liveWindowMinutes": 30},
+    # An Epic (or its Initiative) carrying `cloudLabel` is driven only by a cloud session,
+    # every other one only by a local session.
+    # `initiativeEpics`: "cloud" makes a laptop Initiative run launch each runnable Epic in its
+    # own cloud session (`launch-cloud-epic`) instead of driving it; `stallMinutes`: a live
+    # cloud Epic with no GitHub activity this long is `stalled` in `cloud-status`.
+    "placement": {"cloudLabel": "sdlc:cloud", "initiativeEpics": "local", "stallMinutes": 90},
+    # Where operator questions and gate approvals go: "github" (needs-human, gate PRs) or
+    # "session" (the orchestrator asks with AskUserQuestion and records the answer).
+    "humanChannel": "github",
     # A failed CI check whose failed-step log matches one of these (regex, case-insensitive)
     # is flagged `infra_suspect`: the runner broke, not the code -- fix it, `rerun-checks`.
     "ci": {"infraFailurePatterns": [
@@ -300,8 +312,8 @@ def _default_runner(argv: list) -> str:
 @runtime_checkable
 class WorkItemProvider(Protocol):
     """Work-item-tracker contract every `cmd_*` function is written against;
-    `GitHub` is the only implementation. Issue management only -- PR/branch/CI
-    mechanics are deliberately out of scope."""
+    `GitHubRest` (the default) and `GitHub` (GraphQL) implement it. Issue management
+    only -- PR/branch/CI mechanics are deliberately out of scope."""
 
     def issue_list(self) -> list: ...
     def issue_view(self, number: int) -> dict: ...
@@ -326,6 +338,7 @@ class WorkItemProvider(Protocol):
     def clear_stage_field(self, number: int) -> None: ...
     def add_sub_issue(self, parent_number: int, child_number: int) -> None: ...
     def remove_sub_issue(self, parent_number: int, child_number: int) -> None: ...
+    def ensure_label(self, label: str) -> None: ...
 
     def classify_unit(self, number: int) -> str:
         """"initiative", "epic", "task" or "other" for `number`."""
@@ -596,16 +609,38 @@ class GitHub:
     def pr_ready(self, number: int):
         self._run(["gh", "pr", "ready", str(number), "--repo", self.repo])
 
+    def ensure_label(self, label: str):
+        """Create `label` in the repo when missing (idempotent)."""
+        self._run(["gh", "label", "create", label, "--repo", self.repo, "--force"])
+
     def pr_add_label(self, number: int, label: str):
         """Add `label` to a PR, creating it in the repo first (idempotent)."""
-        self._run(["gh", "label", "create", label, "--repo", self.repo, "--force"])
+        self.ensure_label(label)
         self._run(["gh", "pr", "edit", str(number), "--repo", self.repo, "--add-label", label])
+
+    def pr_remove_label(self, number: int, label: str):
+        self._run(["gh", "pr", "edit", str(number), "--repo", self.repo, "--remove-label", label])
 
     def pr_heads_for_branch(self, branch: str) -> list:
         """Every PR (any state) whose head is `branch`: `number`, `state`, `headRefOid`."""
         out = self._run(["gh", "pr", "list", "--repo", self.repo, "--head", branch,
                           "--state", "all", "--json", "number,state,headRefOid"])
         return json.loads(out)
+
+    def open_prs(self) -> list:
+        """Every open PR: `number`, `headRefName`, `title`, `isDraft`, `updatedAt`."""
+        out = self._run(["gh", "pr", "list", "--repo", self.repo, "--state", "open",
+                          "--limit", "500", "--json", "number,headRefName,title,isDraft,updatedAt"])
+        return json.loads(out)
+
+    def branch_last_commit_at(self, branch: str) -> Optional[str]:
+        """Committer date of `branch`'s head on GitHub (REST); None when the branch is absent."""
+        try:
+            out = self._run(["gh", "api", f"repos/{self.repo}/branches/{branch}",
+                             "--jq", ".commit.commit.committer.date"])
+        except GhError:
+            return None
+        return out.strip() or None
 
     def pr_merge(self, number: int, delete_branch: bool = False, method: str = "squash",
                  match_head: Optional[str] = None):
@@ -618,6 +653,13 @@ class GitHub:
         if match_head:
             argv += ["--match-head-commit", match_head]
         self._run(argv)
+
+    def unresolved_review_threads(self, pr_number: int) -> list:
+        """The PR's unresolved review threads: `id`, `isResolved`, `comments.nodes[]`
+        (`body`, `author.login`)."""
+        data = self.graphql(_UNRESOLVED_THREADS_QUERY.format(pr=pr_number))
+        nodes = data["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        return [n for n in nodes if not n["isResolved"]]
 
     def reply_review_thread(self, thread_id: str, body: str):
         self.graphql(_REPLY_REVIEW_THREAD_MUTATION, threadId=thread_id, body=body)
@@ -633,11 +675,460 @@ class GitHub:
         return json.loads(self._run(argv))["data"]
 
 
+# The Claude Code cloud proxy appends this to every text it writes to GitHub.
+_PROXY_FOOTER_RE = re.compile(
+    r"\s*\r?\n---\r?\n_Generated by \[Claude Code\]\(https://claude\.ai/code\)_\s*\Z")
+
+# gh's `pr checks` bucket per check state (conclusion when completed, else status).
+_CHECK_BUCKETS = {"SUCCESS": "pass", "SKIPPED": "skipping", "NEUTRAL": "skipping",
+                  "FAILURE": "fail", "ERROR": "fail", "TIMED_OUT": "fail",
+                  "ACTION_REQUIRED": "fail", "STARTUP_FAILURE": "fail", "CANCELLED": "cancel"}
+_STAGE_OPTION_NAMES = {slug: display for display, slug in STAGE_FIELD_NAMES.items()}
+_STATUS_OPTION_NAMES = {slug: display for display, slug in PIPELINE_STATUS_FIELD_NAMES.items()}
+# `check-gate` thread ids in REST mode: the PR and the thread's first comment.
+_REST_THREAD_ID_RE = re.compile(r"^ccr:(\d+):([^:]+)$")
+
+
+def strip_proxy_footer(text: Optional[str]) -> Optional[str]:
+    """`text` without the cloud proxy's trailing "Generated by Claude Code" footer."""
+    return _PROXY_FOOTER_RE.sub("", text) if text else text
+
+
+def _number_from_url(url: Optional[str]) -> Optional[int]:
+    tail = (url or "").rstrip("/").rsplit("/", 1)[-1]
+    return int(tail) if tail.isdigit() else None
+
+
+class GitHubRest(GitHub):
+    """The GitHub client: REST for everything public REST covers, and `_no_rest_path` for the
+    rest. Reads strip the cloud proxy's footer; config field ids map to REST ids and option
+    names through the org's fields. Inherited methods are REST already."""
+
+    def __init__(self, repo: str = REPO, runner: Runner = _default_runner):
+        super().__init__(repo, runner)
+        self._owner = repo.split("/", 1)[0]
+        self._org_fields: Optional[list] = None
+
+    def graphql(self, query: str, **variables: str) -> dict:
+        if session_placement()["placement"] == "cloud":
+            raise GhError("GraphQL is not available through the Claude Code cloud GitHub proxy")
+        return super().graphql(query, **variables)
+
+    @staticmethod
+    def _no_rest_path(proxy: Callable[[], object], graphql: Callable[[], object]):
+        """The PR operations public REST lacks (ready-for-review, review threads): the cloud
+        proxy's `ccr` routes in a cloud session, which blocks GraphQL; GraphQL locally."""
+        return proxy() if session_placement()["placement"] == "cloud" else graphql()
+
+    # --- REST plumbing ---------------------------------------------------------------
+
+    def _api(self, path: str, *args: str, method: Optional[str] = None) -> str:
+        argv = ["gh", "api"] + (["-X", method] if method else []) + [path, *args]
+        return self._run(argv)
+
+    def _api_json(self, path: str, *args: str, method: Optional[str] = None):
+        out = self._api(path, *args, method=method)
+        return json.loads(out) if out.strip() else None
+
+    def _api_items(self, path: str, jq: str = ".[]") -> list:
+        """Every item across all pages, one compact JSON value per line from `--jq`."""
+        out = self._run(["gh", "api", "--paginate", path, "--jq", jq])
+        return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+    def _issue(self, number: int) -> dict:
+        return self._api_json(f"repos/{self.repo}/issues/{number}")
+
+    def _issue_db_id(self, number: int) -> int:
+        """The issue's numeric REST id (sub-issue and dependency endpoints take it)."""
+        return int(self._api(f"repos/{self.repo}/issues/{number}", "--jq", ".id").strip())
+
+    # --- org issue fields: config GraphQL ids -> REST ids / option names ---------------
+
+    def _fields(self) -> list:
+        if self._org_fields is None:
+            self._org_fields = self._api_items(f"orgs/{self._owner}/issue-fields")
+        return self._org_fields
+
+    def _field(self, node_id: Optional[str], key: str) -> dict:
+        """The org field whose GraphQL `node_id` is `projectFields.<key>`; raises on a miss."""
+        if not node_id:
+            raise GhError(f"projectFields.{key} is not configured")
+        for field in self._fields():
+            if field.get("node_id") == node_id:
+                return field
+        found = ", ".join(f"{f.get('name')} ({f.get('node_id')})" for f in self._fields())
+        raise GhError(f"projectFields.{key}={node_id!r} matches no field in "
+                      f"GET orgs/{self._owner}/issue-fields (found: {found or 'none'})")
+
+    @staticmethod
+    def _option_name(field: dict, wanted: str) -> str:
+        """The REST spelling of option `wanted` (matched by name, case-insensitively)."""
+        names = [o.get("name") for o in field.get("options") or []]
+        for name in names:
+            if (name or "").lower() == wanted.lower():
+                return name
+        raise GhError(f"field {field.get('name')!r} has no option named {wanted!r} "
+                      f"(options: {', '.join(map(str, names)) or 'none'})")
+
+    def _set_field_option(self, number: int, field: dict, option: str):
+        name = self._option_name(field, option)
+        self._api(f"repos/{self.repo}/issues/{number}/issue-field-values",
+                  "-F", f"issue_field_values[][field_id]={field['id']}",
+                  "-f", f"issue_field_values[][value]={name}", method="POST")
+
+    def _clear_field(self, number: int, field: dict):
+        try:
+            self._api(f"repos/{self.repo}/issues/{number}/issue-field-values/{field['id']}",
+                      method="DELETE")
+        except GhError as e:
+            if "HTTP 404" not in str(e):  # no value set: already clear
+                raise
+
+    def _field_values(self, raw: dict) -> dict:
+        """Single-select values of a REST issue, field name -> option name."""
+        out = {}
+        for v in raw.get("issue_field_values") or []:
+            option = v.get("single_select_option")
+            if v.get("data_type") != "single_select" or not option:
+                continue
+            name = v.get("issue_field_name") or next(
+                (f.get("name") for f in self._fields() if f.get("id") == v.get("issue_field_id")),
+                None)
+            if name:
+                out[name] = option.get("name")
+        return out
+
+    def _node(self, raw: dict) -> dict:
+        """A REST issue in `issue_list()`'s GraphQL-era shape."""
+        parent = (raw.get("parent") or {}).get("number") or _number_from_url(
+            raw.get("parent_issue_url"))
+        return {"number": raw["number"], "title": raw.get("title"),
+                "body": strip_proxy_footer(raw.get("body")) or "",
+                "createdAt": raw.get("created_at"), "updatedAt": raw.get("updated_at"),
+                "state": (raw.get("state") or "").upper(),
+                "labels": [{"name": l["name"]} for l in raw.get("labels") or []],
+                "issueType": {"name": raw["type"]["name"]} if raw.get("type") else None,
+                "parent": {"number": parent} if parent else None,
+                "milestone": (raw.get("milestone") or {}).get("title"),
+                "fields": self._field_values(raw)}
+
+    # --- issues ----------------------------------------------------------------------
+
+    def issue_list(self) -> list:
+        items = self._api_items(f"repos/{self.repo}/issues?state=all&per_page=100"
+                                f"&sort=created&direction=asc")
+        return [self._node(i) for i in items if not i.get("pull_request")]
+
+    def _comments(self, number: int) -> list:
+        return [{"id": c.get("node_id"), "author": {"login": (c.get("user") or {}).get("login")},
+                 "body": strip_proxy_footer(c.get("body")) or "",
+                 "createdAt": c.get("created_at"), "url": c.get("html_url")}
+                for c in self._api_items(f"repos/{self.repo}/issues/{number}/comments"
+                                         f"?per_page=100")]
+
+    def issue_view(self, number: int) -> dict:
+        node = self._node(self._issue(number))
+        return {**{k: node[k] for k in ("number", "title", "labels", "body", "state")},
+                "comments": self._comments(number)}
+
+    def issue_edit(self, number: int, add_labels: list = (), remove_labels: list = (),
+                   add_assignees: list = (), remove_assignees: list = ()):
+        base = f"repos/{self.repo}/issues/{number}"
+        if add_labels:
+            self._api(f"{base}/labels", *[a for l in add_labels for a in ("-f", f"labels[]={l}")],
+                      method="POST")
+        for label in remove_labels:
+            try:
+                self._api(f"{base}/labels/{urllib.parse.quote(label, safe='')}", method="DELETE")
+            except GhError as e:
+                if "HTTP 404" not in str(e):  # not on the issue: already removed
+                    raise
+        for assignees, method in ((add_assignees, "POST"), (remove_assignees, "DELETE")):
+            if assignees:
+                self._api(f"{base}/assignees",
+                          *[a for x in assignees for a in ("-f", f"assignees[]={x}")],
+                          method=method)
+
+    def issue_node_id(self, number: int) -> str:
+        return self._api(f"repos/{self.repo}/issues/{number}", "--jq", ".node_id").strip()
+
+    def issue_fields(self, number: int) -> dict:
+        return self._field_values(self._issue(number))
+
+    def issue_epic_info(self, number: int) -> dict:
+        node = self._node(self._issue(number))
+        return {k: node[k] for k in ("issueType", "parent", "labels")}
+
+    def _dependencies(self, number: int, kind: str) -> list:
+        items = self._api_items(f"repos/{self.repo}/issues/{number}/dependencies/{kind}"
+                                f"?per_page=100")
+        return [i["number"] for i in items if i.get("state") == "open"]
+
+    def blocked_by(self, number: int) -> list:
+        return self._dependencies(number, "blocked_by")
+
+    def blocking(self, number: int) -> list:
+        return self._dependencies(number, "blocking")
+
+    def add_blocked_by(self, issue_number: int, blocking_number: int):
+        self._api(f"repos/{self.repo}/issues/{issue_number}/dependencies/blocked_by",
+                  "-F", f"issue_id={self._issue_db_id(blocking_number)}", method="POST")
+
+    def remove_blocked_by(self, issue_number: int, blocking_number: int):
+        self._api(f"repos/{self.repo}/issues/{issue_number}/dependencies/blocked_by/"
+                  f"{self._issue_db_id(blocking_number)}", method="DELETE")
+
+    def set_issue_type(self, number: int, type_name: str):
+        """Sets the type by name; still refuses a type missing from `issueTypeIds`."""
+        if type_name not in ISSUE_TYPE_IDS:
+            raise GhError(f"type_name={type_name!r} is not in projectFields.issueTypeIds "
+                          f"(configured: {sorted(ISSUE_TYPE_IDS)})")
+        self._api(f"repos/{self.repo}/issues/{number}", "-f", f"type={type_name}",
+                  method="PATCH")
+
+    def set_stage_field(self, number: int, stage: str):
+        if stage not in STAGE_OPTION_IDS or stage not in _STAGE_OPTION_NAMES:
+            raise GhError(f"stage {stage!r} is not in projectFields.stageOptionIds")
+        self._set_field_option(number, self._field(STAGE_FIELD_ID, "stageFieldId"),
+                               _STAGE_OPTION_NAMES[stage])
+
+    def set_pipeline_status_field(self, number: int, status: str):
+        if status not in PIPELINE_STATUS_OPTION_IDS or status not in _STATUS_OPTION_NAMES:
+            raise GhError(f"status {status!r} is not in projectFields.pipelineStatusOptionIds")
+        self._set_field_option(number, self._field(PIPELINE_STATUS_FIELD_ID,
+                                                   "pipelineStatusFieldId"),
+                               _STATUS_OPTION_NAMES[status])
+
+    def set_priority_field(self, number: int, priority: str):
+        if priority not in PRIORITY_OPTION_IDS:
+            raise GhError(f"priority {priority!r} is not in projectFields.priorityOptionIds")
+        self._set_field_option(number, self._field(PRIORITY_FIELD_ID, "priorityFieldId"),
+                               priority)
+
+    def set_effort_field(self, number: int, effort: str):
+        if effort not in EFFORT_OPTION_IDS:
+            raise GhError(f"effort {effort!r} is not in projectFields.effortOptionIds")
+        self._set_field_option(number, self._field(EFFORT_FIELD_ID, "effortFieldId"), effort)
+
+    def clear_stage_and_status_fields(self, number: int):
+        self._clear_field(number, self._field(STAGE_FIELD_ID, "stageFieldId"))
+        self._clear_field(number, self._field(PIPELINE_STATUS_FIELD_ID, "pipelineStatusFieldId"))
+
+    def clear_stage_field(self, number: int):
+        self._clear_field(number, self._field(STAGE_FIELD_ID, "stageFieldId"))
+
+    def add_sub_issue(self, parent_number: int, child_number: int):
+        self._api(f"repos/{self.repo}/issues/{parent_number}/sub_issues",
+                  "-F", f"sub_issue_id={self._issue_db_id(child_number)}", method="POST")
+
+    def remove_sub_issue(self, parent_number: int, child_number: int):
+        self._api(f"repos/{self.repo}/issues/{parent_number}/sub_issue",
+                  "-F", f"sub_issue_id={self._issue_db_id(child_number)}", method="DELETE")
+
+    def issue_comment(self, number: int, body: str):
+        self._api(f"repos/{self.repo}/issues/{number}/comments", "-f", f"body={body}",
+                  method="POST")
+
+    def issue_close(self, number: int, reason: str = "completed"):
+        self._api(f"repos/{self.repo}/issues/{number}", "-f", "state=closed",
+                  "-f", f"state_reason={reason.replace(' ', '_')}", method="PATCH")
+
+    def ensure_label(self, label: str):
+        """No-op: adding a missing label to an issue or PR creates it."""
+
+    def delete_branch(self, branch: str):
+        try:
+            super().delete_branch(branch)
+        except GhError as e:
+            raise GhError(f"branch deletion failed (the cloud GitHub proxy refuses ref "
+                          f"deletes): {e}")
+
+    # --- pull requests ---------------------------------------------------------------
+
+    @staticmethod
+    def _pr_state(raw: dict) -> str:
+        if raw.get("merged_at") or raw.get("merged"):
+            return "MERGED"
+        return (raw.get("state") or "").upper()
+
+    def pr_comment(self, number: int, body: str):
+        self.issue_comment(number, body)
+
+    def pr_view(self, number: int, fields: str = "state,mergedAt") -> dict:
+        wanted = [f for f in fields.split(",") if f]
+        raw = self._api_json(f"repos/{self.repo}/pulls/{number}")
+        merged = self._pr_state(raw) == "MERGED"
+        view = {"number": raw["number"], "title": raw.get("title"), "state": self._pr_state(raw),
+                "mergedAt": raw.get("merged_at"), "createdAt": raw.get("created_at"),
+                "body": strip_proxy_footer(raw.get("body")) or "",
+                "isDraft": bool(raw.get("draft")), "url": raw.get("html_url"),
+                "headRefName": raw["head"]["ref"], "headRefOid": raw["head"]["sha"],
+                "baseRefName": raw["base"]["ref"],
+                "mergeCommit": ({"oid": raw.get("merge_commit_sha")}
+                                if merged and raw.get("merge_commit_sha") else None)}
+        if "comments" in wanted:
+            view["comments"] = self._comments(number)
+        return {k: view.get(k) for k in wanted}
+
+    def _prs_for_branch(self, branch: str, state: str) -> list:
+        rest_state = "closed" if state == "merged" else state
+        items = self._api_items(f"repos/{self.repo}/pulls?head={self._owner}:{branch}"
+                                f"&state={rest_state}&per_page=100")
+        items = [p for p in items if p["head"]["ref"] == branch]
+        return [p for p in items if p.get("merged_at")] if state == "merged" else items
+
+    def pr_list_for_branch(self, branch: str, state: str = "open") -> list:
+        return [{"number": p["number"], "isDraft": bool(p.get("draft")),
+                 "headRefName": p["head"]["ref"], "title": p.get("title"),
+                 "url": p.get("html_url")}
+                for p in self._prs_for_branch(branch, state)]
+
+    def pr_heads_for_branch(self, branch: str) -> list:
+        return [{"number": p["number"], "state": self._pr_state(p),
+                 "headRefOid": p["head"]["sha"]}
+                for p in self._prs_for_branch(branch, "all")]
+
+    def open_prs(self) -> list:
+        return [{"number": p["number"], "headRefName": p["head"]["ref"], "title": p.get("title"),
+                 "isDraft": bool(p.get("draft")), "updatedAt": p.get("updated_at")}
+                for p in self._api_items(f"repos/{self.repo}/pulls?state=open&per_page=100")]
+
+    def pr_create(self, base: str, head: str, title: str, body: str, draft: bool = False) -> int:
+        args = ["-f", f"title={title}", "-f", f"body={body}", "-f", f"head={head}",
+                "-f", f"base={base}"] + (["-F", "draft=true"] if draft else [])
+        return int(self._api_json(f"repos/{self.repo}/pulls", *args, method="POST")["number"])
+
+    def pr_ready(self, number: int):
+        self._no_rest_path(
+            lambda: self._api(f"repos/{self.repo}/pulls/{number}/ccr/ready_for_review",
+                              method="POST"),
+            lambda: super(GitHubRest, self).pr_ready(number))
+
+    def pr_add_label(self, number: int, label: str):
+        self.issue_edit(number, add_labels=[label])
+
+    def pr_remove_label(self, number: int, label: str):
+        self.issue_edit(number, remove_labels=[label])
+
+    def pr_merge(self, number: int, delete_branch: bool = False, method: str = "squash",
+                 match_head: Optional[str] = None):
+        """`delete_branch` is ignored: the proxy refuses ref deletes (`cleanup_unit` reports)."""
+        args = ["-f", f"merge_method={method}"]
+        if match_head:
+            args += ["-f", f"sha={match_head}"]
+        self._api(f"repos/{self.repo}/pulls/{number}/merge", *args, method="PUT")
+
+    def pr_checks(self, number: int) -> list:
+        """`gh pr checks --json name,state,bucket,link,workflow` from the head's check runs and
+        commit statuses; `workflow` is the Actions run's workflow name, else ""."""
+        sha = self._api_json(f"repos/{self.repo}/pulls/{number}")["head"]["sha"]
+        runs = self._api_items(f"repos/{self.repo}/commits/{sha}/check-runs?per_page=100",
+                               ".check_runs[]")
+        workflows = {}
+        if any((r.get("app") or {}).get("slug") == "github-actions" for r in runs):
+            workflows = {w.get("check_suite_id"): w.get("name") for w in self._api_items(
+                f"repos/{self.repo}/actions/runs?head_sha={sha}&per_page=100",
+                ".workflow_runs[]")}
+        checks = []
+        for r in runs:
+            state = ((r.get("conclusion") if r.get("status") == "completed" else r.get("status"))
+                     or "pending").upper()
+            checks.append({"name": r.get("name"), "state": state,
+                           "bucket": _CHECK_BUCKETS.get(state, "pending"),
+                           "link": r.get("details_url") or r.get("html_url") or "",
+                           "workflow": workflows.get((r.get("check_suite") or {}).get("id")) or ""})
+        status = self._api_json(f"repos/{self.repo}/commits/{sha}/status") or {}
+        for st in status.get("statuses") or []:
+            state = (st.get("state") or "pending").upper()
+            checks.append({"name": st.get("context"), "state": state,
+                           "bucket": {"SUCCESS": "pass", "FAILURE": "fail",
+                                      "ERROR": "fail"}.get(state, "pending"),
+                           "link": st.get("target_url") or "", "workflow": ""})
+        return checks
+
+    def run_rerun_failed(self, run_id: int) -> None:
+        self._api(f"repos/{self.repo}/actions/runs/{run_id}/rerun-failed-jobs", method="POST")
+
+    # --- review threads (`_no_rest_path`) ----------------------------------------------
+
+    def unresolved_review_threads(self, pr_number: int) -> list:
+        graphql = super().unresolved_review_threads
+        return self._no_rest_path(lambda: self._ccr_unresolved_threads(pr_number),
+                                  lambda: graphql(pr_number))
+
+    def reply_review_thread(self, thread_id: str, body: str):
+        self._no_rest_path(lambda: self._ccr_reply(thread_id, body),
+                           lambda: super(GitHubRest, self).reply_review_thread(thread_id, body))
+
+    def resolve_review_thread(self, thread_id: str):
+        self._no_rest_path(lambda: self._ccr_resolve(thread_id),
+                           lambda: super(GitHubRest, self).resolve_review_thread(thread_id))
+
+    def _ccr_unresolved_threads(self, pr_number: int) -> list:
+        """GraphQL-shaped unresolved threads; each `id` is `ccr:<pr>:<first comment id>`,
+        which `resolve-thread` takes back."""
+        data = self._api_json(f"repos/{self.repo}/pulls/{pr_number}/ccr/review_threads")
+        if isinstance(data, dict):
+            data = next((data[k] for k in ("review_threads", "threads", "nodes") if k in data), [])
+        out = []
+        for t in data or []:
+            resolved = t.get("is_resolved", t.get("isResolved", t.get("resolved", False)))
+            if resolved:
+                continue
+            comments = t.get("comments") or []
+            if isinstance(comments, dict):
+                comments = comments.get("nodes") or []
+            first = comments[0] if comments else {}
+            cid = (t.get("root_comment_id") or t.get("comment_id") or first.get("database_id")
+                   or first.get("databaseId") or first.get("id"))
+            if cid is None:
+                raise GhError(f"PR #{pr_number}: a ccr review thread has no comment id: {t}")
+            out.append({"id": f"ccr:{pr_number}:{cid}", "isResolved": False,
+                        "comments": {"nodes": [
+                            {"body": strip_proxy_footer(c.get("body")) or "",
+                             "author": {"login": (c.get("user") or c.get("author") or {})
+                                        .get("login")}} for c in comments]}})
+        return out
+
+    @staticmethod
+    def _thread(thread_id: str) -> tuple:
+        m = _REST_THREAD_ID_RE.match(thread_id or "")
+        if not m:
+            raise GhError(f"thread id {thread_id!r} is not a cloud-session id "
+                          f"(ccr:<pr>:<comment>) -- take it from this session's check-gate output")
+        return int(m.group(1)), m.group(2)
+
+    def _ccr_reply(self, thread_id: str, body: str):
+        pr, comment = self._thread(thread_id)
+        self._api(f"repos/{self.repo}/pulls/{pr}/comments/{comment}/replies", "-f",
+                  f"body={body}", method="POST")
+
+    def _ccr_resolve(self, thread_id: str):
+        pr, comment = self._thread(thread_id)
+        self._api(f"repos/{self.repo}/pulls/{pr}/ccr/comments/{comment}/resolve", method="POST")
+
+
+GITHUB_APIS = ("graphql", "rest")
+
+
+def github_api() -> dict:
+    """Which GitHub client this session uses and the `signal` that decided it:
+    `SDLC_GITHUB_API` (graphql|rest), else REST (`GitHubRest`) in every placement."""
+    explicit = os.environ.get("SDLC_GITHUB_API", "").strip().lower()
+    if explicit:
+        if explicit not in GITHUB_APIS:
+            raise GhError(f"SDLC_GITHUB_API={explicit!r} is neither 'graphql' nor 'rest' -- "
+                          f"fix or unset it")
+        return {"api": explicit, "signal": "SDLC_GITHUB_API"}
+    return {"api": "rest", "signal": "default"}
+
+
 def get_work_item_provider(runner: Runner = _default_runner) -> WorkItemProvider:
-    """The configured `pipeline.workItemProvider`; only "github" exists, anything else raises."""
+    """The configured `pipeline.workItemProvider`; only "github" exists, anything else raises.
+    GitHub is `GitHubRest`, or the GraphQL `GitHub` when `SDLC_GITHUB_API=graphql`."""
     provider = PIPELINE.get("workItemProvider", {}).get("type", "github")
     if provider == "github":
-        return GitHub(runner=runner)
+        return (GitHubRest if github_api()["api"] == "rest" else GitHub)(runner=runner)
     raise GhError(f"pipeline.workItemProvider.type={provider!r} is not implemented -- "
                   f"only 'github' exists today (see README.md, 'Initiative-driven lifecycle')")
 
@@ -732,6 +1223,99 @@ def is_epic_architected(issue: dict) -> bool:
     """Whether the Epic's design phase is done (label set by `merge-lld-doc`). A label, not
     a marker, so it is readable from the bulk `issue_list()` fetch."""
     return has_label(issue, LABELS["architected"])
+
+
+PLACEMENTS = ("cloud", "local")
+
+
+def cloud_label() -> str:
+    return PIPELINE["placement"]["cloudLabel"]
+
+
+def session_placement() -> dict:
+    """Where this session runs, and the `signal` that decided it: `SDLC_PLACEMENT`
+    (cloud|local, anything else raises), else a truthy `CLAUDE_CODE_REMOTE` (cloud), else local."""
+    explicit = os.environ.get("SDLC_PLACEMENT", "").strip()
+    if explicit:
+        if explicit.lower() not in PLACEMENTS:
+            raise GhError(f"SDLC_PLACEMENT={explicit!r} is neither 'cloud' nor 'local' -- "
+                          f"fix or unset it")
+        return {"placement": explicit.lower(), "signal": "SDLC_PLACEMENT"}
+    if os.environ.get("CLAUDE_CODE_REMOTE", "").strip().lower() in ("true", "1"):
+        return {"placement": "cloud", "signal": "CLAUDE_CODE_REMOTE"}
+    return {"placement": "local", "signal": "default"}
+
+
+def unit_placement(number: int, lookup: Callable[[int], Optional[dict]]) -> dict:
+    """`{placement, epic}` (+ `label_on` when cloud): a unit belongs to its Epic (an Initiative,
+    or an Initiative's own Task, to the Initiative), which is cloud-placed when it or an ancestor
+    carries the cloud label. `lookup(n)` returns an issue dict with flattened `labels`, `parent`,
+    `issueType`."""
+    label = cloud_label()
+    anchor, n = None, number
+    for _ in range(4):
+        info = lookup(n)
+        if info is None:
+            break
+        kind = classify_unit_from_issue(info)
+        if anchor is None and kind in ("epic", "initiative"):
+            anchor = n
+        if anchor is not None and has_label(info, label):
+            return {"placement": "cloud", "epic": anchor, "label_on": n}
+        parent = (info.get("parent") or {}).get("number")
+        if kind == "initiative" or not parent:
+            break
+        n = parent
+    if anchor is None:
+        info = lookup(number)
+        if info and has_label(info, label):
+            return {"placement": "cloud", "epic": number, "label_on": number}
+        return {"placement": "local", "epic": number}
+    return {"placement": "local", "epic": anchor}
+
+
+class PlacementMismatch(GhError):
+    """This session's placement differs from the unit's; `payload` is the JSON refusal."""
+
+    def __init__(self, payload: dict):
+        super().__init__(f"placement_mismatch: {payload['hint']}")
+        self.payload = payload
+
+
+def check_placement(number: int, lookup: Callable[[int], Optional[dict]]) -> dict:
+    """Raise `PlacementMismatch` unless this session's placement is the unit's; returns
+    the session placement."""
+    session = session_placement()
+    unit = unit_placement(number, lookup)
+    if session["placement"] == unit["placement"]:
+        return session
+    epic, label = unit["epic"], cloud_label()
+    if unit["placement"] == "cloud":
+        holder = unit["label_on"]
+        on = "" if holder == epic else f" on #{holder}"
+        hint = (f"#{epic} is placed in the cloud (label `{label}`{on}): only a cloud session "
+                f"drives it. Leave it to that session; to take it back, `place {holder} --where "
+                f"local` once no cloud session is driving it.")
+    else:
+        hint = (f"#{epic} is placed local (no `{label}` label): only a local session drives it. "
+                f"Hand it over from the laptop with `place {epic} --where cloud` first.")
+    hint += (f" Session placement came from {session['signal']}; set SDLC_PLACEMENT=cloud|local "
+             f"only if that is wrong.")
+    raise PlacementMismatch({"error": "placement_mismatch",
+                             "session_placement": session["placement"],
+                             "signal": session["signal"],
+                             "unit_placement": unit["placement"], "epic": epic, "hint": hint})
+
+
+def _issue_info_lookup(gh: WorkItemProvider) -> Callable[[int], Optional[dict]]:
+    """A memoised `issue_epic_info` for `unit_placement`, so each issue is fetched once."""
+    cache: dict = {}
+
+    def lookup(n: int) -> Optional[dict]:
+        if n not in cache:
+            cache[n] = gh.issue_epic_info(n)
+        return cache[n]
+    return lookup
 
 
 def default_stage(parent: Optional[dict]) -> Optional[str]:
@@ -859,7 +1443,7 @@ _ISSUE_LIST_QUERY = """query {{ repository(owner:"__OWNER__", name:"__NAME__") {
   issues(first: 100, after: {after}, orderBy: {{field: CREATED_AT, direction: ASC}}) {{
     pageInfo {{ hasNextPage endCursor }}
     nodes {{
-      number title body createdAt state
+      number title body createdAt updatedAt state
       labels(first: 20) {{ nodes {{ name }} }}
       issueType {{ name }}
       parent {{ number }}
@@ -1513,12 +2097,14 @@ def _finish_epic_close(gh, epic: int, detail: Optional[dict], pr_number: int, ch
     cmd_mark_issue_closed(gh, epic)
     cleanup = cleanup_unit(gh, epic, "epic", repo_path, runner, base="main")
     closed_children = {c["number"] for c in children}
-    return {"epic": epic, "merged": True, **extra, "pr": pr_number, "branch": epic_branch(epic),
-            "worktree": cleanup.pop("worktree"), "cleanup": cleanup,
-            "children_cleanup": sweep_units(gh, repo_path, runner, only=closed_children,
-                                            issues=all_issues)["units"],
-            "run_state": archive_run_state(epic),
-            "stack": _teardown_stack_after_close(epic)}
+    children_cleanup = sweep_units(gh, repo_path, runner, only=closed_children,
+                                   issues=all_issues)["units"]
+    return _with_warnings(
+        {"epic": epic, "merged": True, **extra, "pr": pr_number, "branch": epic_branch(epic),
+         "worktree": cleanup.pop("worktree"), "cleanup": cleanup,
+         "children_cleanup": children_cleanup,
+         "run_state": archive_run_state(epic),
+         "stack": _teardown_stack_after_close(epic)}, cleanup, *children_cleanup)
 
 
 def _teardown_stack_after_close(epic: int) -> dict:
@@ -1622,9 +2208,7 @@ def new_plain_comments(pr: dict, cutoff: str) -> list:
 
 
 def unresolved_review_threads(gh: GitHub, pr_number: int) -> list:
-    data = gh.graphql(_UNRESOLVED_THREADS_QUERY.format(pr=pr_number))
-    nodes = data["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-    return [n for n in nodes if not n["isResolved"]]
+    return gh.unresolved_review_threads(pr_number)
 
 
 def evaluate_gate(gh: GitHub, issue_number: int) -> dict:
@@ -1805,9 +2389,13 @@ def epic_lacks_phase_tasks(all_issues: list, epic: int) -> bool:
 
 
 def _epic_wait_reason(gh: GitHub, epic_issue: dict) -> Optional[str]:
-    """Why an open Epic cannot be run yet (`legacy`, or `blocked by #n`), else None."""
+    """Why an open Epic cannot be run yet (`legacy`, placed in the cloud while this session
+    is local, or `blocked by #n`), else None."""
     if is_epic_legacy(epic_issue):
         return "not driven (legacy profile)"
+    # Under a cloud-placed Initiative every Epic is cloud, and next-action refused a local session.
+    if has_label(epic_issue, cloud_label()) and session_placement()["placement"] != "cloud":
+        return f"placed in the cloud (`{cloud_label()}`) -- a cloud session drives it"
     blockers = gh.blocked_by(epic_issue["number"])
     return f"blocked by {', '.join(f'#{n}' for n in blockers)}" if blockers else None
 
@@ -1866,7 +2454,8 @@ def _merged_design_action(gh: GitHub, issue: dict, epic: int) -> Optional[dict]:
 
 def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                        skip_epics: Optional[list] = None, repo_path: str = ".",
-                       runner: Runner = _default_runner) -> dict:
+                       runner: Runner = _default_runner,
+                       all_issues: Optional[list] = None) -> dict:
     """Pick the next action among the named Epic's/Initiative's open non-Epic children: `skip` |
     `resume` | `pass-gate` | `finish-lld` | `address-gate-feedback` | `route` | `delegate` |
     `stop-at-cap` | `none`; an Initiative with no such child walks its open Epics: `cut-phase-tasks`
@@ -1875,7 +2464,7 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
     a fresh dev-lane unit needs a free slot and a footprint disjoint from the holders'
     (`dev_lane_slots`); `slots` reports that arithmetic on a dev-lane `delegate` or `none`."""
     skip_epics = skip_epics or []
-    all_issues = gh.issue_list()
+    all_issues = gh.issue_list() if all_issues is None else all_issues
     by_number = {i["number"]: i for i in all_issues}
     epic_issue = by_number.get(epic)
     if epic_issue is None:
@@ -1904,6 +2493,7 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
     deferred_by_run_cap: list = []
     deferred_by_lane: list = []
     lane: dict = {}
+    cloud_survey: dict = {}
 
     def capped(stage: str) -> bool:
         return stage == "product" and product_headroom is not None and product_headroom <= 0
@@ -1971,6 +2561,9 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
             if cut_epics and all(i["state"] == "CLOSED" for i in cut_epics):
                 result["reason"] = ("every cut Epic is closed -- ready for initiative-close "
                                     "validation (SKILL.md, \"Closing an Initiative\").")
+            elif cut_epics and cloud_survey:
+                result["reason"] = _cloud_epics_reason(cloud_survey, cut_epics)
+                result["cloud"] = cloud_survey
             elif cut_epics:
                 result["reason"] = _open_epics_reason(gh, cut_epics, skip_epics)
             elif roadmap_tasks and all(i["state"] == "CLOSED" for i in roadmap_tasks):
@@ -2047,7 +2640,23 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
         return with_lane({"action": "delegate", "issue": issue["number"], "unit": "issue",
                           "stage": stage})
 
-    if is_initiative(epic_issue) and epic_issue["state"] == "OPEN" and not deferred_by_run_cap:
+    if (is_initiative(epic_issue) and epic_issue["state"] == "OPEN" and not deferred_by_run_cap
+            and initiative_epics_placement() == "cloud"
+            and session_placement()["placement"] == "local"):
+        # Each Epic runs in its own cloud session; this run only launches them.
+        open_epics = [e["number"] for e in _initiative_epics(all_issues, epic)
+                      if e["state"] == "OPEN"]
+        if open_epics:
+            cloud_survey.update(cloud_epic_survey(gh, all_issues, open_epics,
+                                                  repo_path=repo_path, runner=runner))
+            if cloud_survey["launchable"]:
+                return {"action": "launch-cloud-epics", "initiative": epic, "unit": "epic",
+                        "epics": cloud_survey["launchable"], "cloud": cloud_survey,
+                        "reason": f"pipeline.placement.initiativeEpics is cloud: run "
+                                  f"`launch-cloud-epic <n>` for each of "
+                                  f"{', '.join(f'#{n}' for n in cloud_survey['launchable'])}, "
+                                  f"then `next-action {epic}` again"}
+    elif is_initiative(epic_issue) and epic_issue["state"] == "OPEN" and not deferred_by_run_cap:
         step = _initiative_epic_step(gh, all_issues, epic, skip_epics)
         if step and at_cap:
             deferred_by_run_cap.append(step["epic"])
@@ -2125,7 +2734,7 @@ def _origin_sha(repo_path: str, branch: str, runner: Runner) -> Optional[str]:
 
 
 def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: str = ".",
-                     runner: Runner = _default_runner) -> dict:
+                     runner: Runner = _default_runner, issues: Optional[list] = None) -> dict:
     """Keep a non-standing Epic's `epic-<n>` from rotting against `main`: `sync-branch <epic>
     --unit epic` on this run-id's first call, after `EPIC_SYNC_EVERY_MERGES` terminal units
     since the last sync, or when `origin/main` moved since then (run-state `epic_sync`).
@@ -2136,7 +2745,7 @@ def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: st
     if not run_id:
         return {"skipped": "no --run-id: the sync cadence is tracked per run"}
     try:
-        issues = gh.issue_list()
+        issues = gh.issue_list() if issues is None else issues
         entry = next((i for i in issues if i["number"] == epic), None)
         if (entry is None or not is_epic(entry) or is_epic_standing(entry)
                 or is_epic_legacy(entry) or entry["state"] != "OPEN"):
@@ -2190,14 +2799,17 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     """`next-action`: `decide_next_action` plus `cap_enforced` (true only with a
     `--run-id` and a nonzero cap), which describes the invocation, not the decision.
     A `resume` also carries liveness hints (`_resume_liveness`). With `--sync-epic`,
-    `sync_epic_if_due` runs first and its result is `epic_sync`."""
+    `sync_epic_if_due` runs first and its result is `epic_sync`. Refuses a unit placed
+    on the other side (`check_placement`) before anything else runs."""
     run_id = getattr(args, "run_id", None)
     repo_path = getattr(args, "repo_path", None) or "."
-    epic_sync = (sync_epic_if_due(gh, args.epic, run_id, repo_path)
+    issues = gh.issue_list()
+    check_placement(args.epic, {i["number"]: i for i in issues}.get)
+    epic_sync = (sync_epic_if_due(gh, args.epic, run_id, repo_path, issues=issues)
                  if getattr(args, "sync_epic", False) else None)
     result = decide_next_action(gh, args.epic, run_id=run_id,
                                 skip_epics=getattr(args, "skip_epic", None),
-                                repo_path=repo_path)
+                                repo_path=repo_path, all_issues=issues)
     # Read liveness before note_in_flight re-stamps this run onto the unit.
     liveness = (_resume_liveness(gh, args.epic, result["issue"])
                 if result.get("action") == "resume" else {})
@@ -2214,6 +2826,7 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
     Read-only. Returns `ready_for_review`, `count`, `eligible_total`, `skipped`."""
     limit = PR_REVIEW_PARALLELISM if limit is None else limit
     all_issues = gh.issue_list()
+    check_placement(epic, {i["number"]: i for i in all_issues}.get)
     open_issues = [i for i in all_issues if i["state"] == "OPEN"]
 
     ready, skipped = [], []
@@ -2585,11 +3198,29 @@ def cmd_show_config(runner: Runner = _default_runner) -> dict:
                             "prReview": PR_REVIEW_PARALLELISM,
                             "designLane": DESIGN_LANE_PARALLELISM,
                             "crossEpicFootprintCheck": CROSS_EPIC_FOOTPRINT_CHECK,
-                            "maxTasksPerRun": MAX_TASKS_PER_RUN},
+                            "maxTasksPerRun": MAX_TASKS_PER_RUN,
+                            "cloudSessions": CLOUD_SESSIONS},
             "requiredWorkflows": CONFIG["requiredWorkflows"],
             "localCiSuites": list(LOCAL_CI_SUITES),
             "plugin": plugin_version_info(runner),
+            "session_placement": _session_placement_or_error(),
+            "human_channel": _human_channel_or_error(),
+            "github_api": _github_api_or_error(),
             **PIPELINE}
+
+
+def _github_api_or_error() -> dict:
+    try:
+        return github_api()
+    except GhError as e:
+        return {"error": str(e)}
+
+
+def _session_placement_or_error() -> dict:
+    try:
+        return session_placement()
+    except GhError as e:
+        return {"error": str(e)}
 
 
 # Network failures a single immediate retry usually clears; anything else fails at once.
@@ -3377,6 +4008,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
     if epic_issue is None or not is_epic(epic_issue):
         raise GhError(f"#{epic} is not an epic (pipeline.classification does not call it "
                        f"\"epic\") -- pass the epic's own issue number, not a child issue's")
+    check_placement(epic, by_number.get)
     cap_state = run_cap_state(epic, run_id)
     cap_enforced = bool(run_id) and MAX_TASKS_PER_RUN > 0
     base = {"parallel_ready": [], "count": 0, "eligible_total": 0, "active_count": 0,
@@ -3473,6 +4105,7 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
     if epic_issue is None or not is_epic(epic_issue):
         raise GhError(f"#{epic} is not an epic (pipeline.classification does not call it "
                        f"\"epic\") -- pass the epic's own issue number, not a child issue's")
+    check_placement(epic, by_number.get)
     # An auto-passing Gate A never queues on the human, so it is exempt from the WIP cap.
     product_headroom = (product_wip_headroom(all_issues)
                         if effective_gates(epic_issue)["requiresHumanGateA"] else None)
@@ -4820,7 +5453,8 @@ def _complete_phase_task(gh: GitHub, repo_path: Optional[str], issue: int, stage
         f"{markers}<!-- phase-task-complete: {stage} @ {_utc_now_marker()} -->")
     closed = cmd_close_issue(gh, issue, repo_path=repo_path, runner=runner)
     return {**result, "phase_task_complete": True, "closed": True, "worktree": closed["worktree"],
-            "cleanup": closed["cleanup"]}
+            "cleanup": closed["cleanup"],
+            **({"warnings": closed["warnings"]} if closed.get("warnings") else {})}
 
 
 def _merged_design_pr(gh: GitHub, comments: list, pr: int) -> Optional[tuple]:
@@ -4993,11 +5627,24 @@ def cmd_merge_gate(gh: GitHub, pr_number: int, issue: int, stage: str,
     without green required checks. A design PR and a Roadmap Task's gate squash; a standing or
     parentless issue's merges as a merge commit; the branch is always kept. `pass-gate`
     (next-action, or the Action) then finishes the bookkeeping."""
-    result = {"pr": pr_number, "issue": issue, "stage": stage, "merged": False}
     if not operator_confirmed:
-        return {**result, "refused": True,
+        return {"pr": pr_number, "issue": issue, "stage": stage, "merged": False, "refused": True,
                 "reason": "merge-gate merges a human-review gate PR only when the operator "
                           "explicitly said to; re-run with --operator-confirmed after they did"}
+    return _merge_gate_pr(
+        gh, pr_number, issue, stage,
+        pr_note="Merged by the pipeline at the operator's explicit instruction.",
+        issue_note=lambda base: f"✅ Gate PR #{pr_number} merged into `{base}` at the "
+                                f"operator's instruction.")
+
+
+def _merge_gate_pr(gh: GitHub, pr_number: int, issue: int, stage: str, pr_note: str,
+                   issue_note: Callable[[str], str], extra_markers: str = "",
+                   before_merge: Optional[Callable[[], None]] = None) -> dict:
+    """`merge-gate`'s checks and merge, shared with `approve-gate`: refuses (exit 0) a PR that is
+    no open gate of `issue`/`stage`, behind its base or without green checks; `before_merge`
+    runs only once every check passed."""
+    result = {"pr": pr_number, "issue": issue, "stage": stage, "merged": False}
     pr = gh.pr_view(pr_number, fields="number,headRefName,baseRefName,state,mergedAt,body")
     if pr.get("state") == "MERGED":
         return {**result, "already_merged": True, "next": _pass_gate_hint(issue, pr_number, stage)}
@@ -5028,16 +5675,18 @@ def cmd_merge_gate(gh: GitHub, pr_number: int, issue: int, stage: str,
                              if missing else "")}
     design = bool(_DESIGN_PR_BODY_MARKER.search(pr.get("body") or ""))
     method = "squash" if design or phase_task_parent(gh, issue) is not None else "merge"
+    if before_merge is not None:
+        before_merge()
     try:
         gh.pr_merge(pr_number, delete_branch=False, method=method)
     except GhError:
         # GitHub can answer 5xx after the merge already landed; only a PR still open failed.
         if gh.pr_view(pr_number, fields="state").get("state") != "MERGED":
             raise
-    gh.pr_comment(pr_number, "Merged by the pipeline at the operator's explicit instruction.")
+    gh.pr_comment(pr_number, pr_note)
     gh.issue_comment(issue,
-        f"✅ Gate PR #{pr_number} merged into `{base}` at the operator's instruction.\n\n"
-        f"<!-- gate-merged: {stage}:{pr_number} @ {_utc_now_marker()} -->")
+        f"{issue_note(base)}\n\n"
+        f"<!-- gate-merged: {stage}:{pr_number} @ {_utc_now_marker()} -->{extra_markers}")
     return {**result, "merged": True, "method": method, "base": base, "design_pr": design,
             "next": _pass_gate_hint(issue, pr_number, stage)}
 
@@ -5972,12 +6621,13 @@ def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
         realised = _close_realised_issues(gh, issue, view.get("body"), pr=pr_number)
     terminal = record_terminal_unit(gh, issue, run_id=run_id)
     cleanup = cleanup_unit(gh, issue, "issue", repo_path, gh._run, base=base)
-    return {"pr": pr_number, "issue": issue, "merged": True, "issue_closed": issue_closed,
-            "config_changed": touches_pipeline_config(files),
-            **extra,
-            **({"run_terminal": terminal} if terminal else {}),
-            **({"realised_closed": realised} if realised else {}),
-            "worktree": cleanup.pop("worktree"), "cleanup": cleanup}
+    return _with_warnings(
+        {"pr": pr_number, "issue": issue, "merged": True, "issue_closed": issue_closed,
+         "config_changed": touches_pipeline_config(files),
+         **extra,
+         **({"run_terminal": terminal} if terminal else {}),
+         **({"realised_closed": realised} if realised else {}),
+         "worktree": cleanup.pop("worktree"), "cleanup": cleanup}, cleanup)
 
 
 def _close_realised_issues(gh: GitHub, issue: int, body: Optional[str],
@@ -6084,7 +6734,7 @@ def _cleanup_remote_branch(gh: GitHub, repo_path: str, branch: str, runner: Runn
         except GhError:
             still = head
         if still:
-            return {"deleted": False, "head": head, "reason": str(exc)}
+            return {"deleted": False, "head": head, "error": True, "reason": str(exc)}
     return {"deleted": True, "head": head}
 
 
@@ -6095,7 +6745,7 @@ def _cleanup_local_branch(repo_path: str, branch: str, runner: Runner, safe_refs
     try:
         listed = runner(["git", "-C", repo_path, "branch", "--list", branch]).strip()
     except GhError as exc:
-        return {"deleted": False, "reason": f"branch lookup failed: {exc}"}
+        return {"deleted": False, "error": True, "reason": f"branch lookup failed: {exc}"}
     if not listed:
         return {"deleted": False, "absent": True}
     kept = {"deleted": False, "retained_local_branch": True}
@@ -6112,7 +6762,7 @@ def _cleanup_local_branch(repo_path: str, branch: str, runner: Runner, safe_refs
     try:
         runner(["git", "-C", repo_path, "branch", "-D", branch])
     except GhError as exc:
-        return {**kept, "reason": str(exc)}
+        return {**kept, "error": True, "reason": str(exc)}
     return {"deleted": True}
 
 
@@ -6186,6 +6836,32 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
     return out
 
 
+def cleanup_warnings(cleanup: dict) -> list:
+    """One operator-facing line per branch deletion that failed (`error`); an intentional
+    keep (open PR, unmerged work, checked out) is no warning."""
+    branch = cleanup.get("branch", "?")
+    out = []
+    remote, local = cleanup.get("remote_branch") or {}, cleanup.get("local_branch") or {}
+    if remote.get("error"):
+        out.append(f"origin/{branch} could not be deleted ({_first_line(remote.get('reason'))})"
+                   f" -- the operator deletes it on GitHub")
+    if local.get("error"):
+        out.append(f"local branch {branch} could not be deleted "
+                   f"({_first_line(local.get('reason'))}) -- the operator runs `git branch -D {branch}`")
+    return out
+
+
+def _first_line(text: Optional[str]) -> str:
+    lines = (text or "").strip().splitlines()
+    return lines[0] if lines else "unknown error"
+
+
+def _with_warnings(result: dict, *cleanups: dict) -> dict:
+    """`result` plus a top-level `warnings` list when any cleanup failed a deletion."""
+    warnings = [w for c in cleanups for w in cleanup_warnings(c)]
+    return {**result, "warnings": warnings} if warnings else result
+
+
 def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
                     runner: Runner = _default_runner, not_planned: bool = False,
                     reason: Optional[str] = None) -> dict:
@@ -6213,11 +6889,12 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
     if released.get("released") or released.get("reason") != "no worktree":
         released = {**released, "branch": cleanup["branch"]}
     terminal = record_terminal_unit(gh, issue)
-    return {"issue": issue, "closed": True, "already_closed": already_closed,
-            "worktree": released, "cleanup": cleanup,
-            **({"state_reason": "not_planned"} if not_planned else {}),
-            **({"run_terminal": terminal} if terminal else {}),
-            **({"realised_closed": realised} if realised else {})}
+    return _with_warnings(
+        {"issue": issue, "closed": True, "already_closed": already_closed,
+         "worktree": released, "cleanup": cleanup,
+         **({"state_reason": "not_planned"} if not_planned else {}),
+         **({"run_terminal": terminal} if terminal else {}),
+         **({"realised_closed": realised} if realised else {})}, cleanup)
 
 
 _UNIT_BRANCH_RE = re.compile(rf"^(?:(?P<issue>{re.escape(ISSUE_BRANCH_PREFIX)})|"
@@ -6244,20 +6921,28 @@ def present_units(repo_path: str, runner: Runner = _default_runner) -> set:
     names = local.split() + [line.split("refs/heads/", 1)[1] for line in remote.splitlines()
                              if "refs/heads/" in line]
     units.update(u for u in map(_unit_of_branch, names) if u)
+    units.update(u for _, u in unit_worktrees(repo_path, runner))
+    return units
+
+
+def unit_worktrees(repo_path: str, runner: Runner = _default_runner) -> list:
+    """`(entry, (unit, n))` for every worktree but the main checkout that holds a pipeline
+    branch, or is a detached review/dev tree under `worktrees.root`."""
     w = PIPELINE["worktrees"]
     review_re = re.compile(rf"^(?:{re.escape(w['reviewPrefix'])}|{re.escape(w['devPrefix'])})(\d+)$")
     root = os.path.realpath(w["root"])
+    found = []
     for i, entry in enumerate(worktree_entries(repo_path, runner)):
         if i == 0:
             continue  # the main checkout
         unit = _unit_of_branch(entry["branch"])
-        if unit:
-            units.add(unit)
-        elif entry["branch"] is None and os.path.dirname(os.path.realpath(entry["path"])) == root:
+        if not unit and entry["branch"] is None \
+                and os.path.dirname(os.path.realpath(entry["path"])) == root:
             m = review_re.match(os.path.basename(entry["path"]))
-            if m:
-                units.add(("issue", int(m.group(1))))
-    return units
+            unit = ("issue", int(m.group(1))) if m else None
+        if unit:
+            found.append((entry, unit))
+    return found
 
 
 def sweep_units(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] = None,
@@ -6337,9 +7022,10 @@ def cmd_prune_stale(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] =
     issues = gh.issue_list()
     swept = sweep_units(gh, repo_path, runner, issues=issues, dry_run=dry_run)
     closed = {i["number"] for i in issues if i["state"] == "CLOSED"}
-    result = {"dry_run": dry_run, **swept,
-              ("would_remove_run_states" if dry_run else "run_states_removed"):
-                  _stale_run_states(closed, dry_run)}
+    result = _with_warnings({"dry_run": dry_run, **swept,
+                             ("would_remove_run_states" if dry_run else "run_states_removed"):
+                                 _stale_run_states(closed, dry_run)},
+                            *swept["units"])
     if not dry_run:
         for key, argv in (("worktree_pruned", ["git", "-C", repo_path, "worktree", "prune"]),
                           ("fetch_pruned", ["git", "-C", repo_path, "fetch", "--prune", "origin"])):
@@ -6350,6 +7036,82 @@ def cmd_prune_stale(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] =
                 result[key] = False
                 result[f"{key}_error"] = str(exc)
     return result
+
+
+def _placement_units(number: int, issues: list) -> set:
+    """`(unit, n)` of Epic/Initiative `number` and every descendant: an Epic's `epic-<n>`
+    branch, every other issue's `issue-<n>`."""
+    kids: dict = {}
+    for i in issues:
+        p = (i.get("parent") or {}).get("number")
+        if p:
+            kids.setdefault(p, []).append(i)
+    by_number = {i["number"]: i for i in issues}
+    units, todo = set(), [number]
+    while todo:
+        n = todo.pop()
+        issue = by_number.get(n)
+        if issue is not None and is_epic(issue):
+            units.add(("epic", n))
+        elif issue is not None and n != number:
+            units.add(("issue", n))
+        todo.extend(k["number"] for k in kids.get(n, []))
+    return units
+
+
+def cmd_place(gh: WorkItemProvider, number: int, where: str, force: bool = False,
+              repo_path: str = ".", runner: Runner = _default_runner) -> dict:
+    """Place Epic/Initiative `number` in the cloud (add the cloud label, creating it) or
+    local (remove it). Refuses (`refused`) while a unit under it holds a local worktree,
+    unless `force`, and an Epic's `local` while its Initiative carries the label. Idempotent."""
+    if where not in PLACEMENTS:
+        raise GhError(f"--where must be one of {', '.join(PLACEMENTS)}")
+    label = cloud_label()
+    issues = gh.issue_list()
+    by_number = {i["number"]: i for i in issues}
+    issue = by_number.get(number)
+    if issue is None or classify_unit_from_issue(issue) not in ("epic", "initiative"):
+        raise GhError(f"#{number} is not an Epic or Initiative -- placement is set on the "
+                      f"Epic or its Initiative; pass that number")
+    own = has_label(issue, label)
+    parent = by_number.get((issue.get("parent") or {}).get("number"))
+    inherited = (parent is not None and is_initiative(parent) and has_label(parent, label))
+    current = "cloud" if own or inherited else "local"
+    result = {"issue": number, "placed": current, "label": label,
+              "label_added": False, "label_removed": False, "worktrees": []}
+    if where == "local" and inherited:
+        return {**result, "refused": True, "inherited_from": parent["number"],
+                "reason": f"Initiative #{parent['number']} carries `{label}`, so every Epic "
+                          f"under it is cloud-placed -- `place {parent['number']} --where "
+                          f"local` instead"}
+    if current == where:
+        return {**result, "already": True}
+    units = _placement_units(number, issues)
+    held = [{"issue": n, "unit": unit, "path": entry["path"], "branch": entry["branch"]}
+            for entry, (unit, n) in unit_worktrees(repo_path, runner) if (unit, n) in units]
+    result["worktrees"] = held
+    if held and not force:
+        return {**result, "refused": True,
+                "reason": f"{len(held)} local worktree(s) still hold units of #{number}: "
+                          f"{', '.join(w['path'] for w in held)}. Work not pushed from them "
+                          f"is invisible to the other side -- push or release them (or "
+                          f"pass --force), then re-run"}
+    if where == "cloud":
+        gh.ensure_label(label)
+        gh.issue_edit(number, add_labels=[label])
+        result["label_added"] = True
+    else:
+        gh.issue_edit(number, remove_labels=[label])
+        result["label_removed"] = True
+    if held:
+        result["forced"] = True
+    if where == "local" and is_initiative(issue):
+        still = sorted(k["number"] for k in issues
+                       if (k.get("parent") or {}).get("number") == number
+                       and is_epic(k) and has_label(k, label) and k["state"] == "OPEN")
+        if still:
+            result["still_cloud"] = still
+    return {**result, "placed": where}
 
 
 def cmd_comment(gh: WorkItemProvider, issue: int, body: Optional[str] = None,
@@ -6374,6 +7136,635 @@ def cmd_comment(gh: WorkItemProvider, issue: int, body: Optional[str] = None,
                           f"contract\"); trim it and re-run"}
     gh.issue_comment(issue, body)
     return {"issue": issue, "commented": True, "chars": len(body)}
+
+
+# --- human channel: in-session operator answers and gate approvals ---------------------
+
+HUMAN_CHANNELS = ("github", "session")
+
+
+def human_channel() -> str:
+    """`pipeline.humanChannel`: "github" (needs-human, gate PRs) or "session" (AskUserQuestion)."""
+    value = str(PIPELINE.get("humanChannel") or "github").strip().lower()
+    if value not in HUMAN_CHANNELS:
+        raise GhError(f"pipeline.humanChannel={PIPELINE.get('humanChannel')!r} is neither "
+                      f"'github' nor 'session' -- fix the config")
+    return value
+
+
+def _human_channel_or_error():
+    try:
+        return human_channel()
+    except GhError as e:
+        return {"error": str(e)}
+
+
+def _read_text_arg(text: Optional[str], path: Optional[str], flag: str) -> str:
+    """`text`, or the contents of `path`; exactly one of them, non-empty."""
+    if (text is None) == (path is None):
+        raise GhError(f"pass exactly one of --{flag} / --{flag}-file")
+    if path is not None:
+        try:
+            with io.open(os.path.expanduser(path), encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as exc:
+            raise GhError(f"--{flag}-file must be a readable file: {exc}")
+    text = (text or "").strip()
+    if not text:
+        raise GhError(f"--{flag} is empty")
+    return text
+
+
+def _issue_pipeline_status(gh: WorkItemProvider, issue: int) -> Optional[str]:
+    return PIPELINE_STATUS_FIELD_NAMES.get(gh.issue_fields(issue).get("Pipeline Status"))
+
+
+def cmd_record_operator_answer(gh: WorkItemProvider, issue: int, question: str,
+                               answer: str) -> dict:
+    """Record an operator's in-session answer on `issue` (question + answer, one comment); a
+    unit parked `needs-human` goes back to `todo`, its question settled."""
+    question, answer = question.strip(), answer.strip()
+    if not question or not answer:
+        raise GhError("--question and --answer must both be non-empty")
+    if len(question) + len(answer) > HANDOFF_CAP:
+        return {"issue": issue, "refused": True,
+                "reason": f"question + answer are {len(question) + len(answer):,} chars, over "
+                          f"the {HANDOFF_CAP:,}-char cap; trim the question to its gist and "
+                          f"re-run"}
+    gh.issue_comment(issue,
+        f"🗣️ Operator decision, asked in session\n\n**Q:** {question}\n\n**A:** {answer}\n\n"
+        f"<!-- sdlc:operator-answer @ {_utc_now_marker()} -->")
+    unparked = _issue_pipeline_status(gh, issue) == "needs-human"
+    if unparked:
+        gh.set_pipeline_status_field(issue, "todo")
+    return {"issue": issue, "recorded": True, "unparked": unparked}
+
+
+def _open_gate_of(gh: WorkItemProvider, issue: int) -> tuple:
+    """`(stage, gate_pr, status)` of `issue`'s open gate; raises `_NotAGate` when it has none."""
+    found = find_gate_pr(gh.issue_view(issue).get("comments", []))
+    if not found:
+        raise _NotAGate(f"#{issue} has no gate-pr marker -- no gate was opened on it")
+    status = _issue_pipeline_status(gh, issue)
+    if status not in GATE_PENDING_STATUSES:
+        raise _NotAGate(f"#{issue} has no open gate (Pipeline Status={status!r})")
+    return found[0], found[1], status
+
+
+def cmd_approve_gate(gh: GitHub, issue: int, by_operator_session: bool = False,
+                     note: Optional[str] = None, repo_path: Optional[str] = None,
+                     runner: Runner = _default_runner) -> dict:
+    """The operator approved `issue`'s open gate in session: what their merge on GitHub does
+    (merge the gate PR, then `pass-gate`), plus an audit comment; the next stage is claimed
+    because this session carries on. Refuses (exit 0) without `by_operator_session`, with no
+    open gate, or on `merge-gate`'s refusals."""
+    result = {"issue": issue, "approved": False}
+    if not by_operator_session:
+        return {**result, "refused": True,
+                "reason": "approve-gate records an approval the operator gave in this session; "
+                          "re-run with --by-operator-session only after they chose Approve"}
+    try:
+        stage, pr, _status = _open_gate_of(gh, issue)
+    except _NotAGate as e:
+        return {**result, "refused": True, "reason": e.reason}
+    result.update(gate_pr=pr, stage=stage)
+    gate_label = LABELS["gate"]
+    label = {"removed": False}
+
+    def drop_gate_label():
+        # The Action wakes only for a labelled PR; this session passes the gate itself.
+        try:
+            gh.pr_remove_label(pr, gate_label)
+            label["removed"] = True
+        except GhError:
+            pass
+
+    note_text = f" {note.strip()}" if note and note.strip() else ""
+    marker = f"\n<!-- gate-approved-in-session: {stage}:{pr} @ {_utc_now_marker()} -->"
+    try:
+        merge = _merge_gate_pr(
+            gh, pr, issue, stage,
+            pr_note="Approved by the operator in a Claude Code session; merged by the pipeline.",
+            issue_note=lambda base: f"✅ The operator approved `{stage}.md` in session — gate "
+                                    f"PR #{pr} merged into `{base}`.{note_text}",
+            extra_markers=marker, before_merge=drop_gate_label)
+    except GhError:
+        if label["removed"]:
+            gh.pr_add_label(pr, gate_label)
+        raise
+    if not (merge.get("merged") or merge.get("already_merged")):
+        return {**result, "refused": True, "merge": merge, "reason": merge.get("reason")}
+    if merge.get("already_merged"):
+        gh.issue_comment(issue, f"✅ The operator approved `{stage}.md` in session; gate PR "
+                                f"#{pr} was already merged.{note_text}{marker}")
+    passed = cmd_pass_gate(gh, repo_path, issue, pr, stage, runner=runner, live=True)
+    out = {**result, "approved": True, "merge": merge, "pass_gate": passed,
+           "gate_label_removed": label["removed"]}
+    if passed.get("warnings"):
+        out["warnings"] = passed["warnings"]
+    return out
+
+
+def cmd_request_gate_changes(gh: WorkItemProvider, issue: int, feedback: str) -> dict:
+    """The operator asked for changes to `issue`'s open gate in session: post the text on the
+    gate PR as feedback and flip Pipeline Status to `feedback-received`, so `next-action`
+    returns `address-gate-feedback`."""
+    if len(feedback) > HANDOFF_CAP:
+        return {"issue": issue, "refused": True,
+                "reason": f"the feedback is {len(feedback):,} chars, over the {HANDOFF_CAP:,}-"
+                          f"char cap; split it or trim it and re-run"}
+    try:
+        stage, pr, _status = _open_gate_of(gh, issue)
+    except _NotAGate as e:
+        return {"issue": issue, "refused": True, "reason": e.reason}
+    if gh.pr_view(pr, fields="state").get("state") != "OPEN":
+        return {"issue": issue, "gate_pr": pr, "refused": True,
+                "reason": f"gate PR #{pr} is no longer open -- next-action returns what to do "
+                          f"(pass-gate on a merge)"}
+    gh.pr_comment(pr, f"Operator feedback, given in a Claude Code session:\n\n{feedback}")
+    gh.set_pipeline_status_field(issue, "feedback-received")
+    gh.issue_comment(issue,
+        f"💬 The operator requested changes on #{pr} in session; the pipeline revises the doc."
+        f"\n\n<!-- gate-changes-in-session: {stage}:{pr} @ {_utc_now_marker()} -->")
+    return {"issue": issue, "gate_pr": pr, "stage": stage, "pipeline_status": "feedback-received",
+            "next": "next-action returns address-gate-feedback for this unit"}
+
+
+# --- Initiative -> cloud Epics ------------------------------------------------------------
+
+CLOUD_SESSION_OUTCOMES = ("closed", "waiting-human", "stopped", "abandoned")
+_CLOUD_SESSION_MARKER = re.compile(r"<!--\s*sdlc:cloud-session\s+([^>]*?)\s*-->")
+_CLOUD_SESSION_END_MARKER = re.compile(r"<!--\s*sdlc:cloud-session-end\s+([^>]*?)\s*-->")
+_CLOUD_NUDGE_MARKER = re.compile(r"<!--\s*sdlc:cloud-session-nudge\s+([^>]*?)\s*-->")
+_MARKER_ATTR = re.compile(r"([a-z_]+)=(\S+)")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_SESSION_ID_LINE_RE = re.compile(r"session\s*id\s*[:=]\s*(session_[A-Za-z0-9_-]+)", re.I)
+_SESSION_URL_RE = re.compile(r"https://claude\.ai/code/(session_[A-Za-z0-9_-]+)")
+_BARE_SESSION_RE = re.compile(r"\b(session_[A-Za-z0-9_-]{6,})")
+NUDGES_BEFORE_ESCALATION = 2
+
+
+def initiative_epics_placement() -> str:
+    """`pipeline.placement.initiativeEpics`: where a laptop Initiative run's Epics run."""
+    value = str(PIPELINE["placement"].get("initiativeEpics") or "local").strip().lower()
+    if value not in PLACEMENTS:
+        raise GhError(f"pipeline.placement.initiativeEpics={value!r} is neither 'cloud' nor "
+                      f"'local' -- fix the config")
+    return value
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_ts(value: Optional[str]) -> Optional[datetime]:
+    """A GitHub/marker timestamp as an aware datetime; None when absent or unparseable."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _default_claude_runner(argv: list, timeout: int = 300) -> str:
+    """Run the `claude` CLI; stdout and stderr together. A timeout raises `ClaudeTimeout`
+    carrying what it printed so far."""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        partial = "\n".join(x.decode() if isinstance(x, bytes) else (x or "")
+                            for x in (e.stdout, e.stderr))
+        raise ClaudeTimeout(partial)
+    except OSError as e:
+        raise GhError(f"cannot run {argv[0]!r}: {e}")
+    if proc.returncode != 0:
+        raise GhError(f"command failed ({proc.returncode}): {' '.join(argv)}\n{proc.stderr}")
+    return f"{proc.stdout}\n{proc.stderr}"
+
+
+class ClaudeTimeout(GhError):
+    """The `claude` CLI outlived its timeout; `output` is what it printed until then."""
+
+    def __init__(self, output: str):
+        super().__init__("the claude CLI timed out")
+        self.output = output
+
+
+def parse_cloud_launch(text: str) -> dict:
+    """`{id, url}` from `claude --cloud` output (`Session ID: session_...`,
+    `View: https://claude.ai/code/session_...`), tolerant of ANSI colour, order and wording;
+    a missing url is derived from the id. Either may be None."""
+    text = _ANSI_RE.sub("", text or "")
+    m = _SESSION_ID_LINE_RE.search(text)
+    url = _SESSION_URL_RE.search(text)
+    sid = m.group(1) if m else (url.group(1) if url else None)
+    if sid is None:
+        bare = _BARE_SESSION_RE.search(text)
+        sid = bare.group(1) if bare else None
+    return {"id": sid,
+            "url": url.group(0) if url else (f"https://claude.ai/code/{sid}" if sid else None),
+            "url_derived": bool(sid) and not url}
+
+
+def cloud_sessions(comments: list) -> list:
+    """Cloud sessions recorded on an Epic, oldest first: `{id, url, launched, ended, nudges}`
+    (`ended`: `{outcome, at}` or None; `nudges`: their timestamps). An end or nudge marker
+    belongs to the latest session with its id, else the latest session."""
+    sessions: list = []
+
+    def owner(attrs: dict) -> Optional[dict]:
+        return next((x for x in reversed(sessions) if x["id"] == attrs.get("id")),
+                    sessions[-1] if sessions else None)
+
+    for c in comments:
+        body = c.get("body") or ""
+        for m in _CLOUD_SESSION_MARKER.finditer(body):
+            a = dict(_MARKER_ATTR.findall(m.group(1)))
+            sessions.append({"id": a.get("id"), "url": a.get("url"),
+                             "launched": a.get("launched") or c.get("createdAt"),
+                             "ended": None, "nudges": []})
+        for m in _CLOUD_SESSION_END_MARKER.finditer(body):
+            a = dict(_MARKER_ATTR.findall(m.group(1)))
+            target = owner(a)
+            if target is None:
+                target = {"id": a.get("id"), "url": None, "launched": None, "ended": None,
+                          "nudges": []}
+                sessions.append(target)
+            target["ended"] = {"outcome": a.get("outcome"), "at": a.get("ended") or c.get("createdAt")}
+        for m in _CLOUD_NUDGE_MARKER.finditer(body):
+            a = dict(_MARKER_ATTR.findall(m.group(1)))
+            target = owner(a)
+            if target is not None:
+                target["nudges"].append(a.get("at") or c.get("createdAt"))
+    return sessions
+
+
+def latest_cloud_session(comments: list) -> Optional[dict]:
+    sessions = cloud_sessions(comments)
+    return sessions[-1] if sessions else None
+
+
+def _is_cloud_marker_comment(body: str) -> bool:
+    return bool(_CLOUD_SESSION_MARKER.search(body) or _CLOUD_SESSION_END_MARKER.search(body)
+                or _CLOUD_NUDGE_MARKER.search(body))
+
+
+def _descendants(all_issues: list, root: int) -> list:
+    kids: dict = {}
+    for i in all_issues:
+        p = (i.get("parent") or {}).get("number")
+        if p:
+            kids.setdefault(p, []).append(i)
+    out, todo = [], [root]
+    while todo:
+        for k in kids.get(todo.pop(), []):
+            out.append(k)
+            todo.append(k["number"])
+    return out
+
+
+def epic_last_activity(gh, epic: int, all_issues: list, comments: list, open_prs: list,
+                       branch_commits: bool = True) -> Optional[datetime]:
+    """The Epic's latest GitHub activity: its comments (cloud-session markers excluded), every
+    descendant issue's `updatedAt`, its open PRs' `updatedAt` and, with `branch_commits`, the
+    head commit of each in-progress child's branch and of `epic-<n>`."""
+    times = [_parse_ts(c.get("createdAt")) for c in comments
+             if not _is_cloud_marker_comment(c.get("body") or "")]
+    kids = _descendants(all_issues, epic)
+    times += [_parse_ts(k.get("updatedAt")) for k in kids]
+    branches = {issue_branch(k["number"]) for k in kids} | {epic_branch(epic)}
+    times += [_parse_ts(p.get("updatedAt")) for p in open_prs if p.get("headRefName") in branches]
+    if branch_commits:
+        live = [issue_branch(k["number"]) for k in kids
+                if k.get("state") == "OPEN" and pipeline_status(k) == "in-progress"]
+        for branch in [*live, epic_branch(epic)]:
+            times.append(_parse_ts(gh.branch_last_commit_at(branch)))
+    times = [t for t in times if t is not None]
+    return max(times) if times else None
+
+
+def epic_footprint(repo_path: str, epic_issue: dict,
+                   runner: Runner = _default_runner) -> Optional[list]:
+    """An Epic's footprint: the union of its Tasks' `## Footprint`s in `origin/epic-<n>`'s
+    `lld.md`, else a `## Footprint` in the Epic's body; None when neither has one."""
+    n = epic_issue["number"]
+    try:
+        text = runner(["git", "-C", repo_path, "show",
+                       f"origin/{epic_branch(n)}:{DOC_ROOT}/epic-{n}/lld.md"])
+    except GhError:
+        text = None
+    if text:
+        found = [find_footprint(text[e["line_end"]:e["end"]]) for e in parse_task_headings(text)]
+        found = [f for f in found if f is not None]
+        if found:
+            return sorted({p for f in found for p in f})
+    return find_footprint(epic_issue.get("body") or "")
+
+
+def _cloud_placed(issue: dict, by_number: dict) -> bool:
+    label = cloud_label()
+    parent = by_number.get((issue.get("parent") or {}).get("number"))
+    return has_label(issue, label) or bool(parent and is_initiative(parent)
+                                           and has_label(parent, label))
+
+
+def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = ".",
+                      runner: Runner = _default_runner, relaunch: bool = False,
+                      comments: Optional[dict] = None, open_prs: Optional[list] = None) -> dict:
+    """Which of `candidates` (Epic numbers) may get a cloud session now. `running`: open Epics,
+    repo-wide, whose latest session has no end marker; they hold the `parallelism.cloudSessions`
+    slots. A candidate is `launchable` when it is open, not legacy, not running, not blocked by
+    an open issue, not idle since its last session ended (unless `relaunch`), within the cap,
+    and its footprint is disjoint from the running and already-chosen Epics' (unverifiable when
+    theirs is known and its own is not). Every other open candidate is in `waiting` with a
+    reason."""
+    by_number = {i["number"]: i for i in all_issues}
+    comments = {} if comments is None else comments
+
+    def comments_of(n: int) -> list:
+        if n not in comments:
+            comments[n] = gh.issue_view(n).get("comments", [])
+        return comments[n]
+
+    open_cloud = [i["number"] for i in all_issues if i["state"] == "OPEN" and is_epic(i)
+                  and _cloud_placed(i, by_number)]
+    scan = sorted({*open_cloud, *(n for n in candidates
+                                  if (by_number.get(n) or {}).get("state") == "OPEN")})
+    sessions = {n: latest_cloud_session(comments_of(n)) for n in scan}
+    running = [n for n in scan if sessions[n] and not sessions[n]["ended"]]
+    cap = CLOUD_SESSIONS
+    fetched, footprints, warnings = [False], {}, []
+
+    def footprint_of(n: int) -> Optional[list]:
+        if not fetched[0]:
+            fetched[0] = True
+            try:
+                runner(["git", "-C", repo_path, "fetch", "origin"])
+            except GhError as e:
+                warnings.append(f"git fetch failed ({_first_line(str(e))}); footprints read "
+                                f"from the last fetched origin refs")
+        if n not in footprints:
+            footprints[n] = epic_footprint(repo_path, by_number[n], runner)
+        return footprints[n]
+
+    launchable, waiting = [], []
+    for n in sorted(set(candidates)):
+        epic = by_number.get(n)
+        if epic is None or epic["state"] != "OPEN" or n in running:
+            continue
+        reason = None
+        if is_epic_legacy(epic):
+            reason = "not driven (legacy profile)"
+        else:
+            blockers = gh.blocked_by(n)
+            if blockers:
+                reason = f"blocked by {', '.join(f'#{b}' for b in blockers)}"
+        session = sessions.get(n)
+        if reason is None and session and session["ended"] and not relaunch:
+            ended_at = _parse_ts(session["ended"].get("at"))
+            if open_prs is None:
+                open_prs = gh.open_prs()
+            last = epic_last_activity(gh, n, all_issues, comments_of(n), open_prs,
+                                      branch_commits=False)
+            if ended_at is None or last is None or last <= ended_at:
+                reason = (f"its cloud session ended ({session['ended'].get('outcome')}) with no "
+                          f"GitHub activity since -- `launch-cloud-epic {n} --relaunch` to "
+                          f"start another")
+        if reason is None and len(running) + len(launchable) >= cap:
+            reason = f"cloud session cap reached ({len(running) + len(launchable)}/{cap})"
+        if reason is None:
+            others = [(m, fp) for m in [*running, *launchable]
+                      for fp in [footprint_of(m)] if fp is not None]
+            if others:
+                hit = footprint_collision(footprint_of(n), others)
+                if hit:
+                    reason = hit
+        if reason:
+            waiting.append({"epic": n, "reason": reason})
+        else:
+            launchable.append(n)
+    result = {"cap": cap, "free": max(0, cap - len(running)),
+              "running": [{"epic": n, "session": sessions[n]} for n in running],
+              "launchable": launchable, "waiting": waiting}
+    if warnings:
+        result["warnings"] = warnings
+    return result
+
+
+def _initiative_epics(all_issues: list, initiative: int) -> list:
+    return sorted((i for i in all_issues if is_epic(i)
+                   and (i.get("parent") or {}).get("number") == initiative),
+                  key=lambda i: i["number"])
+
+
+def _cloud_epics_reason(survey: dict, cut_epics: list) -> str:
+    """The Initiative `none` reason in cloud mode: each open Epic's cloud state."""
+    parts = [f"#{r['epic']} running in the cloud ({(r['session'] or {}).get('url') or 'url unknown'})"
+             for r in survey["running"]]
+    parts += [f"#{w['epic']} {w['reason']}" for w in survey["waiting"]]
+    closed = sum(1 for e in cut_epics if e["state"] == "CLOSED")
+    return (f"cloud mode: {len(cut_epics) - closed} cut Epic(s) open, none to launch now: "
+            f"{'; '.join(parts) or 'none'}" + (f" ({closed} closed)" if closed else "")
+            + ". Re-run `/sdlc:run` on the Initiative (or watch `cloud-status`) to launch the "
+              "rest as these close.")
+
+
+def cmd_launch_cloud_epic(gh: GitHub, epic: int, repo_path: str = ".", relaunch: bool = False,
+                          runner: Runner = _default_runner,
+                          claude: Callable[[list], str] = _default_claude_runner) -> dict:
+    """Place `epic` in the cloud and start `claude --cloud "/sdlc:run <epic>"`, recording a
+    session marker on it. Idempotent: an Epic whose latest session has no end marker is never
+    relaunched (`already_running`). Refuses (exit 0) an Epic `cloud_epic_survey` would not
+    launch, and on `place`'s refusal."""
+    all_issues = gh.issue_list()
+    by_number = {i["number"]: i for i in all_issues}
+    issue = by_number.get(epic)
+    if issue is None or not is_epic(issue):
+        raise GhError(f"#{epic} is not an Epic -- launch-cloud-epic takes an Epic number")
+    result = {"epic": epic, "launched": False}
+    if issue["state"] != "OPEN":
+        return {**result, "refused": True, "reason": f"Epic #{epic} is closed"}
+    comments = {epic: gh.issue_view(epic).get("comments", [])}
+    session = latest_cloud_session(comments[epic])
+    if session and not session["ended"]:
+        return {**result, "already_running": True, "session": session}
+    survey = cloud_epic_survey(gh, all_issues, [epic], repo_path=repo_path, runner=runner,
+                               relaunch=relaunch, comments=comments)
+    if epic not in survey["launchable"]:
+        why = next((w["reason"] for w in survey["waiting"] if w["epic"] == epic), "not launchable")
+        return {**result, "refused": True, "reason": why,
+                "running": [r["epic"] for r in survey["running"]], "cap": survey["cap"]}
+    placed = cmd_place(gh, epic, "cloud", repo_path=repo_path, runner=runner)
+    if placed.get("refused"):
+        return {**result, "refused": True, "reason": placed["reason"], "place": placed}
+    argv = ["claude", "--cloud", f"/sdlc:run {epic}"]
+    try:
+        output = claude(argv)
+    except ClaudeTimeout as e:
+        output = e.output
+    parsed = parse_cloud_launch(output)
+    sid, url = parsed["id"] or "unknown", parsed["url"] or "unknown"
+    gh.issue_comment(epic,
+        f"☁️ Cloud session launched for this Epic: {parsed['url'] or 'its URL was not reported'}"
+        f".\n\nIt drives the Epic until it closes, asking the operator in session, then posts "
+        f"an end marker. From the laptop: `cloud-status {epic}`.\n\n"
+        f"<!-- sdlc:cloud-session id={sid} url={url} launched={_iso(_utc_now())} -->")
+    out = {**result, "launched": True, "session": {"id": parsed["id"], "url": parsed["url"]},
+           "place": placed}
+    if parsed["url_derived"]:
+        out["url_derived"] = True
+    if not parsed["id"]:
+        tail = "\n".join(_ANSI_RE.sub("", output or "").strip().splitlines()[-10:])
+        out.update(ok=False, output_tail=tail,
+                   reason="claude --cloud printed no session id; the marker records id=unknown "
+                          "so the Epic is not relaunched -- find the session on claude.ai/code "
+                          "and tell the operator")
+    return out
+
+
+def _epic_cloud_status(gh, epic: int, by_number: dict, all_issues: list, comments: list,
+                       open_prs: list, now: datetime) -> dict:
+    issue = by_number[epic]
+    session = latest_cloud_session(comments)
+    kids = [i for i in all_issues if (i.get("parent") or {}).get("number") == epic]
+    open_kids = [k for k in kids if k["state"] == "OPEN"]
+    by_stage, by_status = {}, {}
+    for k in open_kids:
+        stage, status = current_stage(k) or "none", pipeline_status(k) or "none"
+        by_stage[stage] = by_stage.get(stage, 0) + 1
+        by_status[status] = by_status.get(status, 0) + 1
+    heads = {issue_branch(k["number"]): k["number"] for k in kids}
+    heads[epic_branch(epic)] = epic
+    prs = [{"pr": p["number"], "issue": heads[p["headRefName"]], "title": p.get("title"),
+            "draft": bool(p.get("isDraft")), "updated": p.get("updatedAt")}
+           for p in open_prs if p.get("headRefName") in heads]
+    gates = [{"issue": k["number"], "status": pipeline_status(k)} for k in open_kids
+             if pipeline_status(k) in GATE_PENDING_STATUSES]
+    needs_human = [k["number"] for k in [issue, *open_kids] if pipeline_status(k) == "needs-human"]
+    last = epic_last_activity(gh, epic, all_issues, comments, open_prs)
+    launched = _parse_ts((session or {}).get("launched"))
+    last = max((t for t in (last, launched) if t is not None), default=None)
+    is_open = issue["state"] == "OPEN"
+    live = bool(session) and not session["ended"]
+    idle = round((now - last).total_seconds() / 60, 1) if last else None
+    stall_minutes = PIPELINE["placement"].get("stallMinutes", 90)
+    stalled = is_open and live and idle is not None and idle >= stall_minutes
+    nudges = [t for t in (session or {}).get("nudges", [])
+              if last is None or (_parse_ts(t) or now) > last]
+    return {"epic": epic, "title": issue.get("title"), "state": issue["state"],
+            "session": session, "live": live, "end_marker": bool(session and session["ended"]),
+            "children": {"open": len(open_kids), "closed": len(kids) - len(open_kids),
+                         "by_stage": by_stage, "by_status": by_status},
+            "open_prs": prs, "gates_pending": gates, "needs_human": needs_human,
+            "last_activity": _iso(last) if last else None, "idle_minutes": idle,
+            "stalled": stalled, "nudges_since_activity": len(nudges),
+            "escalate": stalled and len(nudges) >= NUDGES_BEFORE_ESCALATION}
+
+
+def cmd_cloud_status(gh, number: int, repo_path: str = ".", runner: Runner = _default_runner,
+                     now: Optional[datetime] = None) -> dict:
+    """Read-only state of an Initiative's cloud Epics (or one Epic): per Epic its session,
+    children by stage/status, open PRs, pending gates, needs-human, last GitHub activity,
+    `stalled` and `escalate`. On an Initiative in cloud mode also `launchable`, and
+    `attention` when something needs the laptop (launchable, stalled, all Epics closed)."""
+    now = now or _utc_now()
+    all_issues = gh.issue_list()
+    by_number = {i["number"]: i for i in all_issues}
+    issue = by_number.get(number)
+    if issue is None or not (is_epic(issue) or is_initiative(issue)):
+        raise GhError(f"#{number} is not an Epic or Initiative")
+    epics = _initiative_epics(all_issues, number) if is_initiative(issue) else [issue]
+    comments = {e["number"]: gh.issue_view(e["number"]).get("comments", []) for e in epics}
+    open_prs = gh.open_prs()
+    tracked = [e for e in epics if latest_cloud_session(comments[e["number"]])
+               or _cloud_placed(e, by_number)]
+    rows = [_epic_cloud_status(gh, e["number"], by_number, all_issues, comments[e["number"]],
+                               open_prs, now) for e in tracked]
+    result = {"number": number, "kind": "initiative" if is_initiative(issue) else "epic",
+              "now": _iso(now), "stall_minutes": PIPELINE["placement"].get("stallMinutes", 90),
+              "epics": rows,
+              "not_in_cloud": [e["number"] for e in epics if e not in tracked]}
+    attention = any(r["stalled"] for r in rows)
+    if is_initiative(issue):
+        result["all_closed"] = bool(epics) and all(e["state"] == "CLOSED" for e in epics)
+        attention = attention or result["all_closed"]
+        if initiative_epics_placement() == "cloud":
+            survey = cloud_epic_survey(gh, all_issues, [e["number"] for e in epics],
+                                       repo_path=repo_path, runner=runner, comments=comments,
+                                       open_prs=open_prs)
+            result.update(launchable=survey["launchable"], waiting=survey["waiting"],
+                          cap=survey["cap"], running=[r["epic"] for r in survey["running"]])
+            attention = attention or bool(survey["launchable"])
+    result["attention"] = attention
+    return result
+
+
+def cmd_nudge_cloud_epic(gh, epic: int, force: bool = False,
+                         claude: Callable[[list], str] = _default_claude_runner,
+                         now: Optional[datetime] = None) -> dict:
+    """Send `continue: /sdlc:run <epic>` to the Epic's stalled cloud session and record the
+    nudge. After `NUDGES_BEFORE_ESCALATION` nudges with no activity since, it sends nothing
+    and returns `escalate: true` (ask the operator). `force` nudges a session not yet stalled."""
+    now = now or _utc_now()
+    all_issues = gh.issue_list()
+    by_number = {i["number"]: i for i in all_issues}
+    if epic not in by_number or not is_epic(by_number[epic]):
+        raise GhError(f"#{epic} is not an Epic")
+    comments = gh.issue_view(epic).get("comments", [])
+    status = _epic_cloud_status(gh, epic, by_number, all_issues, comments, gh.open_prs(), now)
+    session = status["session"]
+    result = {"epic": epic, "nudged": False, "escalate": False, "status": status}
+    if not status["live"] or status["state"] != "OPEN":
+        return {**result, "refused": True,
+                "reason": "no live cloud session on this Epic (none launched, ended, or the "
+                          "Epic is closed)"}
+    if not status["stalled"] and not force:
+        return {**result, "reason": f"not stalled (idle {status['idle_minutes']} min, threshold "
+                                    f"{PIPELINE['placement'].get('stallMinutes', 90)})"}
+    sid = session.get("id")
+    if status["nudges_since_activity"] >= NUDGES_BEFORE_ESCALATION or not sid or sid == "unknown":
+        return {**result, "escalate": True,
+                "reason": (f"{status['nudges_since_activity']} nudge(s) with no GitHub activity "
+                           f"since" if sid and sid != "unknown" else "the session id is unknown")
+                          + f" -- ask the operator (session {session.get('url')})"}
+    argv = ["claude", "-p", f"continue: /sdlc:run {epic}", "--cloud", sid]
+    timed_out = False
+    try:
+        claude(argv)
+    except ClaudeTimeout:
+        timed_out = True
+    count = status["nudges_since_activity"] + 1
+    gh.issue_comment(epic,
+        f"👉 Nudged the cloud session ({count}/{NUDGES_BEFORE_ESCALATION}): no GitHub activity "
+        f"for {status['idle_minutes']} min.\n\n"
+        f"<!-- sdlc:cloud-session-nudge id={sid} n={count} at={_iso(now)} -->")
+    return {**result, "nudged": True, "nudges": count,
+            **({"reply_timed_out": True} if timed_out else {})}
+
+
+def cmd_end_cloud_session(gh: WorkItemProvider, epic: int, outcome: str,
+                          note: Optional[str] = None) -> dict:
+    """Post the end marker for the Epic's latest cloud session (id `unknown` when none was
+    launched through `launch-cloud-epic`). Idempotent on an already-ended session."""
+    if outcome not in CLOUD_SESSION_OUTCOMES:
+        raise GhError(f"--outcome must be one of {', '.join(CLOUD_SESSION_OUTCOMES)}")
+    if not is_epic(gh.issue_epic_info(epic)):
+        raise GhError(f"#{epic} is not an Epic")
+    session = latest_cloud_session(gh.issue_view(epic).get("comments", []))
+    if session and session["ended"]:
+        return {"epic": epic, "already_ended": True, "session": session}
+    sid = (session or {}).get("id") or "unknown"
+    text = f" {note.strip()}" if note and note.strip() else ""
+    gh.issue_comment(epic,
+        f"☁️ Cloud session ended — outcome `{outcome}`.{text}\n\n"
+        f"<!-- sdlc:cloud-session-end id={sid} outcome={outcome} ended={_iso(_utc_now())} -->")
+    return {"epic": epic, "ended": True, "id": sid, "outcome": outcome}
 
 
 def cmd_detach_epic(gh: GitHub, epic: int, reason: Optional[str] = None) -> dict:
@@ -7064,6 +8455,9 @@ class StepSequence:
         out = {**fields, "ok": self.ok, "completed_steps": self.completed,
                failed_key: self.failed_step, "remaining_steps": self.remaining,
                "steps": self.steps}
+        warnings = [w for step in self.steps.values() for w in (step.get("warnings") or [])]
+        if warnings:
+            out["warnings"] = warnings
         if self.error:
             out["error"] = self.error
         elif self.stopped:
@@ -7306,7 +8700,9 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
     (`failed_step: "run-cap"`, `stop_at_cap`, exit 0) once the run is at its cap.
     Returns `path`, `claimed` plus the steps."""
     role = RETIRED_ROLES.get(role, role)
-    if unit == "epic" and gh.classify_unit(number) != "epic":
+    lookup = _issue_info_lookup(gh)
+    check_placement(number, lookup)
+    if unit == "epic" and classify_unit_from_issue(lookup(number)) != "epic":
         # `--unit epic` on a Task would cut a stray `epic-<n>` branch + worktree.
         raise GhError(f"#{number} is not an Epic -- start-stage --unit epic is only for an "
                       f"Epic; a Task (phase-Task included) takes the default --unit issue")
@@ -7492,6 +8888,7 @@ COMMENT_CAPS = {
     "advance-standing": ("reason", ROUTE_REASON_CAP),
     "skip-pr-review": ("reason", ROUTE_REASON_CAP),
     "close-issue": ("reason", HANDOFF_CAP),
+    "end-cloud-session": ("note", ROUTE_REASON_CAP),
     "comment": ("body", HANDOFF_CAP),
     "detach-epic": ("reason", HANDOFF_CAP),
     "reparent-issue": ("reason", HANDOFF_CAP),
@@ -7519,11 +8916,13 @@ def _open_gate_cli(a) -> dict:
 
 def main(argv: Optional[list] = None) -> int:
     if not os.environ.get("GITHUB_TOKEN"):
-        source = f"tokenEnv (${TOKEN_ENV}) or " if TOKEN_ENV else ""
+        sources = " or ".join(([f"tokenEnv (${TOKEN_ENV})"] if TOKEN_ENV else [])
+                              + ([f"tokenPath ({TOKEN_PATH})"] if TOKEN_PATH else [])) or "no source"
+        prefix = (f"GITHUB_TOKEN=\"${TOKEN_ENV}\"" if TOKEN_ENV
+                  else f"GITHUB_TOKEN=$(cat {TOKEN_PATH})" if TOKEN_PATH else "GITHUB_TOKEN=<classic PAT>")
         print(json.dumps({"error": "GITHUB_TOKEN not set — the sdlc plugin's SessionStart hook "
-                                    f"exports it from {source}tokenPath ({TOKEN_PATH}); start a new "
-                                    "session in the driven repo, or prefix the call with "
-                                    f"GITHUB_TOKEN=$(cat {TOKEN_PATH})"}))
+                                    f"exports it from {sources}; start a new session in the driven "
+                                    f"repo, or prefix the call with {prefix}"}))
         return 1
     parser = argparse.ArgumentParser(prog="sdlc_next.py")
     repo_path_help = "Any path inside the repository; never used as the git-write target"
@@ -8078,6 +9477,16 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--reason", default=None, help="Why, for the comments on all three issues")
     p.set_defaults(func=lambda a: cmd_reparent_issue(get_work_item_provider(), a.issue,
                                                       a.parent, a.reason))
+    p = sub.add_parser("place",
+                        help="Place an Epic/Initiative in the cloud or local (the cloud label)")
+    p.add_argument("number", type=int, help="The Epic or Initiative")
+    p.add_argument("--where", required=True, choices=list(PLACEMENTS))
+    p.add_argument("--force", action="store_true",
+                    help="Place it even while local worktrees hold its units")
+    p.add_argument("--repo-path", default=".",
+                    help="Repo whose `git worktree list` is checked for its units")
+    p.set_defaults(func=lambda a: cmd_place(get_work_item_provider(), a.number, a.where,
+                                            a.force, a.repo_path))
     p = sub.add_parser("comment", help="Post a plain comment on an issue (no marker)")
     p.add_argument("issue", type=int)
     text = p.add_mutually_exclusive_group(required=True)
@@ -8085,6 +9494,60 @@ def main(argv: Optional[list] = None) -> int:
     text.add_argument("--body-file", default=None, help="File holding the comment text")
     p.set_defaults(func=lambda a: cmd_comment(get_work_item_provider(), a.issue, a.body,
                                               a.body_file))
+    # --- human channel (pipeline.humanChannel: session) ---
+    p = sub.add_parser("record-operator-answer",
+                        help="Record an operator's in-session answer on the unit it settles")
+    p.add_argument("issue", type=int)
+    p.add_argument("--question", required=True)
+    p.add_argument("--answer", required=True)
+    p.set_defaults(func=lambda a: cmd_record_operator_answer(get_work_item_provider(), a.issue,
+                                                              a.question, a.answer))
+    p = sub.add_parser("approve-gate",
+                        help="The operator approved the unit's open gate in session: merge + pass it")
+    p.add_argument("issue", type=int)
+    p.add_argument("--by-operator-session", action="store_true",
+                    help="The operator chose Approve in this session")
+    p.add_argument("--note", default=None, help="Optional words of the approval, for the audit comment")
+    p.add_argument("--repo-path", default=None, help=repo_path_help)
+    p.set_defaults(func=lambda a: cmd_approve_gate(get_work_item_provider(), a.issue,
+                                                   a.by_operator_session, a.note, a.repo_path))
+    p = sub.add_parser("request-gate-changes",
+                        help="Post the operator's in-session change request on the open gate PR")
+    p.add_argument("issue", type=int)
+    text = p.add_mutually_exclusive_group(required=True)
+    text.add_argument("--feedback", default=None, help=f"<= {HANDOFF_CAP:,} chars")
+    text.add_argument("--feedback-file", default=None)
+    p.set_defaults(func=lambda a: cmd_request_gate_changes(
+        get_work_item_provider(), a.issue, _read_text_arg(a.feedback, a.feedback_file, "feedback")))
+    # --- Initiative -> cloud Epics (pipeline.placement.initiativeEpics: cloud) ---
+    p = sub.add_parser("launch-cloud-epic",
+                        help="Place an Epic in the cloud and start its claude --cloud session")
+    p.add_argument("epic", type=int)
+    p.add_argument("--relaunch", action="store_true",
+                    help="Launch even though its last session ended with no activity since")
+    p.add_argument("--repo-path", default=".",
+                    help="Repo whose worktrees `place` checks and whose origin holds footprints")
+    p.set_defaults(func=lambda a: cmd_launch_cloud_epic(get_work_item_provider(), a.epic,
+                                                        a.repo_path, a.relaunch))
+    p = sub.add_parser("cloud-status",
+                        help="Read-only state of an Initiative's (or one Epic's) cloud sessions")
+    p.add_argument("number", type=int, help="The Initiative or Epic")
+    p.add_argument("--repo-path", default=".", help="Repo whose origin holds Epic footprints")
+    p.set_defaults(func=lambda a: cmd_cloud_status(get_work_item_provider(), a.number,
+                                                   a.repo_path))
+    p = sub.add_parser("nudge-cloud-epic",
+                        help="Send continue to an Epic's stalled cloud session")
+    p.add_argument("epic", type=int)
+    p.add_argument("--force", action="store_true", help="Nudge even when not stalled")
+    p.set_defaults(func=lambda a: cmd_nudge_cloud_epic(get_work_item_provider(), a.epic,
+                                                       a.force))
+    p = sub.add_parser("end-cloud-session",
+                        help="Post the end marker for the Epic's cloud session")
+    p.add_argument("epic", type=int)
+    p.add_argument("--outcome", required=True, choices=list(CLOUD_SESSION_OUTCOMES))
+    p.add_argument("--note", default=None, help="One line for the operator")
+    p.set_defaults(func=lambda a: cmd_end_cloud_session(get_work_item_provider(), a.epic,
+                                                        a.outcome, a.note))
     args = parser.parse_args(argv)
     refusal = comment_cap_refusal(args)
     if refusal:
@@ -8095,6 +9558,9 @@ def main(argv: Optional[list] = None) -> int:
         print(json.dumps(result))
         # Commands that report their own `ok: False` (auto-pass-gate, composites) exit 1.
         return 0 if result.get("ok", True) else 1
+    except PlacementMismatch as e:
+        print(json.dumps(e.payload))
+        return 1
     except GhError as e:
         print(json.dumps({"error": str(e)}))
         return 1

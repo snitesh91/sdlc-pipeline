@@ -78,7 +78,28 @@ python3 "$SDLC" open-gate <n> --doc product.md --next-stage architecture \
   review rework, `lld.md`) exist only on `issue-<n>`; losing the branch loses them.
 
 After `open-gate` returns, park the unit and go back to Step 1 (`SKILL.md`, "Looping
-within an invocation"). Never poll a gate.
+within an invocation"). Never poll a gate. With `pipeline.humanChannel: "session"`, ask
+instead ("Deciding a gate in session").
+
+## Deciding a gate in session
+
+With `pipeline.humanChannel: "session"`, once `open-gate` returns (and every other runnable
+unit is dispatched), ask the operator with `AskUserQuestion`: the gate PR's url, the doc, your
+`--summary`, and three options:
+
+- **Approve** → `python3 "$SDLC" approve-gate <n> --by-operator-session [--note "<their words>"]`.
+  It does what their merge on GitHub does — `merge-gate`'s checks and merge, then `pass-gate`
+  (a phase-Task closes; anything else claims its next stage, so continue into it) — and leaves
+  an audit comment. It drops the PR's `sdlc:gate` label first, so the Action does not pass the
+  gate a second time. Its refusals are `merge-gate`'s (`behind_base` → `prepare-rework <n>`,
+  then re-run).
+- **Request changes** (free text) → `python3 "$SDLC" request-gate-changes <n> --feedback "<text>"`:
+  posted on the gate PR, Pipeline Status `Feedback Received`; `next-action` then returns
+  `address-gate-feedback` ("Addressing gate feedback"). After `finish-gate-feedback`, ask again.
+- **Decide later on GitHub** → park it as above; their merge or review comments on GitHub take
+  the normal path (the Action, `next-action`).
+
+The operator's choice is the approval; never pick one for them.
 
 ## Checking a gate
 
@@ -127,7 +148,8 @@ updates the open PR (no new PR). Instruct the agent to:
 3. Reply to and resolve each addressed **review thread**: `python3 "$SDLC" resolve-thread
    --thread-id <id> --reply "<summary of the change>"` (the Bash guard allows it to these
    two roles).
-4. Post one reply **on the PR** covering the plain comments (`gh pr comment`), ending with
+4. Post one reply **on the PR** covering the plain comments (`gh pr comment`; in a cloud
+   session `python3 "$SDLC" comment <pr> --body-file <f>`), ending with
    `<!-- gate-comments-processed: <ISO8601 of this comment> -->`.
 5. Post one short **issue** comment (`post-comment <n> --role <its role> --body-file <f>`)
    naming what was addressed and the new commit SHA, then end with `SDLC-RESULT` outcome

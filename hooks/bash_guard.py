@@ -47,9 +47,10 @@ READ_ONLY_COMMANDS = {"show-config", "lld-section", "pairing-counts", "pr-checks
                       "verify-citations", "audit-issues", "check-gate",
                       "check-initiative-closeable"}
 ROLE_COMMANDS = {
-    # `resolve-thread`: a gate-feedback round replies on the stage's own gate PR threads.
-    "product": {"post-comment", "resolve-thread"},
-    "architecture": {"post-comment", "resolve-thread"},
+    # `resolve-thread`: a gate-feedback round replies on the stage's own gate PR threads;
+    # `comment`: its gate PR reply in a cloud session, where `gh pr comment` is blocked.
+    "product": {"post-comment", "resolve-thread", "comment"},
+    "architecture": {"post-comment", "resolve-thread", "comment"},
     "lld": {"post-comment"},
     "product-review": {"record-design-review"},
     "design-review": {"record-design-review"},
@@ -72,7 +73,7 @@ REASONS = {
     "graphql": f"Hand-run GraphQL is blocked: the control plane owns GitHub reads and writes. Use {SDLC} <command> (next-action, check-gate, pr-checks, resolve-thread, audit-issues, ...).",
     "api-mutation": f"Hand-run GitHub REST mutations are blocked. Use the {SDLC} command that owns the change (set-stage, create-issue, mark-blocked, open-gate, ...).",
     "issue create": f"Use {SDLC} create-issue --parent <n> --title ... --body ... --type T [--priority P] [--effort E] (orchestrator only; stage agents report it in their handoff).",
-    "issue edit": f"Issue fields are control-plane-owned: use {SDLC} set-stage / add-blocked-by / mark-blocked. Stage agents report the change in their handoff instead.",
+    "issue edit": f"Issue fields are control-plane-owned: use {SDLC} set-stage / add-blocked-by / mark-blocked, or {SDLC} place <n> --where cloud|local for the placement label. Stage agents report the change in their handoff instead.",
     "issue close": f"Use {SDLC} close-issue <n> [--repo-path <p>] (orchestrator only).",
     "issue reopen": "Reopening an issue is the operator's call; report it (stage agents: outcome needs-human).",
     "pr create": f"Use {SDLC} open-dev-pr (development), {SDLC} open-design-pr or {SDLC} open-gate (orchestrator). An operator-directed PR outside the pipeline (main thread only) names its non-pipeline branch explicitly: gh pr create --head <branch> ...",
@@ -96,6 +97,9 @@ REASONS = {
              "revert.",
     "review-git-write": "Review roles are read-only on the branch: describe the fix in your "
                         "review; the owning stage applies it.",
+    "claude-session": "Starting or messaging Claude sessions (`claude`, `claude --cloud`) is the "
+                      "orchestrator's: put what you need in your handoff (a question for the "
+                      "operator: outcome needs-human).",
 }
 
 
@@ -306,6 +310,8 @@ def _flag_value(words: list, flag: str):
 
 def check_role(words: list, role: str):
     """A stage agent's limits: its role's control-plane commands; reviewers never write git."""
+    if words[0] == "claude":
+        return "claude-session"
     cmd = control_plane_command(words)
     if cmd == "sync-branch":
         return "sync-branch-agent"

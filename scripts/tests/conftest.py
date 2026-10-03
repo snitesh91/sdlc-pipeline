@@ -15,6 +15,10 @@ os.environ.setdefault("SDLC_LOCK_DIR", tempfile.mkdtemp(prefix="sdlc-test-locks-
 os.environ.setdefault("SDLC_RUNS_DIR", tempfile.mkdtemp(prefix="sdlc-test-runs-"))
 # Run state records the calling Claude session; tests run outside one.
 os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+# Every test runs as a local session unless it sets a placement itself.
+os.environ.pop("SDLC_PLACEMENT", None)
+os.environ.pop("CLAUDE_CODE_REMOTE", None)
+os.environ.pop("SDLC_GITHUB_API", None)
 
 
 import pytest  # noqa: E402

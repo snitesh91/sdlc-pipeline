@@ -45,7 +45,8 @@ rework valve. Work in your own **detached** worktree; sibling reviews run concur
    development worktree.
 2. Diff: `git diff origin/<base>...HEAD` (three dots), `<base>` being the PR's base branch
    (`epic-<n>` for a Task of a non-standing Epic, else `main`; the orchestrator's prompt or
-   `gh pr view <pr> --json baseRefName` names it). Empty is a **finding**: report that the PR
+   `gh pr view <pr> --json baseRefName` names it; in a cloud session
+   `gh api repos/<repo>/pulls/<pr> --jq .base.ref`). Empty is a **finding**: report that the PR
    has no changes against `origin/<base>` and stop.
 3. Load the spec — only your unit's slice:
    - **Functional Task:** only its `## Task #<n>` subsection:
