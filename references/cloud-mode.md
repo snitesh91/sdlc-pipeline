@@ -43,9 +43,11 @@ python3 "$SDLC" place <n> --where cloud|local [--force] --repo-path <p>
   in `still_cloud`.
 - **Laptop → cloud:** stop the local run of `<n>`, then
   `place <n> --where cloud --repo-path <p>`, then
-  `claude --cloud "/sdlc:run <n>" --environment <pipeline.placement.cloudEnvironment>`.
+  `claude --cloud "/sdlc:run <n>"`. The session runs on the CLI's default cloud environment,
+  which the operator picks once with `/remote-env` (`--environment` takes only self-hosted
+  environment ids, not claude.ai ones).
 - **Cloud → laptop:** let the cloud run end (or stop it), then `place <n> --where local`
-  from either side, then `sdlc-run <n>` on the laptop.
+  from either side, then `/sdlc:run <n>` on the laptop.
 
 ## A cloud run
 

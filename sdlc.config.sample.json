@@ -166,9 +166,8 @@
       }
     },
     "placement": {
-      "_comment": "Cloud vs local sessions never drive the same Epic. An Epic carrying `cloudLabel` (or whose Initiative does) is driven only by a cloud session (CLAUDE_CODE_REMOTE, or SDLC_PLACEMENT=cloud), every other Epic only by a local one; `place <n> --where cloud|local` moves it. `cloudEnvironment`: the `claude --cloud --environment` name a handoff uses. See references/cloud-mode.md.",
-      "cloudLabel": "sdlc:cloud",
-      "cloudEnvironment": ""
+      "_comment": "Cloud vs local sessions never drive the same Epic. An Epic carrying `cloudLabel` (or whose Initiative does) is driven only by a cloud session (CLAUDE_CODE_REMOTE, or SDLC_PLACEMENT=cloud), every other Epic only by a local one; `place <n> --where cloud|local` moves it. See references/cloud-mode.md.",
+      "cloudLabel": "sdlc:cloud"
     },
     "resume": {
       "_comment": "A `next-action` resume claimed less than `liveWindowMinutes` ago is flagged `likely_live`: another session may still be driving it, so the orchestrator asks the operator before taking over.",

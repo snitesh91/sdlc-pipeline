@@ -205,7 +205,7 @@ def test_show_config_reports_the_session_placement_and_the_defaults(monkeypatch)
     monkeypatch.setattr(s, "plugin_version_info", lambda runner=None: {})
     out = s.cmd_show_config()
     assert out["session_placement"] == {"placement": "local", "signal": "default"}
-    assert (out["placement"]["cloudLabel"], out["placement"]["cloudEnvironment"]) == (CLOUD, "")
+    assert out["placement"]["cloudLabel"] == CLOUD and "cloudEnvironment" not in out["placement"]
     monkeypatch.setenv("SDLC_PLACEMENT", "moon")
     assert "error" in s.cmd_show_config()["session_placement"]
 

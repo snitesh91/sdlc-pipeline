@@ -142,9 +142,8 @@ _PIPELINE_DEFAULTS = {
     # session may still be driving it, so the orchestrator asks the operator before taking over.
     "resume": {"liveWindowMinutes": 30},
     # An Epic (or its Initiative) carrying `cloudLabel` is driven only by a cloud session,
-    # every other one only by a local session. `cloudEnvironment`: the `claude --cloud
-    # --environment` a handoff names.
-    "placement": {"cloudLabel": "sdlc:cloud", "cloudEnvironment": ""},
+    # every other one only by a local session.
+    "placement": {"cloudLabel": "sdlc:cloud"},
     # A failed CI check whose failed-step log matches one of these (regex, case-insensitive)
     # is flagged `infra_suspect`: the runner broke, not the code -- fix it, `rerun-checks`.
     "ci": {"infraFailurePatterns": [
