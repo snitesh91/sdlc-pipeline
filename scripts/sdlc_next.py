@@ -766,8 +766,14 @@ class GitHubRest(GitHub):
     # --- org issue fields: config GraphQL ids -> REST ids / option names ---------------
 
     def _fields(self) -> list:
+        """The org's issue fields (`id`, `node_id`, `name`, `options[{id, name}]`):
+        `projectFields.issueFieldsRest` when the config carries that snapshot, else
+        `GET orgs/{owner}/issue-fields`. The cloud's GitHub proxy allows only repo-scoped
+        paths, so a repo driven from the cloud must carry the snapshot (`show-issue-fields`
+        prints it)."""
         if self._org_fields is None:
-            self._org_fields = self._api_items(f"orgs/{self._owner}/issue-fields")
+            self._org_fields = (_PF.get("issueFieldsRest")
+                                or self._api_items(f"orgs/{self._owner}/issue-fields"))
         return self._org_fields
 
     def _field(self, node_id: Optional[str], key: str) -> dict:
@@ -778,8 +784,10 @@ class GitHubRest(GitHub):
             if field.get("node_id") == node_id:
                 return field
         found = ", ".join(f"{f.get('name')} ({f.get('node_id')})" for f in self._fields())
-        raise GhError(f"projectFields.{key}={node_id!r} matches no field in "
-                      f"GET orgs/{self._owner}/issue-fields (found: {found or 'none'})")
+        source = ("projectFields.issueFieldsRest (stale? re-run show-issue-fields)"
+                  if _PF.get("issueFieldsRest") else f"GET orgs/{self._owner}/issue-fields")
+        raise GhError(f"projectFields.{key}={node_id!r} matches no field in {source} "
+                      f"(found: {found or 'none'})")
 
     @staticmethod
     def _option_name(field: dict, wanted: str) -> str:
@@ -8037,6 +8045,16 @@ def inferred_issue_type(issue: dict) -> Optional[str]:
     return _KIND_TYPES.get(kinds.pop()) if len(kinds) == 1 else None
 
 
+def cmd_show_issue_fields(runner: Runner = _default_runner) -> list:
+    """`GET orgs/{owner}/issue-fields` trimmed to what `GitHubRest` reads, for pasting into
+    `projectFields.issueFieldsRest` (a cloud session cannot read org endpoints)."""
+    owner = REPO.split("/")[0]
+    fields = GitHubRest(runner=runner)._api_items(f"orgs/{owner}/issue-fields")
+    return [{"id": f["id"], "node_id": f["node_id"], "name": f["name"],
+             "options": [{"id": o["id"], "name": o["name"]} for o in f.get("options") or []]}
+            for f in fields]
+
+
 def cmd_repair_issue(gh: WorkItemProvider, number: int, parent: Optional[int] = None,
                      type_name: Optional[str] = None, priority: Optional[str] = None,
                      effort: Optional[str] = None) -> dict:
@@ -9269,6 +9287,10 @@ def main(argv: Optional[list] = None) -> int:
                          "run-state file's current id)")
     p.set_defaults(func=lambda a: cmd_merge_pr(get_work_item_provider(), a.pr, a.issue,
                                                a.repo_path, run_id=a.run_id))
+    p = sub.add_parser("show-issue-fields",
+                       help="The org's issue fields as projectFields.issueFieldsRest wants them "
+                            "(run on the laptop; the cloud cannot read org endpoints)")
+    p.set_defaults(func=lambda a: {"issueFieldsRest": cmd_show_issue_fields()})
     p = sub.add_parser("create-issue")
     p.add_argument("--title", required=True)
     p.add_argument("--body", required=True)

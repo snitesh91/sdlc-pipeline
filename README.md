@@ -118,6 +118,7 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `pipeline.escalation.replaceAt` / `.needsHumanAt` | 3 / 6 | Bounces before a context-reset replacement / `needs-human` |
 | `pipeline.continuous.cycleCap` | 8 | Merges per unattended run before pausing |
 | `pipeline.resume.liveWindowMinutes` | 30 | A `next-action` resume claimed sooner than this is flagged `likely_live` (another session may be driving it) |
+| `projectFields.issueFieldsRest` | none | Snapshot of the org's issue fields (`show-issue-fields` prints it). Required for cloud sessions: the GitHub proxy blocks org endpoints |
 | `pipeline.placement.cloudLabel` | `sdlc:cloud` | Label that hands an Epic (or its Initiative) to a cloud session — a local session never drives it, a cloud session drives nothing else (`references/cloud-mode.md`) |
 | `pipeline.placement.initiativeEpics` | `local` | `cloud`: a laptop Initiative run launches each runnable Epic in its own cloud session (`launch-cloud-epic`) instead of driving it (`references/cloud-mode.md`, "Initiative → cloud Epics") |
 | `pipeline.placement.stallMinutes` | 90 | A live cloud Epic with no GitHub activity this long is `stalled` in `cloud-status` |
