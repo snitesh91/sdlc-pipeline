@@ -2,6 +2,7 @@
 lacks (cloud: the proxy's `ccr` routes; local: GraphQL), against a fake `gh api` runner."""
 import inspect
 import json
+import re
 
 import pytest
 
@@ -29,6 +30,13 @@ ORG_FIELDS = [
      "options": _options("High", "Medium", "Low", start=400)},
     {"id": 15, "node_id": "IFD_x", "name": "Start date", "data_type": "date"},
 ]
+
+
+class Pages:
+    """A multi-page response for `RestRunner`: page N is `pages[N-1]`, later pages `empty`."""
+
+    def __init__(self, pages: list, empty=None):
+        self.pages, self.empty = pages, ([] if empty is None else empty)
 
 
 class RestRunner:
@@ -60,11 +68,24 @@ class RestRunner:
                 path, i = a, i + 1
         if fields and method == "GET":
             method = "POST"
+        assert not path.startswith("repositories/"), f"numeric-id path: {path}"
+        page = None
+        m = re.search(r"[?&]page=(\d+)$", path)
+        if m:  # `_api_items` paging: route on the path without `page`/the default per_page
+            page, path = int(m.group(1)), path[:m.start()]
+            if (method, path) not in self.routes and path.endswith("per_page=100"):
+                path = path[:-len("per_page=100")].rstrip("?&")
         self.calls.append((method, path, fields))
         key = (method, path)
         if key not in self.routes:
             raise AssertionError(f"unscripted gh api call: {key} {fields}")
         resp = self.routes[key]
+        if page is not None:  # a scripted list is one page; a list of pages is `Pages`
+            if isinstance(resp, Pages):
+                resp = resp.pages[page - 1] if page <= len(resp.pages) else resp.empty
+            elif page > 1:
+                resp = [] if isinstance(resp, list) else {k: ([] if isinstance(v, list) else v)
+                                                           for k, v in resp.items()}
         if isinstance(resp, Exception):
             raise resp
         if jq is None:
@@ -586,3 +607,24 @@ def test_branch_last_commit_at_reads_the_head_commit_date_or_none():
                  ("GET", f"{R}/branches/gone"): GhError("HTTP 404")})
     assert gh.branch_last_commit_at("issue-5") == "2026-10-03T00:00:00Z"
     assert gh.branch_last_commit_at("gone") is None
+
+
+def test_api_items_pages_by_page_number_never_by_link_following():
+    # The cloud proxy rejects `repositories/{id}/...`, the form GitHub's `Link: next` uses, so
+    # `gh api --paginate` broke the first issue listing of a real cloud run. Page by `page=N`.
+    full = [{"n": i} for i in range(100)]
+    runner = RestRunner({("GET", f"repos/{s.REPO}/things"): Pages([full, full, [{"n": "last"}]])})
+    gh = GitHubRest(runner=runner)
+    items = gh._api_items(f"repos/{s.REPO}/things")
+    assert len(items) == 201 and items[-1] == {"n": "last"}
+    assert [c[1] for c in runner.calls] == [f"repos/{s.REPO}/things"] * 3
+    assert not any("--paginate" in str(c) for c in runner.calls)
+
+
+def test_api_items_reads_a_keyed_list_and_stops_on_a_short_page():
+    runner = RestRunner({("GET", f"repos/{s.REPO}/commits/abc/check-runs?per_page=100"):
+                         {"total_count": 2, "check_runs": [{"id": 1}, {"id": 2}]}})
+    gh = GitHubRest(runner=runner)
+    assert gh._api_items(f"repos/{s.REPO}/commits/abc/check-runs?per_page=100", ".check_runs[]") == [
+        {"id": 1}, {"id": 2}]
+    assert len(runner.calls) == 1

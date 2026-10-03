@@ -699,6 +699,10 @@ def _number_from_url(url: Optional[str]) -> Optional[int]:
     return int(tail) if tail.isdigit() else None
 
 
+# Upper bound on pages `GitHubRest._api_items` walks (100 items each).
+_REST_MAX_PAGES = 200
+
+
 class GitHubRest(GitHub):
     """The GitHub client: REST for everything public REST covers, and `_no_rest_path` for the
     rest. Reads strip the cloud proxy's footer; config field ids map to REST ids and option
@@ -731,9 +735,26 @@ class GitHubRest(GitHub):
         return json.loads(out) if out.strip() else None
 
     def _api_items(self, path: str, jq: str = ".[]") -> list:
-        """Every item across all pages, one compact JSON value per line from `--jq`."""
-        out = self._run(["gh", "api", "--paginate", path, "--jq", jq])
-        return [json.loads(line) for line in out.splitlines() if line.strip()]
+        """Every item across all pages. `jq` is `.[]` (the page is a list) or `.<key>[]` (the
+        list under `<key>`). Pages by `page=N` on this `repos/{owner}/{repo}` path rather than
+        `gh api --paginate`: GitHub's `Link: next` URLs use `repositories/{id}/...`, which the
+        cloud's GitHub proxy rejects (HTTP 403)."""
+        key = None if jq == ".[]" else jq[1:-2]
+        if "per_page=" not in path:
+            path += ("&" if "?" in path else "?") + "per_page=100"
+        per_page = int(re.search(r"per_page=(\d+)", path).group(1))
+        items: list = []
+        for page in range(1, _REST_MAX_PAGES + 1):
+            data = self._api_json(f"{path}&page={page}")
+            batch = (data or []) if key is None else ((data or {}).get(key) or [])
+            items.extend(batch)
+            if len(batch) < per_page:
+                return items
+        raise GhError(f"{path}: more than {_REST_MAX_PAGES} pages -- refusing to list further")
+
+    def pr_files(self, number: int) -> list:
+        """Every changed path of a PR (`pulls/{n}/files`, paged like `_api_items`)."""
+        return [f["filename"] for f in self._api_items(f"repos/{self.repo}/pulls/{number}/files")]
 
     def _issue(self, number: int) -> dict:
         return self._api_json(f"repos/{self.repo}/issues/{number}")
