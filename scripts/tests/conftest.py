@@ -18,6 +18,7 @@ os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
 # Every test runs as a local session unless it sets a placement itself.
 os.environ.pop("SDLC_PLACEMENT", None)
 os.environ.pop("CLAUDE_CODE_REMOTE", None)
+os.environ.pop("CLAUDE_CODE_REMOTE_SESSION_ID", None)
 os.environ.pop("SDLC_GITHUB_API", None)
 
 

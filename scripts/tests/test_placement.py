@@ -263,9 +263,19 @@ def test_place_local_refuses_an_epic_whose_initiative_is_cloud(repo):
     assert "place 6 --where local" in result["reason"]
 
 
-def test_place_refuses_a_task():
-    with pytest.raises(s.GhError, match="not an Epic or Initiative"):
+def test_place_refuses_a_task_under_an_epic():
+    with pytest.raises(s.GhError, match="not an Epic, Initiative or parentless issue"):
         s.cmd_place(_tree(), 10, "cloud")
+
+
+def test_place_moves_a_parentless_issue_and_checks_its_own_worktree(repo):
+    gh = PlaceGh([{"number": 5, "labels": ["type:task"], "stage": "development"}])
+    s.cmd_worktree_add(gh, 5, repo_path=str(repo), base="origin/main")
+    refused = s.cmd_place(gh, 5, "cloud", repo_path=str(repo))
+    assert refused["refused"] is True and [w["issue"] for w in refused["worktrees"]] == [5]
+    placed = s.cmd_place(gh, 5, "cloud", force=True, repo_path=str(repo))
+    assert placed["placed"] == "cloud" and CLOUD in gh.issues[5]["labels"]
+    assert _placement(gh, 5)["placement"] == "cloud"
 
 
 # --- branch cleanup warnings ---------------------------------------------------------------
