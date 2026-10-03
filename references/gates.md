@@ -127,7 +127,8 @@ updates the open PR (no new PR). Instruct the agent to:
 3. Reply to and resolve each addressed **review thread**: `python3 "$SDLC" resolve-thread
    --thread-id <id> --reply "<summary of the change>"` (the Bash guard allows it to these
    two roles).
-4. Post one reply **on the PR** covering the plain comments (`gh pr comment`), ending with
+4. Post one reply **on the PR** covering the plain comments (`gh pr comment`; in a cloud
+   session `python3 "$SDLC" comment <pr> --body-file <f>`), ending with
    `<!-- gate-comments-processed: <ISO8601 of this comment> -->`.
 5. Post one short **issue** comment (`post-comment <n> --role <its role> --body-file <f>`)
    naming what was addressed and the new commit SHA, then end with `SDLC-RESULT` outcome

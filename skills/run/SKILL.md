@@ -32,7 +32,7 @@ handoff loop is live at once — never that anything decides on its own.
 | `${CLAUDE_PLUGIN_ROOT}/references/epics.md` | Profiles, phase-Tasks, footprints, deviation, epic close, board status |
 | `${CLAUDE_PLUGIN_ROOT}/references/operations.md` | Token/repo access, issue fields, auto-merge, local-CI attestation, auto-mode denials |
 | `${CLAUDE_PLUGIN_ROOT}/references/continuous-mode.md` | The operator asked for unattended looping |
-| `${CLAUDE_PLUGIN_ROOT}/references/cloud-mode.md` | A `placement_mismatch`; handing an Epic to or from a cloud session; running in one |
+| `${CLAUDE_PLUGIN_ROOT}/references/cloud-mode.md` | A `placement_mismatch`; handing an Epic to or from a cloud session; running in one, and its GitHub access |
 | `${CLAUDE_PLUGIN_ROOT}/references/history.md` | You want the incident behind a rule |
 
 ## The lifecycle model
@@ -443,7 +443,8 @@ The agent must *have* (not necessarily be pasted):
 
 1. The unit's number, title, body, full comment thread; for a phase-Task also its
    parent's number, title, body. **For anything large, give the `gh` command that
-   fetches it** — pasted threads truncate prompts.
+   fetches it** — pasted threads truncate prompts. In a cloud session that is a `gh api`
+   GET, never `gh issue view` (`references/cloud-mode.md`, "GitHub access in the cloud").
 2. The exact doc path it owns (e.g. `<docRoot>/epic-<e>/lld.md` for an Epic's phase-Task,
    `<docRoot>/issue-<n>/product.md` otherwise). **For a functional
    Task's `development` and `pr-review`**, tell it to read its design with

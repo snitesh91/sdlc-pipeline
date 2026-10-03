@@ -4818,10 +4818,10 @@ def test_verify_exit_still_refuses_review_roles_with_no_stage_value(tmp_path):
         assert "misuse" in result, role
 
 
-def test_get_work_item_provider_defaults_to_github():
-    from sdlc_next import GitHub, get_work_item_provider
+def test_get_work_item_provider_defaults_to_github_over_rest():
+    from sdlc_next import GitHubRest, get_work_item_provider
     provider = get_work_item_provider(runner=ScriptedRunner({}))
-    assert isinstance(provider, GitHub)
+    assert type(provider) is GitHubRest
 
 
 def test_get_work_item_provider_honours_a_configured_github_type():

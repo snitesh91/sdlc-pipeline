@@ -394,10 +394,14 @@ ROLE_ALLOWED = [
     ("sdlc:product", CP + "post-comment 5 --role product --body-file /tmp/c.md"),
     ("sdlc:architecture", CP + "post-comment 5 --body-file /tmp/c.md --role=architecture"),
     ("sdlc:lld", CP + "post-comment 5 --role lld --body-file /tmp/c.md"),
+    ("sdlc:product", CP + "comment 40 --body-file /tmp/reply.md"),
+    ("sdlc:architecture", CP + "comment 40 --body-file /tmp/reply.md"),
     ("sdlc:product", CP + "resolve-thread --thread-id T1 --reply 'applied'"),
     ("sdlc:architecture", CP + "resolve-thread --thread-id T1"),
 ]
 ROLE_DENIED = [
+    ("sdlc:lld", CP + "comment 40 --body-file f", "orchestrator"),
+    ("sdlc:development", CP + "comment 40 --body-file f", "orchestrator"),
     ("sdlc:lld", CP + "resolve-thread --thread-id T1 --reply r", "orchestrator"),
     ("sdlc:development", CP + "resolve-thread --thread-id T1", "orchestrator"),
     ("sdlc:product", CP + "mark-feedback-addressed 5", "orchestrator"),
@@ -672,16 +676,16 @@ def test_session_start_wires_token_from_config(tmp_path):
                           env={**clean_env, "GITHUB_TOKEN": "github_pat_stray"}).stdout == "ghp_secret"
 
 
-def _token_probe(tmp_path, config, env, ambient=None):
+def _token_probe(tmp_path, config, env, ambient=None, var="GITHUB_TOKEN"):
     repo = _git_repo(tmp_path / "r", {"repo": "o/r", **config})
     env_file = tmp_path / "env.sh"
     proc = run_hook("session_start.py", {"cwd": repo}, env={"CLAUDE_ENV_FILE": str(env_file), **env})
-    clean_env = {k: v for k, v in os.environ.items() if k != "GITHUB_TOKEN"}
+    clean_env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
     clean_env.pop("MY_GH_TOKEN", None)
     clean_env.update(env)
     if ambient:
-        clean_env["GITHUB_TOKEN"] = ambient
-    out = subprocess.run(["bash", "-c", f'{env_file.read_text()}\nprintf %s "$GITHUB_TOKEN"'],
+        clean_env["GITHUB_TOKEN"] = clean_env["GH_TOKEN"] = ambient
+    out = subprocess.run(["bash", "-c", f'{env_file.read_text()}\nprintf %s "${var}"'],
                          capture_output=True, text=True, env=clean_env).stdout
     ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"] if proc.stdout else ""
     return out, ctx
@@ -693,6 +697,28 @@ def test_token_env_beats_token_path_and_ambient(tmp_path):
     out, ctx = _token_probe(tmp_path, {"tokenPath": str(token), "tokenEnv": "MY_GH_TOKEN"},
                             {"MY_GH_TOKEN": "ghp_env"}, ambient="github_pat_stray")
     assert out == "ghp_env" and "classic PAT" not in ctx
+
+
+def test_token_env_also_overrides_an_ambient_gh_token(tmp_path):
+    # gh prefers GH_TOKEN, and a cloud session presets it to a proxy placeholder.
+    out, _ = _token_probe(tmp_path, {"tokenEnv": "MY_GH_TOKEN"}, {"MY_GH_TOKEN": "ghp_env"},
+                          ambient="proxy_placeholder", var="GH_TOKEN")
+    assert out == "ghp_env"
+
+
+def test_token_path_also_overrides_an_ambient_gh_token(tmp_path):
+    token = tmp_path / "tok"
+    token.write_text("ghp_file\n")
+    out, _ = _token_probe(tmp_path, {"tokenPath": str(token), "tokenEnv": "MY_GH_TOKEN"}, {},
+                          ambient="github_pat_stray", var="GH_TOKEN")
+    assert out == "ghp_file"
+
+
+def test_an_unset_token_env_leaves_an_ambient_gh_token_alone(tmp_path):
+    # Positive control: with no configured source the hook exports nothing over it.
+    out, _ = _token_probe(tmp_path, {"tokenEnv": "MY_GH_TOKEN"}, {}, ambient="proxy_placeholder",
+                          var="GH_TOKEN")
+    assert out == "proxy_placeholder"
 
 
 def test_token_env_falls_back_to_token_path_when_unset(tmp_path):

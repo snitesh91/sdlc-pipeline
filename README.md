@@ -60,7 +60,7 @@ sdlc.config.sample.json          config template
 5. **Token**: point the config's `tokenPath` at a file holding a classic PAT (`ghp_`), or name an
    env var in `tokenEnv`; fine-grained PATs cannot read check-runs or write the custom fields.
    The SessionStart hook exports the `tokenEnv` var, else the `tokenPath` file, as
-   `GITHUB_TOKEN`, overriding any ambient one, and warns when it is not a `ghp_` token.
+   `GITHUB_TOKEN` and `GH_TOKEN`, overriding any ambient one, and warns when it is not a `ghp_` token.
 6. Optional: a repo-specific `<docRoot>/<pipeline.docTemplates>/{product,architecture}.template.md`
    (default `_templates`) overrides the plugin's templates.
 7. Recommended: enable the repo setting **Settings → General → Automatically delete head
@@ -85,7 +85,7 @@ They are stdlib Python, and they fail open on internal errors.
 
 | Hook | Enforces |
 |---|---|
-| `SessionStart` | Exports `$SDLC` and `GITHUB_TOKEN` (from `tokenEnv` / `tokenPath`) for every Bash call; warns when no token is available; suggests `rtk init` if `rtk` is absent; flags a session model off the policy's orchestrator model; after a compaction, restates this session's run (epic, run-id, units in flight) |
+| `SessionStart` | Exports `$SDLC`, `GITHUB_TOKEN` and `GH_TOKEN` (from `tokenEnv` / `tokenPath`) for every Bash call; warns when no token is available; suggests `rtk init` if `rtk` is absent; flags a session model off the policy's orchestrator model; after a compaction, restates this session's run (epic, run-id, units in flight) |
 | `PreToolUse` (Bash) | Denies hand-run `gh api graphql`, `gh issue create/edit/close/reopen`, `gh pr create/merge/ready/close`, mutating `gh api`, `git worktree add` (except `--detach`), force-push and rebase, naming the `python3 "$SDLC"` command to use instead; limits each `sdlc:<role>` agent to its role's control-plane commands (`post-comment` only with its own `--role`), denies `git stash` to every stage agent (one stash stack per repo) and review roles any git write. A main-thread `gh pr create --head <branch>` naming a non-pipeline branch (an operator-directed PR) is allowed. Only each segment's leading words count. Stage agents are always guarded; the main thread only while its session drives a run (a run-state file written in the last 8 h, stamped by `next-action --run-id`), so hand-run backlog or issue cleanup outside a run is allowed. `guard.mainThread: "always"` guards every main-thread session |
 | `PreToolUse` (Agent) | Sets every `sdlc:*` agent's `model` from `hooks/model_policy.json` (overridable per role by `pipeline.models` / `pipeline.fanout`), whether the main thread or a continuous-mode cycle agent launches it; denies nested stages and fan-out a role may not do or has exhausted; lets the policy's `explore` roles (`development`, `lld`) launch a read-only `Explore` search |
 | `SubagentStart` | Gives each `sdlc:*` agent `$SDLC`, `docRoot`, `requirementsDir`, `docTemplates`, the references path and the `SDLC-RESULT` format |
@@ -162,7 +162,9 @@ python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<proj
   authors and runs only the Epic's new specs), and an Initiative closes after a PM-style
   validation of its `product.md`.
 - Issue tracking sits behind a `WorkItemProvider` interface, and GitHub is the only
-  implementation. Code hosting is GitHub.
+  implementation, a REST client on the laptop and in the cloud; only PR ready-for-review and
+  review threads differ by placement (`references/cloud-mode.md`, "GitHub access in the
+  cloud"). `SDLC_GITHUB_API=graphql` selects the old GraphQL client. Code hosting is GitHub.
 
 ## Running the tests
 
