@@ -193,8 +193,8 @@ deviation escalation".
 
 Run from the driven repo's root; everything project-specific is in its `sdlc-pipeline.config.json`.
 
-- **SessionStart** exports `$SDLC` (the control plane) and `GITHUB_TOKEN` (from the config's `tokenEnv` var, else `tokenPath`, overriding any ambient one). If it reports the token missing, get it from the operator first; relay its optional `rtk init` hint once, never block on it. After a compaction it restates the run you were driving; on an off-policy session model it tells you to have the operator restart with `sdlc-run <n>`.
-- **PreToolUse (Bash)** denies hand-run GitHub mutations, GraphQL, `git worktree add` (except `--detach`), force-push and rebase, and limits each stage agent to its role's commands (and denies it `git stash` and `claude`). An operator-directed PR outside the pipeline passes on the main thread when it names a non-pipeline head: `gh pr create --head <branch> ...`. A denial names the `python3 "$SDLC"` command to run instead — run it; never work around the guard. The main thread is guarded only while its session drives a run (a run-state file written by `next-action --run-id` within `guard.mainThreadFreshnessHours`, default 8; `guard.mainThread: "always"` guards every session) — an unguarded call logs one stderr line, so a run without `--run-id` is visible, never silent.
+- **SessionStart** exports `$SDLC` (the control plane) and `GITHUB_TOKEN` (from the config's `tokenEnv` var, else `tokenPath`, overriding any ambient one). If it reports the token missing, get it from the operator first; relay its optional `rtk init` hint once, never block on it. After a compaction it restates the run you were driving; on an off-policy session model it hints at a restart with `sdlc-run <n>` — advisory (may be stale after `/model`): mention it once, never stop on it.
+- **PreToolUse (Bash)** denies hand-run GitHub mutations, GraphQL, `git worktree add` (except `--detach`), force-push and rebase, and limits each stage agent to its role's commands (and denies it `git stash` and `claude`). An operator-directed PR outside the pipeline passes on the main thread when it names a non-pipeline branch: `gh pr create --head <branch> ...`, `gh pr merge <branch>`. An operator-directed issue body/label edit: `edit-issue` (Building blocks). A denial names the `python3 "$SDLC"` command to run instead — run it; never work around the guard. The main thread is guarded only while its session drives a run (a run-state file written by `next-action --run-id` within `guard.mainThreadFreshnessHours`, default 8; `guard.mainThread: "always"` guards every session) — an unguarded call logs one stderr line, so a run without `--run-id` is visible, never silent.
 - **PreToolUse (Agent)** sets every `sdlc:*` agent's `model` from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (config `pipeline.models` / `pipeline.fanout` override it), caps review fan-out, and lets only its `explore` roles launch a read-only `Explore` search. It denies an `sdlc:design-review` prompt lacking the header when the two review roles' models differ.
 - **SubagentStart** gives each `sdlc:*` agent `$SDLC`, its unit's `docRoot` / `requirementsDir` (per-product `docRoots`), `docTemplates`, the references path and the `SDLC-RESULT` format.
 - **SubagentStop** keeps an `sdlc:*` agent running until its final message ends with an `SDLC-RESULT` line (`product`/`architecture`/`lld` finishing `done` also need a successful `post-comment` this round). It and **SessionEnd** record each agent's tokens, cost, tool calls and peak context (README, "Metrics"). Never record metrics yourself.
@@ -247,13 +247,14 @@ an override only.
 | `create-lld-tasks <epic> --repo-path <p>` / `merge-lld-doc <epic-n>` / `close-issue <n> [--repo-path <p>] [--not-planned --reason TEXT]` | The steps inside `finish-lld`; `create-lld-tasks` on an already-numbered doc adds only missing `blocked_by` edges (`edges_added`); `close-issue` is the orchestrator's close (terminal fields, then `cleanup`: worktrees released, a branch whose work landed deleted on origin and locally, unmerged work kept; an already-closed issue → `already_closed: true`); `--not-planned` drops a unit with its reason on the thread (`references/operations.md`, "Dropping a unit") |
 | `place <epic\|initiative> --where cloud\|local [--force] --repo-path <p>` | Hand an Epic or Initiative to a cloud or local session (the `pipeline.placement.cloudLabel` label); refuses (`refused`, `worktrees`) while local worktrees hold its units unless `--force` (`references/cloud-mode.md`) |
 | `detach-epic <epic> [--reason TEXT]` / `reparent-issue <n> --parent <p> [--reason TEXT]` / `comment <n> --body TEXT\|--body-file <f>` | Take an Epic out of its Initiative (sub-issue link + sibling `blockedBy` edges, commented on both) / move a plain issue under another parent (never an Epic: `detach-epic`) / a plain audit-trail comment, no marker (`references/operations.md`, "Dropping a unit") |
+| `edit-issue <n> [--body-file F] [--add-label L ...] [--remove-label L ...]` | An operator-directed issue body/label edit; refuses pipeline-owned labels and in-flight issues |
 | `open-gate` / `check-gate` / `pass-gate` / `skip-gate` / `waive-gate` | Gates (`references/gates.md`); on a phase-Task pass/skip/waive close it (after merging its design PR) instead of claiming a next stage |
 | `approve-gate <n> --by-operator-session [--note TEXT]` / `request-gate-changes <n> --feedback TEXT\|--feedback-file <f>` | The operator's in-session gate decision: merge + `pass-gate` with an audit comment / their change request posted on the gate PR (`references/gates.md`, "Deciding a gate in session") |
 | `record-operator-answer <n> --question TEXT --answer TEXT` | An in-session answer recorded on the unit it settles; a `needs-human` unit returns to `todo` (`references/cloud-mode.md`, "Human channel") |
 | `launch-cloud-epic <epic> [--relaunch] --repo-path <p>` / `cloud-status <initiative\|epic>` / `nudge-cloud-epic <epic> [--force]` / `end-cloud-session <epic> --outcome closed\|waiting-human\|stopped\|abandoned [--note TEXT]` | Place an Epic and start its cloud session (idempotent) / read-only cloud state, any placement / continue a stalled session (`escalate` after two) / the session's end marker (`references/cloud-mode.md`, "Initiative → cloud Epics") |
 | `merge-gate <pr> --issue <n> --stage product\|architecture --operator-confirmed` | Merge an open gate PR (Gate A, or a human-gated design PR) — **only when the operator explicitly told you to merge it** (`references/gates.md`, "Merging a gate PR for the operator"); `pass-gate` finishes it |
-| `open-dev-pr [--allow-empty]` / `handoff-to-pr-review` / `record-pr-review` / `record-local-ci` / `record-design-review` / `post-comment` | Stage-agent exit actions (their agent files own them); tell `development` to pass `--allow-empty` when the Task's design says verify-only (no code change) |
-| `pr-checks <pr>` / `rerun-checks <pr>` / `merge-pr <pr> --issue <n> [--run-id <id>]` | CI status / rerun the head's failed runs after an `infra_suspect` fix (`references/operations.md`, "A check the runner failed") / the only merge gate (pass the run's id so the terminal count books under it; refuses behind-base; reports `config_changed`; on an already-merged PR only finishes the bookkeeping, `recovered: true`; `cleanup` as `close-issue`'s) |
+| `open-dev-pr [--allow-empty]` / `handoff-to-pr-review` / `record-pr-review` / `record-local-ci` / `record-design-review` / `post-comment` | Stage-agent exit actions (their agent files own them); tell `development` to pass `--allow-empty` when the Task's design says verify-only (no code change); `handoff-to-pr-review` refuses `checks_failed` on a red non-infra required check (`agents/development.md`) |
+| `pr-checks <pr>` / `rerun-checks <pr>` / `merge-pr <pr> --issue <n> [--run-id <id>]` | CI status / rerun the head's failed runs after an `infra_suspect` fix (`references/operations.md`, "A check the runner failed") / the only merge gate (pass the run's id so the terminal count books under it; refuses behind-base; reports `config_changed`; on an already-merged PR only finishes the bookkeeping, `recovered: true`; `cleanup` as `close-issue`'s). Both warn with `uncovered_paths` (+ `uncovered_hint`) when changed files fall under no `requiredWorkflows` entry — not a refusal |
 | `mark-blocked <n> --dep <m>` / `mark-needs-human <n> --reason TEXT` / `pause-for-epic-regate <n> --epic <e> [--gate-pr <pr>] [--found-by <stage>]` | Park a unit (first two release its worktree) |
 | `pairing-counts <n>` / `show-config` | Valve strike counts + thresholds / effective tunables and the running `plugin` version (read once per invocation) |
 | `list-needs-human` / `check-epics-closeable` / `audit-issues [--epic <n>\|--initiative <n>]` | End-of-invocation sweeps; `audit-issues` also flags open Epics with no phase-Tasks, with the `cut-phase-tasks` repair |
@@ -291,7 +292,7 @@ ends (`references/cloud-mode.md`, "A cloud run").
 
 ## Config can move under you
 
-When `merge-pr` returns `config_changed: true`, re-read the config before the next stage.
+When `merge-pr` returns `config_changed: true`, or `next-action` returns `config_changed` (`source`, `keys`), re-read the config before the next stage; tell the operator the changed `keys`.
 
 ## What you decide, and what you take to the operator
 
@@ -477,6 +478,8 @@ The agent must *have* (not necessarily be pasted):
 6. Any command that can outlast the default tool timeout needs `run_in_background` or
    an explicit ≥600s outer timeout. A `development` or run-only agent that backgrounds a
    suite: brief it to stay alive until the suite's exit marker and not hand back early.
+7. Prior art only you can read (a claude.ai artifact, a Claude Docs doc): export it to
+   `<worktree>/.sdlc-scratch/prior-art/` and name each file in the prompt.
 
 **Keep the prompt minimal.** Never restate rules the agent reads from its own agent file
 and `references/stage-playbooks.md` — it pays twice and invites the agent to cite your
@@ -574,7 +577,8 @@ its place:
 
 - `product` — only when a product or business decision is open.
 - `architecture` — only for a new component or interface, a data-model change, a
-  cross-module change, or an unclear approach.
+  cross-module change, a new or changed integration with an external API (a vendor's
+  request/response shape), or an unclear approach.
 - `product-review` / `arch-review` — skip when the artifact before it is trivial.
 - `pr-review` — the strong default. Skip (`--to merge`) only for a trivially low-risk
   change, saying why in `--reason`; never after `pr-review` bounced it.
@@ -600,7 +604,8 @@ and every Epic it descends into.
   remains; the next `/sdlc:run` run (fresh run-id, fresh context) resumes exactly
   there.
 - **Never capped:** `resume`, `pass-gate`, `address-gate-feedback`, and any unit this run
-  already handed out (`in_flight`). Only fresh `delegate` work and the dev-lane pool count.
+  already handed out (`in_flight`). Only fresh `delegate` work and the dev-lane pool count;
+  a `close-issue --not-planned` never does.
 - The cap only batches throughput — it never changes Task carving or `blockedBy` order.
 
 ## Step 4 — Report back to the user
@@ -617,7 +622,8 @@ what) and end with the Initiative's own `none` reason. Above the fold:
 - Every gate-pending unit: gate PR, doc, level, whether feedback was addressed.
 - Every merged PR and closed issue; every epic newly `epic:architected`; every Epic cut,
   run to completion or parked this run.
-- Every `warnings` line any command returned (a branch deletion that failed), verbatim.
+- Every `warnings` line any command returned (a branch deletion that failed), verbatim, and
+  every `uncovered_paths` warning from `pr-checks` / `merge-pr` with its PR.
 - Every cloud session launched or still running, with its url; every stalled, escalated or
   ended one (`cloud-status`).
 - Any epic `check-epics-closeable` newly notified; any `product_cap` deferral.

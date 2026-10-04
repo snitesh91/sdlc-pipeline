@@ -64,7 +64,7 @@ Post the escalation as your handoff comment (`stage-playbooks.md`, "Posting a ha
 
 ## 5. Write `architecture.md`
 
-Start from the repo's `<docRoot>/<docTemplates>/architecture.template.md` if it exists, else `${CLAUDE_PLUGIN_ROOT}/templates/architecture.template.md`; fill sections in order; delete its instructional comments. Its three overriding rules and every section rule (Scope as sole goals/non-goals, Design first with a Mermaid diagram, decision tables with bet/fallback lines, measurable NFRs with a stated cost line, flat uncited ACs, CONDITIONAL sections collapsed to `N/A — <reason>`) are in the template and `design-doc-rules.md` — follow them exactly. Additionally:
+Start from `architecture.template.md` (where it resolves, and how to fill it: `design-doc-rules.md`, "Document altitude"). Its three overriding rules and every section rule (Scope as sole goals/non-goals, Design first with a Mermaid diagram, decision tables with bet/fallback lines, measurable NFRs with a stated cost line, flat uncited ACs, CONDITIONAL sections collapsed to `N/A — <reason>`) are in the template and `design-doc-rules.md` — follow them exactly. Additionally:
 
 - **Don't manufacture decisions.** A decision with one plausible option gets no table. If stripping every decision leaves a useful document, it was an implementation manual — write a short doc saying the design was never in question.
 - **`## Footprint` and `## Implementation notes`: standing-epic child only; omit both entirely from an Epic's doc.** Footprint shape is parsed mechanically (`epics.md`, "How to size the Tasks") — do not vary it.
