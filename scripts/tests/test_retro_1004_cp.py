@@ -99,3 +99,72 @@ def test_origin_config_reads_the_committed_file_and_fails_open(monkeypatch, tmp_
     assert s.origin_config(runner) == {"repo": "a/b"}
     runner.fail_on.add(show)
     assert s.origin_config(runner) is None
+
+
+# ---- 3: pr-checks / merge-pr name changed paths no required workflow covers ----
+
+class _ChecksGh:
+    def __init__(self, files, checks=(), base="main"):
+        self.files, self.checks, self.base = list(files), [dict(c) for c in checks], base
+
+    def pr_checks(self, n):
+        return self.checks
+
+    def pr_view(self, n, fields=""):
+        return {"comments": [], "headRefOid": "feedface", "baseRefName": self.base}
+
+    def pr_files(self, n):
+        return self.files
+
+    def job_failed_log(self, job):
+        return "assert 1 == 2"
+
+
+def test_uncovered_paths_skips_docs_config_and_covered_files():
+    files = ["src/x.py", "backend/a.py", "docs/sdlc/n.md", "README.md",
+             f".claude/{s.CONFIG_FILENAME}", "backend/notes.md"]
+    assert s.uncovered_paths(files, "main") == ["src/x.py"]
+
+
+def test_uncovered_paths_ignores_a_spec_scoped_to_another_base(monkeypatch):
+    scoped = [{**w, "bases": ("main",)} for w in s.REQUIRED_WORKFLOWS]
+    monkeypatch.setattr(s, "REQUIRED_WORKFLOWS", tuple(scoped))
+    assert s.uncovered_paths(["backend/a.py"], "epic-9") == ["backend/a.py"]
+    assert s.uncovered_paths(["backend/a.py"], "main") == []
+
+
+def test_pr_checks_warns_about_uncovered_paths_without_changing_status():
+    result = s.cmd_pr_checks(_ChecksGh(["src/x.py"], [{"name": "ci", "bucket": "pass"}]), 42)
+    assert result["status"] == "passed"
+    assert result["uncovered_paths"] == ["src/x.py"]
+    assert result["uncovered_hint"] == ("no required workflow covers these paths; "
+                                        "no suite ran for them")
+
+
+def test_pr_checks_with_every_path_covered_adds_no_warning():
+    # Positive control.
+    gh = _ChecksGh(["backend/a.py", "docs/sdlc/x.md"],
+                   [{"name": "b", "bucket": "pass", "workflow": "Backend CI"}])
+    result = s.cmd_pr_checks(gh, 42)
+    assert result["status"] == "passed" and "uncovered_paths" not in result
+
+
+def _merge_runner_with_files(files):
+    from tests.test_merge_gate_and_citations import _merge_runner
+    runner = _merge_runner()
+    runner.responses[("gh", "api", "--paginate", "repos/owner/repo/pulls/42/files",
+                      "--jq", ".[].filename")] = "".join(f"{f}\n" for f in files)
+    return runner
+
+
+def test_merge_pr_reports_uncovered_paths_and_still_merges():
+    result = s.cmd_merge_pr(s.GitHub(runner=_merge_runner_with_files(["src/x.py"])), 42, issue=9)
+    assert result["merged"] is True and result["uncovered_paths"] == ["src/x.py"]
+    assert "no suite ran" in result["uncovered_hint"]
+
+
+def test_merge_pr_on_a_docs_only_pr_adds_no_warning():
+    # Positive control.
+    runner = _merge_runner_with_files(["docs/sdlc/issue-9/product.md"])
+    result = s.cmd_merge_pr(s.GitHub(runner=runner), 42, issue=9)
+    assert result["merged"] is True and "uncovered_paths" not in result

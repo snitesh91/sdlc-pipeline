@@ -6537,6 +6537,24 @@ def _is_doc_path(path: str) -> bool:
             or path.startswith("docs/"))
 
 
+_UNCOVERED_HINT = "no required workflow covers these paths; no suite ran for them"
+
+
+def uncovered_paths(changed_files: list, base_ref: Optional[str] = None) -> list:
+    """Changed non-doc files (the pipeline config aside) no base-applicable required workflow covers."""
+    specs = [w for w in REQUIRED_WORKFLOWS if _workflow_applies_to_base(w, base_ref)]
+    return [p for p in changed_files
+            if not _is_doc_path(p) and os.path.basename(p) != CONFIG_FILENAME
+            and not any(_workflow_covers(w, p) for w in specs)]
+
+
+def _with_uncovered(result: dict, changed_files: list, base_ref: Optional[str]) -> dict:
+    """`result` plus `uncovered_paths`/`uncovered_hint` when any; a warning, never a gate."""
+    uncovered = uncovered_paths(changed_files, base_ref)
+    return {**result, "uncovered_paths": uncovered, "uncovered_hint": _UNCOVERED_HINT} \
+        if uncovered else result
+
+
 def touches_pipeline_config(changed_files: list) -> bool:
     """True when the changes include the driven repo's pipeline config file."""
     return any(os.path.basename(f) == CONFIG_FILENAME for f in changed_files)
@@ -6700,8 +6718,9 @@ def _infra_hint(pr_number: int) -> str:
 def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
     checks = gh.pr_checks(pr_number)
     view = gh.pr_view(pr_number, "comments,headRefOid,baseRefName")
+    files = gh.pr_files(pr_number)
     status, missing = merge_gate_status(
-        gh.pr_files(pr_number), checks,
+        files, checks,
         view.get("comments", []), view.get("headRefOid"), view.get("baseRefName"))
     infra = enrich_failed_checks(gh, checks)
     result = {"pr": pr_number, "status": status,
@@ -6709,7 +6728,7 @@ def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
     hints = ([_MISSING_WORKFLOW_HINT] if missing else []) + ([_infra_hint(pr_number)] if infra else [])
     if hints:
         result["hint"] = " ".join(hints)
-    return result
+    return _with_uncovered(result, files, view.get("baseRefName"))
 
 
 def cmd_rerun_checks(gh: GitHub, pr_number: int) -> dict:
@@ -6804,8 +6823,8 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
             raise
     gh.pr_comment(pr_number, f"Auto-merged under the pipeline's scoped PR-merge override — "
                               f"see \"PRs merge automatically\" in the pipeline docs.")
-    return _finalize_merged_pr(gh, pr_number, issue, repo_path, base, files, carried_forward,
-                               run_id=run_id)
+    return _with_uncovered(_finalize_merged_pr(gh, pr_number, issue, repo_path, base, files,
+                                               carried_forward, run_id=run_id), files, base)
 
 
 def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
