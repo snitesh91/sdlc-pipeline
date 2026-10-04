@@ -9017,6 +9017,8 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
             results.append({"epic": epic["number"], "title": epic["title"], "already_notified": True})
             continue
         open_dependents = sorted({d for c in children for d in gh.blocking(c["number"])})
+        # `main`, or the opted-in Initiative's branch this epic closes into.
+        target = epic_base(gh, epic["number"], all_issues)
         # An open epic's docs live on its epic branch; `close-epic` carries them to main.
         branch = epic_branch(epic["number"])
         doc_names = ("architecture.md", "lld.md")
@@ -9044,8 +9046,8 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
             f"{dependents_line}"
             f"{docs_line}"
             f"- [ ] Closing verification run on `{epic_branch(epic['number'])}` after merging "
-            "`origin/main` into it — an exploratory pass\n"
-            f"- [ ] `{epic_branch(epic['number'])}` merged to `main`\n\n"
+            f"`origin/{target}` into it — an exploratory pass\n"
+            f"- [ ] `{epic_branch(epic['number'])}` merged to `{target}`\n\n"
             f"Run `sdlc_next.py close-epic {epic['number']}` to do all of it — it reconciles the "
             "epic branch with `main`, refuses while verification evidence is missing, and merges "
             "the integration PR when it is present. Findings from the closing run are triaged by "

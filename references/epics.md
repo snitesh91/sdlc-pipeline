@@ -153,7 +153,9 @@ closed sub-issues, or rotate a standing epic before it fills (e.g. `RTB-2`), the
 - **Every Epic carries two standing Tasks, Integration-test and e2e-test**, specified like
   functional Tasks; they run after the functional Tasks merge and own the coverage unit
   tests don't. The e2e-test Task authors specs only: it runs the specs it adds or changes,
-  never the full suite ("Epic closing").
+  never the full suite ("Epic closing"). **Except** under an Initiative with `testTasks:
+  false` ("Initiative branch"): `lld` carves neither and `create-lld-tasks` skips a section
+  titled as one (`skipped_sections`).
 - **`Priority:` / `Effort:`** lines are optional per Task (`agents/lld.md`, "The
   document"); `create-lld-tasks` sets them, else `pipeline.issueDefaults`.
 - A Task must carry its own Footprint and real `blockedBy` edges — `list-parallel-ready`
@@ -268,6 +270,37 @@ All other rework follows `references/rework.md`.
 - **Runtime stack**: when `pipeline.stack.enabled`, run `provision-epic-stack <n>` at the
   epic's first touch; `close-epic`'s merge tears it down (`references/parallelism.md`,
   "Per-epic isolated stack").
+
+## Initiative branch (opt-in)
+
+An Initiative matching a `pipeline.initiativeProfiles` entry (`references/operations.md`)
+with `branch: true` owns `initiative-<i>` (`branches.initiativePrefix`). Nothing else changes
+for an Initiative or repo without one.
+
+- **Its Epics cut from, sync with and close into `initiative-<i>`**, never `main`:
+  `worktree-add`/`cut-phase-tasks`/`open-arch-revision`/`start-stage` cut `epic-<n>` from it
+  (creating it from `origin/main` on first need), `next-action <epic> --sync-epic` merges it
+  into `epic-<n>`, and `close-epic` reconciles with it and merges the epic PR into it (result
+  `base`). Children of the Epic still base on `epic-<n>`. Each Epic still closes on its own,
+  so a later Epic's `blockedBy` clears.
+- **`next-action <initiative> --sync-epic`** merges `origin/main` into `initiative-<i>` at
+  each run's start and whenever `main` moved (`epic_sync` on the Initiative: `unit:
+  initiative`). On `conflict`: `worktree-add <i> --unit initiative`, merge `origin/main`
+  there, resolve (delegate `development` for anything beyond a mechanical fix), push, then
+  call `next-action` again.
+- **`close-epic` into `initiative-<i>`** does not demand the profile's `deferSuites`
+  (`evidence.suites`: `deferred_to_initiative`); every other suite and the exploratory pass
+  are owed as before. The deferred suites run once, on the initiative PR.
+- **`testTasks: false`**: no Integration-test / e2e-test Task (above).
+- **Into `main`, once, after every cut Epic closed** (SKILL.md, "Closing an Initiative"):
+  `open-initiative-pr <i>` syncs the branch with `main` and opens (or reuses) the PR
+  `initiative-<i>` → `main`, returning the `evidence` owed; the operator's final runs land
+  as passing checks or `record-local-ci --pr <pr>` attestations at its head (every required
+  workflow the PR touches, deferred ones included, plus each `closeSuites` key such as
+  `e2e`); `merge-initiative-pr <i>` merges only when that evidence is complete and the branch
+  is not behind `main` (refusals are exit 0 with `reason`, `evidence`), then deletes the branch.
+  `check-initiative-closeable` / `close-initiative` refuse until it has landed, and a later
+  Epic closing into a re-created branch un-lands it (a new PR is owed).
 
 ## Epic closing
 

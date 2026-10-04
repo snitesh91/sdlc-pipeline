@@ -92,7 +92,11 @@ Before carving, Read `${CLAUDE_PLUGIN_ROOT}/references/epics.md`, "How to size t
 bounded concern, one shippable PR; split on footprint collision or concern boundary, never on
 effort; never below a shippable slice). In addition:
 
-- **Always carve the Epic's two standing Tasks**, `Integration-test` and `e2e-test`
+- **Carve the Epic's two standing Tasks**, `Integration-test` and `e2e-test`, unless the
+  Epic's Initiative turns them off (`testTasks: false`, named in your SubagentStart context or
+  by `python3 "$SDLC" initiative-profile <epic>`): then carve neither — a Task whose surface
+  needs integration/e2e coverage names it in its own section and footprint, and the
+  Initiative's final runs gate its merge to `main`. Otherwise
   (`references/epics.md`, "`lld` specifies the Tasks"), specified like functional Tasks:
   each `Depends on:` every functional Task whose surfaces it proves, owns the integration /
   e2e coverage unit tests cannot, and carries its own `## Footprint` (the test trees it

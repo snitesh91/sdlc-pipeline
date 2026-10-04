@@ -98,13 +98,15 @@
     },
     "branches": {
       "issuePrefix": "issue-",
-      "epicPrefix": "epic-"
+      "epicPrefix": "epic-",
+      "initiativePrefix": "initiative-"
     },
     "worktrees": {
       "_comment": "`releaseCommand`: shell command run inside a unit's worktree right before the pipeline removes it (e.g. `make it-down` to tear down a per-worktree test env); failure is reported, never fatal. Empty = none. `dockerCleanup` (default true): when a unit is cleaned up, remove every docker container (by name or compose project label), volume and network named `<worktree basename>-...` or `<worktree basename>_...` (e.g. `sdlc-dev-12_db`), and retry a `worktree remove` blocked by root-owned files by emptying the tree through `docker run --rm alpine`; docker absent = skipped.",
       "root": "/tmp",
       "devPrefix": "sdlc-dev-",
       "epicPrefix": "sdlc-epic-",
+      "initiativePrefix": "sdlc-initiative-",
       "reviewPrefix": "sdlc-review-",
       "ephemeralPrefix": "sdlc-tmp-",
       "releaseCommand": "",
@@ -193,6 +195,8 @@
       "task": {"field": "label", "value": "type:task"}
     },
     "docTemplates": "_templates",
+    "_initiativeProfiles_comment": "Opt-in per Initiative, ordered; the first entry whose `match` label is on the Initiative wins (no implied catch-all). Toggles: `branch` (true = the Initiative's Epics cut from, sync with and close into `initiative-<i>`, which reaches main once via open-initiative-pr / merge-initiative-pr), `testTasks` (false = lld carves no Integration-test / e2e-test Task), `deferSuites` (suites close-epic does not demand of an Epic closing into the initiative branch), `closeSuites` (suite keys merge-initiative-pr needs record-local-ci-attested at the initiative PR head). Example: [{\"name\": \"branched\", \"match\": {\"label\": \"initiative:branch\"}, \"branch\": true, \"testTasks\": false, \"deferSuites\": [\"backend-it\"], \"closeSuites\": [\"e2e\"]}]",
+    "initiativeProfiles": [],
     "profiles": [
       {
         "_comment": "Ordered; the first whose `match` label is on the epic wins, `\"*\"` is the catch-all. A profile bundles the behaviour that used to be hardcoded to epic:standing/epic:legacy. Missing toggles inherit the shipped defaults; `gates` inherit the global `gates` above.",

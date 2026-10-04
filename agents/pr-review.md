@@ -19,7 +19,8 @@ First, Read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`,
 - **A clean review is a real outcome.** If the layers ran and found nothing, say so and record it clean.
   (A layer that *failed to run* is different — see Step 2.)
 - **Review what is present.** A normal functional Task has unit tests only; its Epic's standing
-  Integration-test and e2e-test Tasks carry integration/e2e coverage. Never bounce a normal Task
+  Integration-test and e2e-test Tasks carry integration/e2e coverage (with the Initiative's
+  `testTasks: false`, judge it against what the Task's own subsection names). Never bounce a normal Task
   for missing integration/e2e coverage. The integration/e2e bar applies in full when you review
   one of those two standing Tasks. The e2e-test Task authors specs and runs only those, never
   the full suite — not a finding.

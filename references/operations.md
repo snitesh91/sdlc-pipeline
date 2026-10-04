@@ -112,6 +112,24 @@ defaults (`legacy`, `standing`, catch-all `default`); `gates` inherit `pipeline.
 profile applies only to an issue `pipeline.classification` already calls an epic.
 Field reference: `sdlc.config.sample.json`. `product-review` is not a toggle.
 
+### `pipeline.initiativeProfiles` — Initiative behaviour by label (opt-in)
+
+Ordered array, default `[]` (v0.3.16 behaviour, no extra lookups); the first entry whose
+`match` (`{ "label": "<name>" }` or `"*"`) is on the Initiative wins; an unmatched
+Initiative keeps the defaults. Toggles: `branch` (default `false`; `true` = `initiative-<i>`,
+`references/epics.md`, "Initiative branch"), `testTasks` (default `true`; `false` = no
+standing Integration-test / e2e-test Tasks), `deferSuites` (suite keys `close-epic` does not
+demand of an Epic closing into the initiative branch), `closeSuites` (suite keys, need not be
+in `requiredWorkflows`, that `merge-initiative-pr` needs attested at the initiative PR head;
+`record-local-ci` accepts them). Prefixes: `branches.initiativePrefix` (`initiative-`),
+`worktrees.initiativePrefix` (`sdlc-initiative-`). `initiative-profile <n>` prints the
+profile governing any unit; `start-stage` records it for the SubagentStart hook.
+
+```json
+"pipeline": {"initiativeProfiles": [{"name": "branched", "match": {"label": "initiative:branch"},
+  "branch": true, "testTasks": false, "deferSuites": ["backend-it"], "closeSuites": ["e2e"]}]}
+```
+
 ## Dropping a unit
 
 A unit the operator drops is never closed as completed. Say why on the thread and close it

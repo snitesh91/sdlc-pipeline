@@ -41,7 +41,10 @@ Every phase of work is **its own plain child issue** (a "phase-Task"): an Initia
 container — no stage is ever delegated to it. Where a unit merges depends on its parent:
 an Initiative's Product-Roadmap Task, a standing child and a parentless issue gate and merge
 `issue-<n>` → `main`; **every child of a non-standing Epic — phase-Tasks and functional Tasks
-alike — branches from and merges into `epic-<n>`**, which reaches `main` once, at epic close.
+alike — branches from and merges into `epic-<n>`**, which reaches `main` once, at epic close —
+or, under an Initiative opted into an initiative branch (`pipeline.initiativeProfiles`,
+`branch: true`), reaches `initiative-<i>` at epic close, and `initiative-<i>` reaches `main`
+once, at initiative close (`references/epics.md`, "Initiative branch").
 
 ```
 initiative: [Product-Roadmap Task: product -> product-review -> Gate A (PR -> main)] -> [orchestrator cuts Epics, ordered by blockedBy] -> [Initiative loop: per Epic, cut-phase-tasks then run-epic]
@@ -62,7 +65,8 @@ task:       development -> [pr-review] -> auto-merge into epic-<n> -> CLOSED
   [pr-review] -> CLOSED` ("Routing a standing child") and merges straight to `main`.
   **Legacy profile** (`driven: false`): skipped entirely, Tasks included.
 - **Every Epic has two standing Tasks** (Integration-test, e2e-test), specified by `lld`,
-  running after every functional Task merges. The e2e-test Task **authors** the Epic's new
+  running after every functional Task merges — none when its Initiative's profile sets
+  `testTasks: false` (`initiative-profile <n>`). The e2e-test Task **authors** the Epic's new
   specs and runs only those, against a stack built from `epic-<n>`.
 - **The pipeline never runs the full e2e suite** — not at epic close, not in a Task. The
   driven repo runs it outside the pipeline (e.g. nightly). Epic close needs
@@ -99,8 +103,9 @@ Epics..."`.
 Do this yourself, not via a subagent: read the Product-Roadmap Task's approved
 `docs/sdlc/issue-<n>/product.md` and cut it into Epics:
 
-- **Each Epic must be independently mergeable to `main` and independently shippable.**
-  An Epic that only makes sense once a sibling has merged is cut wrong.
+- **Each Epic must be independently mergeable to `main` and independently shippable**
+  (into `initiative-<i>` under an initiative branch). An Epic that only makes sense once a
+  sibling has merged is cut wrong.
 - Each Epic's body carries a pointer to the Initiative's IRD plus its own explicit scope
   carve-out (the slice of the IRD it covers).
 - Create each with `create-issue --parent <initiative-n> --type Epic --priority <P>
@@ -136,6 +141,10 @@ issue or is legacy:
 - An Epic whose loop ends still open (waiting on a human gate, `needs-human`, blocked) is
   parked: call `next-action <initiative> --skip-epic <epic>` (repeatable) for the rest of the
   run so the loop moves to the next runnable Epic. Never re-descend into a parked Epic.
+- **Initiative branch** (`branch: true`): call `next-action <initiative> --run-id "$RUN_ID"
+  --sync-epic` — its `epic_sync` keeps `initiative-<i>` current with `main` (`unit:
+  initiative`; a `conflict` → `references/epics.md`, "Initiative branch"). Each Epic still
+  runs and closes as below; `close-epic` merges it into `initiative-<i>` (result `base`).
 - `none` names each open Epic's state in `reason` (blocked by #n, not driven, parked). When
   every cut Epic is closed it says so: "Closing an Initiative".
 
@@ -195,7 +204,7 @@ Run from the driven repo's root; everything project-specific is in its `sdlc-pip
 - **SessionStart** exports `$SDLC` (the control plane) and `GITHUB_TOKEN` (from the config's `tokenEnv` var, else `tokenPath`, overriding any ambient one). If it reports the token missing, get it from the operator first; relay its optional `rtk init` hint once, never block on it. After a compaction it restates the run you were driving; on an off-policy session model it hints at a restart with `sdlc-run <n>` — advisory (may be stale after `/model`): mention it once, never stop on it.
 - **PreToolUse (Bash)** denies hand-run GitHub mutations, GraphQL, `git worktree add` (except `--detach`), force-push and rebase, and limits each stage agent to its role's commands (and denies it `git stash` and `claude`). An operator-directed PR outside the pipeline passes on the main thread when it names a non-pipeline branch: `gh pr create --head <branch> ...`, `gh pr merge <branch>`. An operator-directed issue body/label edit: `edit-issue` (Building blocks). A denial names the `python3 "$SDLC"` command to run instead — run it; never work around the guard. The main thread is guarded only while its session drives a run (a run-state file written by `next-action --run-id` within `guard.mainThreadFreshnessHours`, default 8; `guard.mainThread: "always"` guards every session) — an unguarded call logs one stderr line, so a run without `--run-id` is visible, never silent.
 - **PreToolUse (Agent)** sets every `sdlc:*` agent's `model` from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (config `pipeline.models` / `pipeline.fanout` override it), caps review fan-out, and lets only its `explore` roles launch a read-only `Explore` search. It denies an `sdlc:design-review` prompt lacking the header when the two review roles' models differ.
-- **SubagentStart** gives each `sdlc:*` agent `$SDLC`, its unit's `docRoot` / `requirementsDir` (per-product `docRoots`), `docTemplates`, the references path and the `SDLC-RESULT` format.
+- **SubagentStart** gives each `sdlc:*` agent `$SDLC`, its unit's `docRoot` / `requirementsDir` (per-product `docRoots`), `docTemplates`, its Initiative profile when one is configured (standing test Tasks off, initiative branch), the references path and the `SDLC-RESULT` format.
 - **SubagentStop** keeps an `sdlc:*` agent running until its final message ends with an `SDLC-RESULT` line (`product`/`architecture`/`lld` finishing `done` also need a successful `post-comment` this round). It and **SessionEnd** record each agent's tokens, cost, tool calls and peak context (README, "Metrics"). Never record metrics yourself.
 
 ## Deterministic control plane
@@ -226,7 +235,8 @@ failure; every result carries `remaining_steps`.
 | `file-closing-delta <epic> --title TEXT --body TEXT [--priority P] [--effort E] [--start --repo-path <p>]` | A closing-run finding as a `Bug` child of the Epic; `--priority` takes Urgent/High/Medium/Low (Blocker/Critical file as Urgent); `--start` (operator-authorised close-blocker lane) also stages `development` and `start-stage`s it → `delta_issue` |
 
 `worktree-add`/`sync-branch` auto-detect the base from the native parent: `origin/epic-<n>` for
-every child of a non-standing Epic (phase-Tasks included), `origin/main` otherwise; `--base` is
+every child of a non-standing Epic (phase-Tasks included), `origin/initiative-<i>` for an Epic
+(`--unit epic`) of an Initiative with an initiative branch, `origin/main` otherwise; `--base` is
 an override only.
 
 **Building blocks** (use directly only when no composite fits):
@@ -236,10 +246,10 @@ an override only.
 | `next-action <epic\|initiative> --run-id <id> --sync-epic [--repo-path <p>] [--skip-epic <n> ...]` | The one unit to work (Step 1); on an Initiative, the Epic to descend into ("The Initiative loop"). `--repo-path` (default `.`) is where it reads the dev lane's slot holders. `--sync-epic` keeps a non-standing Epic's `epic-<n>` current with `main` first (`epic_sync`, Step 1) |
 | `list-parallel-ready <epic> --repo-path <p> --run-id <id>` / `list-design-ready <epic> --repo-path <p>` / `list-ready-for-review <epic>` | Dev-lane / standing-epic design-lane / review pools |
 | `lld-section --epic <n> --task <m> --repo-path <p>` | Only Task #`<m>`'s subsection of `epic-<n>/lld.md` |
-| `worktree-add <n> [--unit epic] [--base <ref>]` | The only way to make a worktree: resumes from `origin/<branch>`, else branches off the integration base; `diverged: true` → `references/parallelism.md`, "Working on a branch" |
+| `worktree-add <n> [--unit epic\|initiative] [--base <ref>]` | The only way to make a worktree: resumes from `origin/<branch>`, else branches off the integration base; `diverged: true` → `references/parallelism.md`, "Working on a branch" |
 | `review-worktree-add <n> --repo-path <p>` / `release-review-worktree <n>` | `pr-review`'s detached worktree at `origin/issue-<n>` / its removal (idempotent; `merge-pr` also runs it). The `pr-review` agent runs both itself |
 | `prune-stale --repo-path <p> [--dry-run]` | Closed units' worktrees (detached review and dev ones included), landed branches on origin and locally, stale run-state files; then `worktree prune` + `fetch --prune`. Never touches open units, other branches or unmerged work |
-| `claim <n> --role <r>` / `start-comment <n> --role <r>` / `sync-branch <n> [--unit epic] [--base <ref>]` / `verify-exit <n> --expect-stage <s> [--pr <pr>]` | The steps inside `start-stage` / `transition` / `prepare-rework` / `skip-pr-review` |
+| `claim <n> --role <r>` / `start-comment <n> --role <r>` / `sync-branch <n> [--unit epic\|initiative] [--base <ref>]` / `verify-exit <n> --expect-stage <s> [--pr <pr>]` | The steps inside `start-stage` / `transition` / `prepare-rework` / `skip-pr-review` |
 | `route <n> --to product\|architecture\|development\|merge --reason "<one line>"` | The step inside `advance-standing` / `skip-pr-review`; refuses (exit 0) anything but a forward move on a standing child |
 | `set-stage <n> --stage <s>` / `add-blocked-by <n> --on <dep>` / `create-issue --parent <n> --type <T> [--blocked-by <dep> ...]` / `repair-issue <n> [--parent <p>] [--type <T>]` | Stage a unit / order units (Epics: wave order, "Cutting Epics") / the only issue-creation path / fill an existing issue's missing fields |
 | `open-design-pr <n>` / `merge-design-pr <pr> --issue <n> [--repo-path <p>]` | A phase-Task's design PR `issue-<n>` → `epic-<e>`: `transition` opens it; `skip-gate`/`waive-gate`/`finish-lld` merge it — re-run those, not `merge-design-pr`. Its refusals (`behind_base`, `review_stale`, missing/`rework` review evidence, an `arch-review` below the skip bar) come back in their `design_pr` / `failed_step` |
@@ -260,6 +270,7 @@ an override only.
 | `resolve-thread --thread-id <id> [--reply TEXT]` | Reply to and resolve a gate PR review thread; the gate-feedback agent runs it for the threads it addressed (`references/gates.md`) |
 | `close-epic <n> [--no-carry-forward] [--clean-worktree]` / `record-epic-verification <n> --kind e2e\|exploratory --summary TEXT [--sha S] --repo-path <epic worktree>` / `provision-epic-stack <n>` / `teardown-epic-stack <n> [--project P] [--profile P]` | Epic close (`references/epics.md`, "Epic closing"; its merge also closes the Epic issue, cleans up the epic and tears the stack down; on an already-merged epic it only finishes that bookkeeping, `recovered: true`; `--clean-worktree` first discards the closing run's untracked output from the epic worktree, refusing — `worktree_clean.tracked_changes` — on any tracked change); per-epic stack, no-op unless `pipeline.stack.enabled` or a hand-made stack is named; teardown removes nothing while the project's containers still run |
 | `check-initiative-closeable <n>` / `record-initiative-verification <n> --outcome met\|unmet --summary` / `close-initiative <n>` | "Closing an Initiative" |
+| `open-initiative-pr <i> --repo-path <p>` / `merge-initiative-pr <i> [--repo-path <p>]` / `initiative-profile <n>` | Initiative branch only: sync + open (idempotent) the PR `initiative-<i>` → `main` / its only merge gate (all Epics closed, not behind `main`, required checks green or attested and `closeSuites` attested at the head; refusals exit 0 with `reason`, `evidence`; then the branch is cleaned up) / the Initiative profile governing any unit (`references/epics.md`, "Initiative branch") |
 | `mark-feedback-addressed <n>` | The step inside `finish-gate-feedback` (`references/gates.md`, "Addressing gate feedback"); never the agent's |
 | `auto-pass-gate` / `mark-feedback-received` | CI-triggered paths only — never run them yourself (the shipped workflow runs `auto-pass-gate`; `mark-feedback-received` only if the driven repo wires a comment trigger) |
 
@@ -372,7 +383,7 @@ Every result except `skip`/`none`/`stop-at-cap` carries `unit`: `"issue"`, or `"
   (run each flagged issue's `repair` command, filling any `<P>`/`<T>`; never re-create
   it), then `prune-stale --repo-path <p>`. All feed Step 4.
 - **When `check-epics-closeable` names an epic and `pipeline.epicClose.auto` is on**,
-  close it yourself: `close-epic` (reconciles) → run the exploratory pass →
+  close it yourself (into `initiative-<i>` under an initiative branch — `close-epic` decides): `close-epic` (reconciles) → run the exploratory pass →
   record it only if it ran clean → `close-epic --clean-worktree` (discards the pass's
   untracked output, then merges; it also cleans up the epic's branches, worktrees and stack).
   Escalate instead on the cases in "What you decide". Full
@@ -383,11 +394,19 @@ Every result except `skip`/`none`/`stop-at-cap` carries `unit`: `"issue"`, or `"
 When `next-action` on the Initiative reports in a `none` `reason` that every cut Epic is
 closed:
 
+0. **Initiative branch only** (the `reason` names `open-initiative-pr`): run
+   `open-initiative-pr <initiative> --repo-path <p>` (syncs `initiative-<i>` with `main`, opens
+   or reuses its PR into `main`, returns the `evidence` owed). Tell the operator the PR and the
+   owed suites; their final full runs land as passing checks or `record-local-ci --pr <pr>`
+   attestations at the head (`closeSuites`, e.g. `e2e`). Then `merge-initiative-pr
+   <initiative>`: on `merged: false` act on `reason` (`evidence`, `behind_base` → re-run
+   `open-initiative-pr`, re-attest the new head) and stop until it is green — never merge the
+   PR by hand. Once merged, continue with step 1 (validation runs on `main`).
 1. Delegate `sdlc:initiative-close`: it starts the delivered application and validates
    it against every requirement in the Initiative's `product.md`, and always records
    `record-initiative-verification --outcome met|unmet`.
-2. **All met** (`clean`) → `python3 "$SDLC" close-initiative <initiative>` (one call — an
-   Initiative has no branch; it re-checks closeability and the record itself).
+2. **All met** (`clean`) → `python3 "$SDLC" close-initiative <initiative>` (one call; it
+   re-checks closeability — the initiative branch landed, if any — and the record itself).
 3. **Anything not met** (`rework`) → file the gap (a Task against the relevant Epic, or
    judge it out of scope and say why) and stop; re-run from step 1 once fixed. When the
    owning Epic is already closed, file it without asking: a `Bug` under the repo's standing
