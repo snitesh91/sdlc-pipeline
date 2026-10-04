@@ -17,6 +17,7 @@ import argparse
 import contextlib
 import fcntl
 import fnmatch
+import hashlib
 import io
 import json
 import os
@@ -176,7 +177,12 @@ _PIPELINE_DEFAULTS = {
         "No space left on device", "ENOSPC", "Cannot connect to the Docker daemon",
         "docker daemon not running", "Is the docker daemon running",
         "The runner has received a shutdown signal", "lost communication with the server",
-        "exit code 137", r"\bKilled\s*$", "OOMKilled"]},
+        "exit code 137", r"\bKilled\s*$", "OOMKilled",
+        # OOM kills: specific runtime/kernel wording only, so a test about memory never matches.
+        r"\b(?:by|received|with|signal) (?:signal )?SIGKILL\b", r"\bsignal 9\b",
+        "JavaScript heap out of memory", "ERR_WORKER_OUT_OF_MEMORY",
+        r"Out of memory: Killed process", "Cannot allocate memory",
+        r"fatal error: runtime: out of memory"]},
     # `auto`: the orchestrator runs the final `close-epic` itself; close-epic's own
     # refusals (open children, stale verification, failing checks) still apply.
     # `evidenceCarryForward.paths`: globs a commit after the tested head may touch without
@@ -1361,11 +1367,41 @@ def doc_root_for(number: Optional[int], gh: Optional["WorkItemProvider"] = None)
     return doc_roots_for(number, gh)["docRoot"].rstrip("/")
 
 
+def config_repo_root() -> str:
+    """The repo root holding the config (its dir, or the parent of `.config/` / `.claude/`)."""
+    d = os.path.dirname(os.path.abspath(_find_config() or CONFIG_FILENAME))
+    return os.path.dirname(d) if os.path.basename(d) in (".config", ".claude") else d
+
+
+def doc_templates_dir(root: str) -> str:
+    """`<root>/<docTemplates>` when that dir exists in the repo, else the top-level docRoot's,
+    so a product tree without its own templates borrows the shared ones."""
+    sub = PIPELINE["docTemplates"]
+    own = f"{root.rstrip('/')}/{sub}"
+    if os.path.isdir(os.path.join(config_repo_root(), own)):
+        return own
+    return f"{DOC_ROOT.rstrip('/')}/{sub}"
+
+
+def hint_doc_roots(gh: Optional["WorkItemProvider"], *numbers: Optional[int]) -> None:
+    """Resolve (and so hint, for the SubagentStart hook) each unit's doc roots; best effort,
+    and a no-op without `docRoots`."""
+    if not doc_root_rules():
+        return
+    for n in numbers:
+        if n is None:
+            continue
+        try:
+            doc_roots_for(n, gh)
+        except GhError:
+            pass
+
+
 def cmd_doc_root(gh: Optional["WorkItemProvider"], number: int) -> dict:
-    """Where unit `number`'s docs live (`docRoot`, `requirementsDir`, `docTemplates` under it)."""
+    """Where unit `number`'s docs live (`docRoot`, `requirementsDir`, `docTemplates`)."""
     roots = doc_roots_for(number, gh)
     return {"issue": number, **roots, "docRoot": roots["docRoot"].rstrip("/"),
-            "docTemplates": f"{roots['docRoot'].rstrip('/')}/{PIPELINE['docTemplates']}",
+            "docTemplates": doc_templates_dir(roots["docRoot"]),
             "per_product": bool(doc_root_rules())}
 
 
@@ -2960,6 +2996,7 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     if "issue" in result:
         note_in_flight(args.epic, run_id,
                        {result["issue"]: result.get("stage") or result["action"]})
+    hint_doc_roots(gh, args.epic, result.get("issue"))
     return {**result, **liveness, "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0,
             **({"epic_sync": epic_sync} if epic_sync is not None else {})}
 
@@ -4349,12 +4386,27 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
 def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> dict:
     """Post the `development->pr-review` handoff marker that queues the PR for review.
     Run after every development round, including rework. Returns `queued_for`."""
+    text = f"✅ Development complete. {summary} PR #{pr} is queued for `pr-review`."
+    if _handoff_already_posted(gh, issue, text):
+        return {"issue": issue, "pr": pr, "queued_for": "pr-review", "already_posted": True}
     timestamp = _utc_now_marker()
     gh.issue_comment(issue,
-        f"✅ Development complete. {summary} "
-        f"PR #{pr} is queued for `pr-review`.\n\n"
+        f"{text}\n\n"
         f"<!-- stage-transition: development->pr-review @ {timestamp} -->")
     return {"issue": issue, "pr": pr, "queued_for": "pr-review"}
+
+
+def _handoff_already_posted(gh: GitHub, issue: int, text: str) -> bool:
+    """Whether the latest `development->pr-review` handoff is this very `text` with no
+    pr-review outcome since: a repeated call would only duplicate it."""
+    comments = gh.issue_view(issue).get("comments", [])
+    at = last_transition_to(comments, "pr-review")
+    if at is None:
+        return False
+    outcome = last_pr_review_outcome(comments)
+    if outcome is not None and outcome[0] > at:
+        return False
+    return comments[at].get("body", "").split("\n\n<!-- stage-transition:")[0].strip() == text
 
 
 PR_REVIEW_OUTCOMES = ("clean", "rework")
@@ -4609,10 +4661,12 @@ def route_refusal(parent: Optional[dict], stage: Optional[str], status: Optional
     return None
 
 
-def cmd_route(gh: GitHub, issue: int, to: str, reason: str) -> dict:
+def cmd_route(gh: GitHub, issue: int, to: str, reason: str,
+              finished: Optional[str] = None) -> dict:
     """Route a standing epic's child ahead to `to`, skipping the stages between: Stage `to`
     and Pipeline Status `todo` (no claim; `merge` leaves both), plus a `stage-route` marker.
-    Refuses (`routed: False`, exit 0) per `route_refusal`."""
+    `finished`: the stage that just ran (a review leaves Stage on its authoring stage), so it
+    is never named as skipped. Refuses (`routed: False`, exit 0) per `route_refusal`."""
     parent = gh.issue_epic_info(issue).get("parent")
     parent_info = gh.issue_epic_info(parent["number"]) if parent else None
     fields = gh.issue_fields(issue)
@@ -4625,8 +4679,10 @@ def cmd_route(gh: GitHub, issue: int, to: str, reason: str) -> dict:
                             to, reason, pr_review_bounced=bounced)
     if refusal:
         return {"issue": issue, "routed": False, "reason": refusal}
-    frm = stage or "pickup"
-    skipped = list(STANDING_FLOW[_flow_index(stage) + 1:STANDING_FLOW.index(to)])
+    at, frm = _flow_index(stage), stage or "pickup"
+    if finished in STANDING_FLOW and STANDING_FLOW.index(finished) > at:
+        at, frm = STANDING_FLOW.index(finished), finished
+    skipped = list(STANDING_FLOW[at + 1:STANDING_FLOW.index(to)])
     if to != "merge":
         gh.set_stage_field(issue, to)
         gh.set_pipeline_status_field(issue, "todo")
@@ -5079,6 +5135,24 @@ class MergeConflict(GhError):
         self.base = base
 
 
+def _sync_conflict_key(path: str, branch: str, base: str, files: list, runner: Runner) -> str:
+    """`<base sha>.<branch sha>.<files digest>`: what makes a sync conflict a new one."""
+    shas = [(_origin_sha(path, b, runner) or "none")[:12] for b in (base, branch)]
+    digest = hashlib.sha1("\n".join(sorted(files)).encode()).hexdigest()[:12]
+    return ".".join([*shas, digest])
+
+
+def _sync_conflict_posted(gh: GitHub, issue: int, branch: str, key: str) -> bool:
+    """Whether the latest `sync-conflict` marker for `branch` on `issue` carries `key`."""
+    pattern = re.compile(rf"<!--\s*sync-conflict:\s*{re.escape(branch)}\s*@[^>]*?\bkey:(\S+)")
+    try:
+        comments = gh.issue_view(issue).get("comments", [])
+    except GhError:
+        return False
+    keys = [m.group(1) for c in comments for m in pattern.finditer(c.get("body") or "")]
+    return bool(keys) and keys[-1] == key
+
+
 def cmd_sync_branch(gh: GitHub, repo_path: Optional[str], issue: int, unit: str = "issue",
                      runner: Runner = _default_runner, base: Optional[str] = None) -> dict:
     """Merge the unit's integration base (or `base`) into its branch and push. A merge
@@ -5104,13 +5178,17 @@ def cmd_sync_branch(gh: GitHub, repo_path: Optional[str], issue: int, unit: str 
             try:
                 git_reconcile_branch(ws.path, branch, base=base, runner=runner)
             except MergeConflict as e:
-                # Persisted as a marker so pairing-counts can rebuild it after a crash.
-                timestamp = _utc_now_marker()
-                gh.issue_comment(issue,
-                    f"⚠️ Merge conflict reconciling `{branch}` with `origin/{base}` — "
-                    f"{len(e.files)} file(s): {', '.join(f'`{f}`' for f in e.files)}. "
-                    f"Routing to `development` for resolution in its own worktree.\n\n"
-                    f"<!-- sync-conflict: {branch} @ {timestamp} -->")
+                # Persisted as a marker so pairing-counts can rebuild it after a crash; keyed
+                # so the same unchanged conflict is never re-posted by a later run.
+                key = _sync_conflict_key(ws.path, branch, base, e.files, runner)
+                if _sync_conflict_posted(gh, issue, branch, key):
+                    result["already_posted"] = True
+                else:
+                    gh.issue_comment(issue,
+                        f"⚠️ Merge conflict reconciling `{branch}` with `origin/{base}` — "
+                        f"{len(e.files)} file(s): {', '.join(f'`{f}`' for f in e.files)}. "
+                        f"Routing to `development` for resolution in its own worktree.\n\n"
+                        f"<!-- sync-conflict: {branch} @ {_utc_now_marker()} key:{key} -->")
                 result.update({"synced": False, "conflict": True, "conflicting_files": e.files})
     return _with_workspace(result, ws)
 
@@ -6774,7 +6852,10 @@ def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
     realised = []
     if issue_closed:
         cmd_mark_issue_closed(gh, issue)
-        gh.issue_comment(issue, f"Merged via #{pr_number}.")
+        note = f"Merged via #{pr_number}."
+        # A recovered re-run of the merge finds its note already posted.
+        if not any((c.get("body") or "").strip() == note for c in view.get("comments") or []):
+            gh.issue_comment(issue, note)
         realised = _close_realised_issues(gh, issue, view.get("body"), pr=pr_number)
     terminal = record_terminal_unit(gh, issue, run_id=run_id)
     cleanup = cleanup_unit(gh, issue, "issue", repo_path, gh._run, base=base)
@@ -6806,6 +6887,23 @@ def _close_realised_issues(gh: GitHub, issue: int, body: Optional[str],
     return out
 
 
+def _release_parked_unit(issue: int, base_repo: str, runner: Runner) -> dict:
+    """A parked unit's `docker` resources (both unit prefixes, before the tree they may mount;
+    best effort, as `cleanup_unit`) and its `worktree`."""
+    out: dict = {}
+    if _docker_cleanup_enabled():
+        sweeps = []
+        for unit in ("issue", "epic"):
+            prefix = unit_docker_prefix(issue, unit)
+            try:
+                sweeps.append(docker_sweep(prefix, runner))
+            except Exception as exc:  # parking must never fail on cleanup
+                sweeps.append({"prefix": prefix, "errors": [str(exc)]})
+        out["docker"] = sweeps
+    out["worktree"] = _release_unit_worktree(issue, base_repo=base_repo, runner=runner)
+    return out
+
+
 def _release_unit_worktree(issue: int, base_repo: str = ".",
                             runner: Runner = _default_runner) -> dict:
     """Release whichever of `issue-<n>` / `epic-<n>` currently has a worktree."""
@@ -6818,20 +6916,21 @@ def _release_unit_worktree(issue: int, base_repo: str = ".",
 
 def cmd_mark_blocked(gh: GitHub, issue: int, dep: int, repo_path: str = ".") -> dict:
     """Add a native blockedBy edge on `dep`, reset Pipeline Status to `todo` (so the
-    parked unit doesn't read as a crashed in-progress run) and release its worktree."""
+    parked unit doesn't read as a crashed in-progress run) and release its worktree and
+    docker stack."""
     gh.add_blocked_by(issue, dep)
     gh.set_pipeline_status_field(issue, "todo")
     gh.issue_comment(issue, f"⏸️ Blocked — waiting on #{dep} to merge.")
     return {"issue": issue, "status": "blocked", "on": dep,
-            "worktree": _release_unit_worktree(issue, base_repo=repo_path, runner=gh._run)}
+            **_release_parked_unit(issue, repo_path, gh._run)}
 
 
 def cmd_mark_needs_human(gh: GitHub, issue: int, reason: str, repo_path: str = ".") -> dict:
-    """Park the unit as needs-human with `reason` and release its worktree."""
+    """Park the unit as needs-human with `reason`; release its worktree and docker stack."""
     gh.set_pipeline_status_field(issue, "needs-human")
     gh.issue_comment(issue, f"🙋 Needs human input — {reason}")
     return {"issue": issue, "status": "needs-human",
-            "worktree": _release_unit_worktree(issue, base_repo=repo_path, runner=gh._run)}
+            **_release_parked_unit(issue, repo_path, gh._run)}
 
 
 def cmd_mark_todo(gh: GitHub, issue: int) -> dict:
@@ -8963,7 +9062,7 @@ def cmd_advance_standing(gh: GitHub, issue: int, frm: str, to: str, reason: str,
         seq.run("transition", lambda: cmd_transition(
             gh, issue, _REVIEW_FOLLOWS_STAGE.get(frm, frm), repo_path=repo_path, runner=runner),
             failed=lambda r: not r.get("ready"))
-    routed = seq.run("route", lambda: cmd_route(gh, issue, to, reason),
+    routed = seq.run("route", lambda: cmd_route(gh, issue, to, reason, finished=frm),
                      failed=lambda r: not r.get("routed"))
     started = seq.run("start-stage", lambda: cmd_start_stage(
         gh, issue, to, "issue", repo_path or ".", runner=runner),
@@ -9023,6 +9122,7 @@ def cmd_prepare_rework(gh: GitHub, number: int, unit: str = "issue", repo_path: 
     (reuses a live tree, else re-creates a released one from origin) -> `sync-branch`. Returns
     `path`, the post-sync `head`, `conflict`/`conflicting_files`, the open `pr` and `suites`
     -- which required suites the new head still needs a check or attestation for."""
+    hint_doc_roots(gh, number)
     seq = StepSequence()
     tree = seq.run("worktree-add", lambda: cmd_worktree_add(gh, number, unit, repo_path,
                                                              runner=runner),
@@ -9219,7 +9319,10 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--to", required=True, help=f"One of {', '.join(ROUTE_TARGETS)}")
     p.add_argument("--reason", required=True, help=f"One line, <= {ROUTE_REASON_CAP} chars")
-    p.set_defaults(func=lambda a: cmd_route(get_work_item_provider(), a.issue, a.to, a.reason))
+    p.add_argument("--from", dest="frm", default=None, choices=list(STANDING_FLOW[:-1]),
+                   help="The stage that just ran (never reported as skipped)")
+    p.set_defaults(func=lambda a: cmd_route(get_work_item_provider(), a.issue, a.to, a.reason,
+                                            finished=a.frm))
     p = sub.add_parser("start-comment")
     p.add_argument("issue", type=int)
     p.add_argument("--role", required=True,
