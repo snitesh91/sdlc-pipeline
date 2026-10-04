@@ -1410,7 +1410,11 @@ def test_compaction_injects_nothing_without_run_state(tmp_path, sdlc_repo):
                                         ({"id": "claude-opus-5[1m]"}, True), (None, False)])
 def test_session_start_flags_an_off_policy_orchestrator_model(tmp_path, sdlc_repo, model, hint):
     ctx = _session_start(sdlc_repo, tmp_path, source="startup", model=model)
-    assert ("sdlc-run <n>" in ctx) is hint
+    assert ("orchestrator policy is sonnet" in ctx) is hint
+    if hint:
+        assert "Session launched on opus" in ctx and "stale after /model" in ctx
+        assert "never stop the run" in ctx
+    assert "restart" not in ctx
 
 
 # --- bin/sdlc-run -----------------------------------------------------------------------
@@ -1467,9 +1471,9 @@ def test_sdlc_run_ignores_a_blank_configured_model(tmp_path):
 def test_session_start_hint_follows_the_configured_orchestrator_model(tmp_path, configured, session, hint):
     repo = _repo_with_orchestrator(tmp_path, configured)
     ctx = _session_start(repo, tmp_path, source="startup", model=session)
-    assert ("sdlc-run <n>" in ctx) is hint
+    assert ("orchestrator policy is" in ctx) is hint
     if hint:
-        assert "orchestrator on opus" in ctx
+        assert "orchestrator policy is opus" in ctx
 
 
 def test_sdlc_run_needs_a_number(tmp_path):
@@ -1477,11 +1481,11 @@ def test_sdlc_run_needs_a_number(tmp_path):
     assert proc.returncode == 2 and "usage: sdlc-run" in proc.stderr
 
 
-def test_skill_frontmatter_model_matches_the_orchestrator_policy():
-    with open(os.path.join(HOOKS, "model_policy.json")) as f:
-        model = json.load(f)["orchestrator"]["model"]
+def test_skill_frontmatter_sets_no_model():
+    # A skill `model:` would override the session's (and pipeline.orchestrator.model's) model.
     with open(os.path.join(os.path.dirname(HOOKS), "skills", "run", "SKILL.md")) as f:
-        assert f"\nmodel: {model}\n" in f.read().split("\n---", 1)[0] + "\n"
+        head = f.read().split("\n---", 1)[0] + "\n"
+    assert "\nname: run\n" in head and "\nmodel:" not in head
 
 
 def test_agent_frontmatter_models_match_the_policy():
