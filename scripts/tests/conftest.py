@@ -30,3 +30,12 @@ def _no_host_docker(monkeypatch):
     real runners), so it is off unless a test turns `dockerCleanup` back on with a fake."""
     import sdlc_next
     monkeypatch.setitem(sdlc_next.PIPELINE["worktrees"], "dockerCleanup", False)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_doc_roots_cache():
+    """Per-product doc roots are cached per process; no test may see another's."""
+    import sdlc_next
+    sdlc_next._DOC_ROOTS_CACHE.clear()
+    yield
+    sdlc_next._DOC_ROOTS_CACHE.clear()

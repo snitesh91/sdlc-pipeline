@@ -72,6 +72,23 @@ REPO = CONFIG["repo"]
 # GraphQL templates name the repository inline (gh's `--repo` doesn't reach `api graphql`).
 _OWNER, _NAME = REPO.split("/", 1)
 DOC_ROOT = CONFIG["docRoot"]
+
+
+def doc_root_rules() -> list:
+    """The config's `docRoots` entries (read at call time), [] when unset."""
+    return [r for r in (CONFIG.get("docRoots") or []) if isinstance(r, dict) and r.get("docRoot")]
+
+
+def all_doc_roots() -> list:
+    """The top-level `docRoot` then every `docRoots` entry's, slash-stripped and deduped."""
+    roots = []
+    for root in [DOC_ROOT, *(r["docRoot"] for r in doc_root_rules())]:
+        root = root.rstrip("/")
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
 TOKEN_PATH = CONFIG.get("tokenPath")  # optional: a config may name only tokenEnv
 TOKEN_ENV = CONFIG.get("tokenEnv")
 STAGE_AFTER_GATE = {"product": "architecture", "architecture": "development"}
@@ -220,10 +237,12 @@ PRODUCT_WIP_CAP = PIPELINE["productWip"]["maxGateAPending"]
 RESUME_LIVE_WINDOW_MINUTES = PIPELINE["resume"]["liveWindowMinutes"]
 # Read at call time so a test can override it on the module.
 CI_INFRA_FAILURE_PATTERNS = tuple(PIPELINE["ci"]["infraFailurePatterns"])
-EVIDENCE_CARRY_FORWARD_GLOBS = tuple(
-    g.replace("{docRoot}", DOC_ROOT.rstrip("/"))
+# `{docRoot}` expands once per doc root: the top-level one and every `docRoots` entry's.
+EVIDENCE_CARRY_FORWARD_GLOBS = tuple(dict.fromkeys(
+    g.replace("{docRoot}", root)
     for g in ((PIPELINE["epicClose"].get("evidenceCarryForward") or {}).get("paths")
-              or _PIPELINE_DEFAULTS["epicClose"]["evidenceCarryForward"]["paths"]))
+              or _PIPELINE_DEFAULTS["epicClose"]["evidenceCarryForward"]["paths"])
+    for root in all_doc_roots()))
 
 
 def issue_branch(number: int) -> str:
@@ -1252,6 +1271,102 @@ def is_epic_architected(issue: dict) -> bool:
     """Whether the Epic's design phase is done (label set by `merge-lld-doc`). A label, not
     a marker, so it is readable from the bulk `issue_list()` fetch."""
     return has_label(issue, LABELS["architected"])
+
+
+# --- Per-product doc roots ------------------------------------------------------------
+# A repo hosting several products lists them in the optional top-level `docRoots`:
+#   [{"name": "tijori", "match": {"issues": [1994]} | {"label": "product:tijori"},
+#     "docRoot": "...", "requirementsDir": "..."}]
+# A unit takes the first entry matching the unit itself or any ancestor (Task -> Epic ->
+# Initiative), else the top-level `docRoot` / `requirementsDir`. Without `docRoots` nothing
+# is looked up and every unit gets the top-level values, exactly as before.
+
+_DOC_ROOTS_CACHE: dict = {}
+# Unit -> resolved roots, read by the SubagentStart hook (which has no GitHub access).
+DOC_ROOT_HINTS_FILE = "doc-roots.cache"
+_ANCESTRY_DEPTH = 4
+
+
+def _default_doc_roots() -> dict:
+    return {"docRoot": DOC_ROOT, "requirementsDir": CONFIG.get("requirementsDir"),
+            "product": None}
+
+
+def _doc_root_rule_matches(rule: dict, chain: list) -> bool:
+    """Whether `rule.match` names (by number or label) any `(number, labels)` in `chain`."""
+    match = rule.get("match") or {}
+    numbers = {int(n) for n in (match.get("issues") or [])}
+    label = match.get("label")
+    return any(n in numbers or (label and label in labels) for n, labels in chain)
+
+
+def _resolve_doc_roots(chain: list) -> dict:
+    for rule in doc_root_rules():
+        if _doc_root_rule_matches(rule, chain):
+            return {"docRoot": rule["docRoot"],
+                    "requirementsDir": rule.get("requirementsDir", CONFIG.get("requirementsDir")),
+                    "product": rule.get("name")}
+    return _default_doc_roots()
+
+
+def unit_ancestry(gh: "WorkItemProvider", number: int) -> list:
+    """`[(number, labels), ...]` from `number` up its parents (Task -> Epic -> Initiative)."""
+    chain, n = [], number
+    while n is not None and len(chain) < _ANCESTRY_DEPTH and n not in {c[0] for c in chain}:
+        info = gh.issue_epic_info(n)
+        chain.append((n, label_names(info)))
+        n = (info.get("parent") or {}).get("number")
+    return chain
+
+
+def _record_doc_root_hints(resolved: dict) -> None:
+    """Merge `{number: roots}` into the hint file the SubagentStart hook reads; best effort."""
+    path = os.path.join(_run_state_dir(), DOC_ROOT_HINTS_FILE)
+    try:
+        os.makedirs(_run_state_dir(), exist_ok=True)
+        try:
+            with open(path) as f:
+                hints = json.load(f)
+        except (OSError, ValueError):
+            hints = {}
+        if not isinstance(hints, dict):
+            hints = {}
+        hints.update({str(n): r for n, r in resolved.items()})
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(hints, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def doc_roots_for(number: Optional[int], gh: Optional["WorkItemProvider"] = None) -> dict:
+    """`{docRoot, requirementsDir, product}` for unit `number`: the first `docRoots` entry
+    matching it or an ancestor, else the top-level values. Looks nothing up (and needs no
+    `gh`) when `docRoots` is unset; otherwise cached per process, each ancestor too."""
+    if number is None or not doc_root_rules():
+        return _default_doc_roots()
+    number = int(number)
+    if number in _DOC_ROOTS_CACHE:
+        return _DOC_ROOTS_CACHE[number]
+    chain = unit_ancestry(gh or get_work_item_provider(), number)
+    resolved = {chain[i][0]: _resolve_doc_roots(chain[i:]) for i in range(len(chain))}
+    _DOC_ROOTS_CACHE.update(resolved)
+    _record_doc_root_hints(resolved)
+    return resolved.get(number) or _default_doc_roots()
+
+
+def doc_root_for(number: Optional[int], gh: Optional["WorkItemProvider"] = None) -> str:
+    """Unit `number`'s doc root, slash-stripped (see `doc_roots_for`)."""
+    return doc_roots_for(number, gh)["docRoot"].rstrip("/")
+
+
+def cmd_doc_root(gh: Optional["WorkItemProvider"], number: int) -> dict:
+    """Where unit `number`'s docs live (`docRoot`, `requirementsDir`, `docTemplates` under it)."""
+    roots = doc_roots_for(number, gh)
+    return {"issue": number, **roots, "docRoot": roots["docRoot"].rstrip("/"),
+            "docTemplates": f"{roots['docRoot'].rstrip('/')}/{PIPELINE['docTemplates']}",
+            "per_product": bool(doc_root_rules())}
 
 
 PLACEMENTS = ("cloud", "local")
@@ -2535,13 +2650,13 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                 if lane["occupied"] or lane["cross_epic"]:
                     runner(["git", "-C", repo_path, "fetch", "origin"])
                     lane["footprints"] = dev_lane_footprints(lane, repo_path, by_number,
-                                                             runner=runner)
+                                                             runner=runner, gh=gh)
             except GhError as e:
                 lane.update(cap=DEV_LANE_PARALLELISM, occupied=[], free=DEV_LANE_PARALLELISM,
                             excluded_other_epic=[], cross_epic=[], footprints=[],
                             warning=f"dev lane unverifiable ({e}); treating it as empty")
         return dev_lane_refusal(lane, number, lambda n: read_footprint(
-            repo_path, n, runner=runner, epic=epic))
+            repo_path, n, runner=runner, epic=epic, gh=gh))
 
     def with_lane(result: dict) -> dict:
         """The lane arithmetic (`slots`) once consulted, and what it deferred (`dev_lane`)."""
@@ -3024,34 +3139,37 @@ def slice_task_subsection(doc_text: str, task_number: int) -> Optional[str]:
 
 
 def cmd_lld_section(repo_path: str, epic: int, task,
-                     runner: Runner = _default_runner) -> dict:
-    """Print one Task's subsection of `origin/epic-<n>:.../lld.md` as raw markdown,
-    then return `{ok, epic, task, chars}` as the JSON footer. `task` is an issue
+                     runner: Runner = _default_runner,
+                     gh: Optional[WorkItemProvider] = None) -> dict:
+    """Print one Task's subsection of `origin/epic-<n>:<epic's docRoot>/.../lld.md` as raw
+    markdown, then return `{ok, epic, task, chars}` as the JSON footer. `task` is an issue
     number or task key."""
+    doc = f"{doc_root_for(epic, gh)}/epic-{epic}/lld.md"
     try:
-        text = runner(["git", "-C", repo_path, "show",
-                        f"origin/{epic_branch(epic)}:{DOC_ROOT}/epic-{epic}/lld.md"])
+        text = runner(["git", "-C", repo_path, "show", f"origin/{epic_branch(epic)}:{doc}"])
     except GhError:
-        raise GhError(f"cannot read {DOC_ROOT}/epic-{epic}/lld.md on "
+        raise GhError(f"cannot read {doc} on "
                        f"origin/{epic_branch(epic)} -- is the epic's lld merged?")
     section = slice_task_subsection(text, task)
     if section is None:
         label = f"#{task}" if str(task).isdigit() else f"{task}"
-        raise GhError(f"no `## Task {label}` subsection in {DOC_ROOT}/epic-{epic}/lld.md "
+        raise GhError(f"no `## Task {label}` subsection in {doc} "
                        f"(headings must read `## Task {label}: ...`, per agents/lld.md)")
     print(section, end="")
     return {"ok": True, "epic": epic, "task": task, "chars": len(section)}
 
 
 def read_footprint(repo_path: str, issue: int, runner: Runner = _default_runner,
-                    epic: Optional[int] = None) -> Optional[list]:
+                    epic: Optional[int] = None,
+                    gh: Optional[WorkItemProvider] = None) -> Optional[list]:
     """An issue's owned footprint from `origin/issue-<n>`'s architecture.md, else (with
     `epic`) from its Task subsection of the Epic's lld.md. None when no `## Footprint`
     section is readable anywhere; `[]` for a section that owns no path (verify-only).
     Reads origin refs via `git show`, so no worktree is needed."""
     try:
         text = runner(["git", "-C", repo_path, "show",
-                        f"origin/{issue_branch(issue)}:{DOC_ROOT}/issue-{issue}/architecture.md"])
+                        f"origin/{issue_branch(issue)}:{doc_root_for(issue, gh)}/issue-{issue}"
+                        f"/architecture.md"])
     except GhError:
         text = None
     if text is not None:
@@ -3061,7 +3179,7 @@ def read_footprint(repo_path: str, issue: int, runner: Runner = _default_runner,
     if epic is not None:
         try:
             text = runner(["git", "-C", repo_path, "show",
-                            f"origin/{epic_branch(epic)}:{DOC_ROOT}/epic-{epic}/lld.md"])
+                            f"origin/{epic_branch(epic)}:{doc_root_for(epic, gh)}/epic-{epic}/lld.md"])
         except GhError:
             return None
         return find_task_footprint(text, issue)
@@ -3089,12 +3207,14 @@ DEV_PR_SCOPE_RULE = ("development authors no design doc; record deviations in th
 def dev_pr_scope_offenders(gh: WorkItemProvider, issue: int, changed_files: list,
                            repo_path: str = ".", runner: Runner = _default_runner) -> dict:
     """Paths a `development` branch/PR must not touch: any Epic design doc under
-    `<docRoot>/epic-*/` (e.g. lld.md), and any file listed in ANOTHER open Task's `## Footprint`
-    of the same Epic's lld.md that is not in this unit's OWN footprint. Returns
+    `<docRoot>/epic-*/` of any configured doc root (e.g. lld.md), and any file listed in
+    ANOTHER open Task's `## Footprint` of the same Epic's lld.md that is not in this unit's
+    OWN footprint. Returns
     `{"design_docs": [...], "foreign_footprint": [...]}` (both sorted, deduped); the
     foreign-footprint list is empty when the unit is not a child of a non-standing Epic or the
     Epic lld.md is unreadable (never guessed at)."""
-    design_prefix = DOC_ROOT.rstrip("/") + "/epic-"
+    # Every product's Epic design docs: a development branch authors none of them.
+    design_prefix = tuple(f"{root}/epic-" for root in all_doc_roots())
     design_docs = sorted({p for p in changed_files if p.startswith(design_prefix)})
     foreign: set = set()
     # Only the foreign-footprint arm needs the Epic lld.md; skip it (and its API calls) when the
@@ -3105,7 +3225,8 @@ def dev_pr_scope_offenders(gh: WorkItemProvider, issue: int, changed_files: list
         epic_no = int(integ[len(EPIC_BRANCH_PREFIX):])
         try:
             lld = runner(["git", "-C", repo_path, "show",
-                          f"origin/{epic_branch(epic_no)}:{DOC_ROOT}/epic-{epic_no}/lld.md"])
+                          f"origin/{epic_branch(epic_no)}:{doc_root_for(epic_no, gh)}"
+                          f"/epic-{epic_no}/lld.md"])
         except GhError:
             lld = None
         if lld:
@@ -3222,6 +3343,7 @@ def cmd_show_config(runner: Runner = _default_runner) -> dict:
     """Effective config (`pipeline` block over defaults) plus the running plugin version."""
     return {"repo": REPO, "docRoot": DOC_ROOT, "tokenPath": TOKEN_PATH, "tokenEnv": TOKEN_ENV,
             "requirementsDir": CONFIG.get("requirementsDir"),
+            "docRoots": doc_root_rules(),
             "parallelism": {**_PARALLELISM,
                             "devLane": DEV_LANE_PARALLELISM,
                             "prReview": PR_REVIEW_PARALLELISM,
@@ -3984,7 +4106,8 @@ def dev_lane_slots(gh: GitHub, repo_path: str, epic: int, all_issues: list,
 
 
 def dev_lane_footprints(lane: dict, repo_path: str, by_number: dict,
-                        runner: Runner = _default_runner) -> list:
+                        runner: Runner = _default_runner,
+                        gh: Optional[WorkItemProvider] = None) -> list:
     """`(issue, footprint)` for every slot holder and cross-epic branch whose footprint is
     readable on origin; an unreadable one is left out (it still holds its slot)."""
     numbers = [h["issue"] for h in lane["holders"]]
@@ -3994,7 +4117,7 @@ def dev_lane_footprints(lane: dict, repo_path: str, by_number: dict,
         # Footprints live in the unit's own epic's lld.md, so use its parent, not the lane's epic.
         parent = (by_number.get(number) or {}).get("parent")
         fp = read_footprint(repo_path, number, runner=runner,
-                            epic=parent["number"] if parent else None)
+                            epic=parent["number"] if parent else None, gh=gh)
         if fp:
             out.append((number, fp))
     return out
@@ -4068,7 +4191,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
     active_branches = lane["active_branches"]
 
     eligible, skipped = [], []
-    selected_footprints = dev_lane_footprints(lane, repo_path, by_number, runner=runner)
+    selected_footprints = dev_lane_footprints(lane, repo_path, by_number, runner=runner, gh=gh)
     for issue in sorted(children, key=sort_key):
         number = issue["number"]
         branch = issue_branch(number)
@@ -4092,7 +4215,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
         if gh.blocked_by(number):
             skipped.append({"issue": number, "reason": "blocked by an open dependency"})
             continue
-        footprint = read_footprint(repo_path, number, runner=runner, epic=epic)
+        footprint = read_footprint(repo_path, number, runner=runner, epic=epic, gh=gh)
         if footprint is None:
             skipped.append({"issue": number, "reason": "no ## Footprint section found in its own "
                                                          "architecture.md, or under a "
@@ -4632,10 +4755,14 @@ def design_phase_epic(gh: WorkItemProvider, issue: int, stage: Optional[str]) ->
     return parent["number"] if parent and parent["kind"] == "epic" else None
 
 
-def design_doc_dir(epic: Optional[int], issue: int) -> str:
+def design_doc_dir(epic: Optional[int], issue: int,
+                   gh: Optional[WorkItemProvider] = None) -> str:
     """Where `issue`'s design docs live: `<docRoot>/epic-<e>` for a non-standing Epic's
-    phase-Task (authored in place, merged into `epic-<e>`), else `<docRoot>/issue-<n>`."""
-    return f"{DOC_ROOT}/epic-{epic}" if epic is not None else f"{DOC_ROOT}/issue-{issue}"
+    phase-Task (authored in place, merged into `epic-<e>`), else `<docRoot>/issue-<n>`;
+    `<docRoot>` is the unit's own (`doc_root_for`)."""
+    if epic is not None:
+        return f"{doc_root_for(epic, gh)}/epic-{epic}"
+    return f"{doc_root_for(issue, gh)}/issue-{issue}"
 
 
 def last_design_review_outcome(comments: list, role: str) -> Optional[tuple]:
@@ -4721,7 +4848,7 @@ def cmd_open_design_pr(gh: GitHub, issue: int, runner: Runner = _default_runner)
         return {"issue": issue, "refused": True,
                 "reason": f"#{issue} (Stage {stage!r}) is not a non-standing Epic's "
                           f"architecture/lld phase-Task -- it has no design PR"}
-    base, doc = epic_branch(epic), f"{DOC_ROOT}/epic-{epic}/{stage}.md"
+    base, doc = epic_branch(epic), f"{doc_root_for(epic, gh)}/epic-{epic}/{stage}.md"
     info = gh.issue_view(issue)
     found = find_design_pr(info.get("comments", []))
     if found and found[0] == stage:
@@ -4746,10 +4873,11 @@ def cmd_open_design_pr(gh: GitHub, issue: int, runner: Runner = _default_runner)
             "doc": doc}
 
 
-def _epic_lld_is_numbered_copy(repo_path: str, issue: int, epic: int, runner: Runner) -> bool:
+def _epic_lld_is_numbered_copy(repo_path: str, issue: int, epic: int, runner: Runner,
+                               gh: Optional[WorkItemProvider] = None) -> bool:
     """Whether `origin/epic-<e>`'s lld.md is `issue-<n>`'s after `create-lld-tasks` numbered
     it: merging the branch's copy back would revert the numbering."""
-    doc = f"{DOC_ROOT}/epic-{epic}/lld.md"
+    doc = f"{doc_root_for(epic, gh)}/epic-{epic}/lld.md"
     try:
         runner(["git", "-C", repo_path, "fetch", "origin"])
         src = runner(["git", "-C", repo_path, "show", f"origin/{issue_branch(issue)}:{doc}"])
@@ -4772,7 +4900,7 @@ def _design_review_stale(gh: GitHub, issue: int, stage: str, epic: int, comments
                 "reason": f"the recorded `{role}` outcome names no reviewed head SHA -- {rerun}"}
     if head is None or head.startswith(reviewed) or reviewed.startswith(head):
         return None
-    doc = f"{DOC_ROOT}/epic-{epic}/{stage}.md"
+    doc = f"{doc_root_for(epic, gh)}/epic-{epic}/{stage}.md"
     try:
         changed = gh.files_since(reviewed, issue_branch(issue))
     except GhError:
@@ -4827,7 +4955,7 @@ def cmd_merge_design_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str =
         return {**result, "behind_base": behind,
                 "reason": f"branch {issue_branch(issue)} is {behind} commit(s) behind {base} -- "
                           f"run sync-branch {issue}, then re-run"}
-    if stage == "lld" and _epic_lld_is_numbered_copy(repo_path, issue, parent["number"], runner):
+    if stage == "lld" and _epic_lld_is_numbered_copy(repo_path, issue, parent["number"], runner, gh):
         return {**result, "up_to_date": True,
                 "reason": f"`{base}` already carries this lld.md with its Tasks numbered -- "
                           f"merging would revert the numbering, so nothing is merged"}
@@ -4866,7 +4994,7 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
     stage = doc.rsplit(".", 1)[0]
     epic = design_phase_epic(gh, issue, stage)
     head, base = issue_branch(issue), "main" if epic is None else epic_branch(epic)
-    doc_path = f"{design_doc_dir(epic, issue)}/{doc}"
+    doc_path = f"{design_doc_dir(epic, issue, gh)}/{doc}"
     # Cite the pushed head, not a local HEAD: the PR only contains what is on origin.
     repo_path = repo_path or "."
     runner(["git", "-C", repo_path, "fetch", "origin"])
@@ -5000,7 +5128,7 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
     not realised by another Task) to `development`, and label the Epic architected.
     Idempotent. Returns `merged`, `verified_on_origin`, `advanced_tasks`, `not_advanced`."""
     epic_br = epic_branch(epic)
-    doc_path = f"{DOC_ROOT}/epic-{epic}/lld.md"
+    doc_path = f"{doc_root_for(epic, gh)}/epic-{epic}/lld.md"
     with branch_lock(epic_br), BranchWorkspace(epic_br, repo_path, runner) as ws:
         runner(["git", "-C", ws.path, "fetch", "origin"])
         blob = _blob_at(ws.path, f"origin/{epic_br}", doc_path, runner)
@@ -5323,7 +5451,7 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
     renumber the headings, wire `Depends on:` as `blockedBy` edges, and push the doc.
     Idempotent: existing issues are matched back by their `task-key` marker."""
     epic_br = epic_branch(epic)
-    doc_path = f"{DOC_ROOT}/epic-{epic}/lld.md"
+    doc_path = f"{doc_root_for(epic, gh)}/epic-{epic}/lld.md"
     runner(["git", "-C", repo_path, "fetch", "origin"])
     try:
         doc = runner(["git", "-C", repo_path, "show", f"origin/{epic_br}:{doc_path}"])
@@ -5468,7 +5596,7 @@ def _complete_phase_task(gh: GitHub, repo_path: Optional[str], issue: int, stage
     result = {"issue": issue, "unit": "issue", "phase_task_complete": False,
               "parent": parent["number"]}
     if stage == "architecture" and parent["kind"] == "epic":
-        doc = f"{DOC_ROOT}/epic-{parent['number']}/architecture.md"
+        doc = f"{doc_root_for(parent['number'], gh)}/epic-{parent['number']}/architecture.md"
         on_epic = gh.path_on_ref(doc, epic_branch(parent["number"]))
         result["doc_on_epic_branch"] = on_epic
         if not on_epic:
@@ -6223,7 +6351,7 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
     # A non-standing Epic's phase-Task authors `epic-<e>/<doc>` in place (docs merge into the
     # epic branch by its design PR); everything else keeps `issue-<n>/`.
     epic = design_phase_epic(gh, issue, expect)
-    docs_rel = design_doc_dir(epic, issue)
+    docs_rel = design_doc_dir(epic, issue, gh)
     docs_dir = os.path.join(repo_path, docs_rel)
     result["docs_dir"] = docs_rel
     result["docs_present"] = sorted(os.listdir(docs_dir)) if os.path.isdir(docs_dir) else []
@@ -6354,8 +6482,8 @@ def base_delta_needs_reattest(base_delta_files: list) -> bool:
 
 
 def _is_doc_path(path: str) -> bool:
-    """True for a path under `docRoot`, any `*.md`, or anything under `docs/`."""
-    return (path.startswith(DOC_ROOT.rstrip("/") + "/")
+    """True for a path under any configured doc root, any `*.md`, or anything under `docs/`."""
+    return (path.startswith(tuple(f"{root}/" for root in all_doc_roots()))
             or path.endswith(".md")
             or path.startswith("docs/"))
 
@@ -7479,13 +7607,14 @@ def epic_last_activity(gh, epic: int, all_issues: list, comments: list, open_prs
 
 
 def epic_footprint(repo_path: str, epic_issue: dict,
-                   runner: Runner = _default_runner) -> Optional[list]:
+                   runner: Runner = _default_runner,
+                   gh: Optional[WorkItemProvider] = None) -> Optional[list]:
     """An Epic's footprint: the union of its Tasks' `## Footprint`s in `origin/epic-<n>`'s
     `lld.md`, else a `## Footprint` in the Epic's body; None when neither has one."""
     n = epic_issue["number"]
     try:
         text = runner(["git", "-C", repo_path, "show",
-                       f"origin/{epic_branch(n)}:{DOC_ROOT}/epic-{n}/lld.md"])
+                       f"origin/{epic_branch(n)}:{doc_root_for(n, gh)}/epic-{n}/lld.md"])
     except GhError:
         text = None
     if text:
@@ -7539,7 +7668,7 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
                 warnings.append(f"git fetch failed ({_first_line(str(e))}); footprints read "
                                 f"from the last fetched origin refs")
         if n not in footprints:
-            footprints[n] = epic_footprint(repo_path, by_number[n], runner)
+            footprints[n] = epic_footprint(repo_path, by_number[n], runner, gh=gh)
         return footprints[n]
 
     launchable, waiting = [], []
@@ -8192,9 +8321,9 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
         # An open epic's docs live on its epic branch; `close-epic` carries them to main.
         branch = epic_branch(epic["number"])
         doc_names = ("architecture.md", "lld.md")
-        missing_docs = [f"{DOC_ROOT}/epic-{epic['number']}/{name}"
-                        for name in doc_names
-                        if not gh.path_on_ref(f"{DOC_ROOT}/epic-{epic['number']}/{name}", branch)]
+        epic_docs = f"{doc_root_for(epic['number'], gh)}/epic-{epic['number']}"
+        missing_docs = [f"{epic_docs}/{name}" for name in doc_names
+                        if not gh.path_on_ref(f"{epic_docs}/{name}", branch)]
         docs_line = (
             f"- [ ] {len(missing_docs)} epic doc(s) never reached `{branch}` "
             f"({', '.join(f'`{d}`' for d in missing_docs)}) — merge their design PRs before "
@@ -8769,8 +8898,15 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
     claim = seq.run("claim", lambda: cmd_claim(gh, number, role))
     if run_id and claim:
         note_in_flight(seq.steps["run-cap"]["epic"], run_id, {number: role})
+    # Per-product doc roots: resolving here also records the unit for the SubagentStart hook.
+    roots: dict = {}
+    if doc_root_rules():
+        try:
+            roots["doc_root"] = doc_root_for(number, gh)
+        except GhError as e:
+            roots["doc_root_error"] = str(e)
     return seq.report(issue=number, role=role, path=(worktree or {}).get("path"),
-                      claimed=bool(claim))
+                      claimed=bool(claim), **roots)
 
 
 # A review role with no Stage value of its own is verified against the stage it follows.
@@ -9005,6 +9141,11 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--repo-path", default=".",
                     help="Repo with an origin/epic-<n> ref")
     p.set_defaults(func=lambda a: cmd_lld_section(a.repo_path, a.epic, a.task))
+    p = sub.add_parser("doc-root",
+                        help="Where one unit's docs live: its product's docRoot/requirementsDir "
+                             "(per `docRoots`), else the top-level ones")
+    p.add_argument("issue", type=int, help="Any unit: Initiative, Epic, Task")
+    p.set_defaults(func=lambda a: cmd_doc_root(None, a.issue))
     p = sub.add_parser("list-design-ready",
                         help="A standing epic's product/architecture children safe to run concurrently")
     p.add_argument("epic", type=int, help="The epic")
