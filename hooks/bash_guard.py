@@ -73,11 +73,11 @@ REASONS = {
     "graphql": f"Hand-run GraphQL is blocked: the control plane owns GitHub reads and writes. Use {SDLC} <command> (next-action, check-gate, pr-checks, resolve-thread, audit-issues, ...).",
     "api-mutation": f"Hand-run GitHub REST mutations are blocked. Use the {SDLC} command that owns the change (set-stage, create-issue, mark-blocked, open-gate, ...).",
     "issue create": f"Use {SDLC} create-issue --parent <n> --title ... --body ... --type T [--priority P] [--effort E] (orchestrator only; stage agents report it in their handoff).",
-    "issue edit": f"Issue fields are control-plane-owned: use {SDLC} set-stage / add-blocked-by / mark-blocked, or {SDLC} place <n> --where cloud|local for the placement label. Stage agents report the change in their handoff instead.",
+    "issue edit": f"Issue fields are control-plane-owned: use {SDLC} edit-issue <n> [--body-file F] [--add-label L] [--remove-label L], {SDLC} set-stage / add-blocked-by / mark-blocked, or {SDLC} place <n> --where cloud|local for the placement label. Stage agents report the change in their handoff instead.",
     "issue close": f"Use {SDLC} close-issue <n> [--repo-path <p>] (orchestrator only).",
     "issue reopen": "Reopening an issue is the operator's call; report it (stage agents: outcome needs-human).",
     "pr create": f"Use {SDLC} open-dev-pr (development), {SDLC} open-design-pr or {SDLC} open-gate (orchestrator). An operator-directed PR outside the pipeline (main thread only) names its non-pipeline branch explicitly: gh pr create --head <branch> ...",
-    "pr merge": f"Use {SDLC} merge-pr <pr> --issue <n>; it is the only code merge gate ({SDLC} merge-design-pr for a phase-Task's design PR; {SDLC} merge-gate <pr> --issue <n> --stage <s> --operator-confirmed for a gate PR, only when the operator explicitly said to merge it).",
+    "pr merge": f"Use {SDLC} merge-pr <pr> --issue <n>; it is the only code merge gate ({SDLC} merge-design-pr for a phase-Task's design PR; {SDLC} merge-gate <pr> --issue <n> --stage <s> --operator-confirmed for a gate PR, only when the operator explicitly said to merge it). An operator PR outside the pipeline (main thread only) is merged by its non-pipeline branch: gh pr merge <branch> ...",
     "pr ready": f"Use {SDLC} merge-pr <pr> --issue <n>; it marks the PR ready itself.",
     "pr close": "Closing a pipeline PR is the operator's call; report it instead.",
     "worktree add": f"Use {SDLC} start-stage <n> --role <r> (or worktree-add <n>); a pr-review worktree is {SDLC} review-worktree-add <n>.",
@@ -339,7 +339,28 @@ def operator_pr(args: list, prefixes=DEFAULT_BRANCH_PREFIXES) -> bool:
     if not head:
         return False
     branch = head.split(":", 1)[-1]  # `owner:branch`
-    return not any(re.fullmatch(re.escape(p) + r"\d+", branch) for p in prefixes)
+    return not _pipeline_branch(branch, prefixes)
+
+
+GH_PR_MERGE_OPTS_WITH_VALUE = {"-R", "--repo", "-b", "--body", "-F", "--body-file", "-t", "--subject",
+                               "-A", "--author-email", "--match-head-commit"}
+BRANCH_RE = re.compile(r"[\w.:/-]+")
+
+
+def _pipeline_branch(branch: str, prefixes) -> bool:
+    return any(re.fullmatch(re.escape(p) + r"\d+", branch) for p in prefixes)
+
+
+def operator_merge(args: list, prefixes=DEFAULT_BRANCH_PREFIXES) -> bool:
+    """A main-thread `gh pr merge` of an operator PR: its target is a branch name (not a PR
+    number or URL) and no `<prefix><n>` pipeline branch."""
+    pos = _positionals(args, GH_PR_MERGE_OPTS_WITH_VALUE)
+    target = pos[2] if len(pos) > 2 else ""
+    # A literal branch name only: no number, URL, `{}` placeholder or `$VAR`.
+    if not BRANCH_RE.fullmatch(target) or target.isdigit() or "://" in target \
+            or "/pull/" in target:
+        return False
+    return not _pipeline_branch(target.split(":", 1)[-1], prefixes)
 
 
 def branch_prefixes(config: dict) -> tuple:
@@ -358,6 +379,8 @@ def verdict(command: str, role: str = "", prefixes=DEFAULT_BRANCH_PREFIXES):
         if words[0] == "gh":
             key = check_gh(words[1:])
             if key == "pr create" and not role and operator_pr(words[1:], prefixes):
+                key = None
+            elif key == "pr merge" and not role and operator_merge(words[1:], prefixes):
                 key = None
         elif words[0] == "git":
             key = check_git(words[1:])

@@ -1,8 +1,8 @@
 """SubagentStart: tell every sdlc:* agent where the control plane, docs and references are."""
 import os
 
-from _common import (RESULT_FORMAT, agent_transcript, emit, first_prompt, load_json, plugin_root,
-                     prompt_header, read_input, repo_config, run, runs_dir, sdlc_role)
+from _common import (CONFIG_DIRS, RESULT_FORMAT, agent_transcript, emit, first_prompt, load_json,
+                     plugin_root, prompt_header, read_input, repo_config, run, runs_dir, sdlc_role)
 
 # Written by sdlc_next.py (`doc_roots_for`) in the run-state directory: unit -> resolved roots.
 DOC_ROOT_HINTS_FILE = "doc-roots.cache"
@@ -48,6 +48,18 @@ def unit_doc_roots(config: dict, data: dict):
     return top, (units[0] if units else None), False
 
 
+def templates_dir(config: dict, config_path: str, doc_root) -> str:
+    """`<unit docRoot>/<docTemplates>` when the repo has it, else under the top-level docRoot."""
+    name = (config.get("pipeline") or {}).get("docTemplates") or "_templates"
+    repo = os.path.dirname(os.path.abspath(config_path))
+    if os.path.basename(repo) in CONFIG_DIRS:
+        repo = os.path.dirname(repo)
+    if doc_root and os.path.isdir(os.path.join(repo, doc_root, name)):
+        return f"{doc_root}/{name}"
+    top = config.get("docRoot")
+    return f"{top}/{name}" if top else name
+
+
 def main() -> int:
     data = read_input()
     if not sdlc_role(data.get("agent_type")):
@@ -61,8 +73,8 @@ def main() -> int:
         f'sdlc: run the control plane as python3 "$SDLC" <cmd> in Bash; '
         f'$SDLC={os.path.join(root, "scripts", "sdlc_next.py")}.',
         f"sdlc: docRoot={roots['docRoot']}, requirementsDir={roots['requirementsDir']}, "
-        f"docTemplates={(config.get('pipeline') or {}).get('docTemplates') or '_templates'} "
-        f"(relative to the repo root; docTemplates to docRoot)"
+        f"docTemplates={templates_dir(config, config_path, roots['docRoot'])} "
+        f"(relative to the repo root)"
         + (f"; resolved for #{unit}." if unit is not None and resolved else "."),
     ]
     if not resolved:

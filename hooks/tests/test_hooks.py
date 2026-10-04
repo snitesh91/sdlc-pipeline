@@ -177,6 +177,8 @@ def test_guard_reason_names_control_plane_command(sdlc_repo):
     assert "open-design-pr" in guard("gh pr create --base x", sdlc_repo)
     assert "create-issue" in guard("gh issue create -t x", sdlc_repo)
     assert "set-stage" in guard("gh issue edit 5 --add-label bug", sdlc_repo)
+    assert 'python3 "$SDLC" edit-issue <n> [--body-file F] [--add-label L] [--remove-label L]' \
+        in guard("gh issue edit 5 --body-file b.md", sdlc_repo)
     assert "place <n> --where" in guard("gh issue edit 5 --add-label sdlc:cloud", sdlc_repo)
     assert "resolve-thread" in guard("gh api graphql -f query='mutation { resolveReviewThread }'", sdlc_repo)
     assert "start-stage" in guard("git worktree add /tmp/x", sdlc_repo)
@@ -261,6 +263,23 @@ def test_main_thread_operator_pr_with_an_explicit_non_pipeline_head_is_allowed(s
         assert "sdlc guard: " in guard(cmd, sdlc_repo, **live)
     # never for a stage agent
     assert "sdlc guard: " in guard("gh pr create --head chore/x --title t", sdlc_repo,
+                                   "sdlc:development")
+
+
+def test_main_thread_may_merge_an_operator_pr_by_its_non_pipeline_branch(sdlc_repo, live):
+    assert guard("gh pr merge chore/sdlc-v0315 --squash", sdlc_repo, **live) is None
+    assert guard("gh -R o/r pr merge --squash -t x docs/y", sdlc_repo, **live) is None
+    for cmd in ("gh pr merge 12 --squash",                      # a PR number
+                "gh pr merge issue-12 --squash",                 # a pipeline branch
+                "gh pr merge epic-3",
+                "gh pr merge https://github.com/o/r/pull/12",    # a URL
+                "gh pr merge --squash",                          # no target
+                "gh pr merge",
+                "xargs -I {} gh pr merge {} < prs.txt"):
+        reason = guard(cmd, sdlc_repo, **live)
+        assert "sdlc guard: " in reason and "gh pr merge <branch>" in reason
+    # never for a stage agent
+    assert "sdlc guard: " in guard("gh pr merge chore/sdlc-v0315 --squash", sdlc_repo,
                                    "sdlc:development")
 
 
@@ -1082,7 +1101,7 @@ def test_subagent_start_tells_sdlc_agents_where_things_are(sdlc_repo):
     assert out["hookEventName"] == "SubagentStart" and len(ctx.splitlines()) <= 8
     assert "$SDLC=/plug/scripts/sdlc_next.py" in ctx and 'python3 "$SDLC"' in ctx
     assert "docRoot=docs/sdlc" in ctx and "/plug/references" in ctx
-    assert "docTemplates=_templates" in ctx
+    assert "docTemplates=docs/sdlc/_templates" in ctx
     assert 'SDLC-RESULT: {"issue": <n>' in ctx
 
 
@@ -1136,6 +1155,18 @@ def test_subagent_start_matches_a_listed_root_issue_and_reads_the_agent_transcri
                      transcript_prompt="ROLE: product ISSUE: 2000 EPIC: 1994\nWrite the IRD")
     assert f"docRoot={TIJORI_DOCS}, requirementsDir=apps/tijori/req" in ctx
     assert "resolved for #1994" in ctx
+
+
+def test_subagent_start_points_doc_templates_at_the_units_root_when_it_has_them(
+        two_product_repo, tmp_path):
+    hints = {"2011": {"docRoot": TIJORI_DOCS, "requirementsDir": "apps/tijori/req"}}
+    prompt = "ROLE: development ISSUE: 2011 EPIC: 2010"
+    # The unit's root has no templates: the top-level root's serve it.
+    assert f"docTemplates={BOOKSHAW_DOCS}/_templates " in _start_ctx(
+        two_product_repo, tmp_path, prompt, hints=hints)
+    os.makedirs(os.path.join(two_product_repo, TIJORI_DOCS, "_templates"))
+    assert f"docTemplates={TIJORI_DOCS}/_templates " in _start_ctx(
+        two_product_repo, tmp_path, prompt, hints=hints)
 
 
 def test_subagent_start_points_an_unknown_unit_at_doc_root(two_product_repo, tmp_path):
@@ -1249,15 +1280,77 @@ def test_subagent_stop_records_non_sdlc_agents_without_a_result(tmp_path, sdlc_r
     assert rec["role"] == "general-purpose" and "outcome" not in rec and "epic" not in rec
 
 
-def test_subagent_stop_records_nothing_when_it_blocks_or_outside_sdlc(tmp_path, sdlc_repo, plain_repo):
+def test_subagent_stop_records_a_blocked_stop_but_nothing_outside_sdlc(tmp_path, sdlc_repo, plain_repo):
     data = str(tmp_path / "data")
     blocked = run_hook("subagent_stop.py",
                        _stop_payload(sdlc_repo, _agent_transcript(tmp_path, final="waiting")),
                        env={"CLAUDE_PLUGIN_DATA": data})
     assert blocked.returncode == 2
+    [rec] = _records(data)
+    assert rec["agent_id"] == "a1" and "outcome" not in rec
     run_hook("subagent_stop.py", _stop_payload(plain_repo, _agent_transcript(tmp_path)),
              env={"CLAUDE_PLUGIN_DATA": data})
-    assert not os.path.exists(os.path.join(data, "metrics"))
+    assert len(_records(data)) == 1
+
+
+def _handback_transcript(tmp_path, message, final="I'll hand back now."):
+    """An agent that ends with a SubagentHandback tool_use, then its tool result."""
+    path = _agent_transcript(tmp_path, final=final)
+    with open(path, "a") as f:
+        for line in (
+            {"type": "assistant", "timestamp": "2026-09-18T10:03:00Z",
+             "message": {"id": "m9", "role": "assistant", "model": "claude-opus-5",
+                         "usage": _usage(1, 1), "content": [
+                             {"type": "tool_use", "id": "hb", "name": "SubagentHandback",
+                              "input": {"message": message}}]}},
+            {"type": "user", "timestamp": "2026-09-18T10:03:01Z",
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": "hb",
+                  "content": [{"type": "text", "text": '{"success":true}'}]}]}},
+        ):
+            f.write(json.dumps(line) + "\n")
+    return path
+
+
+@pytest.mark.parametrize("extra", [{}, {"last_assistant_message": ""}])
+def test_a_handback_only_result_passes_and_records_its_issue(tmp_path, sdlc_repo, extra):
+    data = str(tmp_path / "data")
+    transcript = _handback_transcript(tmp_path, "Done: PR #9.\n\n" + RESULT)
+    proc = run_hook("subagent_stop.py", _stop_payload(sdlc_repo, transcript, **extra),
+                    env={"CLAUDE_PLUGIN_DATA": data})
+    assert proc.returncode == 0, proc.stderr
+    [rec] = _records(data)
+    assert (rec["issue"], rec["stage"], rec["outcome"]) == (13, "development", "done")
+
+
+def test_the_metrics_scan_reads_a_handback_result(tmp_path, sdlc_repo):
+    # With the check skipped (stop_hook_active) the record comes from the scan alone.
+    data = str(tmp_path / "data")
+    transcript = _handback_transcript(tmp_path, RESULT)
+    run_hook("subagent_stop.py", _stop_payload(sdlc_repo, transcript, stop_hook_active=True),
+             env={"CLAUDE_PLUGIN_DATA": data})
+    [rec] = _records(data)
+    assert (rec["issue"], rec["outcome"]) == (13, "done")
+
+
+def test_a_handback_without_a_result_blocks_but_records(tmp_path, sdlc_repo):
+    data = str(tmp_path / "data")
+    transcript = _handback_transcript(tmp_path, "Done: PR #9, all green.")
+    proc = run_hook("subagent_stop.py", _stop_payload(sdlc_repo, transcript),
+                    env={"CLAUDE_PLUGIN_DATA": data})
+    assert proc.returncode == 2 and "no SDLC-RESULT line" in proc.stderr
+    [rec] = _records(data)
+    assert "issue" not in rec and rec["tool_calls"] == 1
+
+
+def test_a_handback_from_an_earlier_round_does_not_count(tmp_path, sdlc_repo):
+    transcript = _handback_transcript(tmp_path, RESULT)
+    with open(transcript, "a") as f:
+        f.write(json.dumps({"type": "user", "message": {"role": "user", "content": "resume: fix x"}}) + "\n")
+        f.write(json.dumps(_assistant("m10", "claude-opus-5", _usage(1, 1), "fixed x")) + "\n")
+    proc = run_hook("subagent_stop.py", _stop_payload(sdlc_repo, transcript),
+                    env={"CLAUDE_PLUGIN_DATA": str(tmp_path / "data")})
+    assert proc.returncode == 2
 
 
 def _run_state(runs_dir, session, epic=9, **extra):
@@ -1329,7 +1422,11 @@ def test_compaction_injects_nothing_without_run_state(tmp_path, sdlc_repo):
                                         ({"id": "claude-opus-5[1m]"}, True), (None, False)])
 def test_session_start_flags_an_off_policy_orchestrator_model(tmp_path, sdlc_repo, model, hint):
     ctx = _session_start(sdlc_repo, tmp_path, source="startup", model=model)
-    assert ("sdlc-run <n>" in ctx) is hint
+    assert ("orchestrator policy is sonnet" in ctx) is hint
+    if hint:
+        assert "Session launched on opus" in ctx and "stale after /model" in ctx
+        assert "never stop the run" in ctx
+    assert "restart" not in ctx
 
 
 # --- bin/sdlc-run -----------------------------------------------------------------------
@@ -1386,9 +1483,9 @@ def test_sdlc_run_ignores_a_blank_configured_model(tmp_path):
 def test_session_start_hint_follows_the_configured_orchestrator_model(tmp_path, configured, session, hint):
     repo = _repo_with_orchestrator(tmp_path, configured)
     ctx = _session_start(repo, tmp_path, source="startup", model=session)
-    assert ("sdlc-run <n>" in ctx) is hint
+    assert ("orchestrator policy is" in ctx) is hint
     if hint:
-        assert "orchestrator on opus" in ctx
+        assert "orchestrator policy is opus" in ctx
 
 
 def test_sdlc_run_needs_a_number(tmp_path):
@@ -1396,11 +1493,11 @@ def test_sdlc_run_needs_a_number(tmp_path):
     assert proc.returncode == 2 and "usage: sdlc-run" in proc.stderr
 
 
-def test_skill_frontmatter_model_matches_the_orchestrator_policy():
-    with open(os.path.join(HOOKS, "model_policy.json")) as f:
-        model = json.load(f)["orchestrator"]["model"]
+def test_skill_frontmatter_sets_no_model():
+    # A skill `model:` would override the session's (and pipeline.orchestrator.model's) model.
     with open(os.path.join(os.path.dirname(HOOKS), "skills", "run", "SKILL.md")) as f:
-        assert f"\nmodel: {model}\n" in f.read().split("\n---", 1)[0] + "\n"
+        head = f.read().split("\n---", 1)[0] + "\n"
+    assert "\nname: run\n" in head and "\nmodel:" not in head
 
 
 def test_agent_frontmatter_models_match_the_policy():

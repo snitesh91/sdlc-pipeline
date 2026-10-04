@@ -1,7 +1,6 @@
 ---
 name: run
 description: Use when the operator invokes /sdlc:run <epic> to drive a GitHub-Issues Initiative or Epic and its child issues through the auto-SDLC stages to merge, or asks to resume, unblock, retro, or continuously run that pipeline. Requires an sdlc-pipeline.config.json in the target repo.
-model: sonnet
 ---
 
 # Auto SDLC over GitHub Issues

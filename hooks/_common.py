@@ -156,6 +156,34 @@ def message_text(content) -> str:
     return ""
 
 
+HANDBACK_TOOL = "SubagentHandback"
+
+
+def handback_message(content):
+    """`input.message` of the last SubagentHandback tool_use in a message's content, or None."""
+    found = None
+    if isinstance(content, list):
+        for b in content:
+            if (isinstance(b, dict) and b.get("type") == "tool_use"
+                    and b.get("name") == HANDBACK_TOOL):
+                msg = (b.get("input") or {}).get("message")
+                found = msg if isinstance(msg, str) else found
+    return found
+
+
+def is_tool_result(content) -> bool:
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+
+
+def result_text(text, handback):
+    """`text` when it holds a valid SDLC-RESULT; else the handback message, when there is one.
+    An agent that ends with SubagentHandback puts its result there, not in a text block."""
+    if handback is None or sdlc_result(text)[0] is not None:
+        return text
+    return handback
+
+
 def first_prompt(transcript: str) -> str:
     """The first user message of a transcript (a subagent's delegation prompt), or ""."""
     try:
