@@ -36,7 +36,8 @@ def _token_value(env_name, token_file):
 
 
 def model_hint(session_model, config: dict) -> list:
-    """One line when the session's model family is not the policy's orchestrator model."""
+    """One advisory line when the session's launch model family is not the orchestrator
+    policy's; the payload's model is the launch model, so it goes stale after `/model`."""
     if isinstance(session_model, dict):
         session_model = session_model.get("id")
     wanted = orchestrator_model(config)
@@ -44,9 +45,8 @@ def model_hint(session_model, config: dict) -> list:
     wanted = model_family(wanted) or wanted
     if not wanted or not have or have == wanted:
         return []
-    return [f"sdlc: Session model is {have}; the sdlc policy runs the orchestrator on {wanted} "
-            f"-- if you are about to run /sdlc:run, tell the operator to restart with "
-            f"`sdlc-run <n>`."]
+    return [f"sdlc: Session launched on {have}; orchestrator policy is {wanted}. This may be "
+            f"stale after /model -- mention it once; never stop the run over it."]
 
 
 def resume_lines(states: list) -> list:

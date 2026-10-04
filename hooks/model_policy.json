@@ -1,6 +1,6 @@
 {
   "_comment": "The one home of model and fan-out policy; agent_guard.py enforces it. pipeline.models.<role> / pipeline.fanout.<role> in the driven repo's config override it (a role's entry replaces the default whole). A fanout role absent here may not fan out. `explore`: stage roles that may launch the read-only Explore agent for search (not a fan-out; its own model).",
-  "orchestrator": {"model": "sonnet", "_comment": "Default; pipeline.orchestrator.model in the driven repo's config overrides it for bin/sdlc-run and the session-start check. skills/run/SKILL.md's frontmatter model matches this default."},
+  "orchestrator": {"model": "sonnet", "_comment": "Default; pipeline.orchestrator.model in the driven repo's config overrides it for bin/sdlc-run and the session-start check. skills/run/SKILL.md sets no model, so the session's model (bin/sdlc-run passes --model) drives the run."},
   "models": {
     "product": "opus",
     "product-review": "opus",

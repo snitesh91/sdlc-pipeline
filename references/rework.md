@@ -143,6 +143,9 @@ at instance level — what the context-reset replacement is for.
   the context-reset replacement, or — if this pairing's replacement is already spent —
   `mark-needs-human`. Name the class, not the instance, in the replacement prompt or the
   reason.
+- A verdict that flags a same-class repeat only in prose (e.g. "Same defect class — escalation
+  candidate"), with no marker: on its first round, resume with the class-at-root instruction
+  below; flagged again on the next consecutive round, escalate as if the count were 1.
 - Every resume message on such a pairing asks the agent to fix the class at the root
   (e.g. derive the guarded set live so an unknown case fails instead of passing), not
   the listed case.

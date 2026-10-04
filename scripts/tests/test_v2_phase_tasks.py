@@ -793,8 +793,9 @@ def test_a_new_run_id_resets_the_cap(run_state):
     result = s.decide_next_action(gh, 9, run_id="run-2")
 
     assert result["action"] == "delegate" and result["issue"] == 13
-    assert json.loads((run_state / "epic-9.json").read_text()) == {
-        "run_id": "run-2", "terminal": [], "epic": 9}
+    state = json.loads((run_state / "epic-9.json").read_text())
+    assert state.pop("config_digest") == s.config_digest(s.CONFIG)
+    assert state == {"run_id": "run-2", "terminal": [], "epic": 9}
 
 
 def test_run_state_tracks_units_in_flight_and_the_session(run_state, monkeypatch):
@@ -804,6 +805,7 @@ def test_run_state_tracks_units_in_flight_and_the_session(run_state, monkeypatch
     result = s.cmd_next_action(gh, argparse.Namespace(epic=9, run_id="run-1"))
     state = json.loads((run_state / "epic-9.json").read_text())
     assert result["issue"] == 13
+    assert state.pop("config_digest") == s.config_digest(s.CONFIG)
     assert state == {"run_id": "run-1", "terminal": [], "epic": 9, "session_id": "sess-1",
                      "in_flight": {"13": "development"}}
     s.record_terminal_unit(gh, 13)

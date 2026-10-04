@@ -7,8 +7,9 @@ import re
 import sys
 
 import _metrics
-from _common import (RESULT_FORMAT, first_prompt, load_json, message_text, prompt_header,
-                     read_input, repo_config, run, run_states, sdlc_result, sdlc_role)
+from _common import (RESULT_FORMAT, first_prompt, handback_message, is_tool_result, load_json,
+                     message_text, prompt_header, read_input, repo_config, result_text, run,
+                     run_states, sdlc_result, sdlc_role)
 from agent_guard import release_slot
 
 TAIL_BYTES = 2_000_000
@@ -55,12 +56,9 @@ def _blocks(entry: dict) -> list:
     return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
 
 
-def posted_handoff(path: str, role: str):
-    """Whether the agent's current round ran a successful `post-comment --role <role>`.
-
-    A round starts at the last user turn that is not a tool result (a resume message counts).
-    Returns None when the transcript is unreadable (the caller fails open).
-    """
+def _round(path: str):
+    """The transcript tail's entries from the current round's start: the last user turn that
+    is not a tool result (a resume message counts). None when the transcript is unreadable."""
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -69,9 +67,8 @@ def posted_handoff(path: str, role: str):
             raw = f.read().decode("utf-8", "replace")
     except OSError:
         return None
-    lines = raw.splitlines()[1 if size > TAIL_BYTES else 0:]
     entries = []
-    for line in lines:
+    for line in raw.splitlines()[1 if size > TAIL_BYTES else 0:]:
         try:
             entry = json.loads(line)
         except ValueError:
@@ -81,11 +78,29 @@ def posted_handoff(path: str, role: str):
     start = 0
     for i, entry in enumerate(entries):
         msg = entry.get("message") if isinstance(entry.get("message"), dict) else {}
-        if (msg.get("role") or entry.get("type")) == "user" and not any(
-                b.get("type") == "tool_result" for b in _blocks(entry)):
+        if (msg.get("role") or entry.get("type")) == "user" and not is_tool_result(msg.get("content")):
             start = i
+    return entries[start:]
+
+
+def last_handback(path: str):
+    """The current round's last SubagentHandback message, or None."""
+    found = None
+    for entry in _round(path) or []:
+        msg = entry.get("message") if isinstance(entry.get("message"), dict) else {}
+        if msg.get("role") == "assistant":
+            found = handback_message(msg.get("content")) or found
+    return found
+
+
+def posted_handoff(path: str, role: str):
+    """Whether the agent's current round ran a successful `post-comment --role <role>`;
+    None when the transcript is unreadable (the caller fails open)."""
+    entries = _round(path)
+    if entries is None:
+        return None
     calls = set()
-    for entry in entries[start:]:
+    for entry in entries:
         for block in _blocks(entry):
             if block.get("type") == "tool_use" and block.get("name") == "Bash":
                 m = POST_COMMENT_RE.search(str((block.get("input") or {}).get("command", "")))
@@ -128,29 +143,34 @@ def main() -> int:
         return 0
     release_fanout_slot(data)
     text = data.get("last_assistant_message")
-    if sdlc_role(data.get("agent_type")) and not data.get("stop_hook_active"):
+    role = sdlc_role(data.get("agent_type"))
+    path = data.get("agent_transcript_path") or ""
+    checked = role and not data.get("stop_hook_active")
+    if checked:
         if not isinstance(text, str):
-            path = data.get("agent_transcript_path") or ""
             text = last_assistant_text(path) if path else None
-        problem = sdlc_result(text)[1] if text is not None else None  # unreadable: fail open
-        if problem:
-            print(f"sdlc: {problem}. Finish your stage's exit actions now if any are undone, "
-                  f"then end your final message with exactly one line:\n{RESULT_FORMAT}",
-                  file=sys.stderr)
-            return 2
-        role = sdlc_role(data.get("agent_type"))
-        result = sdlc_result(text)[0] if text is not None else None
-        path = data.get("agent_transcript_path") or ""
-        if (role in COMMENT_ROLES and result and result.get("outcome") == "done" and path
-                and posted_handoff(path, role) is False):
-            print(f"sdlc: no handoff comment was posted this round. Write it to a file (<= 2,000 "
-                  f"chars) and run python3 \"$SDLC\" post-comment {result['issue']} --role {role} "
-                  f"--body-file <file>, then end your final message with the same SDLC-RESULT line.",
-                  file=sys.stderr)
-            return 2
+        if text is not None and path:
+            text = result_text(text, last_handback(path))
+    # Recorded before any block, so a blocked stop still has its cost; `report` keeps the
+    # latest of an agent's cumulative records.
     record(data, load_json(config_path), text if isinstance(text, str) else None)
+    if not checked:
+        return 0
+    problem = sdlc_result(text)[1] if text is not None else None  # unreadable: fail open
+    if problem:
+        print(f"sdlc: {problem}. Finish your stage's exit actions now if any are undone, "
+              f"then end your final message (or your SubagentHandback message) with exactly "
+              f"one line:\n{RESULT_FORMAT}", file=sys.stderr)
+        return 2
+    result = sdlc_result(text)[0] if text is not None else None
+    if (role in COMMENT_ROLES and result and result.get("outcome") == "done" and path
+            and posted_handoff(path, role) is False):
+        print(f"sdlc: no handoff comment was posted this round. Write it to a file (<= 2,000 "
+              f"chars) and run python3 \"$SDLC\" post-comment {result['issue']} --role {role} "
+              f"--body-file <file>, then end your final message with the same SDLC-RESULT line.",
+              file=sys.stderr)
+        return 2
     return 0
-
 
 if __name__ == "__main__":
     run(main)

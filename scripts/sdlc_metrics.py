@@ -35,6 +35,36 @@ def load_records(repo: str | None) -> list:
     return records
 
 
+ATTRIBUTION_KEYS = ("issue", "stage", "outcome", "epic", "run_id")
+
+
+def _agent_key(index: int, r: dict) -> tuple:
+    """One agent's identity: (session, agent id), else (session, spawning tool_use id); a
+    record with neither stands alone."""
+    if r.get("agent_id"):
+        return r.get("session_id"), "agent", r["agent_id"]
+    tool_use = (r.get("parent") or {}).get("tool_use_id")
+    return (r.get("session_id"), "spawn", tool_use) if tool_use else ("", "record", index)
+
+
+def latest_records(records: list) -> list:
+    """Each stop appends a cumulative record, so keep each agent's latest (by `ts`, then
+    store order), filling attribution it lacks from that agent's earlier records."""
+    groups: dict = {}
+    for i, r in enumerate(records):
+        groups.setdefault(_agent_key(i, r), []).append((r.get("ts") or "", i, r))
+    out = []
+    for group in groups.values():
+        group.sort(key=lambda t: t[:2])
+        latest = dict(group[-1][2])
+        for _, _, earlier in reversed(group[:-1]):
+            for key in ATTRIBUTION_KEYS:
+                if key in earlier:
+                    latest.setdefault(key, earlier[key])
+        out.append((group[-1][1], latest))
+    return [r for _, r in sorted(out, key=lambda t: t[0])]
+
+
 def attribute_children(records: list) -> list:
     """A fan-out child inherits its parent agent's epic/issue/run; its role becomes
     `<parent-role>:fanout`."""
@@ -92,7 +122,7 @@ def report(records: list, epic: int | None = None, since: str | None = None,
            by: str = "role", run: str | None = None) -> dict:
     """Totals plus per-group runs, tokens, cost, tool calls, peak context, median duration
     and outcome counts; `run` keeps one control-plane run (`next-action --run-id`)."""
-    records = attribute_children(records)
+    records = attribute_children(latest_records(records))
     if since:
         records = [r for r in records if (r.get("ts") or "") >= since]
     if epic is not None:

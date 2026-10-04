@@ -142,7 +142,8 @@ def test_doc_root_cmd_resolves_every_unit_kind(two_products, issue, root, req):
     out = s.cmd_doc_root(None, issue)
     assert out["docRoot"] == root and out["per_product"] is True
     assert out["requirementsDir"] == (req or s.CONFIG.get("requirementsDir"))
-    assert out["docTemplates"] == f"{root}/{s.PIPELINE['docTemplates']}"
+    # No product tree has its own templates dir here, so each falls back to the top-level one.
+    assert out["docTemplates"] == f"{BOOKSHAW}/{s.PIPELINE['docTemplates']}"
 
 
 def test_resolution_is_cached_and_hinted_for_every_ancestor(two_products, tmp_path, monkeypatch):

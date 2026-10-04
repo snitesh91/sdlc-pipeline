@@ -29,7 +29,7 @@ Read the repo's product-vision/strategy doc (its path is named in the driven rep
 
 ## 4. Write `product.md`
 
-Start from the repo's `<docRoot>/<docTemplates>/product.template.md` if it exists, else `${CLAUDE_PLUGIN_ROOT}/templates/product.template.md`, and read the repo's worked-example IRD (`<requirements-dir>/IRD-*.md`) first. Follow `design-doc-rules.md`, "Document altitude" exactly (observable behaviour not technology, nothing about the pipeline, no hedging layer, detail inline, no system flow diagram). Additionally:
+Start from `product.template.md` (where it resolves: `design-doc-rules.md`, "Document altitude") and read the repo's worked-example IRD (`<requirements-dir>/IRD-*.md`) first. Follow `design-doc-rules.md`, "Document altitude" exactly (observable behaviour not technology, nothing about the pipeline, no hedging layer, detail inline, no system flow diagram). Additionally:
 
 - **A technology ruling you are handed** → record the *constraint behind it* under Constraints; pass the ruling itself to `architecture` in your handoff comment.
 - **Say each fact once** (`design-doc-rules.md`, "`product.md` is a requirements document"). Before handoff, grep the doc for its own distinctive nouns and numbers; a fact stated in full in two sections is a restatement — keep the owning section's and make the other a reference.

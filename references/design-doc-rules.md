@@ -9,9 +9,10 @@ be as technical as the work demands.
 `product.md` (an Initiative's, or a standing child's) and `architecture.md` (an Epic's,
 or a standing child's) are both read by a human at a gate. Each has its own rules below.
 
-Start each from its skeleton — the repo's `<docRoot>/<pipeline.docTemplates>/` (default
-`_templates`) if present, else the plugin's `templates/`: copy it in, fill the sections in
-order, and delete the template's instructional HTML comments.
+Start each from its skeleton in the `docTemplates` directory your SubagentStart context names
+(the unit's docRoot's `_templates` if present, else the top-level docRoot's), else the
+plugin's `${CLAUDE_PLUGIN_ROOT}/templates/`: copy it in, fill the sections in order, and
+delete the template's instructional HTML comments.
 
 **Both documents: nothing about the pipeline.** Leave out stage names, gate
 references, field names, round numbers, review history, "what changed since the previous

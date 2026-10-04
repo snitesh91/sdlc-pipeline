@@ -95,6 +95,25 @@ def test_report_run_keeps_one_run_including_its_fanout_children():
     assert out["totals"]["est_cost_usd"] == 1.5
 
 
+def test_report_keeps_only_each_agents_latest_cumulative_record():
+    records = [_rec("d1", "development", 1.0, issue=13, epic=9, outcome="done",
+                    ts="2026-09-18T10:00:00Z", tool_calls=5),
+               _rec("d1", "development", 1.4, ts="2026-09-18T10:05:00Z", tool_calls=7),
+               _rec("d1", "development", 1.6, ts="2026-09-18T10:09:00Z", tool_calls=8,
+                    session_id="other"),
+               {**_rec("", "development", 0.5), "parent": {"tool_use_id": "tu1"}},
+               {**_rec("", "development", 0.75, ts="2026-09-18T10:01:00Z"),
+                "parent": {"tool_use_id": "tu1"}},
+               {**_rec("", "general-purpose", 0.1)},
+               {**_rec("", "general-purpose", 0.1)}]
+    out = m.report(records, by="session_id")
+    assert out["totals"]["runs"] == 5
+    assert out["groups"]["s"]["est_cost_usd"] == round(1.4 + 0.75 + 0.2, 2)
+    assert out["groups"]["s"]["tool_calls"] == 7
+    # the latest record keeps the earlier one's attribution
+    assert m.report(records, epic=9)["groups"]["development"]["outcomes"] == {"done": 1}
+
+
 def test_report_cli_reads_the_repo_store(store, capsys):
     store.mkdir(parents=True)
     (store / "o__r.jsonl").write_text("".join(json.dumps(r) + "\n" for r in RECORDS))
