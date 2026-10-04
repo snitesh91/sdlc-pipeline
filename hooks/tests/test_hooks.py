@@ -1101,7 +1101,7 @@ def test_subagent_start_tells_sdlc_agents_where_things_are(sdlc_repo):
     assert out["hookEventName"] == "SubagentStart" and len(ctx.splitlines()) <= 8
     assert "$SDLC=/plug/scripts/sdlc_next.py" in ctx and 'python3 "$SDLC"' in ctx
     assert "docRoot=docs/sdlc" in ctx and "/plug/references" in ctx
-    assert "docTemplates=_templates" in ctx
+    assert "docTemplates=docs/sdlc/_templates" in ctx
     assert 'SDLC-RESULT: {"issue": <n>' in ctx
 
 
@@ -1155,6 +1155,18 @@ def test_subagent_start_matches_a_listed_root_issue_and_reads_the_agent_transcri
                      transcript_prompt="ROLE: product ISSUE: 2000 EPIC: 1994\nWrite the IRD")
     assert f"docRoot={TIJORI_DOCS}, requirementsDir=apps/tijori/req" in ctx
     assert "resolved for #1994" in ctx
+
+
+def test_subagent_start_points_doc_templates_at_the_units_root_when_it_has_them(
+        two_product_repo, tmp_path):
+    hints = {"2011": {"docRoot": TIJORI_DOCS, "requirementsDir": "apps/tijori/req"}}
+    prompt = "ROLE: development ISSUE: 2011 EPIC: 2010"
+    # The unit's root has no templates: the top-level root's serve it.
+    assert f"docTemplates={BOOKSHAW_DOCS}/_templates " in _start_ctx(
+        two_product_repo, tmp_path, prompt, hints=hints)
+    os.makedirs(os.path.join(two_product_repo, TIJORI_DOCS, "_templates"))
+    assert f"docTemplates={TIJORI_DOCS}/_templates " in _start_ctx(
+        two_product_repo, tmp_path, prompt, hints=hints)
 
 
 def test_subagent_start_points_an_unknown_unit_at_doc_root(two_product_repo, tmp_path):
