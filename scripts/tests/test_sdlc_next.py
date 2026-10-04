@@ -971,6 +971,7 @@ def test_handoff_to_pr_review_posts_marker_without_referencing_a_stage_doc():
     runner.prefix_responses[("gh", "issue", "comment", "42", "--repo",
                              "owner/repo", "--body")] = ""
     runner.prefix_responses[("gh", "issue", "view", "42")] = '{"comments": []}'
+    runner.prefix_responses[("gh", "pr", "checks", "77")] = "[]"
     gh = GitHub(runner=runner)
     result = cmd_handoff_to_pr_review(gh, 42, 77, "142 passed, 0 failed.")
     assert result == {"issue": 42, "pr": 77, "queued_for": "pr-review"}
