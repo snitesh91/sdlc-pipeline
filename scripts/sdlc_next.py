@@ -2483,10 +2483,11 @@ def run_cap_reached(state: Optional[dict]) -> bool:
 
 
 def record_terminal_unit(gh: WorkItemProvider, issue: int,
-                          run_id: Optional[str] = None) -> Optional[dict]:
+                          run_id: Optional[str] = None, count: bool = True) -> Optional[dict]:
     """Idempotently count `issue` against its parent's tracked run (from `merge-pr` /
     `close-issue`). Returns the count summary, or None when no run is tracked.
-    An empty run-state dir short-circuits before any tracker call.
+    An empty run-state dir short-circuits before any tracker call. `count=False` only drops
+    it from `in_flight` (a not-planned close is no completed work).
 
     With an explicit `run_id` (merge-pr's `--run-id`), the count is booked under that run,
     adopting it if the state file holds a different (e.g. stale probe) id -- so the terminal
@@ -2507,8 +2508,8 @@ def record_terminal_unit(gh: WorkItemProvider, issue: int,
     state = run_cap_state(parent, run_id) if run_id else read_run_state(parent)
     if state is None:
         return None
-    if issue not in state["terminal"] or str(issue) in state.get("in_flight", {}):
-        if issue not in state["terminal"]:
+    if (count and issue not in state["terminal"]) or str(issue) in state.get("in_flight", {}):
+        if count and issue not in state["terminal"]:
             state["terminal"].append(issue)
         state.get("in_flight", {}).pop(str(issue), None)
         _write_run_state(parent, state)
@@ -7025,7 +7026,7 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
     """Close `issue` (`not_planned`: state reason NOT_PLANNED, with `reason` commented first),
     apply the terminal fields, run `cleanup_unit` (worktrees; branches whose work landed --
     an unmerged branch is kept) and close the issues it `Realises:` -- for a unit that
-    never merges through `merge-pr`. Counts toward the run cap."""
+    never merges through `merge-pr`. Counts toward the run cap unless `not_planned`."""
     if reason and not not_planned:
         raise GhError("--reason only goes with --not-planned")
     view = gh.issue_view(issue)
@@ -7045,7 +7046,7 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
     released = cleanup.pop("worktree")
     if released.get("released") or released.get("reason") != "no worktree":
         released = {**released, "branch": cleanup["branch"]}
-    terminal = record_terminal_unit(gh, issue)
+    terminal = record_terminal_unit(gh, issue, count=not not_planned)
     return _with_warnings(
         {"issue": issue, "closed": True, "already_closed": already_closed,
          "worktree": released, "cleanup": cleanup,
