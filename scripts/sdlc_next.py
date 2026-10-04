@@ -345,6 +345,7 @@ class WorkItemProvider(Protocol):
     def issue_create(self, title: str, body: str, labels: list) -> int: ...
     def issue_comment(self, number: int, body: str) -> None: ...
     def issue_close(self, number: int, reason: str = "completed") -> None: ...
+    def issue_set_body(self, number: int, body: str) -> None: ...
     def blocked_by(self, number: int) -> list: ...
     def add_blocked_by(self, issue_number: int, blocking_number: int) -> None: ...
     def remove_blocked_by(self, issue_number: int, blocking_number: int) -> None: ...
@@ -517,6 +518,9 @@ class GitHub:
     def issue_close(self, number: int, reason: str = "completed"):
         self._run(["gh", "issue", "close", str(number), "--repo", self.repo,
                    "--reason", reason])
+
+    def issue_set_body(self, number: int, body: str):
+        self._run(["gh", "issue", "edit", str(number), "--repo", self.repo, "--body", body])
 
     def delete_branch(self, branch: str):
         """Delete `origin/<branch>` GitHub-side (REST); a missing ref raises GhError
@@ -981,6 +985,9 @@ class GitHubRest(GitHub):
     def issue_close(self, number: int, reason: str = "completed"):
         self._api(f"repos/{self.repo}/issues/{number}", "-f", "state=closed",
                   "-f", f"state_reason={reason.replace(' ', '_')}", method="PATCH")
+
+    def issue_set_body(self, number: int, body: str):
+        self._api(f"repos/{self.repo}/issues/{number}", "-f", f"body={body}", method="PATCH")
 
     def ensure_label(self, label: str):
         """No-op: adding a missing label to an issue or PR creates it."""
@@ -7363,6 +7370,76 @@ def cmd_comment(gh: WorkItemProvider, issue: int, body: Optional[str] = None,
     return {"issue": issue, "commented": True, "chars": len(body)}
 
 
+def pipeline_owned_label(label: str) -> bool:
+    """Whether the pipeline writes or reads `label` as its own state: the gate, architected and
+    cloud-placement labels, or one naming a Stage or Pipeline Status."""
+    if label in (LABELS["gate"], LABELS["architected"], cloud_label()):
+        return True
+    name = label.strip().lower()
+    bare = name.split(":", 1)[1] if name.startswith(("stage:", "status:")) else name
+    return (normalize_stage(bare) is not None
+            or bare.replace(" ", "-") in PIPELINE_STATUS_FIELD_NAMES.values()
+            or name != bare)
+
+
+def live_runs_holding(issue: int) -> list:
+    """Run ids of open (unarchived) run-states that have `issue` in flight."""
+    try:
+        names = sorted(os.listdir(_run_state_dir()))
+    except OSError:
+        return []
+    runs = []
+    for name in names:
+        try:
+            with open(os.path.join(_run_state_dir(), name)) as f:
+                state = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(state, dict) and not state.get("closed") \
+                and str(issue) in (state.get("in_flight") or {}):
+            runs.append(state.get("run_id"))
+    return runs
+
+
+def cmd_edit_issue(gh: WorkItemProvider, issue: int, body_file: Optional[str] = None,
+                   add_labels: list = (), remove_labels: list = ()) -> dict:
+    """Operator-directed edit of `issue`'s body and labels. Refuses (exit 0) a pipeline-owned
+    label and an issue a live run has in flight."""
+    add_labels, remove_labels = list(add_labels or ()), list(remove_labels or ())
+    if body_file is None and not add_labels and not remove_labels:
+        raise GhError("pass --body-file, --add-label or --remove-label")
+    result = {"issue": issue, "edited": [], "refused": False, "reason": None}
+    owned = [l for l in add_labels + remove_labels if pipeline_owned_label(l)]
+    if owned:
+        return {**result, "refused": True,
+                "reason": f"pipeline-owned label(s) {', '.join(owned)}: the pipeline sets "
+                          f"them through its own commands, never by hand"}
+    held = live_runs_holding(issue)
+    if held:
+        return {**result, "refused": True,
+                "reason": f"#{issue} is in flight in live run {', '.join(map(str, held))}; "
+                          f"edit it once the run stops or the unit is terminal"}
+    body = None
+    if body_file is not None:
+        try:
+            with io.open(os.path.expanduser(body_file), encoding="utf-8") as fh:
+                body = fh.read()
+        except OSError as exc:
+            raise GhError(f"--body-file must be a readable file holding the issue body: {exc}")
+        if not body.strip():
+            raise GhError("the body file is empty -- an issue body is never blanked here")
+    if body is not None:
+        gh.issue_set_body(issue, body)
+        result["edited"].append("body")
+    for label in add_labels:
+        gh.ensure_label(label)
+    if add_labels or remove_labels:
+        gh.issue_edit(issue, add_labels=add_labels, remove_labels=remove_labels)
+    result["edited"] += ([f"add-label:{l}" for l in add_labels]
+                         + [f"remove-label:{l}" for l in remove_labels])
+    return result
+
+
 # --- human channel: in-session operator answers and gate approvals ---------------------
 
 HUMAN_CHANNELS = ("github", "session")
@@ -9746,6 +9823,15 @@ def main(argv: Optional[list] = None) -> int:
     text.add_argument("--body-file", default=None, help="File holding the comment text")
     p.set_defaults(func=lambda a: cmd_comment(get_work_item_provider(), a.issue, a.body,
                                               a.body_file))
+    p = sub.add_parser("edit-issue", help="Operator-directed edit of an issue's body/labels "
+                                           "(refuses pipeline-owned labels and in-flight units)")
+    p.add_argument("issue", type=int)
+    p.add_argument("--body-file", default=None, help="File holding the new issue body")
+    p.add_argument("--add-label", action="append", default=[], help="Label to add (repeatable)")
+    p.add_argument("--remove-label", action="append", default=[],
+                   help="Label to remove (repeatable)")
+    p.set_defaults(func=lambda a: cmd_edit_issue(get_work_item_provider(), a.issue, a.body_file,
+                                                 a.add_label, a.remove_label))
     # --- human channel (pipeline.humanChannel: session) ---
     p = sub.add_parser("record-operator-answer",
                         help="Record an operator's in-session answer on the unit it settles")

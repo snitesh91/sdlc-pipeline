@@ -168,3 +168,76 @@ def test_merge_pr_on_a_docs_only_pr_adds_no_warning():
     runner = _merge_runner_with_files(["docs/sdlc/issue-9/product.md"])
     result = s.cmd_merge_pr(s.GitHub(runner=runner), 42, issue=9)
     assert result["merged"] is True and "uncovered_paths" not in result
+
+
+# ---- 4: edit-issue, refusing pipeline-owned labels and in-flight units ----
+
+class _EditGh:
+    def __init__(self):
+        self.calls = []
+
+    def issue_set_body(self, n, body):
+        self.calls.append(("body", n, body))
+
+    def ensure_label(self, label):
+        self.calls.append(("ensure", label))
+
+    def issue_edit(self, n, add_labels=(), remove_labels=(), **_):
+        self.calls.append(("labels", n, list(add_labels), list(remove_labels)))
+
+
+def test_edit_issue_sets_the_body_and_labels(monkeypatch, tmp_path):
+    monkeypatch.setenv("SDLC_RUNS_DIR", str(tmp_path / "runs"))
+    body = tmp_path / "b.md"
+    body.write_text("new body\n")
+    gh = _EditGh()
+    result = s.cmd_edit_issue(gh, 5, str(body), ["priority:high"], ["wip"])
+    assert result == {"issue": 5, "refused": False, "reason": None,
+                      "edited": ["body", "add-label:priority:high", "remove-label:wip"]}
+    assert ("body", 5, "new body\n") in gh.calls
+    assert ("labels", 5, ["priority:high"], ["wip"]) in gh.calls
+
+
+@pytest.mark.parametrize("label", ["sdlc:gate", "epic:architected", "sdlc:cloud",
+                                   "stage:development", "status:needs-human", "pr-review",
+                                   "Needs Human"])
+def test_edit_issue_refuses_a_pipeline_owned_label(monkeypatch, tmp_path, label):
+    monkeypatch.setenv("SDLC_RUNS_DIR", str(tmp_path))
+    gh = _EditGh()
+    result = s.cmd_edit_issue(gh, 5, add_labels=["ok", label])
+    assert result["refused"] is True and label in result["reason"] and gh.calls == []
+    assert s.cmd_edit_issue(gh, 5, remove_labels=[label])["refused"] is True
+
+
+def test_edit_issue_refuses_an_issue_a_live_run_has_in_flight(monkeypatch, tmp_path):
+    monkeypatch.setenv("SDLC_RUNS_DIR", str(tmp_path))
+    s._write_run_state(9, {"run_id": "r", "terminal": [], "in_flight": {"5": "development"}})
+    gh = _EditGh()
+    result = s.cmd_edit_issue(gh, 5, add_labels=["ok"])
+    assert result["refused"] is True and "live run r" in result["reason"] and gh.calls == []
+    # Positive control: an archived run no longer holds it.
+    s.archive_run_state(9)
+    assert s.cmd_edit_issue(gh, 5, add_labels=["ok"])["edited"] == ["add-label:ok"]
+
+
+def test_edit_issue_needs_something_to_edit():
+    with pytest.raises(s.GhError, match="--body-file"):
+        s.cmd_edit_issue(_EditGh(), 5)
+
+
+def test_rest_issue_set_body_patches_the_issue():
+    from tests.test_sdlc_next import ScriptedRunner
+    argv = ("gh", "api", "-X", "PATCH", "repos/owner/repo/issues/5", "-f", "body=hi")
+    runner = ScriptedRunner({argv: "{}"})
+    s.GitHubRest(runner=runner).issue_set_body(5, "hi")
+    assert runner.calls == [list(argv)]
+
+
+def test_cli_wires_edit_issue(monkeypatch, capsys):
+    seen = []
+    monkeypatch.setenv("GITHUB_TOKEN", "x")
+    monkeypatch.setattr(s, "get_work_item_provider", lambda: "GH")
+    monkeypatch.setattr(s, "cmd_edit_issue", lambda gh, *a: seen.append((gh, a)) or {})
+    assert s.main(["edit-issue", "5", "--body-file", "/f", "--add-label", "a",
+                   "--add-label", "b", "--remove-label", "c"]) == 0
+    assert seen == [("GH", (5, "/f", ["a", "b"], ["c"]))]
