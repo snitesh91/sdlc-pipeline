@@ -17,6 +17,7 @@ import argparse
 import contextlib
 import fcntl
 import fnmatch
+import hashlib
 import io
 import json
 import os
@@ -2435,9 +2436,54 @@ def run_cap_state(epic: int, run_id: Optional[str]) -> Optional[dict]:
         return None
     state = read_run_state(epic)
     if state is None or state.get("run_id") != run_id:
-        state = {"run_id": run_id, "terminal": []}
+        state = {"run_id": run_id, "terminal": [], "config_digest": config_digest(CONFIG)}
         _write_run_state(epic, state)
     return state
+
+
+def config_digest(config: dict) -> dict:
+    """sha256 of each top-level config key's canonical JSON."""
+    return {k: hashlib.sha256(json.dumps(v, sort_keys=True, separators=(",", ":"))
+                              .encode()).hexdigest() for k, v in config.items()}
+
+
+def _changed_keys(old: dict, new: dict) -> list:
+    return sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+
+
+def origin_config(runner: Runner = _default_runner) -> Optional[dict]:
+    """The config file as committed on `origin/main` (no fetch), or None on any git failure."""
+    path = _find_config()
+    if not path:
+        return None
+    path = os.path.realpath(path)
+    try:
+        top = runner(["git", "-C", os.path.dirname(path), "rev-parse",
+                      "--show-toplevel"]).strip()
+        rel = os.path.relpath(path, os.path.realpath(top))
+        config = json.loads(runner(["git", "-C", top, "show", f"origin/main:{rel}"]))
+    except (GhError, OSError, ValueError):
+        return None
+    return config if isinstance(config, dict) else None
+
+
+def config_drift(epic: int, run_id: Optional[str],
+                 runner: Runner = _default_runner) -> Optional[dict]:
+    """`{source, keys}` when the config changed since the run began (`local`, reported once)
+    or the checkout's differs from `origin/main` (`origin`, until they match); else None."""
+    state = run_cap_state(epic, run_id)
+    if state is None:
+        return None
+    current = config_digest(CONFIG)
+    stored = state.get("config_digest")
+    if stored != current:
+        state["config_digest"] = current
+        _write_run_state(epic, state)
+        if stored is not None:
+            return {"source": "local", "keys": _changed_keys(stored, current)}
+    origin = origin_config(runner)
+    keys = _changed_keys(current, config_digest(origin)) if origin is not None else []
+    return {"source": "origin", "keys": keys} if keys else None
 
 
 def archive_run_state(epic: int) -> Optional[dict]:
@@ -2950,6 +2996,7 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     repo_path = getattr(args, "repo_path", None) or "."
     issues = gh.issue_list()
     check_placement(args.epic, {i["number"]: i for i in issues}.get)
+    drift = config_drift(args.epic, run_id)
     epic_sync = (sync_epic_if_due(gh, args.epic, run_id, repo_path, issues=issues)
                  if getattr(args, "sync_epic", False) else None)
     result = decide_next_action(gh, args.epic, run_id=run_id,
@@ -2962,7 +3009,8 @@ def cmd_next_action(gh: GitHub, args) -> dict:
         note_in_flight(args.epic, run_id,
                        {result["issue"]: result.get("stage") or result["action"]})
     return {**result, **liveness, "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0,
-            **({"epic_sync": epic_sync} if epic_sync is not None else {})}
+            **({"epic_sync": epic_sync} if epic_sync is not None else {}),
+            **({"config_changed": drift} if drift else {})}
 
 
 def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None) -> dict:
