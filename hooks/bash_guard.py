@@ -45,7 +45,7 @@ GH_API_OPTS_WITH_VALUE = {"-X", "--method", "-H", "--header", "-f", "--raw-field
 # Control-plane commands a stage agent may run; everything else is the orchestrator's.
 READ_ONLY_COMMANDS = {"show-config", "doc-root", "lld-section", "pairing-counts", "pr-checks", "cite",
                       "verify-citations", "audit-issues", "check-gate",
-                      "check-initiative-closeable"}
+                      "check-initiative-closeable", "initiative-profile"}
 ROLE_COMMANDS = {
     # `resolve-thread`: a gate-feedback round replies on the stage's own gate PR threads;
     # `comment`: its gate PR reply in a cloud session, where `gh pr comment` is blocked.
@@ -76,8 +76,8 @@ REASONS = {
     "issue edit": f"Issue fields are control-plane-owned: use {SDLC} edit-issue <n> [--body-file F] [--add-label L] [--remove-label L], {SDLC} set-stage / add-blocked-by / mark-blocked, or {SDLC} place <n> --where cloud|local for the placement label. Stage agents report the change in their handoff instead.",
     "issue close": f"Use {SDLC} close-issue <n> [--repo-path <p>] (orchestrator only).",
     "issue reopen": "Reopening an issue is the operator's call; report it (stage agents: outcome needs-human).",
-    "pr create": f"Use {SDLC} open-dev-pr (development), {SDLC} open-design-pr or {SDLC} open-gate (orchestrator). An operator-directed PR outside the pipeline (main thread only) names its non-pipeline branch explicitly: gh pr create --head <branch> ...",
-    "pr merge": f"Use {SDLC} merge-pr <pr> --issue <n>; it is the only code merge gate ({SDLC} merge-design-pr for a phase-Task's design PR; {SDLC} merge-gate <pr> --issue <n> --stage <s> --operator-confirmed for a gate PR, only when the operator explicitly said to merge it). An operator PR outside the pipeline (main thread only) is merged by its non-pipeline branch: gh pr merge <branch> ...",
+    "pr create": f"Use {SDLC} open-dev-pr (development), {SDLC} open-design-pr, {SDLC} open-gate or {SDLC} open-initiative-pr (orchestrator). An operator-directed PR outside the pipeline (main thread only) names its non-pipeline branch explicitly: gh pr create --head <branch> ...",
+    "pr merge": f"Use {SDLC} merge-pr <pr> --issue <n>; it is the only code merge gate ({SDLC} merge-design-pr for a phase-Task's design PR; {SDLC} close-epic <n> for an epic branch; {SDLC} merge-initiative-pr <i> for an initiative branch; {SDLC} merge-gate <pr> --issue <n> --stage <s> --operator-confirmed for a gate PR, only when the operator explicitly said to merge it). An operator PR outside the pipeline (main thread only) is merged by its non-pipeline branch: gh pr merge <branch> ...",
     "pr ready": f"Use {SDLC} merge-pr <pr> --issue <n>; it marks the PR ready itself.",
     "pr close": "Closing a pipeline PR is the operator's call; report it instead.",
     "worktree add": f"Use {SDLC} start-stage <n> --role <r> (or worktree-add <n>); a pr-review worktree is {SDLC} review-worktree-add <n>.",
@@ -329,7 +329,7 @@ def check_role(words: list, role: str):
     return None
 
 
-DEFAULT_BRANCH_PREFIXES = ("issue-", "epic-")
+DEFAULT_BRANCH_PREFIXES = ("issue-", "epic-", "initiative-")
 
 
 def operator_pr(args: list, prefixes=DEFAULT_BRANCH_PREFIXES) -> bool:
@@ -364,9 +364,10 @@ def operator_merge(args: list, prefixes=DEFAULT_BRANCH_PREFIXES) -> bool:
 
 
 def branch_prefixes(config: dict) -> tuple:
-    """`pipeline.branches` issue/epic prefixes, defaulting as sdlc_next.py does."""
+    """`pipeline.branches` issue/epic/initiative prefixes, defaulting as sdlc_next.py does."""
     b = (config.get("pipeline") or {}).get("branches") or {}
-    return (b.get("issuePrefix", "issue-"), b.get("epicPrefix", "epic-"))
+    return (b.get("issuePrefix", "issue-"), b.get("epicPrefix", "epic-"),
+            b.get("initiativePrefix", "initiative-"))
 
 
 def verdict(command: str, role: str = "", prefixes=DEFAULT_BRANCH_PREFIXES):

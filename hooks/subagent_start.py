@@ -6,6 +6,8 @@ from _common import (CONFIG_DIRS, RESULT_FORMAT, agent_transcript, emit, first_p
 
 # Written by sdlc_next.py (`doc_roots_for`) in the run-state directory: unit -> resolved roots.
 DOC_ROOT_HINTS_FILE = "doc-roots.cache"
+# Written by sdlc_next.py (`unit_initiative_profile`): unit -> its Initiative's profile.
+INITIATIVE_HINTS_FILE = "initiative-profiles.cache"
 
 
 def header_units(data: dict) -> list:
@@ -48,6 +50,35 @@ def unit_doc_roots(config: dict, data: dict):
     return top, (units[0] if units else None), False
 
 
+def initiative_lines(config: dict, data: dict) -> list:
+    """Lines naming the unit's opted-in Initiative profile (`pipeline.initiativeProfiles`):
+    from the control plane's hint file, else a pointer to `initiative-profile`. None without
+    the opt-in, so every other repo's context is unchanged."""
+    if not (config.get("pipeline") or {}).get("initiativeProfiles"):
+        return []
+    units = header_units(data)
+    hints = load_json(os.path.join(runs_dir(config), INITIATIVE_HINTS_FILE))
+    for unit in units:
+        hint = hints.get(str(unit))
+        if not isinstance(hint, dict):
+            continue
+        if not hint.get("name"):
+            return []
+        i, lines = hint.get("initiative"), []
+        if hint.get("testTasks") is False:
+            lines.append(f"sdlc: Initiative #{i} turns the standing test Tasks off "
+                         f"(testTasks: false): carve no Integration-test / e2e-test Task and "
+                         f"never require them; a Task's own section names any integration/e2e "
+                         f"coverage it needs; the Initiative's final runs gate its merge to main.")
+        if hint.get("branch"):
+            lines.append(f"sdlc: Initiative #{i}'s Epics integrate into its initiative branch, "
+                         f"not main; it reaches main once, at initiative close.")
+        return lines
+    unit = units[0] if units else "<your issue>"
+    return [f"sdlc: this repo opts some Initiatives out of the standing test Tasks: run "
+            f"python3 \"$SDLC\" initiative-profile {unit} and follow its testTasks."]
+
+
 def templates_dir(config: dict, config_path: str, doc_root) -> str:
     """`<unit docRoot>/<docTemplates>` when the repo has it, else under the top-level docRoot."""
     name = (config.get("pipeline") or {}).get("docTemplates") or "_templates"
@@ -83,6 +114,7 @@ def main() -> int:
             f"yours is not known here: run python3 \"$SDLC\" doc-root "
             f"{unit if unit is not None else '<your issue>'} and use its docRoot, "
             f"requirementsDir and docTemplates instead of the line above.")
+    lines += initiative_lines(config, data)
     lines += [
         f"sdlc: ${{CLAUDE_PLUGIN_ROOT}} is {root}; its references are "
         f"{os.path.join(root, 'references')}.",

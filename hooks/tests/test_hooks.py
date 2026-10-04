@@ -290,6 +290,36 @@ def test_custom_branch_prefixes_count_as_pipeline_branches(tmp_path):
     assert guard("gh pr create --head issue-5 --title t", cwd) is None
 
 
+def test_initiative_branches_are_pipeline_branches_on_the_main_thread(sdlc_repo, live):
+    """Regression (initiative branch, v0.3.16-initiative.1): a hand-run PR or merge of
+    `initiative-<n>` is denied like `epic-<n>`; its control-plane commands pass."""
+    for cmd in ("gh pr merge initiative-1994 --squash", "gh pr create --head initiative-1994 -t t"):
+        reason = guard(cmd, sdlc_repo, **live)
+        assert "sdlc guard: " in reason
+    assert "merge-initiative-pr" in guard("gh pr merge initiative-1994", sdlc_repo, **live)
+    for cmd in ('python3 "$SDLC" open-initiative-pr 1994 --repo-path .',
+                'python3 "$SDLC" merge-initiative-pr 1994',
+                'python3 "$SDLC" sync-branch 1994 --unit initiative',
+                'python3 "$SDLC" initiative-profile 2011'):
+        assert guard(cmd, sdlc_repo, **live) is None
+    # positive control: an operator branch that merely contains the word still passes
+    assert guard("gh pr merge chore/initiative-docs --squash", sdlc_repo, **live) is None
+
+
+def test_initiative_commands_are_the_orchestrators_but_any_agent_may_read_the_profile(sdlc_repo):
+    for cmd in ('python3 "$SDLC" open-initiative-pr 1994', 'python3 "$SDLC" merge-initiative-pr 1994'):
+        assert "orchestrator" in guard(cmd, sdlc_repo, "sdlc:development")
+    for agent in ("sdlc:lld", "sdlc:design-review", "sdlc:development"):
+        assert guard('python3 "$SDLC" initiative-profile 2011', sdlc_repo, agent) is None
+
+
+def test_a_custom_initiative_prefix_counts_as_a_pipeline_branch(tmp_path):
+    cwd = _git_repo(tmp_path / "ipfx", {"repo": "o/r", "guard": {"mainThread": "always"},
+                                        "pipeline": {"branches": {"initiativePrefix": "init-"}}})
+    assert "sdlc guard: " in guard("gh pr merge init-7", cwd)
+    assert guard("gh pr create --head initiative-7 --title t", cwd) is None
+
+
 @pytest.mark.parametrize("agent", ["sdlc:development", "sdlc:pr-review", "sdlc:lld"])
 @pytest.mark.parametrize("command", ["git stash", "git stash pop", "git -C /tmp/w stash push -m x"])
 def test_stage_agents_never_stash(sdlc_repo, agent, command):
@@ -1180,6 +1210,54 @@ def test_subagent_start_single_doc_root_output_is_unchanged(sdlc_repo, tmp_path)
                      hints={"2011": {"docRoot": TIJORI_DOCS}})
     assert "docRoot=docs/sdlc, requirementsDir=None" in ctx
     assert "doc-root" not in ctx and "resolved for" not in ctx and len(ctx.splitlines()) == 4
+
+
+@pytest.fixture
+def initiative_repo(tmp_path):
+    return _git_repo(tmp_path / "irepo", {
+        "repo": "o/r", "docRoot": "docs/sdlc",
+        "pipeline": {"initiativeProfiles": [{"name": "tijori", "match": {"label": "initiative:branch"},
+                                             "branch": True, "testTasks": False}]}})
+
+
+def _initiative_ctx(cwd, tmp_path, prompt, hints=None):
+    runs = tmp_path / "runs"
+    runs.mkdir(exist_ok=True)
+    if hints is not None:
+        (runs / "initiative-profiles.cache").write_text(json.dumps(hints))
+    proc = run_hook("subagent_start.py", {"agent_id": "a1", "agent_type": "sdlc:lld", "cwd": cwd,
+                                          "prompt": prompt}, env={"SDLC_RUNS_DIR": str(runs)})
+    return json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_subagent_start_tells_lld_the_standing_test_tasks_are_off(initiative_repo, tmp_path):
+    hint = {"initiative": 1994, "name": "tijori", "branch": True, "testTasks": False}
+    ctx = _initiative_ctx(initiative_repo, tmp_path, "ROLE: lld ISSUE: 2012 EPIC: 1994",
+                          hints={"2012": hint})
+    assert "Initiative #1994 turns the standing test Tasks off" in ctx
+    assert "carve no Integration-test / e2e-test Task" in ctx
+    assert "initiative branch" in ctx
+
+
+def test_subagent_start_says_nothing_for_a_unit_whose_initiative_did_not_opt_in(
+        initiative_repo, tmp_path):
+    hint = {"initiative": 6, "name": None, "branch": False, "testTasks": True}
+    ctx = _initiative_ctx(initiative_repo, tmp_path, "ROLE: lld ISSUE: 12 EPIC: 6",
+                          hints={"12": hint})
+    assert "test Tasks" not in ctx and "initiative-profile" not in ctx
+
+
+def test_subagent_start_points_an_unhinted_unit_at_initiative_profile(initiative_repo, tmp_path):
+    ctx = _initiative_ctx(initiative_repo, tmp_path, "ROLE: lld ISSUE: 2012 EPIC: 1994")
+    assert 'python3 "$SDLC" initiative-profile 2012' in ctx
+
+
+def test_subagent_start_is_unchanged_without_initiative_profiles(sdlc_repo, tmp_path):
+    """Positive control: no opt-in config, no new line, even with a stray hint file."""
+    hint = {"initiative": 1994, "name": "tijori", "branch": True, "testTasks": False}
+    ctx = _initiative_ctx(sdlc_repo, tmp_path, "ROLE: lld ISSUE: 2012 EPIC: 1994",
+                          hints={"2012": hint})
+    assert "test Tasks" not in ctx and len(ctx.splitlines()) == 4
 
 
 # --- metrics (SubagentStop / SessionEnd) ------------------------------------------------
