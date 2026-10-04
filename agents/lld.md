@@ -186,7 +186,9 @@ attestation step, a CI or check command, a suite-run procedure, a run-count or s
 protocol, a load co-runner, credentials, or a verifier script — the control plane already
 enforces those (`references/operations.md`, "Local-CI attestation"; `agents/development.md`
 owns how a suite is run). Written into the LLD they drift from the real gates and make
-`pr-review` bounce on criteria the pipeline never required.
+`pr-review` bounce on criteria the pipeline never required. Never write, e.g., "run the spec
+3× and require 3/3 green" into the e2e-test Task: that belongs nowhere in `lld.md` — the
+Task's `development` agent owns how it runs.
 
 **On a rework round, edit the design in place.** No "round N findings" or disposition
 sections in the file — it is a current-state spec. State what changed and why in your rework

@@ -186,7 +186,8 @@ cycle.
   returns a raw entity or bare `find()`/`findOne()` result, which leaks every column added
   later.
 - **Code comments explain only a non-obvious why.** No narratives, incident history, dates,
-  issue numbers, or restating what the code does; docstrings 1–3 lines. Design rationale
+  issue numbers, or restating what the code does; docstrings 1–3 lines, stating only what
+  the code guarantees. Design rationale
   belongs in the design doc / PR description, not the code. `pr-review` blocks on bloat.
 - **A code comment stating a guarantee is true for every input, or names what it excludes**
   (truncation, common-shape-only, best-effort) in the same sentence.
@@ -251,7 +252,7 @@ else is settled; do not reopen it.
 1. Re-run "The completion gates", then push once.
 2. `python3 "$SDLC" open-dev-pr <n> --title "..." --body "..." --summary "..."` — opens the draft
    PR (on a rework round it reports the open one, `created: false`); it does not queue the
-   review (step 4 does). A verify-only Task with no code change adds `--allow-empty`; its body
+   review (step 5 does). A verify-only Task with no code change adds `--allow-empty`; its body
    states what was verified and the evidence.
 3. For **each suite the config requires a local attestation for** that this round ran (suite
    keys from the config's `requiredWorkflows[].suite`; which ones →
@@ -264,10 +265,13 @@ else is settled; do not reopen it.
    A push after it stales it. A suite a
    required workflow runs on the PR itself, or one your change never touches (confined to
    another suite's `prefixes`), needs none.
-4. `python3 "$SDLC" handoff-to-pr-review <n> --pr <pr> --summary "..."` — **always**, including
+4. Wait for the PR head's required checks (`pr-checks <pr>`); fix any red check that is not
+   `infra_suspect`, then repeat from step 1.
+5. `python3 "$SDLC" handoff-to-pr-review <n> --pr <pr> --summary "..."` — **always**, including
    after rework, and only after the attestations: its marker is the review queue. The summary
-   is the handoff comment below.
-5. Stop every background `Monitor`/watcher you started (`TaskStop`) and tear down any stack
+   is the handoff comment below. A `checks_failed` refusal names the `failing` checks: fix them,
+   then hand off again.
+6. Stop every background `Monitor`/watcher you started (`TaskStop`) and tear down any stack
    you built (`references/stage-playbooks.md`, "Secrets and containers").
 
 **Handoff comment** (evidence-carrying — size cap per `references/stage-playbooks.md`,
