@@ -970,11 +970,13 @@ def test_handoff_to_pr_review_posts_marker_without_referencing_a_stage_doc():
     runner = ScriptedRunner()
     runner.prefix_responses[("gh", "issue", "comment", "42", "--repo",
                              "owner/repo", "--body")] = ""
+    runner.prefix_responses[("gh", "issue", "view", "42")] = '{"comments": []}'
     gh = GitHub(runner=runner)
     result = cmd_handoff_to_pr_review(gh, 42, 77, "142 passed, 0 failed.")
     assert result == {"issue": 42, "pr": 77, "queued_for": "pr-review"}
-    assert len(runner.calls) == 1
-    body = runner.calls[0][-1]
+    posts = [c for c in runner.calls if c[:3] == ["gh", "issue", "comment"]]
+    assert len(posts) == 1
+    body = posts[0][-1]
     assert "development.md" not in body
     assert "testing.md" not in body
     assert "docs/sdlc/issue-42" not in body
@@ -2970,9 +2972,11 @@ def test_sync_branch_returns_conflict_result_without_raising_and_posts_marker():
         ("git", "-C", "/repo", "diff", "--name-only", "--diff-filter=U"): "src/a.ts\n",
         ("git", "-C", "/repo", "merge", "--abort"): "",
     })
+    runner.prefix_responses = {("git", "-C", "/repo", "rev-parse"): "abc\n"}
     runner.fail_on = {("git", "-C", "/repo", "merge", "origin/main")}
     gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([_issue(9)])})
-    gh_runner.prefix_responses = {("gh", "issue", "comment", "9"): ""}
+    gh_runner.prefix_responses = {("gh", "issue", "comment", "9"): "",
+                                  ("gh", "issue", "view", "9"): '{"comments": []}'}
     gh = GitHub(runner=gh_runner)
     result = cmd_sync_branch(gh, "/repo", 9, runner=runner)
     assert result == {"issue": 9, "unit": "issue", "branch": "issue-9", "base": "main", "synced": False,

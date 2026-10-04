@@ -179,7 +179,7 @@
     },
     "ci": {
       "_comment": "A failed/cancelled check whose failed-step log matches one of these (regex, case-insensitive) is flagged `infra_suspect` by pr-checks / merge-pr / close-epic: fix the runner, then `rerun-checks <pr>`. A configured list replaces the default.",
-      "infraFailurePatterns": ["No space left on device", "ENOSPC", "Cannot connect to the Docker daemon", "docker daemon not running", "Is the docker daemon running", "The runner has received a shutdown signal", "lost communication with the server", "exit code 137", "\\bKilled\\s*$", "OOMKilled"]
+      "infraFailurePatterns": ["No space left on device", "ENOSPC", "Cannot connect to the Docker daemon", "docker daemon not running", "Is the docker daemon running", "The runner has received a shutdown signal", "lost communication with the server", "exit code 137", "\\bKilled\\s*$", "OOMKilled", "\\b(?:by|received|with|signal) (?:signal )?SIGKILL\\b", "\\bsignal 9\\b", "JavaScript heap out of memory", "ERR_WORKER_OUT_OF_MEMORY", "Out of memory: Killed process", "Cannot allocate memory", "fatal error: runtime: out of memory"]
     },
     "_models_comment": "Optional `models` ({\"<role>\": \"opus|sonnet|haiku\"}) and `fanout` ({\"<review-role>\": {\"allowed\", \"maxChildren\", \"model\", \"axisModels\"}}) override the plugin's hooks/model_policy.json per role; a hook enforces the result on every Agent call.",
     "workItemProvider": {
