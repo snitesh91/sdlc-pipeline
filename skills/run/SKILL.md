@@ -215,7 +215,7 @@ prints one JSON object. **Exit 0** = valid result, including "nothing to do" and
 structured refusals (sync conflict, behind-main merge). **Exit 1** = operational
 failure: stop and report; never retry by hand. An auto-mode classifier denial or outage:
 `references/operations.md`, "Auto-mode classifier denies a composite". Run `merge-pr`,
-`finish-lld`, `start-stage`, `close-epic` and `cut-phase-tasks` with `run_in_background` —
+`finish-lld`, `start-stage`, `close-epic`, `cut-phase-tasks` and `open-initiative-pr` with `run_in_background` —
 they can outlast the 2-minute tool timeout.
 
 **Composites — the normal path.** Each runs its steps in order, stopping at the first
