@@ -7,7 +7,8 @@ import json
 import os
 from datetime import datetime
 
-from _common import load_json, message_text, plugin_data_dir, prompt_header, sdlc_result, sdlc_role
+from _common import (handback_message, is_tool_result, load_json, message_text, plugin_data_dir,
+                     prompt_header, result_text, sdlc_result, sdlc_role)
 
 # USD per million tokens (input, output); cache writes and reads are priced off input.
 PRICES_PER_MTOK = {"opus": (5, 25), "sonnet": (3, 15), "haiku": (1, 5), "fable": (10, 50)}
@@ -39,8 +40,9 @@ def scan(path: str, main_thread: bool = False) -> dict:
     """Stream a transcript once: per-model tokens (one API message spans several lines with
     the same id, so each id counts once), turns, tool calls, peak context (the largest
     single request's input + cache tokens), first/last timestamp, the first prompt and the
-    final assistant turn's text. `main_thread` skips sidechain lines."""
-    usage, models, first_ts, last_ts, prompt, final = {}, {}, None, None, None, []
+    final assistant turn's text (else the round's SubagentHandback message). `main_thread`
+    skips sidechain lines."""
+    usage, models, first_ts, last_ts, prompt, final, handback = {}, {}, None, None, None, [], None
     tool_ids = set()
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
@@ -58,11 +60,14 @@ def scan(path: str, main_thread: bool = False) -> dict:
                 continue
             if msg.get("role") == "user":
                 final = []
+                if not is_tool_result(msg.get("content")):
+                    handback = None
                 if prompt is None:
                     prompt = message_text(msg.get("content"))
             elif msg.get("role") == "assistant":
                 content = msg.get("content")
                 final.append(message_text(content))
+                handback = handback_message(content) or handback
                 if isinstance(content, list):
                     tool_ids.update(b.get("id") for b in content if isinstance(b, dict)
                                     and b.get("type") == "tool_use" and b.get("id"))
@@ -86,7 +91,8 @@ def scan(path: str, main_thread: bool = False) -> dict:
     return {"tokens": tokens, "turns": len(usage), "tool_calls": len(tool_ids),
             "peak_context": peak, "first_ts": first_ts, "last_ts": last_ts,
             "duration_s": round(end - start, 1) if start is not None and end is not None else None,
-            "prompt": prompt or "", "final_text": "\n".join(p for p in final if p)}
+            "prompt": prompt or "",
+            "final_text": result_text("\n".join(p for p in final if p), handback)}
 
 
 def epic_of(issue, states: list):

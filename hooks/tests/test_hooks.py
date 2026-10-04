@@ -1268,15 +1268,77 @@ def test_subagent_stop_records_non_sdlc_agents_without_a_result(tmp_path, sdlc_r
     assert rec["role"] == "general-purpose" and "outcome" not in rec and "epic" not in rec
 
 
-def test_subagent_stop_records_nothing_when_it_blocks_or_outside_sdlc(tmp_path, sdlc_repo, plain_repo):
+def test_subagent_stop_records_a_blocked_stop_but_nothing_outside_sdlc(tmp_path, sdlc_repo, plain_repo):
     data = str(tmp_path / "data")
     blocked = run_hook("subagent_stop.py",
                        _stop_payload(sdlc_repo, _agent_transcript(tmp_path, final="waiting")),
                        env={"CLAUDE_PLUGIN_DATA": data})
     assert blocked.returncode == 2
+    [rec] = _records(data)
+    assert rec["agent_id"] == "a1" and "outcome" not in rec
     run_hook("subagent_stop.py", _stop_payload(plain_repo, _agent_transcript(tmp_path)),
              env={"CLAUDE_PLUGIN_DATA": data})
-    assert not os.path.exists(os.path.join(data, "metrics"))
+    assert len(_records(data)) == 1
+
+
+def _handback_transcript(tmp_path, message, final="I'll hand back now."):
+    """An agent that ends with a SubagentHandback tool_use, then its tool result."""
+    path = _agent_transcript(tmp_path, final=final)
+    with open(path, "a") as f:
+        for line in (
+            {"type": "assistant", "timestamp": "2026-09-18T10:03:00Z",
+             "message": {"id": "m9", "role": "assistant", "model": "claude-opus-5",
+                         "usage": _usage(1, 1), "content": [
+                             {"type": "tool_use", "id": "hb", "name": "SubagentHandback",
+                              "input": {"message": message}}]}},
+            {"type": "user", "timestamp": "2026-09-18T10:03:01Z",
+             "message": {"role": "user", "content": [
+                 {"type": "tool_result", "tool_use_id": "hb",
+                  "content": [{"type": "text", "text": '{"success":true}'}]}]}},
+        ):
+            f.write(json.dumps(line) + "\n")
+    return path
+
+
+@pytest.mark.parametrize("extra", [{}, {"last_assistant_message": ""}])
+def test_a_handback_only_result_passes_and_records_its_issue(tmp_path, sdlc_repo, extra):
+    data = str(tmp_path / "data")
+    transcript = _handback_transcript(tmp_path, "Done: PR #9.\n\n" + RESULT)
+    proc = run_hook("subagent_stop.py", _stop_payload(sdlc_repo, transcript, **extra),
+                    env={"CLAUDE_PLUGIN_DATA": data})
+    assert proc.returncode == 0, proc.stderr
+    [rec] = _records(data)
+    assert (rec["issue"], rec["stage"], rec["outcome"]) == (13, "development", "done")
+
+
+def test_the_metrics_scan_reads_a_handback_result(tmp_path, sdlc_repo):
+    # With the check skipped (stop_hook_active) the record comes from the scan alone.
+    data = str(tmp_path / "data")
+    transcript = _handback_transcript(tmp_path, RESULT)
+    run_hook("subagent_stop.py", _stop_payload(sdlc_repo, transcript, stop_hook_active=True),
+             env={"CLAUDE_PLUGIN_DATA": data})
+    [rec] = _records(data)
+    assert (rec["issue"], rec["outcome"]) == (13, "done")
+
+
+def test_a_handback_without_a_result_blocks_but_records(tmp_path, sdlc_repo):
+    data = str(tmp_path / "data")
+    transcript = _handback_transcript(tmp_path, "Done: PR #9, all green.")
+    proc = run_hook("subagent_stop.py", _stop_payload(sdlc_repo, transcript),
+                    env={"CLAUDE_PLUGIN_DATA": data})
+    assert proc.returncode == 2 and "no SDLC-RESULT line" in proc.stderr
+    [rec] = _records(data)
+    assert "issue" not in rec and rec["tool_calls"] == 1
+
+
+def test_a_handback_from_an_earlier_round_does_not_count(tmp_path, sdlc_repo):
+    transcript = _handback_transcript(tmp_path, RESULT)
+    with open(transcript, "a") as f:
+        f.write(json.dumps({"type": "user", "message": {"role": "user", "content": "resume: fix x"}}) + "\n")
+        f.write(json.dumps(_assistant("m10", "claude-opus-5", _usage(1, 1), "fixed x")) + "\n")
+    proc = run_hook("subagent_stop.py", _stop_payload(sdlc_repo, transcript),
+                    env={"CLAUDE_PLUGIN_DATA": str(tmp_path / "data")})
+    assert proc.returncode == 2
 
 
 def _run_state(runs_dir, session, epic=9, **extra):
