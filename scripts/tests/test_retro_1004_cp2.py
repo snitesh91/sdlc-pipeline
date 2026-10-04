@@ -319,14 +319,16 @@ def _handoffs(gh):
     return sum("development->pr-review" in c for c in gh.comments_on(9))
 
 
-def test_repeated_handoff_is_not_reposted():
+def test_repeated_handoff_is_not_reposted(monkeypatch):
+    monkeypatch.setattr(s, "required_check_states", lambda gh, pr: None)
     gh = FakeGh([{"number": 9}])
     s.cmd_handoff_to_pr_review(gh, 9, 42, "10 passed.")
     again = s.cmd_handoff_to_pr_review(gh, 9, 42, "10 passed.")
     assert again["already_posted"] is True and _handoffs(gh) == 1
 
 
-def test_a_rework_round_handoff_is_posted_again():
+def test_a_rework_round_handoff_is_posted_again(monkeypatch):
+    monkeypatch.setattr(s, "required_check_states", lambda gh, pr: None)
     gh = FakeGh([{"number": 9}])
     s.cmd_handoff_to_pr_review(gh, 9, 42, "10 passed.")
     s.cmd_record_pr_review(gh, 9, 42, "rework", "fix the guard")
