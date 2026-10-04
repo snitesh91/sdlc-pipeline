@@ -177,6 +177,8 @@ def test_guard_reason_names_control_plane_command(sdlc_repo):
     assert "open-design-pr" in guard("gh pr create --base x", sdlc_repo)
     assert "create-issue" in guard("gh issue create -t x", sdlc_repo)
     assert "set-stage" in guard("gh issue edit 5 --add-label bug", sdlc_repo)
+    assert 'python3 "$SDLC" edit-issue <n> [--body-file F] [--add-label L] [--remove-label L]' \
+        in guard("gh issue edit 5 --body-file b.md", sdlc_repo)
     assert "place <n> --where" in guard("gh issue edit 5 --add-label sdlc:cloud", sdlc_repo)
     assert "resolve-thread" in guard("gh api graphql -f query='mutation { resolveReviewThread }'", sdlc_repo)
     assert "start-stage" in guard("git worktree add /tmp/x", sdlc_repo)
@@ -261,6 +263,23 @@ def test_main_thread_operator_pr_with_an_explicit_non_pipeline_head_is_allowed(s
         assert "sdlc guard: " in guard(cmd, sdlc_repo, **live)
     # never for a stage agent
     assert "sdlc guard: " in guard("gh pr create --head chore/x --title t", sdlc_repo,
+                                   "sdlc:development")
+
+
+def test_main_thread_may_merge_an_operator_pr_by_its_non_pipeline_branch(sdlc_repo, live):
+    assert guard("gh pr merge chore/sdlc-v0315 --squash", sdlc_repo, **live) is None
+    assert guard("gh -R o/r pr merge --squash -t x docs/y", sdlc_repo, **live) is None
+    for cmd in ("gh pr merge 12 --squash",                      # a PR number
+                "gh pr merge issue-12 --squash",                 # a pipeline branch
+                "gh pr merge epic-3",
+                "gh pr merge https://github.com/o/r/pull/12",    # a URL
+                "gh pr merge --squash",                          # no target
+                "gh pr merge",
+                "xargs -I {} gh pr merge {} < prs.txt"):
+        reason = guard(cmd, sdlc_repo, **live)
+        assert "sdlc guard: " in reason and "gh pr merge <branch>" in reason
+    # never for a stage agent
+    assert "sdlc guard: " in guard("gh pr merge chore/sdlc-v0315 --squash", sdlc_repo,
                                    "sdlc:development")
 
 
