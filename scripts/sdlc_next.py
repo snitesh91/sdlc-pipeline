@@ -119,7 +119,10 @@ with open(os.path.join(PLUGIN_ROOT, "hooks", "model_policy.json")) as _f:
 _PIPELINE_DEFAULTS = {
     "labels": {"standing": "epic:standing", "legacy": "epic:legacy",
                "architected": "epic:architected", "gate": "sdlc:gate"},
-    "branches": {"issuePrefix": "issue-", "epicPrefix": "epic-"},
+    # `initiativePrefix`: the branch of an Initiative whose `initiativeProfiles` entry sets
+    # `branch: true` (its Epics integrate there, not into `main`).
+    "branches": {"issuePrefix": "issue-", "epicPrefix": "epic-",
+                 "initiativePrefix": "initiative-"},
     # `ephemeralPrefix`: throwaway tree for a branch no live worktree holds, since
     # the main checkout is never a git-write target.
     # `releaseCommand`: shell command run inside a worktree right before it is removed
@@ -128,7 +131,7 @@ _PIPELINE_DEFAULTS = {
     # `<unit_docker_prefix>-*` / `_*`, and fall back to a docker `rm -rf` when a
     # root-owned file blocks `worktree remove`.
     "worktrees": {"root": "/tmp", "devPrefix": "sdlc-dev-", "epicPrefix": "sdlc-epic-",
-                  "reviewPrefix": "sdlc-review-", "ephemeralPrefix": "sdlc-tmp-",
+                  "initiativePrefix": "sdlc-initiative-", "reviewPrefix": "sdlc-review-", "ephemeralPrefix": "sdlc-tmp-",
                   "releaseCommand": "", "dockerCleanup": True},
     # Per-branch flock; `SDLC_LOCK_DIR` in the environment overrides `dir`.
     "locks": {"dir": "{worktreesRoot}/.sdlc-locks", "waitSeconds": 600},
@@ -209,6 +212,10 @@ _PIPELINE_DEFAULTS = {
          "gates": {"requiresHumanGateA": False, "requiresHumanGateB": False}},
         {"name": "default", "match": "*"},
     ],
+    # Opt-in per Initiative, ordered, first `match` label on the Initiative wins; no "*"
+    # entry is implied, so an unmatched Initiative keeps the defaults below
+    # (`_INITIATIVE_PROFILE_DEFAULTS`). See `resolve_initiative_profile`.
+    "initiativeProfiles": [],
 }
 
 # Fallbacks for toggles a matched profile omits (its `gates` fall back to `pipeline.gates`).
@@ -217,6 +224,17 @@ _PROFILE_TOGGLE_DEFAULTS = {
     "epicLevelPhase": True,       # False = standing: each child runs its own full flow
     "childrenNeedArchitectedEpic": True,  # children gated on epic:architected
     "closes": True,               # epic closes + has an integration branch
+}
+
+
+# Fallbacks for an Initiative profile's toggles (and for an Initiative no profile matches).
+_INITIATIVE_PROFILE_DEFAULTS = {
+    "branch": False,      # True = `initiative-<i>`: its Epics cut from and close into it
+    "testTasks": True,    # False = `lld` carves no Integration-test / e2e-test Tasks
+    "deferSuites": [],    # suites close-epic does not demand of an Epic closing into the
+                          # initiative branch; they gate the initiative -> main merge instead
+    "closeSuites": [],    # suite keys (any name, e.g. "e2e") `merge-initiative-pr` also needs
+                          # a `record-local-ci` attestation for at the initiative PR's head
 }
 
 
@@ -236,6 +254,7 @@ PIPELINE = _pipeline_config()
 LABELS = PIPELINE["labels"]
 ISSUE_BRANCH_PREFIX = PIPELINE["branches"]["issuePrefix"]
 EPIC_BRANCH_PREFIX = PIPELINE["branches"]["epicPrefix"]
+INITIATIVE_BRANCH_PREFIX = PIPELINE["branches"]["initiativePrefix"]
 ESCALATION = PIPELINE["escalation"]
 # Read at call time (never bound as a default arg) so it can be overridden on the module.
 PRODUCT_WIP_CAP = PIPELINE["productWip"]["maxGateAPending"]
@@ -1280,6 +1299,90 @@ def is_epic_legacy(issue: dict) -> bool:
     return not resolve_profile(issue)["driven"]
 
 
+def resolve_initiative_profile(initiative_issue: Optional[dict]) -> dict:
+    """The Initiative's first matching `pipeline.initiativeProfiles` entry (by `match` label,
+    or `"*"`), its toggles filled from `_INITIATIVE_PROFILE_DEFAULTS`; `name` is None when
+    nothing matched -- the v0.3.16 behaviour: no initiative branch, standing test Tasks on."""
+    labels = label_names(initiative_issue) if initiative_issue else set()
+    chosen: dict = {}
+    for prof in PIPELINE["initiativeProfiles"] or []:
+        match = prof.get("match")
+        if match == "*" or (isinstance(match, dict) and match.get("label") in labels):
+            chosen = prof
+            break
+    merged = {**_INITIATIVE_PROFILE_DEFAULTS,
+              **{k: v for k, v in chosen.items() if k in _INITIATIVE_PROFILE_DEFAULTS}}
+    merged["deferSuites"] = list(merged.get("deferSuites") or [])
+    merged["closeSuites"] = list(merged.get("closeSuites") or [])
+    merged["name"] = chosen.get("name") if chosen else None
+    return merged
+
+
+def initiative_branch(initiative: int) -> str:
+    """An opted-in Initiative's long-lived branch (default `initiative-<n>`)."""
+    return f"{INITIATIVE_BRANCH_PREFIX}{initiative}"
+
+
+def initiative_of_in(issues: dict, number: int) -> Optional[dict]:
+    """The Initiative `number` is or sits under (Task -> Epic -> Initiative), or None."""
+    seen, n = set(), number
+    while n is not None and n not in seen and len(seen) < 4:
+        seen.add(n)
+        entry = issues.get(n)
+        if entry is None:
+            return None
+        if is_initiative(entry):
+            return entry
+        n = (entry.get("parent") or {}).get("number")
+    return None
+
+
+def epic_initiative_branch_in(issues: dict, epic: int) -> Optional[str]:
+    """`initiative-<i>` when `epic`'s parent is an Initiative whose profile sets `branch`,
+    else None. Only the direct parent counts: an Epic is a native sub-issue of its Initiative."""
+    entry = issues.get(epic)
+    parent = (entry or {}).get("parent") or {}
+    parent_entry = issues.get(parent.get("number"))
+    if parent_entry is None or not is_initiative(parent_entry):
+        return None
+    if not resolve_initiative_profile(parent_entry)["branch"]:
+        return None
+    return initiative_branch(parent_entry["number"])
+
+
+def epic_base_in(issues: dict, epic: int) -> str:
+    """Where an Epic's branch is cut from, synced with and closes into: its opted-in
+    Initiative's branch, else `main`."""
+    return epic_initiative_branch_in(issues, epic) or "main"
+
+
+def epic_base(gh: "WorkItemProvider", epic: int, issues: Optional[list] = None) -> str:
+    """`epic_base_in` that looks nothing up while no `initiativeProfiles` is configured,
+    so a repo without the opt-in makes exactly the calls it made before."""
+    if not PIPELINE["initiativeProfiles"]:
+        return "main"
+    return epic_base_in({i["number"]: i for i in (issues if issues is not None
+                                                  else gh.issue_list())}, epic)
+
+
+def unit_initiative_profile(gh: Optional["WorkItemProvider"], number: int) -> dict:
+    """The resolved Initiative profile governing unit `number` (`initiative`: its number or
+    None), read up its ancestry; the defaults, looking nothing up, without the opt-in."""
+    if not PIPELINE["initiativeProfiles"] or number is None:
+        return {**resolve_initiative_profile(None), "initiative": None}
+    gh = gh or get_work_item_provider()
+    chain, n = [], int(number)
+    while n is not None and n not in chain and len(chain) < _ANCESTRY_DEPTH:
+        chain.append(n)
+        info = gh.issue_epic_info(n)
+        if classify_unit_from_issue(info) == "initiative":
+            prof = {**resolve_initiative_profile(info), "initiative": n}
+            _record_hints(INITIATIVE_HINTS_FILE, {m: prof for m in chain})
+            return prof
+        n = (info.get("parent") or {}).get("number")
+    return {**resolve_initiative_profile(None), "initiative": None}
+
+
 def is_epic_architected(issue: dict) -> bool:
     """Whether the Epic's design phase is done (label set by `merge-lld-doc`). A label, not
     a marker, so it is readable from the bulk `issue_list()` fetch."""
@@ -1297,6 +1400,8 @@ def is_epic_architected(issue: dict) -> bool:
 _DOC_ROOTS_CACHE: dict = {}
 # Unit -> resolved roots, read by the SubagentStart hook (which has no GitHub access).
 DOC_ROOT_HINTS_FILE = "doc-roots.cache"
+# Unit -> its Initiative's resolved profile (`unit_initiative_profile`), same reader.
+INITIATIVE_HINTS_FILE = "initiative-profiles.cache"
 _ANCESTRY_DEPTH = 4
 
 
@@ -1334,7 +1439,12 @@ def unit_ancestry(gh: "WorkItemProvider", number: int) -> list:
 
 def _record_doc_root_hints(resolved: dict) -> None:
     """Merge `{number: roots}` into the hint file the SubagentStart hook reads; best effort."""
-    path = os.path.join(_run_state_dir(), DOC_ROOT_HINTS_FILE)
+    _record_hints(DOC_ROOT_HINTS_FILE, resolved)
+
+
+def _record_hints(filename: str, resolved: dict) -> None:
+    """Merge `{number: value}` into the run-state hint file `filename`; best effort."""
+    path = os.path.join(_run_state_dir(), filename)
     try:
         os.makedirs(_run_state_dir(), exist_ok=True)
         try:
@@ -1402,6 +1512,19 @@ def hint_doc_roots(gh: Optional["WorkItemProvider"], *numbers: Optional[int]) ->
             doc_roots_for(n, gh)
         except GhError:
             pass
+
+
+def cmd_initiative_profile(gh: Optional["WorkItemProvider"], number: int) -> dict:
+    """`initiative-profile <n>`: the Initiative profile governing unit `n` (`initiative`,
+    `profile`, `branch` -> `initiative_branch`, `testTasks`, `deferSuites`, `closeSuites`);
+    `opted_in: false` and the defaults when nothing matches or no profile is configured."""
+    prof = unit_initiative_profile(gh, number)
+    out = {"issue": number, "initiative": prof["initiative"], "profile": prof["name"],
+           "opted_in": prof["name"] is not None,
+           **{k: prof[k] for k in _INITIATIVE_PROFILE_DEFAULTS}}
+    if prof["branch"] and prof["initiative"] is not None:
+        out["initiative_branch"] = initiative_branch(prof["initiative"])
+    return out
 
 
 def cmd_doc_root(gh: Optional["WorkItemProvider"], number: int) -> dict:
@@ -1588,7 +1711,11 @@ _ARCH_CONFIDENCE_MARKER = re.compile(r"<!--\s*arch-review-confidence:\s*(\d+)\s*
 _LOCAL_CI_MARKER = re.compile(
     r"<!--\s*local-ci:\s*([\w-]+):(\d+)\s*@\s*([0-9a-fA-F]{7,40})\s*-->")
 
-LOCAL_CI_SUITES = tuple(dict.fromkeys(w["suite"] for w in CONFIG["requiredWorkflows"]))
+# Plus every Initiative profile's `closeSuites` (attested on the initiative PR only).
+LOCAL_CI_SUITES = tuple(dict.fromkeys(
+    [w["suite"] for w in CONFIG["requiredWorkflows"]]
+    + [suite for prof in PIPELINE["initiativeProfiles"] or [] for suite in
+       prof.get("closeSuites") or []]))
 
 # Fail at config load on a suite key the marker regex could never match.
 for _suite in LOCAL_CI_SUITES:
@@ -1755,7 +1882,9 @@ def epic_branch(epic: int) -> str:
 
 
 def unit_branch(unit: str, number: int) -> str:
-    """The branch for an `issue` or `epic` unit, using the configured prefixes."""
+    """The branch for an `issue`, `epic` or `initiative` unit, using the configured prefixes."""
+    if unit == "initiative":
+        return initiative_branch(number)
     return epic_branch(number) if unit == "epic" else issue_branch(number)
 
 
@@ -1766,10 +1895,13 @@ PHASE_TASK_STAGES = frozenset({"architecture", "arch-review", "lld", "lld-review
 
 def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
     """Branch this unit integrates into: `epic-<parent>` for every child of a non-standing
-    Epic (phase-Tasks included), else `main` (epics, parentless issues, standing/Initiative
+    Epic (phase-Tasks included); for an Epic, its opted-in Initiative's `initiative-<i>`
+    (`epic_base`); else `main` (initiatives, other epics, parentless issues, standing/Initiative
     children)."""
-    if unit == "epic":
+    if unit == "initiative":
         return "main"
+    if unit == "epic":
+        return epic_base(gh, issue)
     # `parent` exists only in `issue_list`'s GraphQL; `gh issue view --json` has no such field.
     return integration_base_in({i["number"]: i for i in gh.issue_list()}, issue)
 
@@ -1973,7 +2105,7 @@ def _pr_suite_evidence(gh, spec: dict, view: dict, checks: list, ref: str,
     return f"carried_forward_from {sha[:10]}"
 
 
-def _epic_child_chain(gh, branch: str, children: list) -> dict:
+def _epic_child_chain(gh, branch: str, children: list, base: str = "main") -> dict:
     """Every merged child PR of the epic (`{pr: {issue, view, files, checks}}`) and the shas
     of the commits on `branch` that came through none of them (`direct`; None when the
     branch has too many commits to enumerate)."""
@@ -1985,14 +2117,17 @@ def _epic_child_chain(gh, branch: str, children: list) -> dict:
                       "view": gh.pr_view(n, "comments,headRefOid,mergeCommit"),
                       "files": gh.pr_files(n), "checks": gh.pr_checks(n)}
     merged = {(p["view"].get("mergeCommit") or {}).get("oid") for p in prs.values()}
-    commits = gh.branch_commits("main", branch)
+    commits = gh.branch_commits(base, branch)
     direct = None if len(commits) >= 250 else [c for c in commits if c not in merged]
     return {"prs": prs, "direct": direct}
 
 
 def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
-                         epic_pr: Optional[int], carry_forward: bool = True) -> dict:
-    """Per required suite (base `main`) at the epic head: how it is satisfied -- the epic
+                         epic_pr: Optional[int], carry_forward: bool = True,
+                         base: str = "main", deferred: tuple = ()) -> dict:
+    """Per required suite (base `base`: `main`, or the opted-in Initiative's branch) at the
+    epic head; a suite in `deferred` is `deferred_to_initiative` (the initiative -> main merge
+    gates it). Otherwise how it is satisfied -- the epic
     PR's own check/attestation, or the child chain (every merged child PR that touched the
     suite is satisfied and no direct epic commit touches it). Returns `suites` (status per
     suite), `unattested` / `awaiting` (attestable / non-attestable suites still `missing`),
@@ -2007,15 +2142,18 @@ def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
     suites, unattested, awaiting, missing, breaks, carried = {}, [], [], [], {}, set()
     for spec in REQUIRED_WORKFLOWS:
         suite = spec["suite"]
-        if not _workflow_applies_to_base(spec, "main"):
+        if not _workflow_applies_to_base(spec, base):
             continue
         if not truncated and not any(_workflow_covers(spec, p) for p in epic_files):
             suites[suite] = "not_required"
             continue
+        if suite in deferred:
+            suites[suite] = "deferred_to_initiative"
+            continue
         status = _pr_suite_evidence(gh, spec, view, checks, branch, carry_forward, carried) \
             if epic_pr is not None else None
         if status is None and carry_forward:
-            chain = chain or _epic_child_chain(gh, branch, children)
+            chain = chain or _epic_child_chain(gh, branch, children, base)
             status, why = _chain_suite_evidence(gh, spec, chain, branch, carried)
             if why:
                 breaks[suite] = why
@@ -2090,15 +2228,16 @@ def cmd_record_epic_verification(gh: GitHub, epic: int, kind: str, summary: str,
 
 
 def _close_epic_evidence(gh, epic: int, branch: str, children: list, epic_pr: Optional[int],
-                         carry_forward: bool) -> dict:
+                         carry_forward: bool, base: str = "main", deferred: tuple = ()) -> dict:
     """The evidence fields every close-epic result carries: `missing_verification` (when
     any), `unattested_suites`, `evidence`, `carried_forward_files`, `evidence_breaks`,
     plus the private `_missing_workflows` the merge gate reads."""
     comments = gh.issue_view(epic).get("comments", [])
     delta = _EpicEvidenceDelta(gh, branch, carry_forward)
     problems = missing_epic_verification(comments, delta)
-    files = gh.pr_files(epic_pr) if epic_pr is not None else gh.base_delta_files("main", base=branch)
-    suites = _epic_suite_evidence(gh, branch, children, files, epic_pr, carry_forward)
+    files = gh.pr_files(epic_pr) if epic_pr is not None else gh.base_delta_files(base, base=branch)
+    suites = _epic_suite_evidence(gh, branch, children, files, epic_pr, carry_forward,
+                                  base, deferred)
     carried = set(suites["carried_files"])
     carried.update(f for d in delta.deltas.values() if d["status"] == "carried_forward"
                    for f in d["files"])
@@ -2187,11 +2326,21 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     branch = epic_branch(epic)
     all_issues = gh.issue_list()
     children = [i for i in all_issues if i.get("parent") and i["parent"]["number"] == epic]
+    # `main`, or -- for an Epic of an opted-in Initiative -- `initiative-<i>`: the target of
+    # the reconcile and the epic PR. Suites the profile defers are not demanded here.
+    base = epic_base(gh, epic, all_issues)
+    deferred: tuple = ()
+    if base != "main":
+        by_number = {i["number"]: i for i in all_issues}
+        deferred = tuple(resolve_initiative_profile(initiative_of_in(by_number, epic))
+                         ["deferSuites"])
+    target = {"base": base} if base != "main" else {}
     merged_prs = gh.pr_list_for_branch(branch, state="merged")
     if merged_prs:
         # A repeat call after the merge: `origin/epic-<n>` is gone, so never compare it.
         return _finish_epic_close(gh, epic, detail, merged_prs[0]["number"], children,
-                                  all_issues, repo_path, runner, {"recovered": True})
+                                  all_issues, repo_path, runner, {"recovered": True, **target},
+                                  base=base)
     open_children = [c["number"] for c in children if c["state"] != "CLOSED"]
     if open_children:
         return {"epic": epic, "merged": False, "open_children": open_children,
@@ -2209,7 +2358,10 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                     "reason": cleaned["worktree_clean"]["reason"]}
         return None
 
-    behind = gh.branch_behind_by(branch, base="main")
+    if base != "main":
+        # An Epic cut before its Initiative opted in: stand the initiative branch up first.
+        ensure_branch_on_origin(repo_path, base, runner=runner)
+    behind = gh.branch_behind_by(branch, base=base)
     if behind:
         refused = clean_refusal()
         if refused:
@@ -2217,46 +2369,53 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         # The epic branch rarely has a live worktree by close time; reconcile in
         # an ephemeral one under the branch lock, never in the main checkout.
         with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
-            git_reconcile_branch(ws.path, branch, base="main", runner=runner)
+            git_reconcile_branch(ws.path, branch, base=base, runner=runner)
         timestamp = _utc_now_marker()
         gh.issue_comment(epic,
-            f"🔄 Reconciled `{branch}` with `origin/main` ({behind} commit(s) picked up). "
+            f"🔄 Reconciled `{branch}` with `origin/{base}` ({behind} commit(s) picked up). "
             f"Closing verification must now run against **this** tree — the exploratory pass. "
             f"Evidence recorded before this point describes a "
             f"different tree and will not be accepted.\n\n"
             f"<!-- epic-reconciled: {epic} @ {timestamp} -->")
         existing = gh.pr_list_for_branch(branch)
         evidence = _close_epic_evidence(gh, epic, branch, children,
-                                        existing[0]["number"] if existing else None, carry_forward)
+                                        existing[0]["number"] if existing else None, carry_forward,
+                                        base, deferred)
         evidence.pop("_missing_workflows")
         return _with_workspace(
-            {"epic": epic, "merged": False, "branch": branch, "reconciled": behind, **evidence,
-             **cleaned,
-             "reason": f"picked up {behind} commit(s) from main -- run the exploratory pass "
+            {"epic": epic, "merged": False, "branch": branch, "reconciled": behind, **target,
+             **evidence, **cleaned,
+             "reason": f"picked up {behind} commit(s) from {base} -- run the exploratory pass "
                        f"against the reconciled branch, then re-run close-epic"},
             ws)
     existing = gh.pr_list_for_branch(branch)
     if _close_epic_exploratory_problems(gh, epic, branch, carry_forward):
         evidence = _close_epic_evidence(gh, epic, branch, children,
-                                        existing[0]["number"] if existing else None, carry_forward)
+                                        existing[0]["number"] if existing else None, carry_forward,
+                                        base, deferred)
         evidence.pop("_missing_workflows")
-        return {"epic": epic, "merged": False, "branch": branch, **evidence,
+        return {"epic": epic, "merged": False, "branch": branch, **target, **evidence,
                 "reason": f"closing verification incomplete: "
                           f"{'; '.join(evidence['missing_verification'])}"}
     if existing:
         pr_number = existing[0]["number"]
     else:
+        # `Closes #<n>` only auto-closes on the default branch; close-epic closes it either way.
         pr_number = gh.pr_create(
-            base="main", head=branch,
+            base=base, head=branch,
             title=f"{detail['title']} — epic integration (#{epic})",
-            body=f"Integration of every child of #{epic}.\n\nCloses #{epic}",
+            body=f"Integration of every child of #{epic}"
+                 + (f" into `{base}` (the Initiative's branch; it reaches `main` at "
+                    f"initiative close)" if base != "main" else "")
+                 + f".\n\nCloses #{epic}",
             draft=True)
     # The PR's files, checks and attestations are the gate's inputs, so it must exist first.
-    evidence = _close_epic_evidence(gh, epic, branch, children, pr_number, carry_forward)
+    evidence = _close_epic_evidence(gh, epic, branch, children, pr_number, carry_forward,
+                                    base, deferred)
     missing_workflows = evidence.pop("_missing_workflows")
     if missing_workflows:
         return {"epic": epic, "merged": False, "pr": pr_number, "checks": "missing-checks",
-                **evidence,
+                **target, **evidence,
                 "reason": f"PR #{pr_number} required suites unsatisfied at the epic head "
                           f"(no passing check, attestation or child chain from: "
                           f"{', '.join(missing_workflows)})"}
@@ -2267,11 +2426,12 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     gh.pr_ready(pr_number)
     gh.pr_merge(pr_number)
     return _finish_epic_close(gh, epic, None, pr_number, children, all_issues, repo_path,
-                              runner, {**evidence, **cleaned})
+                              runner, {**target, **evidence, **cleaned}, base=base)
 
 
 def _finish_epic_close(gh, epic: int, detail: Optional[dict], pr_number: int, children: list,
-                       all_issues: list, repo_path: str, runner: Runner, extra: dict) -> dict:
+                       all_issues: list, repo_path: str, runner: Runner, extra: dict,
+                       base: str = "main") -> dict:
     """Post-merge bookkeeping, each step safe to repeat: close the Epic issue unless GitHub's
     `Closes #<n>` already has (it lands asynchronously, and `next-action` must see it closed
     now), its terminal fields, the unit cleanup, run-state archive and stack teardown."""
@@ -2282,7 +2442,7 @@ def _finish_epic_close(gh, epic: int, detail: Optional[dict], pr_number: int, ch
         except GhError:
             pass  # GitHub closed it in between; mark-issue-closed below still runs
     cmd_mark_issue_closed(gh, epic)
-    cleanup = cleanup_unit(gh, epic, "epic", repo_path, runner, base="main")
+    cleanup = cleanup_unit(gh, epic, "epic", repo_path, runner, base=base)
     closed_children = {c["number"] for c in children}
     children_cleanup = sweep_units(gh, repo_path, runner, only=closed_children,
                                    issues=all_issues)["units"]
@@ -2341,9 +2501,9 @@ def cmd_record_initiative_verification(gh: GitHub, initiative: int, summary: str
             "recorded": True}
 
 
-def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
-    """`closeable` when at least one Epic was cut from the Initiative and all are closed;
-    otherwise `reason` (and `open_epics`)."""
+def _initiative_epics_state(gh: GitHub, initiative: int) -> tuple:
+    """`(initiative_issue, refusal)`: the refusal (`closeable: false` + `reason`, `open_epics`)
+    while no Epic was cut or one is open, else `epics` in place of a refusal."""
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
     initiative_issue = by_number.get(initiative)
@@ -2352,15 +2512,64 @@ def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
     cut_epics = [i for i in all_issues if i.get("parent")
                  and i["parent"]["number"] == initiative and is_epic(i)]
     if not cut_epics:
-        return {"initiative": initiative, "closeable": False,
-                "reason": "no Epics have been cut from this Initiative yet"}
+        return initiative_issue, {"initiative": initiative, "closeable": False,
+                                  "reason": "no Epics have been cut from this Initiative yet"}
     open_epics = sorted(i["number"] for i in cut_epics if i["state"] != "CLOSED")
     if open_epics:
-        return {"initiative": initiative, "closeable": False, "open_epics": open_epics,
-                "reason": f"{len(open_epics)} cut Epic(s) still open: "
-                          f"{', '.join(f'#{n}' for n in open_epics)}"}
-    return {"initiative": initiative, "closeable": True,
-            "epics": sorted(i["number"] for i in cut_epics)}
+        return initiative_issue, {"initiative": initiative, "closeable": False,
+                                  "open_epics": open_epics,
+                                  "reason": f"{len(open_epics)} cut Epic(s) still open: "
+                                            f"{', '.join(f'#{n}' for n in open_epics)}"}
+    return initiative_issue, {"epics": sorted(i["number"] for i in cut_epics)}
+
+
+def initiative_landing(gh: GitHub, initiative: int) -> dict:
+    """Whether an opted-in Initiative's branch reached `main`: `landed` when its latest PR
+    `initiative-<i>` -> main is merged and the branch is gone or still at the merged head
+    (a later Epic closing into a re-created branch un-lands it). Also `branch`, `pr`, `state`
+    (`merged` | `open` | `none` for that latest PR)."""
+    branch = initiative_branch(initiative)
+    prs = sorted(gh.pr_heads_for_branch(branch), key=lambda p: p["number"])
+    open_prs = [p for p in prs if p.get("state") == "OPEN"]
+    merged = [p for p in prs if p.get("state") == "MERGED"]
+    out = {"branch": branch, "pr": None, "state": "none", "landed": False}
+    if open_prs:
+        out.update(pr=open_prs[-1]["number"], state="open")
+        return out
+    if not merged:
+        return out
+    last = merged[-1]
+    out.update(pr=last["number"], state="merged")
+    try:
+        head = gh.branch_head_sha(branch)
+    except GhError:
+        head = None  # deleted after the merge
+    out["landed"] = not head or head == last.get("headRefOid")
+    if not out["landed"]:
+        out["state"] = "none"  # new work on the branch since that merge needs its own PR
+        out["unlanded_head"] = head
+    return out
+
+
+def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
+    """`closeable` when at least one Epic was cut from the Initiative and all are closed --
+    and, for an Initiative with an initiative branch, that branch reached `main`
+    (`initiative_landing`); otherwise `reason` (and `open_epics` / `initiative_branch`)."""
+    initiative_issue, state = _initiative_epics_state(gh, initiative)
+    if "epics" not in state:
+        return state
+    if resolve_initiative_profile(initiative_issue)["branch"]:
+        landing = initiative_landing(gh, initiative)
+        if not landing["landed"]:
+            step = (f"`merge-initiative-pr {initiative}` once its evidence is green"
+                    if landing["state"] == "open" else
+                    f"`open-initiative-pr {initiative} --repo-path <p>`, then "
+                    f"`merge-initiative-pr {initiative}` once its evidence is green")
+            return {"initiative": initiative, "closeable": False, "epics": state["epics"],
+                    "initiative_branch": landing,
+                    "reason": f"every cut Epic is closed, but `{landing['branch']}` has not "
+                              f"reached main: {step} (SKILL.md, \"Closing an Initiative\")"}
+    return {"initiative": initiative, "closeable": True, "epics": state["epics"]}
 
 
 def cmd_close_initiative(gh: GitHub, initiative: int) -> dict:
@@ -2379,6 +2588,138 @@ def cmd_close_initiative(gh: GitHub, initiative: int) -> dict:
     # Also set here so a repo without the `issues: closed` Action still ends correct.
     cmd_mark_issue_closed(gh, initiative)
     return {"initiative": initiative, "closed": True, "epics": check["epics"]}
+
+
+def _initiative_branch_refusal(gh: GitHub, initiative: int, action: str) -> tuple:
+    """`(initiative_issue, epics, refusal)` shared by the two initiative-PR commands: refused
+    for an Initiative without an initiative branch, or while an Epic is open / none was cut."""
+    initiative_issue, state = _initiative_epics_state(gh, initiative)
+    if not resolve_initiative_profile(initiative_issue)["branch"]:
+        return initiative_issue, [], {
+            "initiative": initiative, action: False,
+            "reason": f"Initiative #{initiative} has no initiative branch (no "
+                      f"`pipeline.initiativeProfiles` entry with `branch: true` matches its "
+                      f"labels) -- its Epics merged to main at their own close"}
+    if "epics" not in state:
+        return initiative_issue, [], {**{k: v for k, v in state.items() if k != "closeable"},
+                                      action: False}
+    return initiative_issue, state["epics"], None
+
+
+def _initiative_pr_evidence(gh: GitHub, initiative_issue: dict, pr: int) -> dict:
+    """The initiative PR's merge gate at its head: every required workflow its files touch
+    (base `main`, deferred suites included) by passing check or `local-ci` attestation, plus
+    the profile's `closeSuites` attested at the head. `ready` when nothing is owed."""
+    view = gh.pr_view(pr, "comments,headRefOid")
+    head = view.get("headRefOid")
+    comments = view.get("comments", [])
+    checks = gh.pr_checks(pr)
+    files = gh.pr_files(pr)
+    status, missing = merge_gate_status(files, checks, comments, head, "main")
+    attested = local_ci_suites_attested(comments, head)
+    close_suites = resolve_initiative_profile(initiative_issue)["closeSuites"]
+    unattested = [suite for suite in close_suites if suite not in attested]
+    out = {"head": head, "checks": status, "missing_workflows": missing,
+           "close_suites": close_suites, "unattested_close_suites": unattested,
+           "ready": status == "passed" and not unattested}
+    failing = [c for c in checks if _is_failed_check(c)]
+    if failing:
+        out["failing_checks"] = [c.get("name") or "?" for c in failing]
+        out["infra_suspect"] = enrich_failed_checks(gh, failing)
+    return _with_uncovered(out, files, "main")
+
+
+def cmd_open_initiative_pr(gh: GitHub, initiative: int, repo_path: str = ".",
+                           runner: Runner = _default_runner) -> dict:
+    """Once every cut Epic is closed: sync `initiative-<i>` with `main`, then open (or reuse)
+    the PR `initiative-<i>` -> `main`. Idempotent; refuses (`opened: false`, `reason`) without
+    the opt-in, while an Epic is open, on a sync conflict, or once the branch already landed.
+    Returns `pr`, `sync` and the PR's `evidence` owed (`_initiative_pr_evidence`)."""
+    initiative_issue, epics, refusal = _initiative_branch_refusal(gh, initiative, "opened")
+    if refusal:
+        return refusal
+    landing = initiative_landing(gh, initiative)
+    branch = landing["branch"]
+    if landing["landed"]:
+        return {"initiative": initiative, "opened": False, "pr": landing["pr"], "landed": True,
+                "reason": f"`{branch}` already reached main via PR #{landing['pr']} -- "
+                          f"nothing to open; run initiative-close next"}
+    sync = cmd_sync_branch(gh, repo_path, initiative, "initiative", runner=runner, base="main")
+    if not sync.get("synced"):
+        return {"initiative": initiative, "opened": False, "branch": branch, "sync": sync,
+                "reason": sync.get("reason") or (
+                    f"`{branch}` conflicts with main ({', '.join(sync.get('conflicting_files', []))})"
+                    f" -- resolve it in `worktree-add {initiative} --unit initiative`'s tree, "
+                    f"push, then re-run open-initiative-pr")}
+    if landing["state"] == "open":
+        pr, created = landing["pr"], False
+    else:
+        pr = gh.pr_create(
+            base="main", head=branch,
+            title=f"{initiative_issue['title']} — initiative integration (#{initiative})",
+            body=(f"Every Epic of Initiative #{initiative} "
+                  f"({', '.join(f'#{n}' for n in epics)}), integrated on `{branch}`.\n\n"
+                  f"Merged by `merge-initiative-pr {initiative}` once the required checks and "
+                  f"suite attestations are green at its head; #{initiative} then closes after "
+                  f"its requirements validation (`close-initiative`)."),
+            draft=False)
+        created = True
+    return {"initiative": initiative, "opened": True, "created": created, "pr": pr,
+            "branch": branch, "epics": epics, "sync": sync,
+            "evidence": _initiative_pr_evidence(gh, initiative_issue, pr)}
+
+
+def cmd_merge_initiative_pr(gh: GitHub, initiative: int, repo_path: str = ".",
+                            runner: Runner = _default_runner) -> dict:
+    """The initiative branch's only path to `main`: merge its open PR when every cut Epic is
+    closed, the branch is not behind main, and `_initiative_pr_evidence` is `ready` (required
+    checks green or attested, `closeSuites` attested at the head). Then clean the branch up.
+    Refusals are exit 0 (`merged: false`, `reason`); an already-merged PR only re-runs the
+    cleanup (`recovered: true`)."""
+    initiative_issue, epics, refusal = _initiative_branch_refusal(gh, initiative, "merged")
+    if refusal:
+        return refusal
+    landing = initiative_landing(gh, initiative)
+    branch = landing["branch"]
+    if landing["landed"]:
+        cleanup = cleanup_unit(gh, initiative, "initiative", repo_path, runner, base="main")
+        return _with_warnings({"initiative": initiative, "merged": True, "recovered": True,
+                               "pr": landing["pr"], "branch": branch, "cleanup": cleanup}, cleanup)
+    if landing["state"] != "open":
+        return {"initiative": initiative, "merged": False, "branch": branch,
+                "reason": f"no open PR `{branch}` -> main -- run "
+                          f"`open-initiative-pr {initiative} --repo-path <p>` first"}
+    pr = landing["pr"]
+    behind = gh.branch_behind_by(branch, base="main")
+    if behind:
+        return {"initiative": initiative, "merged": False, "pr": pr, "behind_base": behind,
+                "reason": f"`{branch}` is {behind} commit(s) behind main -- re-run "
+                          f"`open-initiative-pr {initiative}` (it syncs the branch), let the "
+                          f"checks and the final suite runs re-attest the new head, then re-run"}
+    evidence = _initiative_pr_evidence(gh, initiative_issue, pr)
+    if not evidence["ready"]:
+        owed = [*(f"workflow `{w}`" for w in evidence["missing_workflows"]),
+                *(f"`{s}` attestation" for s in evidence["unattested_close_suites"])]
+        return {"initiative": initiative, "merged": False, "pr": pr, "evidence": evidence,
+                "reason": f"PR #{pr} is not ready at head {str(evidence['head'])[:10]}: checks "
+                          f"{evidence['checks']}"
+                          + (f"; owed: {', '.join(owed)}" if owed else "")
+                          + (f" ({_MISSING_WORKFLOW_HINT})" if evidence["missing_workflows"]
+                             else "")}
+    gh.pr_ready(pr)
+    try:
+        gh.pr_merge(pr, match_head=evidence["head"])
+    except GhError:
+        if gh.pr_view(pr, fields="state").get("state") != "MERGED":
+            raise
+    gh.issue_comment(initiative,
+        f"🚢 `{branch}` merged to `main` via PR #{pr} (Epics "
+        f"{', '.join(f'#{n}' for n in epics)}). Next: requirements validation, then "
+        f"`close-initiative {initiative}`.\n\n"
+        f"<!-- initiative-merged: {initiative} pr:{pr} @ {_utc_now_marker()} -->")
+    cleanup = cleanup_unit(gh, initiative, "initiative", repo_path, runner, base="main")
+    return _with_warnings({"initiative": initiative, "merged": True, "pr": pr, "branch": branch,
+                           "epics": epics, "evidence": evidence, "cleanup": cleanup}, cleanup)
 
 
 def find_gate_comments_cutoff(pr: dict) -> str:
@@ -2791,7 +3132,19 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                                    and i["parent"]["number"] == epic]
             cut_epics = [i for i in initiative_children if is_epic(i)]
             roadmap_tasks = [i for i in initiative_children if not is_epic(i)]
-            if cut_epics and all(i["state"] == "CLOSED" for i in cut_epics):
+            landing = (initiative_landing(gh, epic)
+                       if cut_epics and all(i["state"] == "CLOSED" for i in cut_epics)
+                       and resolve_initiative_profile(epic_issue)["branch"] else None)
+            if landing and not landing["landed"]:
+                result["initiative_branch"] = landing
+                result["reason"] = (
+                    f"every cut Epic is closed -- `{landing['branch']}` must reach main first: "
+                    + (f"`merge-initiative-pr {epic}` once PR #{landing['pr']}'s evidence is "
+                       f"green" if landing["state"] == "open" else
+                       f"`open-initiative-pr {epic} --repo-path <p>`, then "
+                       f"`merge-initiative-pr {epic}` once its evidence is green")
+                    + " (SKILL.md, \"Closing an Initiative\").")
+            elif cut_epics and all(i["state"] == "CLOSED" for i in cut_epics):
                 result["reason"] = ("every cut Epic is closed -- ready for initiative-close "
                                     "validation (SKILL.md, \"Closing an Initiative\").")
             elif cut_epics and cloud_survey:
@@ -2980,6 +3333,8 @@ def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: st
     try:
         issues = gh.issue_list() if issues is None else issues
         entry = next((i for i in issues if i["number"] == epic), None)
+        if entry is not None and is_initiative(entry):
+            return sync_initiative_if_due(gh, entry, run_id, repo_path, runner)
         if (entry is None or not is_epic(entry) or is_epic_standing(entry)
                 or is_epic_legacy(entry) or entry["state"] != "OPEN"):
             return {"skipped": f"#{epic} is not an open non-standing Epic -- no epic branch "
@@ -2988,11 +3343,13 @@ def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: st
                    and not is_epic(i) for i in issues):
             return {"skipped": "no open children -- close-epic reconciles the branch at close"}
         branch = epic_branch(epic)
+        # `main`, or the opted-in Initiative's branch the Epic closes into.
+        base = epic_base(gh, epic, issues)
         _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
         epic_sha = _origin_sha(repo_path, branch, runner)
         if epic_sha is None:
             return {"skipped": f"origin/{branch} does not exist yet"}
-        main_sha = _origin_sha(repo_path, "main", runner)
+        main_sha = _origin_sha(repo_path, base, runner)
         state = run_cap_state(epic, run_id)
         last = state.get("epic_sync") or {}
         terminal = len(state.get("terminal", []))
@@ -3014,8 +3371,9 @@ def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: st
         if due is None:
             return {"synced": False, "due": None, "branch": branch,
                     "reason": "not due: no new run, fewer than "
-                              f"{EPIC_SYNC_EVERY_MERGES} merges since the last sync, main unmoved"}
-        result = cmd_sync_branch(gh, repo_path, epic, "epic", runner=runner)
+                              f"{EPIC_SYNC_EVERY_MERGES} merges since the last sync, "
+                              f"{base} unmoved"}
+        result = cmd_sync_branch(gh, repo_path, epic, "epic", runner=runner, base=base)
         _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
         record = {"main": main_sha, "epic": _origin_sha(repo_path, branch, runner),
                   "terminal": terminal, "at": _utc_now_marker()}
@@ -3026,6 +3384,49 @@ def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: st
         return {**result, "due": due}
     except GhError as e:
         return {"synced": False, "error": str(e)}
+
+
+def sync_initiative_if_due(gh: GitHub, entry: dict, run_id: str, repo_path: str = ".",
+                           runner: Runner = _default_runner) -> dict:
+    """`--sync-epic` on an Initiative: keep an opted-in (`branch: true`) Initiative's
+    `initiative-<i>` current with `main` -- `sync-branch <i> --unit initiative` on this run's
+    first call or when `origin/main` moved since the last sync (run-state `initiative_sync`).
+    Skipped for an Initiative without the opt-in, a closed one, or before the branch exists
+    (the first Epic's `cut-phase-tasks` creates it). A conflict is posted once per (`main`,
+    initiative head) pair, then `pending`, as `sync_epic_if_due` does."""
+    n = entry["number"]
+    if not resolve_initiative_profile(entry)["branch"]:
+        return {"skipped": f"Initiative #{n} has no initiative branch (no `initiativeProfiles` "
+                           f"entry with `branch: true` matches it)"}
+    if entry["state"] != "OPEN":
+        return {"skipped": f"Initiative #{n} is closed"}
+    branch = initiative_branch(n)
+    _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
+    head = _origin_sha(repo_path, branch, runner)
+    if head is None:
+        return {"skipped": f"origin/{branch} does not exist yet (the first Epic's "
+                           f"cut-phase-tasks creates it)"}
+    main_sha = _origin_sha(repo_path, "main", runner)
+    state = run_cap_state(n, run_id)
+    last = state.get("initiative_sync") or {}
+    if last.get("conflict") and last.get("main") == main_sha and last.get("initiative") == head:
+        return {"synced": False, "conflict": True, "pending": True, "branch": branch,
+                "conflicting_files": last["conflict"],
+                "reason": "the recorded initiative-branch <- main conflict is still unresolved"}
+    due = ("run-start" if not last else "main-moved" if main_sha != last.get("main")
+           else "conflict-retry" if last.get("conflict") else None)
+    if due is None:
+        return {"synced": False, "due": None, "branch": branch,
+                "reason": "not due: this run already synced it and main is unmoved"}
+    result = cmd_sync_branch(gh, repo_path, n, "initiative", runner=runner, base="main")
+    _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
+    record = {"main": main_sha, "initiative": _origin_sha(repo_path, branch, runner),
+              "at": _utc_now_marker()}
+    if result.get("conflict"):
+        record["conflict"] = result.get("conflicting_files", [])
+    state["initiative_sync"] = record
+    _write_run_state(n, state)
+    return {**result, "due": due}
 
 
 def cmd_next_action(gh: GitHub, args) -> dict:
@@ -3051,6 +3452,11 @@ def cmd_next_action(gh: GitHub, args) -> dict:
         note_in_flight(args.epic, run_id,
                        {result["issue"]: result.get("stage") or result["action"]})
     hint_doc_roots(gh, args.epic, result.get("issue"))
+    if PIPELINE["initiativeProfiles"] and result.get("issue") is not None:
+        try:  # records the unit's Initiative profile for the SubagentStart hook
+            unit_initiative_profile(gh, result["issue"])
+        except GhError:
+            pass
     return {**result, **liveness, "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0,
             **({"epic_sync": epic_sync} if epic_sync is not None else {}),
             **({"config_changed": drift} if drift else {})}
@@ -3407,7 +3813,8 @@ def worktree_path(unit: str, number: int) -> str:
     """Configured worktree path for a unit (default `/tmp/sdlc-dev-<n>`, or
     `/tmp/sdlc-epic-<n>` for `unit="epic"`)."""
     w = PIPELINE["worktrees"]
-    prefix = w["epicPrefix"] if unit == "epic" else w["devPrefix"]
+    prefix = {"epic": w["epicPrefix"],
+              "initiative": w.get("initiativePrefix", "sdlc-initiative-")}.get(unit, w["devPrefix"])
     return os.path.join(w["root"], f"{prefix}{number}")
 
 
@@ -3533,8 +3940,8 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
                 ensure_branch_on_origin(repo_path, base_branch, runner=runner)
             base = f"origin/{base_branch}"
         _add_fresh_worktree(repo_path, path, branch, base, runner)
-        if unit == "epic":
-            # An epic branch is shared: every branch-writing command resolves it
+        if unit in ("epic", "initiative"):
+            # An epic (or initiative) branch is shared: every branch-writing command resolves it
             # from origin, so a local-only one is invisible to them.
             _run_retry_transient(["git", "-C", repo_path, "push", "origin",
                                   f"refs/heads/{branch}:refs/heads/{branch}"], runner)
@@ -5245,7 +5652,7 @@ def cmd_sync_branch(gh: GitHub, repo_path: Optional[str], issue: int, unit: str 
     if base:
         base = base[len("origin/"):] if base.startswith("origin/") else base
     else:
-        base = "main" if unit == "epic" else integration_base(gh, issue, unit)
+        base = integration_base(gh, issue, unit)
     result = {"issue": issue, "unit": unit, "branch": branch, "base": base, "synced": True}
     with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
         # Fetch first so the existence check never reads a stale remote-tracking ref.
@@ -5270,8 +5677,11 @@ def cmd_sync_branch(gh: GitHub, repo_path: Optional[str], issue: int, unit: str 
                     gh.issue_comment(issue,
                         f"⚠️ Merge conflict reconciling `{branch}` with `origin/{base}` — "
                         f"{len(e.files)} file(s): {', '.join(f'`{f}`' for f in e.files)}. "
-                        f"Routing to `development` for resolution in its own worktree.\n\n"
-                        f"<!-- sync-conflict: {branch} @ {_utc_now_marker()} key:{key} -->")
+                        + (f"Resolve it in `worktree-add {issue} --unit initiative`'s tree "
+                           f"(merge `origin/{base}`, fix, push), then re-run the sync.\n\n"
+                           if unit == "initiative" else
+                           f"Routing to `development` for resolution in its own worktree.\n\n")
+                        + f"<!-- sync-conflict: {branch} @ {_utc_now_marker()} key:{key} -->")
                 result.update({"synced": False, "conflict": True, "conflicting_files": e.files})
     return _with_workspace(result, ws)
 
@@ -5606,6 +6016,16 @@ def _wire_numbered_task_edges(gh: GitHub, doc: str, numbered: list, key_to_numbe
                 result["edges_added"].append({"issue": issue_number, "on": dep})
 
 
+# The two standing Tasks `lld` carves by default; an Initiative profile's `testTasks: false`
+# turns them off, and create-lld-tasks then skips a section titled as one.
+_STANDING_TEST_TASK_TITLE = re.compile(
+    r"\s*(?:standing\s+)?(?:integration|e2e)[\s_-]*tests?(?:\s+task)?\s*$", re.IGNORECASE)
+STANDING_TEST_TASKS_OFF = ("a standing Integration-test / e2e-test Task, but this Epic's "
+                           "Initiative turns them off (`testTasks: false`) -- not created; drop "
+                           "the section from lld.md (the coverage it owned goes in the functional "
+                           "Tasks' own sections, or to the Initiative's final runs)")
+
+
 def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
                           runner: Runner = _default_runner) -> dict:
     """Create one Task per `## Task <KEY>` section of the Epic's merged `lld.md`,
@@ -5627,6 +6047,11 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
                    for h in keyed}
     defects = {h["key"]: task_section_defect(doc[h["line_end"]:h["end"]])
                or dep_defects[h["key"]] for h in keyed}
+    if any(_STANDING_TEST_TASK_TITLE.match(h["title"] or "") for h in keyed) \
+            and not unit_initiative_profile(gh, epic)["testTasks"]:
+        for h in keyed:
+            if defects[h["key"]] is None and _STANDING_TEST_TASK_TITLE.match(h["title"] or ""):
+                defects[h["key"]] = STANDING_TEST_TASKS_OFF
     pending = [h for h in keyed if defects[h["key"]] is None]
     # An already-numbered Task's `Depends on:` is re-read on every run, so a missed edge heals.
     numbered = [h for h in headings if h["number"]]
@@ -7256,15 +7681,17 @@ def cmd_close_issue(gh: GitHub, issue: int, repo_path: Optional[str] = None,
 
 
 _UNIT_BRANCH_RE = re.compile(rf"^(?:(?P<issue>{re.escape(ISSUE_BRANCH_PREFIX)})|"
-                             rf"(?P<epic>{re.escape(EPIC_BRANCH_PREFIX)}))(?P<n>\d+)$")
+                             rf"(?P<epic>{re.escape(EPIC_BRANCH_PREFIX)})|"
+                             rf"(?P<initiative>{re.escape(INITIATIVE_BRANCH_PREFIX)}))(?P<n>\d+)$")
 
 
 def _unit_of_branch(branch: Optional[str]) -> Optional[tuple]:
-    """`("issue"|"epic", n)` for a pipeline branch name, else None."""
+    """`("issue"|"epic"|"initiative", n)` for a pipeline branch name, else None."""
     m = _UNIT_BRANCH_RE.match(branch or "")
     if not m:
         return None
-    return ("epic" if m.group("epic") else "issue", int(m.group("n")))
+    unit = "epic" if m.group("epic") else "initiative" if m.group("initiative") else "issue"
+    return (unit, int(m.group("n")))
 
 
 def present_units(repo_path: str, runner: Runner = _default_runner) -> set:
@@ -7326,7 +7753,8 @@ def sweep_units(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] = Non
         if issue["state"] != "CLOSED":
             skipped_open.append(n)
             continue
-        base = "main" if unit == "epic" else integration_base_in(by_number, n)
+        base = ("main" if unit == "initiative" else epic_base_in(by_number, n) if unit == "epic"
+                else integration_base_in(by_number, n))
         units.append({"issue": n, "unit": unit,
                       **cleanup_unit(gh, n, unit, repo_path, runner, base=base, dry_run=dry_run)})
     return {"units": units, "skipped_open": skipped_open, "unknown": unknown}
@@ -9176,6 +9604,15 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
             roots["doc_root"] = doc_root_for(number, gh)
         except GhError as e:
             roots["doc_root_error"] = str(e)
+    if PIPELINE["initiativeProfiles"]:
+        # Likewise the unit's Initiative profile (standing test Tasks off, initiative branch).
+        try:
+            prof = unit_initiative_profile(gh, number)
+            if prof["name"] is not None:
+                roots["initiative_profile"] = {k: prof[k] for k in
+                                               ("initiative", "name", "branch", "testTasks")}
+        except GhError as e:
+            roots["initiative_profile_error"] = str(e)
     return seq.report(issue=number, role=role, path=(worktree or {}).get("path"),
                       claimed=bool(claim), **roots)
 
@@ -9613,7 +10050,7 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("worktree-add",
                         help="Create or resume the unit's worktree")
     p.add_argument("number", type=int)
-    p.add_argument("--unit", choices=["issue", "epic"], default="issue")
+    p.add_argument("--unit", choices=["issue", "epic", "initiative"], default="issue")
     p.add_argument("--repo-path", default=".", help="The shared main checkout")
     p.add_argument("--base", default=None,
                     help="Override the auto-detected integration base (e.g. origin/main)")
@@ -9640,7 +10077,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--repo-path", default=None,
                     help=repo_path_help)
-    p.add_argument("--unit", default="issue", choices=["issue", "epic"])
+    p.add_argument("--unit", default="issue", choices=["issue", "epic", "initiative"])
     p.add_argument("--base", default=None,
                     help="Override the auto-detected integration base")
     p.set_defaults(func=lambda a: cmd_sync_branch(get_work_item_provider(), a.repo_path,
@@ -9803,9 +10240,28 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_record_initiative_verification(
         get_work_item_provider(), a.initiative, a.summary, a.outcome))
     p = sub.add_parser("check-initiative-closeable",
-                        help="Whether every Epic of the Initiative is closed")
+                        help="Whether every Epic of the Initiative is closed (and its initiative "
+                             "branch, if any, merged to main)")
     p.add_argument("initiative", type=int)
     p.set_defaults(func=lambda a: cmd_check_initiative_closeable(get_work_item_provider(), a.initiative))
+    p = sub.add_parser("open-initiative-pr",
+                        help="Sync initiative-<i> with main and open (or reuse) its PR into main")
+    p.add_argument("initiative", type=int)
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.set_defaults(func=lambda a: cmd_open_initiative_pr(get_work_item_provider(), a.initiative,
+                                                         a.repo_path))
+    p = sub.add_parser("merge-initiative-pr",
+                        help="Merge initiative-<i>'s PR into main once its checks and suite "
+                             "attestations are green at the head")
+    p.add_argument("initiative", type=int)
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.set_defaults(func=lambda a: cmd_merge_initiative_pr(get_work_item_provider(), a.initiative,
+                                                          a.repo_path))
+    p = sub.add_parser("initiative-profile",
+                        help="The Initiative profile governing a unit: its initiative branch "
+                             "and whether lld carves the standing test Tasks")
+    p.add_argument("issue", type=int, help="Any unit: Initiative, Epic, Task")
+    p.set_defaults(func=lambda a: cmd_initiative_profile(None, a.issue))
     p = sub.add_parser("provision-epic-stack",
                         help="Stand up the epic's isolated runtime stack")
     p.add_argument("epic", type=int)
