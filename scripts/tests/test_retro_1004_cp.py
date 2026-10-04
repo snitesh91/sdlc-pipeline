@@ -241,3 +241,59 @@ def test_cli_wires_edit_issue(monkeypatch, capsys):
     assert s.main(["edit-issue", "5", "--body-file", "/f", "--add-label", "a",
                    "--add-label", "b", "--remove-label", "c"]) == 0
     assert seen == [("GH", (5, "/f", ["a", "b"], ["c"]))]
+
+
+# ---- 5: handoff-to-pr-review refuses while a required check is red ----
+
+class _HandoffGh(_ChecksGh):
+    def __init__(self, files, checks, logs=None):
+        super().__init__(files, checks)
+        self.logs, self.comments = logs or {}, []
+
+    def job_failed_log(self, job):
+        return self.logs.get(job, "")
+
+    def issue_comment(self, n, body):
+        self.comments.append(body)
+
+
+def _check(name, bucket, job=None, workflow="Backend CI"):
+    link = f"https://github.com/o/r/actions/runs/1/job/{job}" if job else ""
+    return {"name": name, "bucket": bucket, "workflow": workflow, "link": link}
+
+
+def test_handoff_refuses_on_a_failed_required_check():
+    gh = _HandoffGh(["backend/a.py"], [_check("backend", "fail", job=7)],
+                    logs={7: "AssertionError: expected 2"})
+    result = s.cmd_handoff_to_pr_review(gh, 42, 77, "done")
+    assert result["refused"] == "checks_failed" and gh.comments == []
+    assert result["failing"] == [{"name": "backend",
+                                  "failure_excerpt": "AssertionError: expected 2"}]
+    assert result["hint"] == "fix the failing check, push, and hand off again"
+
+
+def test_handoff_proceeds_past_pending_and_infra_suspect_checks():
+    gh = _HandoffGh(["backend/a.py"],
+                    [_check("backend", "fail", job=7), _check("backend-it", "pending")],
+                    logs={7: "No space left on device"})
+    result = s.cmd_handoff_to_pr_review(gh, 42, 77, "done")
+    assert result["queued_for"] == "pr-review" and "refused" not in result
+    assert result["checks_pending"] == ["backend-it"] and result["infra_suspect"] == ["backend"]
+    assert len(gh.comments) == 1
+
+
+def test_handoff_ignores_a_failed_check_outside_the_required_workflows():
+    # Positive control: an unrelated workflow's failure, or a workflow the PR does not touch.
+    gh = _HandoffGh(["backend/a.py"], [_check("lint", "fail", workflow="Other"),
+                                       _check("fe", "fail", workflow="Frontend CI"),
+                                       _check("backend", "pass")])
+    result = s.cmd_handoff_to_pr_review(gh, 42, 77, "done")
+    assert result == {"issue": 42, "pr": 77, "queued_for": "pr-review"}
+
+
+def test_handoff_without_pr_level_ci_behaves_as_before():
+    # Positive control.
+    gh = _HandoffGh(["backend/a.py"], [])
+    assert s.cmd_handoff_to_pr_review(gh, 42, 77, "done") == {
+        "issue": 42, "pr": 77, "queued_for": "pr-review"}
+    assert len(gh.comments) == 1

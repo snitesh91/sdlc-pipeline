@@ -4402,15 +4402,43 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
             "stale_worktrees": stale, "product_cap": product_cap}
 
 
+def required_check_states(gh: GitHub, pr: int) -> Optional[dict]:
+    """The PR head's checks from the required workflows it touches (base-scoped):
+    `{failing, infra_suspect, pending}` lists of checks; None when no check reported at all."""
+    checks = gh.pr_checks(pr)
+    if not checks:
+        return None
+    base = gh.pr_view(pr, "headRefOid,baseRefName").get("baseRefName")
+    files = gh.pr_files(pr)
+    required = {w["workflow"] for w in REQUIRED_WORKFLOWS if _workflow_applies_to_base(w, base)
+                and any(_workflow_covers(w, p) for p in files)}
+    mine = [c for c in checks if c.get("workflow", "") in required]
+    failed = [c for c in mine if _is_failed_check(c)]
+    enrich_failed_checks(gh, failed)
+    return {"failing": [c for c in failed if not c["infra_suspect"]],
+            "infra_suspect": [c for c in failed if c["infra_suspect"]],
+            "pending": [c for c in mine if c.get("bucket") == "pending"]}
+
+
 def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> dict:
     """Post the `development->pr-review` handoff marker that queues the PR for review.
-    Run after every development round, including rework. Returns `queued_for`."""
+    Run after every development round, including rework. Refuses (exit 0) while a required
+    check has failed for a non-infra reason. Returns `queued_for`."""
+    states = required_check_states(gh, pr)
+    if states and states["failing"]:
+        return {"issue": issue, "pr": pr, "refused": "checks_failed",
+                "failing": [{"name": c.get("name"), "failure_excerpt": c.get("failure_excerpt")}
+                            for c in states["failing"]],
+                "hint": "fix the failing check, push, and hand off again"}
+    extra = {key: [c.get("name") for c in states[src]]
+             for key, src in (("checks_pending", "pending"), ("infra_suspect", "infra_suspect"))
+             if states and states[src]}
     timestamp = _utc_now_marker()
     gh.issue_comment(issue,
         f"✅ Development complete. {summary} "
         f"PR #{pr} is queued for `pr-review`.\n\n"
         f"<!-- stage-transition: development->pr-review @ {timestamp} -->")
-    return {"issue": issue, "pr": pr, "queued_for": "pr-review"}
+    return {"issue": issue, "pr": pr, "queued_for": "pr-review", **extra}
 
 
 PR_REVIEW_OUTCOMES = ("clean", "rework")
