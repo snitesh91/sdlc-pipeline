@@ -15,7 +15,8 @@ means there.
 
 - A SubagentStart hook gives you `$SDLC` (the control plane: `python3 "$SDLC" <cmd>`), the
   plugin root that `references/…` and `templates/…` are under, and `<docRoot>` /
-  `<requirements-dir>`.
+  `<requirements-dir>` — your unit's own when the repo sets per-product `docRoots`; when the
+  hook says it could not resolve yours, run `python3 "$SDLC" doc-root <n>` and use that.
 - **The control plane owns every GitHub mutation, GraphQL call, worktree, force-push and
   rebase.** A Bash guard hook denies hand-run ones and names the command to use instead. It
   also limits you to your role's commands (review roles: no git writes); anything else is

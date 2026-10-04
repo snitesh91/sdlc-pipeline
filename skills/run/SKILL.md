@@ -196,7 +196,7 @@ Run from the driven repo's root; everything project-specific is in its `sdlc-pip
 - **SessionStart** exports `$SDLC` (the control plane) and `GITHUB_TOKEN` (from the config's `tokenEnv` var, else `tokenPath`, overriding any ambient one). If it reports the token missing, get it from the operator first; relay its optional `rtk init` hint once, never block on it. After a compaction it restates the run you were driving; on an off-policy session model it tells you to have the operator restart with `sdlc-run <n>`.
 - **PreToolUse (Bash)** denies hand-run GitHub mutations, GraphQL, `git worktree add` (except `--detach`), force-push and rebase, and limits each stage agent to its role's commands (and denies it `git stash` and `claude`). An operator-directed PR outside the pipeline passes on the main thread when it names a non-pipeline head: `gh pr create --head <branch> ...`. A denial names the `python3 "$SDLC"` command to run instead — run it; never work around the guard. The main thread is guarded only while its session drives a run (a run-state file written by `next-action --run-id` within `guard.mainThreadFreshnessHours`, default 8; `guard.mainThread: "always"` guards every session) — an unguarded call logs one stderr line, so a run without `--run-id` is visible, never silent.
 - **PreToolUse (Agent)** sets every `sdlc:*` agent's `model` from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (config `pipeline.models` / `pipeline.fanout` override it), caps review fan-out, and lets only its `explore` roles launch a read-only `Explore` search. It denies an `sdlc:design-review` prompt lacking the header when the two review roles' models differ.
-- **SubagentStart** gives each `sdlc:*` agent `$SDLC`, `docRoot`, `requirementsDir`, `docTemplates`, the references path and the `SDLC-RESULT` format.
+- **SubagentStart** gives each `sdlc:*` agent `$SDLC`, its unit's `docRoot` / `requirementsDir` (per-product `docRoots`), `docTemplates`, the references path and the `SDLC-RESULT` format.
 - **SubagentStop** keeps an `sdlc:*` agent running until its final message ends with an `SDLC-RESULT` line (`product`/`architecture`/`lld` finishing `done` also need a successful `post-comment` this round). It and **SessionEnd** record each agent's tokens, cost, tool calls and peak context (README, "Metrics"). Never record metrics yourself.
 
 ## Deterministic control plane
@@ -456,7 +456,8 @@ The agent must *have* (not necessarily be pasted):
    fetches it** — pasted threads truncate prompts. In a cloud session that is a `gh api`
    GET, never `gh issue view` (`references/cloud-mode.md`, "GitHub access in the cloud").
 2. The exact doc path it owns (e.g. `<docRoot>/epic-<e>/lld.md` for an Epic's phase-Task,
-   `<docRoot>/issue-<n>/product.md` otherwise). **For a functional
+   `<docRoot>/issue-<n>/product.md` otherwise). With per-product `docRoots`, `<docRoot>` is
+   the unit's own: `start-stage`'s `doc_root`, or `python3 "$SDLC" doc-root <n>`. **For a functional
    Task's `development` and `pr-review`**, tell it to read its design with
    `python3 "$SDLC" lld-section --epic <parent> --task <n> --repo-path <worktree>` and
    not to read the whole `epic-<parent>/lld.md`.

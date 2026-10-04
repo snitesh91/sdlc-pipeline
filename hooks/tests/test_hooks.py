@@ -388,6 +388,7 @@ ROLE_ALLOWED = [
     ("sdlc:initiative-close", CP + "record-initiative-verification 1 --summary s"),
     ("sdlc:lld", CP + "lld-section --epic 9 --task 5 --repo-path /w"),
     ("sdlc:product", CP + "show-config"),
+    ("sdlc:development", CP + "doc-root 2011"),
     ("sdlc:architecture", CP + "cite docs/a.md --line 3"),
     ("sdlc:architecture", CP + "--help"),
     ("sdlc:lld", "git commit -m 'lld' && git push origin issue-5"),
@@ -1089,6 +1090,65 @@ def test_subagent_start_ignores_other_agents_and_repos(sdlc_repo, plain_repo):
     for payload in ({"agent_type": "general-purpose", "cwd": sdlc_repo},
                     {"agent_type": "sdlc:lld", "cwd": plain_repo}):
         assert run_hook("subagent_start.py", payload).stdout == ""
+
+
+BOOKSHAW_DOCS, TIJORI_DOCS = "apps/bookshaw/bookshaw-docs/sdlc", "apps/tijori/tijori-docs/sdlc"
+
+
+@pytest.fixture
+def two_product_repo(tmp_path):
+    return _git_repo(tmp_path / "mono", {
+        "repo": "o/r", "docRoot": BOOKSHAW_DOCS, "requirementsDir": "apps/bookshaw/req",
+        "docRoots": [{"name": "tijori", "match": {"issues": [1994]}, "docRoot": TIJORI_DOCS,
+                      "requirementsDir": "apps/tijori/req"}]})
+
+
+def _start_ctx(cwd, tmp_path, prompt=None, transcript_prompt=None, hints=None):
+    runs = tmp_path / "runs"
+    runs.mkdir(exist_ok=True)
+    if hints is not None:
+        (runs / "doc-roots.cache").write_text(json.dumps(hints))
+    payload = {"agent_id": "a1", "agent_type": "sdlc:development", "cwd": cwd,
+               "transcript_path": str(tmp_path / "s.jsonl")}
+    if prompt is not None:
+        payload["prompt"] = prompt
+    if transcript_prompt is not None:
+        _parent_transcript(tmp_path, "a1", transcript_prompt)
+    proc = run_hook("subagent_start.py", payload, env={"SDLC_RUNS_DIR": str(runs)})
+    return json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_subagent_start_gives_each_unit_its_products_doc_root(two_product_repo, tmp_path):
+    hints = {"2011": {"docRoot": TIJORI_DOCS, "requirementsDir": "apps/tijori/req"},
+             "1970": {"docRoot": BOOKSHAW_DOCS, "requirementsDir": "apps/bookshaw/req"}}
+    tijori = _start_ctx(two_product_repo, tmp_path, "ROLE: development ISSUE: `2011` EPIC: `2010`",
+                        hints=hints)
+    assert f"docRoot={TIJORI_DOCS}, requirementsDir=apps/tijori/req" in tijori
+    assert "resolved for #2011" in tijori and "doc-root" not in tijori
+    bookshaw = _start_ctx(two_product_repo, tmp_path, "ROLE: development ISSUE: 1970 EPIC: 1966",
+                          hints=hints)
+    assert f"docRoot={BOOKSHAW_DOCS}, requirementsDir=apps/bookshaw/req" in bookshaw
+
+
+def test_subagent_start_matches_a_listed_root_issue_and_reads_the_agent_transcript(
+        two_product_repo, tmp_path):
+    ctx = _start_ctx(two_product_repo, tmp_path,
+                     transcript_prompt="ROLE: product ISSUE: 2000 EPIC: 1994\nWrite the IRD")
+    assert f"docRoot={TIJORI_DOCS}, requirementsDir=apps/tijori/req" in ctx
+    assert "resolved for #1994" in ctx
+
+
+def test_subagent_start_points_an_unknown_unit_at_doc_root(two_product_repo, tmp_path):
+    ctx = _start_ctx(two_product_repo, tmp_path, "ROLE: development ISSUE: 3001 EPIC: 3000")
+    assert f"docRoot={BOOKSHAW_DOCS}" in ctx
+    assert 'python3 "$SDLC" doc-root 3001' in ctx and len(ctx.splitlines()) <= 8
+
+
+def test_subagent_start_single_doc_root_output_is_unchanged(sdlc_repo, tmp_path):
+    ctx = _start_ctx(sdlc_repo, tmp_path, "ROLE: development ISSUE: 2011 EPIC: 1994",
+                     hints={"2011": {"docRoot": TIJORI_DOCS}})
+    assert "docRoot=docs/sdlc, requirementsDir=None" in ctx
+    assert "doc-root" not in ctx and "resolved for" not in ctx and len(ctx.splitlines()) == 4
 
 
 # --- metrics (SubagentStop / SessionEnd) ------------------------------------------------
