@@ -57,13 +57,18 @@ def load_json(path: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def runs_dir(config: dict) -> str:
+    """The control plane's run-state directory, as sdlc_next.py's `_run_state_dir` finds it."""
+    worktrees = ((config.get("pipeline") or {}).get("worktrees") or {})
+    return os.environ.get("SDLC_RUNS_DIR") or os.path.join(worktrees.get("root", "/tmp"),
+                                                           ".sdlc-runs")
+
+
 def run_states(config: dict, session_id: str, max_age: float = None) -> list:
     """This session's control-plane run states, newest first; the directory is found as
     sdlc_next.py's `_run_state_dir` finds it. With `max_age` (seconds), only files written
     that recently: nothing deletes a state file when its run ends."""
-    worktrees = ((config.get("pipeline") or {}).get("worktrees") or {})
-    root = os.environ.get("SDLC_RUNS_DIR") or os.path.join(worktrees.get("root", "/tmp"),
-                                                           ".sdlc-runs")
+    root = runs_dir(config)
     try:
         paths = sorted((os.path.join(root, n) for n in os.listdir(root) if n.endswith(".json")),
                        key=os.path.getmtime, reverse=True)
@@ -130,6 +135,15 @@ def prompt_header(prompt) -> dict:
     """`KEY: value` pairs on a prompt's first line (`ROLE: arch-review ISSUE: 5`)."""
     first = str(prompt or "").lstrip().split("\n", 1)[0]
     return {k.lower(): v for k, v in HEADER_RE.findall(first)}
+
+
+def agent_transcript(data: dict) -> str:
+    """An agent's own transcript, `<session>/subagents/agent-<id>.jsonl`, from a hook payload's
+    session `transcript_path` and `agent_id`."""
+    path, agent = str(data.get("transcript_path") or ""), os.path.basename(str(data["agent_id"]))
+    if path.endswith(f"agent-{agent}.jsonl"):
+        return path
+    return os.path.join(path[:-len(".jsonl")], "subagents", f"agent-{agent}.jsonl")
 
 
 def message_text(content) -> str:

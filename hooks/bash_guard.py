@@ -43,7 +43,7 @@ GH_API_OPTS_WITH_VALUE = {"-X", "--method", "-H", "--header", "-f", "--raw-field
                           "--hostname", "--cache", "-p", "--preview"}
 
 # Control-plane commands a stage agent may run; everything else is the orchestrator's.
-READ_ONLY_COMMANDS = {"show-config", "lld-section", "pairing-counts", "pr-checks", "cite",
+READ_ONLY_COMMANDS = {"show-config", "doc-root", "lld-section", "pairing-counts", "pr-checks", "cite",
                       "verify-citations", "audit-issues", "check-gate",
                       "check-initiative-closeable"}
 ROLE_COMMANDS = {

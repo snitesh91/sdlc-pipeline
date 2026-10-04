@@ -10,7 +10,7 @@ import json
 import os
 import time
 
-from _common import (emit, first_prompt, load_json, model_policy, plugin_data_dir,
+from _common import (agent_transcript, emit, first_prompt, load_json, model_policy, plugin_data_dir,
                      prompt_header, read_input, repo_config, run, sdlc_role)
 
 DESIGN_REVIEW = "design-review"
@@ -62,10 +62,7 @@ def fanout_label(header: dict, tool_input: dict) -> str:
 
 def parent_transcript(data: dict) -> str:
     """The calling subagent's own transcript: `<session>/subagents/agent-<id>.jsonl`."""
-    path, agent = str(data.get("transcript_path") or ""), os.path.basename(str(data["agent_id"]))
-    if path.endswith(f"agent-{agent}.jsonl"):
-        return path
-    return os.path.join(path[:-len(".jsonl")], "subagents", f"agent-{agent}.jsonl")
+    return agent_transcript(data)
 
 
 def _slot_file(agent_id: str) -> str:
