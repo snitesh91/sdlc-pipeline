@@ -2620,7 +2620,7 @@ def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
             return {"initiative": initiative, "closeable": False, "epics": state["epics"],
                     "initiative_branch": landing,
                     "reason": f"every cut Epic is closed, but `{landing['branch']}` has not "
-                              f"reached main: {step} (SKILL.md, \"Closing an Initiative\")"}
+                              f"reached main: {step} (references/initiatives.md, \"Closing an Initiative\")"}
     return {"initiative": initiative, "closeable": True, "epics": state["epics"]}
 
 
@@ -3195,10 +3195,10 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                        f"green" if landing["state"] == "open" else
                        f"`open-initiative-pr {epic} --repo-path <p>`, then "
                        f"`merge-initiative-pr {epic}` once its evidence is green")
-                    + " (SKILL.md, \"Closing an Initiative\").")
+                    + " (references/initiatives.md, \"Closing an Initiative\").")
             elif cut_epics and all(i["state"] == "CLOSED" for i in cut_epics):
                 result["reason"] = ("every cut Epic is closed -- ready for initiative-close "
-                                    "validation (SKILL.md, \"Closing an Initiative\").")
+                                    "validation (references/initiatives.md, \"Closing an Initiative\").")
             elif cut_epics and cloud_survey:
                 result["reason"] = _cloud_epics_reason(cloud_survey, cut_epics)
                 result["cloud"] = cloud_survey
@@ -3206,10 +3206,10 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                 result["reason"] = _open_epics_reason(gh, cut_epics, skip_epics)
             elif roadmap_tasks and all(i["state"] == "CLOSED" for i in roadmap_tasks):
                 result["reason"] = ("Product-Roadmap Task closed -- cut Epics from the "
-                                    "approved product.md next (SKILL.md, \"Cutting Epics "
+                                    "approved product.md next (references/initiatives.md, \"Cutting Epics "
                                     "from an approved Initiative\").")
             elif not initiative_children:
-                result["reason"] = ("no Product-Roadmap Task yet -- cut it next (SKILL.md, "
+                result["reason"] = ("no Product-Roadmap Task yet -- cut it next (references/initiatives.md, "
                                     "\"Cutting an Initiative's Product-Roadmap Task\").")
         return result
 

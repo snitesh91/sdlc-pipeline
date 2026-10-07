@@ -293,7 +293,7 @@ and in a repo without `initiativeProfiles`, its Epics close into `main` exactly 
   (`evidence.suites`: `deferred_to_initiative`); every other suite and the exploratory pass
   are owed as before. The deferred suites run once, on the initiative PR.
 - **`testTasks: false`**: no Integration-test / e2e-test Task (above).
-- **Into `main`, once, after every cut Epic closed** (SKILL.md, "Closing an Initiative"):
+- **Into `main`, once, after every cut Epic closed** (`references/initiatives.md`, "Closing an Initiative"):
   `open-initiative-pr <i>` syncs the branch with `main` and opens (or reuses) the PR
   `initiative-<i>` → `main`, returning the `evidence` owed; the operator's final runs land
   as passing checks or `record-local-ci --pr <pr>` attestations at its head (every required

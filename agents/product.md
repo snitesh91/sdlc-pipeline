@@ -63,7 +63,7 @@ Both unit kinds are a plain `unit: "issue"` Task and exit the same way:
 
 | Unit | Document covers | After a clean `product-review` |
 |---|---|---|
-| Initiative's Product-Roadmap Task | The whole Initiative, by functional area | Gate A merges to `main`; `pass-gate` closes the Task (no `architecture` claim); the orchestrator cuts Epics (SKILL.md, "Cutting Epics from an approved Initiative") |
+| Initiative's Product-Roadmap Task | The whole Initiative, by functional area | Gate A merges to `main`; `pass-gate` closes the Task (no `architecture` claim); the orchestrator cuts Epics (`references/initiatives.md`, "Cutting Epics from an approved Initiative") |
 | Standing-epic child | That child | `architecture`; recommend `"next": "development"` when no new component, interface or data model is needed (`stage-playbooks.md`, "The handback is terse") |
 
 **Gate-feedback round** (`references/gates.md`, "Addressing gate feedback"): revise `product.md` on `issue-<n>`, push, resolve the threads you addressed, `post-comment`, and end `done`. Never run `mark-feedback-addressed`; the orchestrator does (`finish-gate-feedback`).
