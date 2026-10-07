@@ -125,7 +125,8 @@ reaches the operator's phone from a cloud session. Never `PushNotification`, nev
 
 ## Initiative → cloud Epics
 
-With `pipeline.placement.initiativeEpics: "cloud"` a laptop Initiative run keeps the Initiative's
+With `pipeline.placement.initiativeEpics: "cloud"` (or the Initiative's
+`initiativeProfiles` entry's `placement: "cloud"`) a laptop Initiative run keeps the Initiative's
 own work (product, Gate A, cutting Epics, the close) and gives each Epic its own claude.ai
 cloud session instead of driving it.
 

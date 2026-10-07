@@ -18,7 +18,7 @@ orchestrator named.
 
 | Unit | Your design | Your test obligation |
 |---|---|---|
-| **Normal functional Task** (child of a non-standing Epic) | Only your own `## Task #<n>` subsection: `python3 "$SDLC" lld-section --epic <parent-n> --task <n> --repo-path <worktree>`. Never read the whole `epic-<n>/lld.md`. Read the Epic's `architecture.md` only where your subsection points you at a specific part. | **Unit tests only.** No integration or e2e tests, no integration suite run — deferred by design to the Epic's standing Integration-test and e2e-test Tasks. Not a gap. Where the Initiative turns those off (`testTasks: false`), write the integration/e2e coverage your subsection names, nothing more. |
+| **Normal functional Task** (child of a non-standing Epic) | Only your own `## Task #<n>` subsection: `python3 "$SDLC" lld-section --epic <parent-n> --task <n> --repo-path <worktree>`. Never read the whole `epic-<n>/lld.md`. Read the Epic's `architecture.md` only where your subsection points you at a specific part. | **Unit tests only.** No integration or e2e tests, no integration suite run — deferred by design to the Epic's standing Integration-test and e2e-test Tasks. Not a gap. Where the Initiative turns those off (`testTasks: false`), write the integration/e2e coverage your subsection names, nothing more. Your prompt's `Integration tests: mandatory` line overrides this: also run, locally, the integration specs your change impacts. |
 | **Standing Integration-test Task** of an Epic | Same `lld-section` call. | Run the full integration suite once every functional Task has merged; write the missing coverage; fix every failure found. Every integration rule below applies in full. |
 | **Standing e2e-test Task** of an Epic | Same `lld-section` call. | **Author** the Epic's missing e2e specs. Run **only the specs you add or change**, never the full suite, against a stack built from `epic-<n>` (`references/epics.md`, "Epic closing"); fix every failure they show. Every e2e rule below applies to those specs. |
 | **Standing-epic child** | Your own `<docRoot>/issue-<n>/architecture.md` (with its `product.md`), in full; routed past both, the issue body. Recommend `"next": "merge"` only for a trivially low-risk diff (`stage-playbooks.md`, "The handback is terse"). | No Integration-test Task behind you: every integration rule below applies in full. |
@@ -140,6 +140,13 @@ cycle.
   touched. A suite a required workflow runs on your PR is gated by that check; do not re-run
   it whole locally. Run and attest a whole suite only where the config requires a local
   attestation → `references/operations.md`, "Local-CI attestation".
+- **Pre-PR check.** When `show-config` → `pipeline.prePr.command` is set, run it from your
+  worktree root with `PRE_PR_BASE=origin/<base>` exported (e.g. `origin/epic-12`), after the
+  completion gates and before the push that precedes `open-dev-pr`, on every round. Fix and
+  re-run until it exits 0; it picks the checks from the changed paths, so never substitute
+  your own. Its run goes in the handoff's Commands table.
+- **Integration tests run locally only when your prompt says `Integration tests: mandatory`**
+  (or your unit's row above makes the suite yours).
 - **Redirect every suite run to a file** as you go; an attestation or your handoff table
   quotes it.
 - **Copy an attested suite's invocation from its workflow file**, flags included — the
@@ -249,7 +256,7 @@ else is settled; do not reopen it.
 
 ## Exit actions — yours, in order
 
-1. Re-run "The completion gates", then push once.
+1. Re-run "The completion gates", then the pre-PR check (when configured), then push once.
 2. `python3 "$SDLC" open-dev-pr <n> --title "..." --body "..." --summary "..."` — opens the draft
    PR (on a rework round it reports the open one, `created: false`); it does not queue the
    review (step 5 does). A verify-only Task with no code change adds `--allow-empty`; its body

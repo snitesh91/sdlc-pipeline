@@ -47,7 +47,7 @@
       ]
     }
   ],
-  "_requiredWorkflows_scoped_example": "A base-scoped, non-attestable entry looks like: {\"workflow\": \"Backend Integration Tests\", \"suite\": \"backend-it\", \"prefixes\": [\"backend/\"], \"excludeGlobs\": [\"**/*.md\"], \"bases\": [\"main\"], \"attestable\": false} -- required only on PRs into `main`, and satisfied only by a passing GHA check on the PR (record-local-ci refuses it). A workflow that runs on every PR (any base) is `attestable: false` with no `bases`.",
+  "_requiredWorkflows_scoped_example": "A base-scoped, non-attestable entry looks like: {\"workflow\": \"Backend Integration Tests\", \"suite\": \"backend-it\", \"prefixes\": [\"backend/\"], \"excludeGlobs\": [\"**/*.md\"], \"bases\": [\"main\", \"initiative-*\"], \"attestable\": false} -- required only on PRs into `main` or an initiative branch (`bases` entries are names or fnmatch globs), and satisfied only by a passing GHA check on the PR (record-local-ci refuses it). A workflow that runs on every PR (any base) is `attestable: false` with no `bases`.",
   "projectFields": {
     "issueTypeIds": {
       "Task": "IT_TASK_ID",
@@ -94,7 +94,8 @@
       "standing": "epic:standing",
       "legacy": "epic:legacy",
       "architected": "epic:architected",
-      "gate": "sdlc:gate"
+      "gate": "sdlc:gate",
+      "retro": "sdlc:retro"
     },
     "branches": {
       "issuePrefix": "issue-",
@@ -175,6 +176,14 @@
       "stallMinutes": 90
     },
     "humanChannel": "github",
+    "prePr": {
+      "_comment": "`command`: run by `development` in its worktree (with PRE_PR_BASE=origin/<the PR base> exported) and green before open-dev-pr; it picks what to check from the changed paths. Empty = none. See agents/development.md.",
+      "command": ""
+    },
+    "retro": {
+      "_comment": "`parkIssue`: the open issue (labelled `labels.retro`) `park-finding` comments friction findings on between retros; a closed one is followed through its `sdlc:superseded-by` marker. Unset = park-finding refuses.",
+      "parkIssue": null
+    },
     "resume": {
       "_comment": "A `next-action` resume claimed less than `liveWindowMinutes` ago is flagged `likely_live`: another session may still be driving it, so the orchestrator asks the operator before taking over.",
       "liveWindowMinutes": 30
@@ -195,7 +204,7 @@
       "task": {"field": "label", "value": "type:task"}
     },
     "docTemplates": "_templates",
-    "_initiativeProfiles_comment": "Opt-in per Initiative, ordered; the first entry whose `match` label is on the Initiative wins (no implied catch-all). Toggles: `branch` (true = the Initiative's Epics cut from, sync with and close into `initiative-<i>`, which reaches main once via open-initiative-pr / merge-initiative-pr), `testTasks` (false = lld carves no Integration-test / e2e-test Task), `deferSuites` (suites close-epic does not demand of an Epic closing into the initiative branch), `closeSuites` (suite keys merge-initiative-pr needs record-local-ci-attested at the initiative PR head). Example: [{\"name\": \"branched\", \"match\": {\"label\": \"initiative:branch\"}, \"branch\": true, \"testTasks\": false, \"deferSuites\": [\"backend-it\"], \"closeSuites\": [\"e2e\"]}]",
+    "_initiativeProfiles_comment": "Opt-in per Initiative, ordered; the first entry whose `match` label is on the Initiative wins (no implied catch-all). Toggles: `branch` (true = the Initiative's Epics cut from, sync with and close into `initiative-<i>`, which reaches main once via open-initiative-pr / merge-initiative-pr), `testTasks` (false = lld carves no Integration-test / e2e-test Task), `deferSuites` (suites close-epic does not demand of an Epic closing into the initiative branch), `closeSuites` (suite keys merge-initiative-pr needs record-local-ci-attested at the initiative PR head), `placement` (\"cloud\"|\"local\": overrides `placement.initiativeEpics` for this Initiative). Example: [{\"name\": \"branched\", \"match\": {\"label\": \"initiative:branch\"}, \"branch\": true, \"testTasks\": false, \"deferSuites\": [\"backend-it\"], \"closeSuites\": [\"e2e\"]}]",
     "initiativeProfiles": [],
     "profiles": [
       {
