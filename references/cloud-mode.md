@@ -137,7 +137,8 @@ cloud session instead of driving it.
   python3 "$SDLC" launch-cloud-epic <epic> --repo-path <p>
   ```
 
-  It runs `place <epic> --where cloud`, then `claude --cloud "/sdlc:run <epic>"`, and posts the
+  It runs `place <epic> --where cloud`, then `claude --cloud "/sdlc:run <epic>"` on a pseudo-terminal
+  (the CLI refuses `--cloud` without one; it is stopped once it prints the url), and posts the
   session marker. Then call `next-action <initiative>` again.
 - **Launchable:** open, not legacy, not blocked by an open issue, no live session, footprint
   disjoint from every live cloud Epic's (the union of its `lld.md` Tasks' footprints, else a

@@ -624,3 +624,43 @@ def test_an_ended_session_frees_its_cap_slot(monkeypatch):
     s.cmd_end_cloud_session(gh, 2, "closed")
     gh.issues[2]["state"] = "CLOSED"
     assert _survey(gh, [3])["launchable"] == [3]
+
+
+def _fake_cli(tmp_path, body):
+    """An executable standing in for `claude`: refuses without a terminal, like `--cloud`."""
+    exe = tmp_path / "claude"
+    exe.write_text("#!/usr/bin/env python3\nimport sys, time\n"
+                   "if not sys.stdout.isatty():\n"
+                   "    print('Error: --cloud requires an interactive terminal.'); sys.exit(1)\n"
+                   + body)
+    exe.chmod(0o755)
+    return str(exe)
+
+
+def test_launch_runner_gives_claude_a_terminal_and_stops_it_after_the_url(tmp_path):
+    exe = _fake_cli(tmp_path, "print('Created cloud session: x'); "
+                              "print('View: https://claude.ai/code/session_01PTY?from=cli', "
+                              "flush=True)\ntime.sleep(60)\n")
+    started = datetime.now()
+    out = s._pty_claude_runner([exe, "--cloud", "/sdlc:run 2"], timeout=20)
+    assert (datetime.now() - started).total_seconds() < 15
+    assert s.parse_cloud_launch(out)["id"] == "session_01PTY"
+
+
+def test_launch_runner_times_out_without_a_url(tmp_path):
+    exe = _fake_cli(tmp_path, "print('Creating...', flush=True)\ntime.sleep(60)\n")
+    with pytest.raises(s.ClaudeTimeout) as e:
+        s._pty_claude_runner([exe, "--cloud", "x"], timeout=2)
+    assert "Creating" in e.value.output
+
+
+def test_launch_runner_reports_a_failed_cli(tmp_path):
+    exe = _fake_cli(tmp_path, "print('Error: not logged in'); sys.exit(3)\n")
+    with pytest.raises(s.GhError, match="not logged in"):
+        s._pty_claude_runner([exe, "--cloud", "x"], timeout=10)
+
+
+def test_the_plain_runner_is_what_claude_refuses(tmp_path):
+    exe = _fake_cli(tmp_path, "print('View: https://claude.ai/code/session_01PTY')\n")
+    with pytest.raises(s.GhError, match=r"command failed \(1\)"):
+        s._default_claude_runner([exe, "--cloud", "x"])

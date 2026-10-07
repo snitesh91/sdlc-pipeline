@@ -8454,6 +8454,56 @@ def _default_claude_runner(argv: list, timeout: int = 300) -> str:
     return f"{proc.stdout}\n{proc.stderr}"
 
 
+def _pty_claude_runner(argv: list, timeout: int = 120) -> str:
+    """Run `claude --cloud` on a pseudo-terminal, which it requires, and stop it once it has
+    printed the session url; the cloud session outlives it. No url by `timeout` raises
+    `ClaudeTimeout`."""
+    import select
+    master, slave = os.openpty()
+    try:
+        proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave,
+                                start_new_session=True)
+    except OSError as e:
+        os.close(master)
+        raise GhError(f"cannot run {argv[0]!r}: {e}")
+    finally:
+        os.close(slave)
+    buf, deadline = b"", time.monotonic() + timeout
+
+    def seen() -> bool:
+        return bool(_SESSION_URL_RE.search(_ANSI_RE.sub("", buf.decode(errors="replace"))))
+
+    try:
+        while not seen():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise ClaudeTimeout(buf.decode(errors="replace"))
+            ready, _, _ = select.select([master], [], [], min(left, 1.0))
+            if ready:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:  # Linux raises EIO once the child closed the terminal
+                    chunk = b""
+                if not chunk:
+                    break
+                buf += chunk
+            elif proc.poll() is not None:
+                break
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        os.close(master)
+    out = buf.decode(errors="replace")
+    if not seen() and proc.returncode:
+        raise GhError(f"command failed ({proc.returncode}): {' '.join(argv)}\n{out}")
+    return out
+
+
 class ClaudeTimeout(GhError):
     """The `claude` CLI outlived its timeout; `output` is what it printed until then."""
 
@@ -8684,7 +8734,7 @@ def _cloud_epics_reason(survey: dict, cut_epics: list) -> str:
 
 def cmd_launch_cloud_epic(gh: GitHub, epic: int, repo_path: str = ".", relaunch: bool = False,
                           runner: Runner = _default_runner,
-                          claude: Callable[[list], str] = _default_claude_runner) -> dict:
+                          claude: Callable[[list], str] = _pty_claude_runner) -> dict:
     """Place `epic` in the cloud and start `claude --cloud "/sdlc:run <epic>"`, recording a
     session marker on it. Idempotent: an Epic whose latest session has no end marker is never
     relaunched (`already_running`). Refuses (exit 0) an Epic `cloud_epic_survey` would not
