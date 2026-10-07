@@ -149,7 +149,7 @@ cloud session instead of driving it.
   `id=unknown`; relay the tail to the operator.
 - **`none`** names each open Epic's cloud state. Report (Step 4) and end the run. Re-running
   `/sdlc:run <initiative>` re-surveys: it launches Epics that became runnable, and once every
-  Epic is closed it returns the normal close (`SKILL.md`, "Closing an Initiative"), run locally.
+  Epic is closed it returns the normal close (`references/initiatives.md`, "Closing an Initiative"), run locally.
 - **Optional watching** (ask the operator once at the end of the run): a `Monitor` on
 
   ```bash
