@@ -2561,13 +2561,43 @@ def initiative_landing(gh: GitHub, initiative: int) -> dict:
     return out
 
 
+def initiative_unlanded_commits(gh: GitHub, initiative: int) -> list:
+    """Shas on `origin/initiative-<i>` that `main` lacks (one GitHub compare, capped at 250);
+    `[]` when the branch does not exist. Any other read error raises."""
+    try:
+        return gh.branch_commits("main", initiative_branch(initiative))
+    except GhError as e:
+        if "HTTP 404" in str(e) or "Not Found" in str(e):
+            return []
+        raise
+
+
 def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
     """`closeable` when at least one Epic was cut from the Initiative and all are closed --
     and, for an Initiative with an initiative branch, that branch reached `main`
-    (`initiative_landing`); otherwise `reason` (and `open_epics` / `initiative_branch`)."""
+    (`initiative_landing`); otherwise `reason` (and `open_epics` / `initiative_branch`).
+    Whatever its labels now say, it also refuses while `initiative-<i>` holds work `main`
+    lacks (`unlanded_commits`), e.g. Epics closed into it before its label was removed. That
+    check runs only while some `initiativeProfiles` entry sets `branch` (no call otherwise:
+    without one the control plane never closes an Epic into an initiative branch)."""
     initiative_issue, state = _initiative_epics_state(gh, initiative)
     if "epics" not in state:
         return state
+    if not resolve_initiative_profile(initiative_issue)["branch"] and any(
+            prof.get("branch") for prof in PIPELINE["initiativeProfiles"] or []):
+        stray = initiative_unlanded_commits(gh, initiative)
+        if stray:
+            branch = initiative_branch(initiative)
+            return {"initiative": initiative, "closeable": False, "epics": state["epics"],
+                    "initiative_branch": {"branch": branch, "landed": False},
+                    "unlanded_commits": len(stray),
+                    "reason": f"`{branch}` holds {len(stray)}{'+' if len(stray) >= 250 else ''} "
+                              f"commit(s) not on main, but #{initiative} no longer matches an "
+                              f"`initiativeProfiles` entry with `branch: true` (its label was "
+                              f"removed?) -- restore the label, then `open-initiative-pr "
+                              f"{initiative} --repo-path <p>` and `merge-initiative-pr "
+                              f"{initiative}`; or land (or deliberately delete) the branch by "
+                              f"hand, then re-run"}
     if resolve_initiative_profile(initiative_issue)["branch"]:
         landing = initiative_landing(gh, initiative)
         if not landing["landed"]:

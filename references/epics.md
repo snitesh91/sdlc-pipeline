@@ -302,6 +302,10 @@ and in a repo without `initiativeProfiles`, its Epics close into `main` exactly 
   is not behind `main` (refusals are exit 0 with `reason`, `evidence`), then deletes the branch.
   `check-initiative-closeable` / `close-initiative` refuse until it has landed, and a later
   Epic closing into a re-created branch un-lands it (a new PR is owed).
+- **Label removed mid-flight:** whatever the Initiative's labels now say, `check-initiative-closeable`
+  / `close-initiative` refuse (`unlanded_commits`) while `origin/initiative-<i>` holds commits
+  `main` lacks: restore the label, then `open-initiative-pr` / `merge-initiative-pr`, or land
+  the branch. The check is one GitHub compare, made only while some profile sets `branch`.
 
 ## Epic closing
 

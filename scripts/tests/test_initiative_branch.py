@@ -279,6 +279,10 @@ def _all_closed(opt_in=True, prs=None):
     gh.branch_head_sha = lambda branch: "abcd0000"
     gh.branch_behind_by = lambda branch, base="main": 0
     gh.pr_ready = lambda n: None
+
+    def no_branch(base, head):
+        raise s.GhError(f"gh: Not Found (HTTP 404) comparing {base}...{head}")
+    gh.branch_commits = no_branch
     return gh
 
 
@@ -518,3 +522,60 @@ def test_without_initiative_profiles_an_initiative_branch_is_not_a_pipeline_unit
 
 def test_with_initiative_profiles_an_initiative_branch_is_a_pipeline_unit(opted_in):
     assert s._unit_of_branch("initiative-7") == ("initiative", 7)
+
+
+# --- close guard: an initiative branch left unlanded (v0.3.17) ---------------------------
+
+def _verified(gh):
+    gh.issues[6]["comments"] = [
+        "<!-- initiative-verification: requirements:6 @ 2026-10-07T00:00:00Z -->"]
+    return gh
+
+
+def test_close_refused_while_the_initiative_branch_holds_work_after_the_label_is_removed(
+        opted_in):
+    """Regression: Epics closed into initiative-6, then the label came off -- the Initiative
+    must not close with that work never reaching main."""
+    gh = _verified(_all_closed(opt_in=False))
+    gh.branch_commits = lambda base, head: (["c1", "c2"] if (base, head) == ("main", "initiative-6")
+                                            else pytest.fail(f"compared {base}...{head}"))
+
+    result = s.cmd_check_initiative_closeable(gh, 6)
+
+    assert result["closeable"] is False and result["unlanded_commits"] == 2
+    assert "`initiative-6`" in result["reason"] and "restore the label" in result["reason"]
+    assert "merge-initiative-pr 6" in result["reason"]
+    closed = s.cmd_close_initiative(gh, 6)
+    assert closed["closed"] is False and gh.issues[6]["state"] == "OPEN"
+
+
+def test_close_allowed_once_the_initiative_branch_is_fully_on_main(opted_in):
+    """Positive control: the branch exists but main has every commit of it."""
+    gh = _verified(_all_closed(opt_in=False))
+    gh.branch_commits = lambda base, head: []
+
+    assert s.cmd_check_initiative_closeable(gh, 6)["closeable"] is True
+    assert s.cmd_close_initiative(gh, 6)["closed"] is True
+
+
+def test_a_failed_unlanded_read_never_closes_the_initiative(opted_in):
+    gh = _verified(_all_closed(opt_in=False))
+
+    def fails(base, head):
+        raise s.GhError("gh: HTTP 502 comparing")
+    gh.branch_commits = fails
+
+    with pytest.raises(s.GhError):
+        s.cmd_close_initiative(gh, 6)
+    assert gh.issues[6]["state"] == "OPEN"
+
+
+def test_without_initiative_profiles_close_makes_no_branch_call():
+    """Positive control: a repo without `initiativeProfiles` (no initiative branch ever)
+    closes as v0.3.16, with no compare call at all."""
+    gh = _verified(_all_closed(opt_in=False))
+    gh.branch_commits = lambda base, head: pytest.fail("compare called without the opt-in")
+
+    assert s.cmd_check_initiative_closeable(gh, 6) == {"initiative": 6, "closeable": True,
+                                                        "epics": [9]}
+    assert s.cmd_close_initiative(gh, 6)["closed"] is True
