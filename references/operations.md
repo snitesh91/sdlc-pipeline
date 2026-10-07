@@ -25,6 +25,12 @@ once installed; bump only while no run is live, since agents read the playbook m
 the reformat it makes to `.claude/settings.json`), then
 `claude plugin update sdlc@sdlc-pipeline --scope project`.
 
+A session keeps the plugin it loaded. `next-action` stamps the run's root issue with its
+version (`sdlc:plugin-version` marker) and refuses, naming both versions, when a newer plugin
+last moved the run (or the Initiative above it): continue from a session on that version or
+newer. A same-or-newer session continues. A new run on a plugin older than the repo's pin
+gets `plugin_warning`: relay it.
+
 ## Auto-mode classifier denies a composite
 
 The auto-mode classifier can deny a heavier composite (e.g. `finish-lld`: several issue
@@ -129,7 +135,8 @@ Toggles: `branch` (default `false`; `true` = `initiative-<i>`,
 standing Integration-test / e2e-test Tasks), `deferSuites` (suite keys `close-epic` does not
 demand of an Epic closing into the initiative branch), `closeSuites` (suite keys, need not be
 in `requiredWorkflows`, that `merge-initiative-pr` needs attested at the initiative PR head;
-`record-local-ci` accepts them). Prefixes: `branches.initiativePrefix` (`initiative-`),
+`record-local-ci` accepts them), `placement` (`cloud` | `local`; overrides
+`placement.initiativeEpics` for this Initiative). Prefixes: `branches.initiativePrefix` (`initiative-`),
 `worktrees.initiativePrefix` (`sdlc-initiative-`). `initiative-profile <n>` prints the
 profile governing any unit; `start-stage` records it for the SubagentStart hook.
 
@@ -268,8 +275,8 @@ for a suite with no PR-level CI (a workflow that runs only on push to `main`).
   `files`, plus `excludeGlobs` for its negations (`!**/*.md` → `"**/*.md"`); a changed
   file matching one never requires the suite. `suite` keys are `[A-Za-z0-9_-]+` (checked
   at config load). An optional `commandPattern` regex must match the attested `--command`.
-  Optional **`bases`** (e.g. `["main"]`) scopes an entry to those PR base branches only
-  (omitted = every base) — so an integration suite can be required on PRs into `main` yet
+  Optional **`bases`** (names or fnmatch globs, e.g. `["main", "initiative-*"]`) scopes an
+  entry to those PR base branches only (omitted = every base) — so an integration suite can be required on PRs into `main` yet
   ignored on child PRs into an epic branch. Optional **`attestable: false`** (default
   `true`): the workflow runs on every PR the entry applies to, so only its passing check
   satisfies the suite — no stage runs it locally, `record-local-ci` refuses it, and

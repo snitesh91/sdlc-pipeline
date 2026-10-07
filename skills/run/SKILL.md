@@ -266,6 +266,7 @@ an override only.
 | `open-dev-pr [--allow-empty]` / `handoff-to-pr-review` / `record-pr-review` / `record-local-ci` / `record-design-review` / `post-comment` | Stage-agent exit actions (their agent files own them); tell `development` to pass `--allow-empty` when the Task's design says verify-only (no code change); `handoff-to-pr-review` refuses `checks_failed` on a red non-infra required check (`agents/development.md`) |
 | `pr-checks <pr>` / `rerun-checks <pr>` / `merge-pr <pr> --issue <n> [--run-id <id>]` | CI status / rerun the head's failed runs after an `infra_suspect` fix (`references/operations.md`, "A check the runner failed") / the only merge gate (pass the run's id so the terminal count books under it; refuses behind-base; reports `config_changed`; on an already-merged PR only finishes the bookkeeping, `recovered: true`; `cleanup` as `close-issue`'s). Both warn with `uncovered_paths` (+ `uncovered_hint`) when changed files fall under no `requiredWorkflows` entry — not a refusal |
 | `mark-blocked <n> --dep <m>` / `mark-needs-human <n> --reason TEXT` / `pause-for-epic-regate <n> --epic <e> [--gate-pr <pr>] [--found-by <stage>]` | Park a unit (first two release its worktree) |
+| `park-finding --key K --text T\|--text-file F [--evidence URL]... [--target FILE]` / `supersede-park-issue <old> --by <new>` | Step 5: park a retro finding on `pipeline.retro.parkIssue` / retire a park issue for its successor |
 | `pairing-counts <n>` / `show-config` | Valve strike counts + thresholds / effective tunables and the running `plugin` version (read once per invocation) |
 | `list-needs-human` / `check-epics-closeable` / `audit-issues [--epic <n>\|--initiative <n>]` | End-of-invocation sweeps; `audit-issues` also flags open Epics with no phase-Tasks, with the `cut-phase-tasks` repair |
 | `resolve-thread --thread-id <id> [--reply TEXT]` | Reply to and resolve a gate PR review thread; the gate-feedback agent runs it for the threads it addressed (`references/gates.md`) |
@@ -489,6 +490,9 @@ The agent must *have* (not necessarily be pasted):
    the main checkout for anything on this unit." For `development` add: small local commits,
    one push before `open-dev-pr`; if a push is rejected, stop and report; and, when the run
    has a test-env helper script, name it (it must not rebuild network/PG/volumes by hand).
+   Add `Integration tests: mandatory` when no required workflow runs the integration suite
+   on its PR and the change needs it before review (a migration, a raw query, a
+   cross-module or external-API integration); this line is the record of that decision.
    **For `pr-review`** give the repo root, not a worktree: the agent makes its own detached
    one with `review-worktree-add` and releases it at the end (`agents/pr-review.md`), never
    reviewing in the unit's development worktree.
@@ -641,8 +645,9 @@ what) and end with the Initiative's own `none` reason. Above the fold:
 - Every gate-pending unit: gate PR, doc, level, whether feedback was addressed.
 - Every merged PR and closed issue; every epic newly `epic:architected`; every Epic cut,
   run to completion or parked this run.
-- Every `warnings` line any command returned (a branch deletion that failed), verbatim, and
-  every `uncovered_paths` warning from `pr-checks` / `merge-pr` with its PR.
+- Every `warnings` line any command returned (a branch deletion that failed), verbatim,
+  every `uncovered_paths` warning from `pr-checks` / `merge-pr` with its PR, and any
+  `plugin_warning` from `next-action` (`references/operations.md`, "Plugin pin").
 - Every cloud session launched or still running, with its url; every stalled, escalated or
   ended one (`cloud-status`).
 - Any epic `check-epics-closeable` newly notified; any `product_cap` deferral.
@@ -652,28 +657,42 @@ what) and end with the Initiative's own `none` reason. Above the fold:
 
 ## Step 5 — Retrospective (only when the operator asks)
 
-Never decide on your own that a retro is due. Between retros, note each friction finding
-as you see it — bouncing pairings (`pairing-counts`), docs too thin for the next stage,
-dead references, gates too strict or loose — with the plugin version it was seen on
-(`show-config` → `plugin`). The operator decides where parked findings live; never file
-them as issues unless told to.
+Never decide on your own that a retro is due. Between retros, park each friction finding as
+you see it — bouncing pairings (`pairing-counts`), docs too thin for the next stage, dead
+references, gates too strict or loose:
 
-When the operator runs the retro: sweep recently merged units' handoff comments and docs
-for that friction. Fixes go to the **plugin repo** (`snitesh91/sdlc-pipeline`); **this
-file and its references are the primary fix target.** Present findings in chat and ask
-before editing. Once approved:
+```bash
+python3 "$SDLC" park-finding --key <stable-slug> --text "<finding>" \
+    [--evidence <url>]... [--target <plugin file>]
+```
+
+It comments on `pipeline.retro.parkIssue` (plugin version recorded); a repeated `--key`
+posts a short "seen again" instead. Unset `parkIssue` → tell the operator; never open
+issues for findings yourself.
+
+When the operator runs the retro: read every comment on the park issue, and sweep recently
+merged units' handoff comments and docs for more. Fixes go to the **plugin repo**
+(`snitesh91/sdlc-pipeline`); **this file and its references are the primary fix target.**
+Present findings in chat and ask before editing. Once approved:
 
 1. In a clone of the plugin repo: `git checkout -B retro/<date> origin/main`, edit
-   `skills/run/SKILL.md` / `references/*` / `agents/*` / `hooks/*`, add a 1–2 line entry
-   to `references/history.md`, commit, push, merge to `main` (PR, or fast-forward if the
-   operator says so), and tag it. An unpushed edit is a failed retro. **A change to
+   `skills/run/SKILL.md` / `references/*` / `agents/*` / `hooks/*`, bump
+   `.claude-plugin/plugin.json` `version`, add a 1–2 line entry to `references/history.md`,
+   commit, push, merge to `main` (PR, or fast-forward if the operator says so), and tag it.
+   Before tagging, `(cd scripts && SDLC_RELEASE_TAG=<tag> python3 -m pytest -q -k release)`
+   must pass (manifest version = tag). An unpushed edit is a failed retro. **A change to
    `scripts/` or `hooks/` must pass `(cd scripts && python3 -m pytest -q)` and
    `python3 -m pytest -q hooks/tests` before pushing.** A control-plane fix also gets a regression test plus a positive
    control; run both against the pre-fix `sdlc_next.py` — the regression must go red,
    the control must not.
-2. In the driven repo: bump the plugin pin (the marketplace `ref` in
+2. Reply on the park issue to each finding (`comment <park> --body`, linking it): `fixed
+   (<tag>)`, `deferred` or `rejected`, with one line why.
+3. Open the next park issue, `sdlc retro backlog (since <tag>)`, labelled `sdlc:retro`, its
+   body listing every deferred finding (with links).
+4. In the driven repo: bump the plugin pin (the marketplace `ref` in
    `.claude/settings.json`, and the `SDLC_PIPELINE_REF` Actions variable) to the new tag
-   and commit it, naming the retrospective.
+   and set `pipeline.retro.parkIssue` to the new issue, in one commit naming the
+   retrospective. Once it is merged: `supersede-park-issue <old> --by <new>`.
 
 How to apply the bump locally, when it takes effect, and why it waits for a quiet repo:
 `references/operations.md`, "Plugin pin".

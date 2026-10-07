@@ -48,7 +48,7 @@ def test_an_initiative_without_the_label_keeps_the_defaults(opted_in):
     gh = _tree(opt_in=False)
     prof = s.resolve_initiative_profile(gh.issue_list()[0])
     assert prof == {"branch": False, "testTasks": True, "deferSuites": [], "closeSuites": [],
-                    "name": None}
+                    "placement": None, "name": None}
     assert s.resolve_initiative_profile(_tree().issue_list()[0])["branch"] is True
 
 
