@@ -117,8 +117,9 @@ with open(os.path.join(PLUGIN_ROOT, "hooks", "model_policy.json")) as _f:
 # Everything below is tunable per repo via the optional `pipeline` block in the
 # config; every key has the default shown here so an older config keeps working.
 _PIPELINE_DEFAULTS = {
+    # `retro`: an issue carrying it (the retro backlog) is never pipeline work.
     "labels": {"standing": "epic:standing", "legacy": "epic:legacy",
-               "architected": "epic:architected", "gate": "sdlc:gate"},
+               "architected": "epic:architected", "gate": "sdlc:gate", "retro": "sdlc:retro"},
     # `initiativePrefix`: the branch of an Initiative whose `initiativeProfiles` entry sets
     # `branch: true` (its Epics integrate there, not into `main`).
     "branches": {"issuePrefix": "issue-", "epicPrefix": "epic-",
@@ -171,6 +172,11 @@ _PIPELINE_DEFAULTS = {
     # own cloud session (`launch-cloud-epic`) instead of driving it; `stallMinutes`: a live
     # cloud Epic with no GitHub activity this long is `stalled` in `cloud-status`.
     "placement": {"cloudLabel": "sdlc:cloud", "initiativeEpics": "local", "stallMinutes": 90},
+    # `command`: run by `development` in its worktree, green before `open-dev-pr`
+    # (agents/development.md); "" = none.
+    "prePr": {"command": ""},
+    # `parkIssue`: the open issue `park-finding` comments friction findings on between retros.
+    "retro": {"parkIssue": None},
     # Where operator questions and gate approvals go: "github" (needs-human, gate PRs) or
     # "session" (the orchestrator asks with AskUserQuestion and records the answer).
     "humanChannel": "github",
@@ -235,6 +241,7 @@ _INITIATIVE_PROFILE_DEFAULTS = {
                           # initiative branch; they gate the initiative -> main merge instead
     "closeSuites": [],    # suite keys (any name, e.g. "e2e") `merge-initiative-pr` also needs
                           # a `record-local-ci` attestation for at the initiative PR's head
+    "placement": None,    # "cloud"|"local" overrides `pipeline.placement.initiativeEpics`
 }
 
 
@@ -417,7 +424,7 @@ class GitHub:
             if not conn["pageInfo"]["hasNextPage"]:
                 break
             after = f'"{conn["pageInfo"]["endCursor"]}"'
-        return issues
+        return without_retro_issues(issues)
 
     def issue_view(self, number: int) -> dict:
         out = self._run(["gh", "issue", "view", str(number), "--repo", self.repo,
@@ -894,7 +901,7 @@ class GitHubRest(GitHub):
     def issue_list(self) -> list:
         items = self._api_items(f"repos/{self.repo}/issues?state=all&per_page=100"
                                 f"&sort=created&direction=asc")
-        return [self._node(i) for i in items if not i.get("pull_request")]
+        return without_retro_issues([self._node(i) for i in items if not i.get("pull_request")])
 
     def _comments(self, number: int) -> list:
         return [{"id": c.get("node_id"), "author": {"login": (c.get("user") or {}).get("login")},
@@ -1215,6 +1222,11 @@ def get_work_item_provider(runner: Runner = _default_runner) -> WorkItemProvider
 
 def label_names(issue: dict) -> set:
     return {l["name"] for l in issue.get("labels", [])}
+
+
+def without_retro_issues(issues: list) -> list:
+    """`issues` minus the retro backlog (`labels.retro`): no scan ever treats it as work."""
+    return [i for i in issues if LABELS["retro"] not in label_names(i)]
 
 
 def has_label(issue: dict, name: str) -> bool:
@@ -2666,7 +2678,7 @@ def _initiative_pr_evidence(gh: GitHub, initiative_issue: dict, pr: int) -> dict
     if failing:
         out["failing_checks"] = [c.get("name") or "?" for c in failing]
         out["infra_suspect"] = enrich_failed_checks(gh, failing)
-    return _with_uncovered(out, files, "main")
+    return _with_uncovered(out, files)
 
 
 def cmd_open_initiative_pr(gh: GitHub, initiative: int, repo_path: str = ".",
@@ -3267,7 +3279,7 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                           "stage": stage})
 
     if (is_initiative(epic_issue) and epic_issue["state"] == "OPEN" and not deferred_by_run_cap
-            and initiative_epics_placement() == "cloud"
+            and initiative_epics_placement(epic_issue) == "cloud"
             and session_placement()["placement"] == "local"):
         # Each Epic runs in its own cloud session; this run only launches them.
         open_epics = [e["number"] for e in _initiative_epics(all_issues, epic)
@@ -3278,7 +3290,7 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
             if cloud_survey["launchable"]:
                 return {"action": "launch-cloud-epics", "initiative": epic, "unit": "epic",
                         "epics": cloud_survey["launchable"], "cloud": cloud_survey,
-                        "reason": f"pipeline.placement.initiativeEpics is cloud: run "
+                        "reason": f"this Initiative's Epics are placed in the cloud: run "
                                   f"`launch-cloud-epic <n>` for each of "
                                   f"{', '.join(f'#{n}' for n in cloud_survey['launchable'])}, "
                                   f"then `next-action {epic}` again"}
@@ -3474,11 +3486,14 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     `--run-id` and a nonzero cap), which describes the invocation, not the decision.
     A `resume` also carries liveness hints (`_resume_liveness`). With `--sync-epic`,
     `sync_epic_if_due` runs first and its result is `epic_sync`. Refuses a unit placed
-    on the other side (`check_placement`) before anything else runs."""
+    on the other side (`check_placement`), then a plugin older than the run's last
+    (`plugin_version_guard`), before anything else runs."""
     run_id = getattr(args, "run_id", None)
     repo_path = getattr(args, "repo_path", None) or "."
     issues = gh.issue_list()
-    check_placement(args.epic, {i["number"]: i for i in issues}.get)
+    by_number = {i["number"]: i for i in issues}
+    check_placement(args.epic, by_number.get)
+    version = plugin_version_guard(gh, args.epic, by_number, repo_path=repo_path)
     drift = config_drift(args.epic, run_id)
     epic_sync = (sync_epic_if_due(gh, args.epic, run_id, repo_path, issues=issues)
                  if getattr(args, "sync_epic", False) else None)
@@ -3497,7 +3512,8 @@ def cmd_next_action(gh: GitHub, args) -> dict:
             unit_initiative_profile(gh, result["issue"])
         except GhError:
             forget_initiative_hint(result["issue"])
-    return {**result, **liveness, "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0,
+    return {**result, **liveness, **version,
+            "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0,
             **({"epic_sync": epic_sync} if epic_sync is not None else {}),
             **({"config_changed": drift} if drift else {})}
 
@@ -3861,12 +3877,7 @@ def worktree_path(unit: str, number: int) -> str:
 def plugin_version_info(runner: Runner = _default_runner) -> dict:
     """The running plugin's manifest `version` and, when its root is its own git
     checkout, that checkout's HEAD `sha` (else None)."""
-    info = {"root": PLUGIN_ROOT, "version": None, "sha": None}
-    try:
-        with open(os.path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json")) as f:
-            info["version"] = json.load(f).get("version")
-    except (OSError, ValueError):
-        pass
+    info = {"root": PLUGIN_ROOT, "version": running_plugin_version(), "sha": None}
     try:
         top, sha = runner(["git", "-C", PLUGIN_ROOT, "rev-parse",
                            "--show-toplevel", "HEAD"]).split()
@@ -3876,6 +3887,102 @@ def plugin_version_info(runner: Runner = _default_runner) -> dict:
     if os.path.realpath(top) == os.path.realpath(PLUGIN_ROOT):
         info["sha"] = sha
     return info
+
+
+def running_plugin_version() -> Optional[str]:
+    """The running plugin's manifest `version`, or None when unreadable."""
+    try:
+        with open(os.path.join(PLUGIN_ROOT, ".claude-plugin", "plugin.json")) as f:
+            return json.load(f).get("version")
+    except (OSError, ValueError):
+        return None
+
+
+def version_key(version: Optional[str]) -> Optional[tuple]:
+    """A sortable key for `v0.3.17` / `0.3.16-initiative.1`; None when unparseable. A suffixed
+    tag is a build cut from its release, so it sorts after it and before the next release."""
+    m = re.fullmatch(r"v?(\d+(?:\.\d+)*)(?:[-+]([0-9A-Za-z.\-]+))?", str(version or "").strip())
+    if not m:
+        return None
+    core = tuple(int(x) for x in m.group(1).split("."))
+    core += (0,) * max(0, 3 - len(core))
+    suffix = tuple((0, int(p), "") if p.isdigit() else (1, 0, p)
+                   for p in re.split(r"[.\-]", m.group(2) or "") if p)
+    return (core, bool(suffix), suffix)
+
+
+_PLUGIN_VERSION_MARKER = re.compile(r"<!--\s*sdlc:plugin-version\s+v=(\S+?)\s*(?:@[^>]*?)?-->")
+# Tests turn it off globally (their fake clients lack comments); its own tests turn it on.
+PLUGIN_VERSION_GUARD = True
+
+
+def recorded_plugin_version(comments: list) -> Optional[str]:
+    """The plugin version the latest `sdlc:plugin-version` marker records, or None."""
+    for c in reversed(comments or []):
+        m = _PLUGIN_VERSION_MARKER.search(c.get("body") or "")
+        if m:
+            return m.group(1)
+    return None
+
+
+def repo_plugin_pin(repo_path: str = ".") -> Optional[str]:
+    """The driven repo's pinned plugin ref (`.claude/settings.json`
+    `extraKnownMarketplaces.sdlc-pipeline.source.ref`), found walking up from `repo_path`."""
+    path = os.path.abspath(repo_path or ".")
+    while True:
+        settings = os.path.join(path, ".claude", "settings.json")
+        if os.path.isfile(settings):
+            try:
+                with open(settings) as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                return None
+            source = (((data.get("extraKnownMarketplaces") or {}).get("sdlc-pipeline") or {})
+                      .get("source") or {})
+            return source.get("ref")
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+
+
+def _run_roots(by_number: dict, root: int) -> list:
+    """`root` plus every Epic/Initiative above it."""
+    roots, n = [], root
+    while n is not None and n not in roots and len(roots) < 4:
+        roots.append(n)
+        n = ((by_number.get(n) or {}).get("parent") or {}).get("number")
+    return [r for r in roots if r == root or (r in by_number and (
+        is_epic(by_number[r]) or is_initiative(by_number[r])))]
+
+
+def plugin_version_guard(gh: GitHub, root: int, by_number: dict, repo_path: str = ".") -> dict:
+    """Refuse when a newer plugin last moved this run (`root` or an Epic/Initiative above it);
+    else stamp `root` with this version when it is new there. A run's first stamp warns
+    (`plugin_warning`) when this version is older than the driven repo's pin."""
+    running = running_plugin_version()
+    mine = version_key(running)
+    if not PLUGIN_VERSION_GUARD or mine is None:
+        return {}
+    comments = {n: gh.issue_view(n).get("comments", []) for n in _run_roots(by_number, root)}
+    for n, thread in comments.items():
+        recorded = recorded_plugin_version(thread)
+        if version_key(recorded) is not None and version_key(recorded) > mine:
+            raise GhError(f"#{n} was last moved by sdlc plugin {recorded}; this session runs "
+                          f"the older {running} -- continue this run from a session on "
+                          f"{recorded} or newer")
+    recorded = recorded_plugin_version(comments.get(root, []))
+    out: dict = {}
+    if recorded is None:
+        pin = repo_plugin_pin(repo_path)
+        if version_key(pin) is not None and version_key(pin) > mine:
+            out["plugin_warning"] = (f"this session runs sdlc plugin {running}, older than the "
+                                     f"repo's pin {pin}; start a new session to load {pin}")
+    if recorded is None or version_key(recorded) is None or version_key(recorded) < mine:
+        gh.issue_comment(root, f"sdlc plugin `{running}` now drives this run.\n\n"
+                               f"<!-- sdlc:plugin-version v={running} @ {_utc_now_marker()} -->")
+        out["plugin_version_recorded"] = running
+    return out
 
 
 def cmd_show_config(runner: Runner = _default_runner) -> dict:
@@ -7025,7 +7132,8 @@ def checks_status(checks: list) -> str:
 # Workflows required when a PR touches their paths. `workflow` must match the
 # workflow file's `name:`; `suite` names the `local-ci` attestation that can stand in for it.
 # `excludeGlobs` mirrors the workflow's path negations (`!**/*.md`): a match never counts.
-# `bases`: the PR base branches this entry applies to (empty = every base). `attestable`:
+# `bases`: the PR base branches (names or fnmatch globs) this entry applies to (empty = every
+# base). `attestable`:
 # False when no `local-ci` attestation can stand in for it (a passing GHA check only).
 REQUIRED_WORKFLOWS = tuple(
     {"workflow": w["workflow"], "suite": w["suite"],
@@ -7052,9 +7160,11 @@ def _workflow_covers(spec: dict, path: str) -> bool:
 
 def _workflow_applies_to_base(spec: dict, base_ref: Optional[str]) -> bool:
     """Whether a base-scoped entry applies to a PR into `base_ref`. An entry with no `bases`
-    applies to every base; a scoped entry applies only when `base_ref` is one of them (an
-    unknown `base_ref` never matches a scoped entry, so it is not over-required)."""
-    return not spec["bases"] or base_ref in spec["bases"]
+    applies to every base; a scoped entry applies only when `base_ref` matches one of its
+    names or fnmatch globs (`initiative-*`); an unknown `base_ref` never matches."""
+    if not spec["bases"]:
+        return True
+    return base_ref is not None and any(fnmatch.fnmatchcase(base_ref, b) for b in spec["bases"])
 
 
 def workflow_check_state(checks: list, workflow: str) -> str:
@@ -7117,17 +7227,17 @@ def _is_doc_path(path: str) -> bool:
 _UNCOVERED_HINT = "no required workflow covers these paths; no suite ran for them"
 
 
-def uncovered_paths(changed_files: list, base_ref: Optional[str] = None) -> list:
-    """Changed non-doc files (the pipeline config aside) no base-applicable required workflow covers."""
-    specs = [w for w in REQUIRED_WORKFLOWS if _workflow_applies_to_base(w, base_ref)]
+def uncovered_paths(changed_files: list) -> list:
+    """Changed non-doc files (the pipeline config aside) no required workflow covers on any
+    base: a config coverage gap. A path whose suite is scoped to another base is covered."""
     return [p for p in changed_files
             if not _is_doc_path(p) and os.path.basename(p) != CONFIG_FILENAME
-            and not any(_workflow_covers(w, p) for w in specs)]
+            and not any(_workflow_covers(w, p) for w in REQUIRED_WORKFLOWS)]
 
 
-def _with_uncovered(result: dict, changed_files: list, base_ref: Optional[str]) -> dict:
+def _with_uncovered(result: dict, changed_files: list) -> dict:
     """`result` plus `uncovered_paths`/`uncovered_hint` when any; a warning, never a gate."""
-    uncovered = uncovered_paths(changed_files, base_ref)
+    uncovered = uncovered_paths(changed_files)
     return {**result, "uncovered_paths": uncovered, "uncovered_hint": _UNCOVERED_HINT} \
         if uncovered else result
 
@@ -7305,7 +7415,7 @@ def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
     hints = ([_MISSING_WORKFLOW_HINT] if missing else []) + ([_infra_hint(pr_number)] if infra else [])
     if hints:
         result["hint"] = " ".join(hints)
-    return _with_uncovered(result, files, view.get("baseRefName"))
+    return _with_uncovered(result, files)
 
 
 def cmd_rerun_checks(gh: GitHub, pr_number: int) -> dict:
@@ -7401,7 +7511,7 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
     gh.pr_comment(pr_number, f"Auto-merged under the pipeline's scoped PR-merge override — "
                               f"see \"PRs merge automatically\" in the pipeline docs.")
     return _with_uncovered(_finalize_merged_pr(gh, pr_number, issue, repo_path, base, files,
-                                               carried_forward, run_id=run_id), files, base)
+                                               carried_forward, run_id=run_id), files)
 
 
 def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
@@ -7942,6 +8052,100 @@ def cmd_place(gh: WorkItemProvider, number: int, where: str, force: bool = False
     return {**result, "placed": where}
 
 
+_FINDING_MARKER = re.compile(r"<!--\s*sdlc:finding\s+key=([a-z0-9][a-z0-9-]*)[^>]*-->")
+_SUPERSEDED_MARKER = re.compile(r"<!--\s*sdlc:superseded-by\s+#(\d+)\s*-->")
+_FINDING_KEY = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+_PARK_HOPS = 4
+
+
+def _read_text(text: Optional[str], text_file: Optional[str], what: str) -> str:
+    """Exactly one of `text` / the contents of `text_file`, stripped; raises when empty."""
+    if (text is None) == (text_file is None):
+        raise GhError(f"pass exactly one of --{what} / --{what}-file")
+    if text_file is not None:
+        try:
+            with io.open(os.path.expanduser(text_file), encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as exc:
+            raise GhError(f"--{what}-file must be a readable file: {exc}")
+    text = (text or "").strip()
+    if not text:
+        raise GhError(f"the {what} is empty")
+    return text
+
+
+def _live_park_issue(gh: WorkItemProvider) -> tuple:
+    """`pipeline.retro.parkIssue`, following `sdlc:superseded-by` markers from a closed one:
+    `(number, comments)` of the open issue findings go to."""
+    number = PIPELINE["retro"].get("parkIssue")
+    if not number:
+        raise GhError("pipeline.retro.parkIssue is not set -- name the open retro-backlog issue "
+                      "in the config before parking findings")
+    number = int(number)
+    for _ in range(_PARK_HOPS):
+        view = gh.issue_view(number)
+        comments = view.get("comments", [])
+        if view.get("state", "OPEN").upper() != "CLOSED":
+            return number, comments
+        nxt = next((int(m.group(1)) for c in reversed(comments)
+                    for m in [_SUPERSEDED_MARKER.search(c.get("body") or "")] if m), None)
+        if nxt is None:
+            raise GhError(f"retro park issue #{number} is closed and names no successor "
+                          f"(sdlc:superseded-by marker) -- point pipeline.retro.parkIssue at "
+                          f"the open one")
+        number = nxt
+    raise GhError(f"retro park issue: more than {_PARK_HOPS} superseded hops from "
+                  f"#{PIPELINE['retro'].get('parkIssue')} -- update pipeline.retro.parkIssue")
+
+
+def cmd_park_finding(gh: WorkItemProvider, key: str, text: Optional[str] = None,
+                     text_file: Optional[str] = None, evidence: tuple = (),
+                     target: Optional[str] = None) -> dict:
+    """Post one friction finding on the retro park issue, or, when a comment there already
+    carries `key`, a short "seen again" comment linking it. Returns `issue`, `posted`
+    (`finding` | `seen-again`) and `original` (the earlier comment's url) on a repeat."""
+    key = (key or "").strip().lower()
+    if not _FINDING_KEY.fullmatch(key):
+        raise GhError(f"--key {key!r} must be a short slug ([a-z0-9-], at most 64 chars)")
+    text = _read_text(text, text_file, "text")
+    version = running_plugin_version() or "unknown"
+    number, comments = _live_park_issue(gh)
+    original = next((c for c in comments
+                     if any(m.group(1) == key for m in _FINDING_MARKER.finditer(c.get("body") or ""))),
+                    None)
+    links = "".join(f"\n- {e}" for e in evidence)
+    if original is not None:
+        first = text.splitlines()[0][:200]
+        gh.issue_comment(number, f"Seen again on plugin `{version}`: {first}\n\n"
+                                 f"Original: {original.get('url') or 'above'}"
+                                 + (f"\n\nEvidence:{links}" if links else "")
+                                 + f"\n\n<!-- sdlc:finding-seen key={key} v={version} -->")
+        return {"issue": number, "key": key, "posted": "seen-again",
+                "original": original.get("url")}
+    body = (f"**Finding** `{key}` — plugin `{version}`\n\n{text}"
+            + (f"\n\nTarget: `{target}`" if target else "")
+            + (f"\n\nEvidence:{links}" if links else "")
+            + f"\n\n<!-- sdlc:finding key={key} v={version} -->")
+    if len(body) > EVIDENCE_CAP:
+        return {"issue": number, "refused": True,
+                "reason": f"the finding is {len(body):,} chars, over the {EVIDENCE_CAP:,}-char "
+                          f"cap; trim it and re-run"}
+    gh.issue_comment(number, body)
+    return {"issue": number, "key": key, "posted": "finding"}
+
+
+def cmd_supersede_park_issue(gh: WorkItemProvider, old: int, new: int) -> dict:
+    """Point a retro park issue at its successor (`sdlc:superseded-by` marker), then close it."""
+    if old == new:
+        raise GhError("an issue cannot supersede itself")
+    view = gh.issue_view(old)
+    if not any(_SUPERSEDED_MARKER.search(c.get("body") or "") for c in view.get("comments", [])):
+        gh.issue_comment(old, f"Superseded by #{new}.\n\n<!-- sdlc:superseded-by #{new} -->")
+    if view.get("state", "OPEN").upper() != "CLOSED":
+        gh.issue_close(old)
+    return {"issue": old, "superseded_by": new, "closed": True}
+
+
 def cmd_comment(gh: WorkItemProvider, issue: int, body: Optional[str] = None,
                 body_file: Optional[str] = None) -> dict:
     """Post a plain comment on `issue` from `body` or `body_file` (one of them), capped at
@@ -8202,12 +8406,16 @@ _BARE_SESSION_RE = re.compile(r"\b(session_[A-Za-z0-9_-]{6,})")
 NUDGES_BEFORE_ESCALATION = 2
 
 
-def initiative_epics_placement() -> str:
-    """`pipeline.placement.initiativeEpics`: where a laptop Initiative run's Epics run."""
-    value = str(PIPELINE["placement"].get("initiativeEpics") or "local").strip().lower()
+def initiative_epics_placement(initiative: Optional[dict] = None) -> str:
+    """Where a laptop Initiative run's Epics run: the matching `initiativeProfiles` entry's
+    `placement`, else `pipeline.placement.initiativeEpics`."""
+    key, value = "pipeline.placement.initiativeEpics", PIPELINE["placement"].get("initiativeEpics")
+    own = resolve_initiative_profile(initiative)["placement"] if initiative else None
+    if own is not None:
+        key, value = "pipeline.initiativeProfiles[].placement", own
+    value = str(value or "local").strip().lower()
     if value not in PLACEMENTS:
-        raise GhError(f"pipeline.placement.initiativeEpics={value!r} is neither 'cloud' nor "
-                      f"'local' -- fix the config")
+        raise GhError(f"{key}={value!r} is neither 'cloud' nor 'local' -- fix the config")
     return value
 
 
@@ -8593,7 +8801,7 @@ def cmd_cloud_status(gh, number: int, repo_path: str = ".", runner: Runner = _de
     if is_initiative(issue):
         result["all_closed"] = bool(epics) and all(e["state"] == "CLOSED" for e in epics)
         attention = attention or result["all_closed"]
-        if initiative_epics_placement() == "cloud":
+        if initiative_epics_placement(issue) == "cloud":
             survey = cloud_epic_survey(gh, all_issues, [e["number"] for e in epics],
                                        repo_path=repo_path, runner=runner, comments=comments,
                                        open_prs=open_prs)
@@ -10454,6 +10662,22 @@ def main(argv: Optional[list] = None) -> int:
     text.add_argument("--body-file", default=None, help="File holding the comment text")
     p.set_defaults(func=lambda a: cmd_comment(get_work_item_provider(), a.issue, a.body,
                                               a.body_file))
+    p = sub.add_parser("park-finding",
+                        help="Park a retro finding on pipeline.retro.parkIssue (REST only)")
+    p.add_argument("--key", required=True,
+                   help="Stable short slug naming the finding; a repeat posts 'seen again'")
+    text = p.add_mutually_exclusive_group(required=True)
+    text.add_argument("--text", default=None, help="The finding")
+    text.add_argument("--text-file", default=None, help="File holding the finding")
+    p.add_argument("--evidence", action="append", default=[], help="Link (repeatable)")
+    p.add_argument("--target", default=None, help="Plugin file the fix likely lands in")
+    p.set_defaults(func=lambda a: cmd_park_finding(GitHubRest(), a.key, a.text, a.text_file,
+                                                   tuple(a.evidence), a.target))
+    p = sub.add_parser("supersede-park-issue",
+                        help="Mark a retro park issue superseded by its successor and close it")
+    p.add_argument("issue", type=int)
+    p.add_argument("--by", type=int, required=True, help="The successor park issue")
+    p.set_defaults(func=lambda a: cmd_supersede_park_issue(GitHubRest(), a.issue, a.by))
     p = sub.add_parser("edit-issue", help="Operator-directed edit of an issue's body/labels "
                                            "(refuses pipeline-owned labels and in-flight units)")
     p.add_argument("issue", type=int)

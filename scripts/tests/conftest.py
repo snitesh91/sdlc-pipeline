@@ -39,3 +39,11 @@ def _fresh_doc_roots_cache():
     sdlc_next._DOC_ROOTS_CACHE.clear()
     yield
     sdlc_next._DOC_ROOTS_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_plugin_version_guard(monkeypatch):
+    """`next-action` stamps the run root with the plugin version; most fakes carry no comment
+    thread for it, so the guard is off unless a test turns it on."""
+    import sdlc_next
+    monkeypatch.setattr(sdlc_next, "PLUGIN_VERSION_GUARD", False)

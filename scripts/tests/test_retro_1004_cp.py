@@ -123,14 +123,16 @@ class _ChecksGh:
 def test_uncovered_paths_skips_docs_config_and_covered_files():
     files = ["src/x.py", "backend/a.py", "docs/sdlc/n.md", "README.md",
              f".claude/{s.CONFIG_FILENAME}", "backend/notes.md"]
-    assert s.uncovered_paths(files, "main") == ["src/x.py"]
+    assert s.uncovered_paths(files) == ["src/x.py"]
 
 
-def test_uncovered_paths_ignores_a_spec_scoped_to_another_base(monkeypatch):
-    scoped = [{**w, "bases": ("main",)} for w in s.REQUIRED_WORKFLOWS]
+def test_uncovered_paths_counts_a_spec_scoped_to_another_base_as_covering(monkeypatch):
+    scoped = [{**w, "bases": ("main", "initiative-*")} for w in s.REQUIRED_WORKFLOWS]
     monkeypatch.setattr(s, "REQUIRED_WORKFLOWS", tuple(scoped))
-    assert s.uncovered_paths(["backend/a.py"], "epic-9") == ["backend/a.py"]
-    assert s.uncovered_paths(["backend/a.py"], "main") == []
+    # A task PR into epic-<n>: the suite runs at a later merge, not a coverage gap.
+    assert s.uncovered_paths(["backend/a.py"]) == []
+    # Positive control: a path no entry covers on any base is still reported.
+    assert s.uncovered_paths(["backend/a.py", "src/x.py"]) == ["src/x.py"]
 
 
 def test_pr_checks_warns_about_uncovered_paths_without_changing_status():
