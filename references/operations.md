@@ -114,9 +114,17 @@ Field reference: `sdlc.config.sample.json`. `product-review` is not a toggle.
 
 ### `pipeline.initiativeProfiles` — Initiative behaviour by label (opt-in)
 
-Ordered array, default `[]` (v0.3.16 behaviour, no extra lookups); the first entry whose
-`match` (`{ "label": "<name>" }` or `"*"`) is on the Initiative wins; an unmatched
-Initiative keeps the defaults. Toggles: `branch` (default `false`; `true` = `initiative-<i>`,
+Ordered array, default `[]`; the first entry whose `match` (`{ "label": "<name>" }` or
+`"*"`) is on the Initiative wins. **The default is the label's absence:** an Initiative no
+entry matches, a bare or engineering-driven Epic, a standing epic and a parentless issue keep
+the plain flow — Epics close into `main`, their children into `epic-<n>`, both standing test
+Tasks carved — and a repo without `initiativeProfiles` (or with no entry setting `branch`)
+makes no extra lookups. A failed GitHub read while resolving the profile stops the step that needed it (exit 1,
+or an `error` / `*_error` field); it never falls back to `main` or to the initiative branch.
+`initiative-<n>` is a pipeline branch (the Bash guard, `prune-stale`) only while
+`initiativeProfiles` is set.
+
+Toggles: `branch` (default `false`; `true` = `initiative-<i>`,
 `references/epics.md`, "Initiative branch"), `testTasks` (default `true`; `false` = no
 standing Integration-test / e2e-test Tasks), `deferSuites` (suite keys `close-epic` does not
 demand of an Epic closing into the initiative branch), `closeSuites` (suite keys, need not be

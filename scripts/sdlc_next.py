@@ -1357,9 +1357,10 @@ def epic_base_in(issues: dict, epic: int) -> str:
 
 
 def epic_base(gh: "WorkItemProvider", epic: int, issues: Optional[list] = None) -> str:
-    """`epic_base_in` that looks nothing up while no `initiativeProfiles` is configured,
-    so a repo without the opt-in makes exactly the calls it made before."""
-    if not PIPELINE["initiativeProfiles"]:
+    """`epic_base_in` that looks nothing up while no `initiativeProfiles` entry sets
+    `branch`, so a repo without that opt-in makes exactly the calls it made before. A failed
+    issue-list read raises: it never falls back to `main` (nor to a branch)."""
+    if not any(prof.get("branch") for prof in PIPELINE["initiativeProfiles"] or []):
         return "main"
     return epic_base_in({i["number"]: i for i in (issues if issues is not None
                                                   else gh.issue_list())}, epic)
@@ -1380,7 +1381,16 @@ def unit_initiative_profile(gh: Optional["WorkItemProvider"], number: int) -> di
             _record_hints(INITIATIVE_HINTS_FILE, {m: prof for m in chain})
             return prof
         n = (info.get("parent") or {}).get("number")
-    return {**resolve_initiative_profile(None), "initiative": None}
+    prof = {**resolve_initiative_profile(None), "initiative": None}
+    # Recorded too, so the SubagentStart hook knows a unit under no Initiative needs no line.
+    _record_hints(INITIATIVE_HINTS_FILE, {m: prof for m in chain})
+    return prof
+
+
+def forget_initiative_hint(*numbers: Optional[int]) -> None:
+    """Drop the recorded profile of `numbers` after a failed read, so the SubagentStart hook
+    points the agent at `initiative-profile` instead of repeating a possibly stale one."""
+    _record_hints(INITIATIVE_HINTS_FILE, {n: None for n in numbers if n is not None})
 
 
 def is_epic_architected(issue: dict) -> bool:
@@ -3456,7 +3466,7 @@ def cmd_next_action(gh: GitHub, args) -> dict:
         try:  # records the unit's Initiative profile for the SubagentStart hook
             unit_initiative_profile(gh, result["issue"])
         except GhError:
-            pass
+            forget_initiative_hint(result["issue"])
     return {**result, **liveness, "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0,
             **({"epic_sync": epic_sync} if epic_sync is not None else {}),
             **({"config_changed": drift} if drift else {})}
@@ -7691,6 +7701,8 @@ def _unit_of_branch(branch: Optional[str]) -> Optional[tuple]:
     if not m:
         return None
     unit = "epic" if m.group("epic") else "initiative" if m.group("initiative") else "issue"
+    if unit == "initiative" and not PIPELINE["initiativeProfiles"]:
+        return None  # without the opt-in an `initiative-<n>` branch is not the pipeline's
     return (unit, int(m.group("n")))
 
 
@@ -9615,6 +9627,7 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
                                                ("initiative", "name", "branch", "testTasks")}
         except GhError as e:
             roots["initiative_profile_error"] = str(e)
+            forget_initiative_hint(number)
     return seq.report(issue=number, role=role, path=(worktree or {}).get("path"),
                       claimed=bool(claim), **roots)
 

@@ -273,9 +273,10 @@ All other rework follows `references/rework.md`.
 
 ## Initiative branch (opt-in)
 
-An Initiative matching a `pipeline.initiativeProfiles` entry (`references/operations.md`)
-with `branch: true` owns `initiative-<i>` (`branches.initiativePrefix`). Nothing else changes
-for an Initiative or repo without one.
+An Initiative carrying the label of a `pipeline.initiativeProfiles` entry
+(`references/operations.md`) with `branch: true` owns `initiative-<i>`
+(`branches.initiativePrefix`). The label decides, per Initiative: without it (the default),
+and in a repo without `initiativeProfiles`, its Epics close into `main` exactly as below.
 
 - **Its Epics cut from, sync with and close into `initiative-<i>`**, never `main`:
   `worktree-add`/`cut-phase-tasks`/`open-arch-revision`/`start-stage` cut `epic-<n>` from it

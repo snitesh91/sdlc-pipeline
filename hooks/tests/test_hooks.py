@@ -290,9 +290,11 @@ def test_custom_branch_prefixes_count_as_pipeline_branches(tmp_path):
     assert guard("gh pr create --head issue-5 --title t", cwd) is None
 
 
-def test_initiative_branches_are_pipeline_branches_on_the_main_thread(sdlc_repo, live):
-    """Regression (initiative branch, v0.3.16-initiative.1): a hand-run PR or merge of
-    `initiative-<n>` is denied like `epic-<n>`; its control-plane commands pass."""
+def test_initiative_branches_are_pipeline_branches_on_the_main_thread(initiative_repo, live):
+    """Regression (initiative branch, v0.3.17): with `initiativeProfiles` configured, a
+    hand-run PR or merge of `initiative-<n>` is denied like `epic-<n>`; its control-plane
+    commands pass."""
+    sdlc_repo = initiative_repo
     for cmd in ("gh pr merge initiative-1994 --squash", "gh pr create --head initiative-1994 -t t"):
         reason = guard(cmd, sdlc_repo, **live)
         assert "sdlc guard: " in reason
@@ -315,9 +317,20 @@ def test_initiative_commands_are_the_orchestrators_but_any_agent_may_read_the_pr
 
 def test_a_custom_initiative_prefix_counts_as_a_pipeline_branch(tmp_path):
     cwd = _git_repo(tmp_path / "ipfx", {"repo": "o/r", "guard": {"mainThread": "always"},
-                                        "pipeline": {"branches": {"initiativePrefix": "init-"}}})
+                                        "pipeline": {"branches": {"initiativePrefix": "init-"},
+                                                     "initiativeProfiles": [
+                                                         {"match": {"label": "x"}, "branch": True}]}})
     assert "sdlc guard: " in guard("gh pr merge init-7", cwd)
     assert guard("gh pr create --head initiative-7 --title t", cwd) is None
+
+
+def test_without_initiative_profiles_an_initiative_branch_is_an_operator_branch(tmp_path):
+    """Positive control (v0.3.17): a repo without `initiativeProfiles` guards exactly the
+    v0.3.16 prefixes, so a main-thread PR/merge of `initiative-<n>` passes as it did."""
+    cwd = _git_repo(tmp_path / "noprof", {"repo": "o/r", "guard": {"mainThread": "always"}})
+    assert guard("gh pr merge initiative-7 --squash", cwd) is None
+    assert guard("gh pr create --head initiative-7 --title t", cwd) is None
+    assert "sdlc guard: " in guard("gh pr merge epic-7 --squash", cwd)
 
 
 @pytest.mark.parametrize("agent", ["sdlc:development", "sdlc:pr-review", "sdlc:lld"])

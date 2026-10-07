@@ -42,9 +42,10 @@ container — no stage is ever delegated to it. Where a unit merges depends on i
 an Initiative's Product-Roadmap Task, a standing child and a parentless issue gate and merge
 `issue-<n>` → `main`; **every child of a non-standing Epic — phase-Tasks and functional Tasks
 alike — branches from and merges into `epic-<n>`**, which reaches `main` once, at epic close —
-or, under an Initiative opted into an initiative branch (`pipeline.initiativeProfiles`,
-`branch: true`), reaches `initiative-<i>` at epic close, and `initiative-<i>` reaches `main`
-once, at initiative close (`references/epics.md`, "Initiative branch").
+or, under an Initiative carrying a label that a `pipeline.initiativeProfiles` entry with
+`branch: true` matches, reaches `initiative-<i>` at epic close, and `initiative-<i>` reaches
+`main` once, at initiative close (`references/epics.md`, "Initiative branch"). Without such a
+label (the default) nothing changes: Epics close into `main`.
 
 ```
 initiative: [Product-Roadmap Task: product -> product-review -> Gate A (PR -> main)] -> [orchestrator cuts Epics, ordered by blockedBy] -> [Initiative loop: per Epic, cut-phase-tasks then run-epic]

@@ -384,3 +384,137 @@ def test_merge_initiative_pr_refuses_a_branch_behind_main(opted_in):
     gh.branch_behind_by = lambda branch, base="main": 2
     result = s.cmd_merge_initiative_pr(gh, 6, runner=lambda argv: "")
     assert result["merged"] is False and result["behind_base"] == 2
+
+
+# --- release gating (v0.3.17): unlabelled / unconfigured is exactly v0.3.16 --------------
+
+class ListFails(FakeGh):
+    """The issue list read fails (GitHub error or timeout)."""
+
+    def issue_list(self):
+        raise s.GhError("gh: timed out reading the issue list")
+
+
+class AncestryFails(FakeGh):
+    """The per-issue ancestry read (`issue_epic_info`) fails."""
+
+    def issue_epic_info(self, n):
+        raise s.GhError("gh: HTTP 502 reading the issue")
+
+
+def _hints(runs_dir):
+    import json
+    return json.loads((runs_dir / s.INITIATIVE_HINTS_FILE).read_text())
+
+
+@pytest.mark.parametrize("opt_in", [True, False])
+def test_without_initiative_profiles_every_base_is_the_v0316_one(opt_in):
+    """No `initiativeProfiles` (most driven repos): even an Initiative carrying the label keeps
+    its Epic on main, the Epic's children on `epic-<n>`, the Initiative's own Tasks on main."""
+    gh = _tree({"number": 12, "labels": ["type:task"], "parent": 9},
+               {"number": 13, "labels": ["type:task"], "parent": 6}, opt_in=opt_in)
+    assert s.integration_base(gh, 9, "epic") == "main"
+    assert s.integration_base(gh, 12) == "epic-9"
+    assert s.integration_base(gh, 13) == "main"
+    assert s.epic_base(NoLookups([]), 9) == "main"
+
+
+def test_children_of_an_epic_under_an_unlabelled_initiative_keep_the_epic_branch(opted_in):
+    gh = _tree({"number": 12, "labels": ["type:task"], "parent": 9},
+               {"number": 13, "labels": ["type:task"], "parent": 6}, opt_in=False)
+    assert s.integration_base(gh, 9, "epic") == "main"
+    assert s.integration_base(gh, 12) == "epic-9"
+    assert s.integration_base(gh, 13) == "main"
+
+
+def test_profiles_without_branch_never_look_up_the_epic_base(monkeypatch):
+    """A repo whose profiles only turn test Tasks off has no initiative branch to find."""
+    monkeypatch.setitem(s.PIPELINE, "initiativeProfiles",
+                        [{**PROFILE, "branch": False}])
+    assert s.integration_base(NoLookups([]), 9, "epic") == "main"
+
+
+def test_close_epic_without_initiative_profiles_is_the_v0316_merge_into_main():
+    gh = _tree({"number": 12, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
+    calls = _closing(gh)
+
+    result = s.cmd_close_epic(gh, 9, runner=lambda argv: "")
+
+    assert result["merged"] is True and "base" not in result
+    assert calls["behind_base"] == ["main"]
+    assert calls["created"][0]["base"] == "main"
+    assert calls["created"][0]["body"] == "Integration of every child of #9.\n\nCloses #9"
+
+
+def test_create_lld_tasks_without_initiative_profiles_creates_both_standing_tasks(repo):
+    gh = _tree()  # carries the label, but nothing in config matches it
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", _LLD_WITH_STANDING)
+
+    result = s.cmd_create_lld_tasks(gh, 9, repo_path=str(repo))
+
+    assert [c["key"] for c in result["created"]] == ["greet-endpoint", "it", "e2e"]
+
+
+@pytest.mark.parametrize("opt_in", [True, False])
+def test_a_failed_issue_list_never_picks_an_epic_base(opted_in, opt_in):
+    """A read error while resolving the profile raises: an unlabelled Initiative's Epic is not
+    sent to a branch, nor a labelled one's to main."""
+    gh = ListFails([])
+    with pytest.raises(s.GhError):
+        s.integration_base(gh, 9, "epic")
+    with pytest.raises(s.GhError):
+        s.cmd_sync_branch(gh, ".", 9, "epic", runner=lambda argv: "")
+
+
+def test_a_failed_issue_list_skips_the_epic_sync(opted_in):
+    out = s.sync_epic_if_due(ListFails([]), 9, "run-1", repo_path=".",
+                             runner=lambda argv: pytest.fail(f"ran {argv}"))
+    assert out["synced"] is False and "timed out" in out["error"]
+
+
+def test_a_failed_ancestry_read_never_drops_the_standing_test_tasks(repo, opted_in):
+    gh = AncestryFails([{"number": 6, "labels": ["type:initiative", OPT_IN], "title": "Tijori"},
+                        {"number": 9, "labels": ["type:epic"], "parent": 6}])
+    _push_doc_branch(repo, "epic-9", f"{DOC}/epic-9/lld.md", _LLD_WITH_STANDING)
+    before = set(gh.issues)
+    with pytest.raises(s.GhError):
+        s.cmd_create_lld_tasks(gh, 9, repo_path=str(repo))
+    assert set(gh.issues) == before
+
+
+def test_a_unit_under_no_initiative_is_hinted_with_the_defaults(opted_in, runs_dir):
+    """Regression: a parentless unit (or one under a bare Epic) gets a recorded no-profile hint,
+    so the SubagentStart hook adds no `initiative-profile` line for it."""
+    gh = FakeGh([{"number": 20, "labels": ["type:epic"]},
+                 {"number": 21, "labels": ["type:task"], "parent": 20}])
+    assert s.unit_initiative_profile(gh, 21)["name"] is None
+    hints = _hints(runs_dir)
+    assert hints["21"]["name"] is None and hints["20"]["name"] is None
+
+
+def test_a_failed_profile_read_at_start_stage_forgets_the_stale_hint(opted_in, runs_dir,
+                                                                      monkeypatch):
+    """Regression: a stale `testTasks: false` hint must not outlive a failed re-read."""
+    s._record_hints(s.INITIATIVE_HINTS_FILE,
+                    {10: {"initiative": 6, "name": "tijori", "branch": True,
+                          "testTasks": False}})
+    gh = FakeGh([{"number": 10, "labels": ["type:task"]}])
+    monkeypatch.setattr(s, "cmd_worktree_add", lambda *a, **k: {"path": "/wt"})
+
+    def fails(*a, **k):
+        raise s.GhError("gh: HTTP 502 reading the issue")
+    monkeypatch.setattr(s, "unit_initiative_profile", fails)
+
+    result = s.cmd_start_stage(gh, 10, "development")
+
+    assert "initiative_profile_error" in result
+    assert _hints(runs_dir)["10"] is None
+
+
+def test_without_initiative_profiles_an_initiative_branch_is_not_a_pipeline_unit():
+    assert s._unit_of_branch("initiative-7") is None
+    assert s._unit_of_branch("epic-7") == ("epic", 7)
+
+
+def test_with_initiative_profiles_an_initiative_branch_is_a_pipeline_unit(opted_in):
+    assert s._unit_of_branch("initiative-7") == ("initiative", 7)
