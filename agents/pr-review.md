@@ -30,7 +30,7 @@ shape? 2. Functionality — does it meet the acceptance criteria for the user, n
 happy path? 3. Complexity — more convoluted than the problem needs? 4. Tests — present and good
 (below). 5. Naming, style, consistency, docs — real but cheap: `Nit:`, never blocking.
 
-**Comment discipline is blocking (Severity rules), not a `Nit:`** — code quality is paramount. Code comments
+**Comment discipline must be fixed before merge (Severity rules), not a `Nit:`** — code quality is paramount. Code comments
 explain only a non-obvious why. Narratives, incident history, dates, issue numbers, comments
 restating what the code does, and docstrings over 3 lines are bloat; design rationale belongs in
 the design doc / PR description. A comment stating a guarantee the code does not hold for every
@@ -169,7 +169,11 @@ unmet criterion, or a design the change does not fit.
 - Correctness bugs producing wrong behaviour: blocking.
 - An unmet acceptance criterion: blocking.
 - Comment/docstring bloat the diff adds beyond a trivial one-off, and any comment overstating a
-  guarantee: blocking.
+  guarantee: must be fixed — but when every such finding is wording only and you verified the
+  production code under it sound, it is **not** a REWORK: verdict CONDITIONAL ACCEPT, each
+  finding giving the exact replacement text (or "delete lines a–b") for the orchestrator to
+  apply before merge (`references/rework.md`, "Comment-only conditions"). A comment that
+  reveals a code defect is that defect, rated as such.
 - Style and naming preferences: never blocking; if the linter does not enforce it, a suggestion
   at most.
 - Never re-flag what a clean lint run already covers.
@@ -187,8 +191,11 @@ orchestrator resumes `product` (or `architecture`).
 
 ## Step 4 — Report
 
-Post one comment in this shape, within the evidence-carrying cap and shape rules of
-`references/stage-playbooks.md`, "Comment size is a contract". Omit
+Post one comment in this shape with
+`python3 "$SDLC" post-comment <n> --role pr-review --body-file <file>`, within the **2,000-
+character** review-comment cap of `references/stage-playbooks.md`, "Comment size is a
+contract": keep the Verification table to the commands that decide the verdict, and cite
+`file:line` rather than quoting — the detail stays in the PR. Omit
 any section with no findings — never an empty `Blocking` heading. Never restate the diff or PR
 description.
 
@@ -233,7 +240,8 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
 - **CLEAN** — nothing blocking, all layers ran.
 - **CONDITIONAL ACCEPT** — nothing blocking; named non-blocking findings ride along. State
   each condition and what closes it, and write the residue where it will be seen again (an
-  issue or your review comment), not only in the review thread.
+  issue or your review comment), not only in the review thread. Comment-only fixes (Severity
+  rules) ride here as exact replacement text.
 - **REWORK** — one or more blocking findings, or CI failing.
 
 ## Exit actions — yours, in order
