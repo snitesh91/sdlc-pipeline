@@ -47,3 +47,11 @@ def _no_plugin_version_guard(monkeypatch):
     thread for it, so the guard is off unless a test turns it on."""
     import sdlc_next
     monkeypatch.setattr(sdlc_next, "PLUGIN_VERSION_GUARD", False)
+
+
+@pytest.fixture(autouse=True)
+def _no_verify_exit_head_check(monkeypatch):
+    """verify-exit's pushed-head check reads the unit's dev worktree; most fakes script none,
+    so it is off unless a test turns it on."""
+    import sdlc_next
+    monkeypatch.setattr(sdlc_next, "VERIFY_EXIT_HEAD_CHECK", False)

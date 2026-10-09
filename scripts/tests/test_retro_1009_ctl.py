@@ -60,3 +60,84 @@ def test_cli_wires_update_pr_body(monkeypatch, capsys):
     monkeypatch.setattr(s, "cmd_update_pr_body", lambda *a: seen.append(a) or {"updated": True})
     assert s.main(["update-pr-body", "42", "--body-file", "b.md"]) == 0
     assert seen == [("GH", 42, "b.md")]
+
+
+# --- verify-exit refuses a detached or unpushed unit worktree (reviewer-detached-dev-worktree) ---
+
+from tests.test_v2_phase_tasks import _git  # noqa: E402
+
+
+@pytest.fixture
+def unit_tree(tmp_path, monkeypatch):
+    """A clone with `issue-9` pushed and its dev worktree at the configured path."""
+    monkeypatch.setattr(s, "VERIFY_EXIT_HEAD_CHECK", True)
+    monkeypatch.setitem(s.PIPELINE["worktrees"], "root", str(tmp_path / "wt"))
+    origin, repo = tmp_path / "origin.git", tmp_path / "repo"
+    _git("init", "-q", "--bare", "-b", "main", str(origin))
+    _git("clone", "-q", str(origin), str(repo))
+    for k, v in (("user.email", "t@t"), ("user.name", "t")):
+        _git("config", k, v, cwd=repo)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=repo)
+    _git("push", "-q", "origin", "HEAD:main", cwd=repo)
+    path = s.worktree_path("issue", 9)
+    _git("worktree", "add", "-q", "-b", "issue-9", path, cwd=repo)
+    _git("commit", "-q", "--allow-empty", "-m", "doc", cwd=path)
+    _git("push", "-q", "origin", "issue-9", cwd=path)
+    return str(repo), path
+
+
+def _verify(repo, stage="architecture"):
+    gh = FakeGh([{"number": 9, "stage": stage, "status": "in-progress"}])
+    return s.cmd_verify_exit(gh, repo, 9, stage)
+
+
+def test_verify_exit_passes_a_pushed_unit_worktree(unit_tree):
+    # Positive control: on its branch and pushed.
+    repo, _ = unit_tree
+    result = _verify(repo)
+    assert result.get("ok") is not False and "head_check" not in result
+
+
+def test_verify_exit_refuses_a_detached_unit_worktree(unit_tree):
+    """Regression: a reviewer's `git checkout --detach` in the dev tree left the architect
+    committing on no branch; `git push origin issue-9` pushed nothing and it said 'pushed'."""
+    repo, path = unit_tree
+    _git("checkout", "-q", "--detach", "origin/issue-9", cwd=path)
+    _git("commit", "-q", "--allow-empty", "-m", "rework on a detached head", cwd=path)
+    _git("push", "-q", "origin", "issue-9", cwd=path)  # pushes nothing new
+    result = _verify(repo)
+    assert result["ok"] is False and result["head_check"]["detached"] is True
+    assert "detached HEAD" in result["reason"] and "review-worktree-add" in result["reason"]
+
+
+@pytest.mark.parametrize("stage", ["product", "architecture", "lld", "pr-review"])
+def test_verify_exit_refuses_unpushed_work(unit_tree, stage):
+    repo, path = unit_tree
+    _git("commit", "-q", "--allow-empty", "-m", "not pushed", cwd=path)
+    result = _verify(repo, stage)
+    assert result["ok"] is False and "not pushed" in result["reason"]
+    assert result["head_check"]["local_head"] != result["head_check"]["origin_head"]
+
+
+def test_verify_exit_refuses_a_never_pushed_branch(tmp_path, unit_tree):
+    repo, path = unit_tree
+    _git("push", "-q", "origin", "--delete", "issue-9", cwd=path)
+    _git("fetch", "-q", "--prune", "origin", cwd=path)
+    result = _verify(repo)
+    assert result["ok"] is False and result["head_check"]["origin_head"] is None
+
+
+def test_verify_exit_skips_the_head_check_without_a_dev_worktree(unit_tree):
+    repo, path = unit_tree
+    _git("worktree", "remove", "--force", path, cwd=repo)
+    assert "head_check" not in _verify(repo)
+
+
+def test_review_worktree_add_leaves_the_dev_worktree_on_its_branch(unit_tree):
+    # A design/product reviewer's own detached tree never moves the unit's dev tree.
+    repo, path = unit_tree
+    out = s.cmd_review_worktree_add(9, repo)
+    assert out["path"] != path and out["head"] == _git("rev-parse", "origin/issue-9",
+                                                         cwd=repo).strip()
+    assert _git("symbolic-ref", "--short", "HEAD", cwd=path).strip() == "issue-9"
+    assert s.cmd_release_review_worktree(9, repo)["released"] is True

@@ -7051,6 +7051,52 @@ STAGE_RECORD_FILENAMES = {
 }
 
 
+# verify-exit checks the unit's dev worktree is on its branch and pushed for these stages (the
+# authoring stages, and development's exit, verified as `pr-review`). Tests' fake runners
+# script no worktree, so conftest turns it off; its own tests turn it back on.
+VERIFY_EXIT_HEAD_CHECK = True
+HEAD_CHECKED_STAGES = ("product", "architecture", "lld", "development", "pr-review")
+
+
+def unit_head_problem(issue: int, repo_path: str,
+                      runner: Runner = _default_runner) -> Optional[dict]:
+    """Why the unit's dev worktree does not hold its pushed work, or None: a detached HEAD or
+    another branch there (commits made there are on no `issue-<n>`, so `git push origin
+    issue-<n>` pushes nothing), or a local HEAD that differs from `origin/issue-<n>`. None
+    when no dev worktree is registered or origin cannot be fetched (`skipped`)."""
+    branch, path = issue_branch(issue), worktree_path("issue", issue)
+    try:
+        entry = _registered_worktree(repo_path, path, runner)
+    except GhError as exc:
+        return {"ok": True, "skipped": f"worktree lookup failed: {exc}"}
+    if entry is None:
+        return None
+    if entry["branch"] != branch:
+        held = "a detached HEAD" if entry["branch"] is None else f"branch {entry['branch']}"
+        return {"ok": False, "path": path, "detached": entry["branch"] is None,
+                "reason": f"{path} is on {held}, not {branch}: commits made there are on no "
+                          f"{branch}, and `git push origin {branch}` pushes nothing, so the "
+                          f"work is not on origin. Check out {branch} in {path} (bring any "
+                          f"commits made while detached onto it), push, then re-run. Reviewers "
+                          f"never check out in a unit's dev worktree: they use "
+                          f"review-worktree-add."}
+    remote: Optional[str] = None
+    try:
+        _run_retry_transient(["git", "-C", path, "fetch", "origin", branch], runner)
+        remote = runner(["git", "-C", path, "rev-parse", f"origin/{branch}"]).strip()
+    except GhError as exc:
+        if "couldn't find remote ref" not in str(exc).lower():
+            return {"ok": True, "skipped": f"could not fetch origin/{branch}: {exc}"}
+    local = runner(["git", "-C", path, "rev-parse", "HEAD"]).strip()
+    if local == remote:
+        return None
+    return {"ok": False, "path": path, "local_head": local, "origin_head": remote,
+            "reason": f"{path}'s HEAD {local[:10]} is not origin/{branch} "
+                      f"({remote[:10] if remote else 'absent'}): the stage's work is not pushed "
+                      f"(or origin moved under it). Push {branch} (`git -C {path} push origin "
+                      f"{branch}`), then re-run."}
+
+
 def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_stage: str,
                      pr: Optional[int] = None, runner: Runner = _default_runner) -> dict:
     """Post-handoff check: Stage field matches `expect_stage`, the stage's docs and
@@ -7157,6 +7203,13 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
                     "reason",
                     f"{record_filename} has an unresolved citation -- see "
                     f"result['citations'] for which one and what was cited vs. found.")
+    if VERIFY_EXIT_HEAD_CHECK and expect in HEAD_CHECKED_STAGES:
+        head = unit_head_problem(issue, repo_path, runner)
+        if head is not None:
+            result["head_check"] = head
+            if head.get("ok") is False:
+                result["ok"] = False
+                result.setdefault("reason", head["reason"])
     log = runner(["git", "-C", repo_path, "log", "--oneline", "-5"]).strip()
     result["recent_commits"] = log.splitlines() if log else []
     return result
