@@ -143,7 +143,8 @@ cloud session instead of driving it.
 - **Launchable:** open, not legacy, not blocked by an open issue, no live session, footprint
   disjoint from every live cloud Epic's (the union of its `lld.md` Tasks' footprints, else a
   `## Footprint` in the Epic's body; an unknown one cannot be shown disjoint from a known
-  one), within `parallelism.cloudSessions` (default 3) live sessions repo-wide. An Epic whose
+  one; paths matching `pipeline.placement.softOverlapPaths` never count as overlap), within
+  `parallelism.cloudSessions` (default 3) live sessions repo-wide. An Epic whose
   last session ended waits for new GitHub activity on it (`--relaunch` overrides).
 - **Idempotent:** an Epic with a live session marker is never relaunched (`already_running`).
   `ok: false` with `output_tail` means the CLI printed no session id: the marker records

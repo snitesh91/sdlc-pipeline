@@ -27,6 +27,16 @@ Do this yourself, not via a subagent: read the Product-Roadmap Task's approved
   sibling has merged is cut wrong.
 - Each Epic's body carries a pointer to the Initiative's IRD plus its own explicit scope
   carve-out (the slice of the IRD it covers).
+- **Each Epic's body carries a coarse `## Footprint`** (directory globs, backticked, one per
+  bullet), estimated against the current code at cut time: until its `lld.md` exists it is
+  the only footprint the overlap checks can read, and an Epic with none never launches in
+  parallel (`references/cloud-mode.md`, "Initiative → cloud Epics").
+- **Carve for parallel running.** Set boundaries and `blockedBy` from feature dependencies
+  **and** file hotspots (a migrations index, the app module, a shared route list or test
+  util): Epics that must edit the same hotspot are sequenced, or the hotspot goes to one Epic
+  and the others' bodies state the constraint for their architecture/LLD. A small shared file
+  whose conflict is mechanical to resolve at epic close (a registration line, a docs table)
+  goes in `pipeline.placement.softOverlapPaths` instead — it does not serialise Epics.
 - Create each with `create-issue --parent <initiative-n> --type Epic --priority <P>
   --effort <E>`, Priority and Effort from the approved `product.md`'s sizing
   (`references/operations.md`, "Issue taxonomy").
