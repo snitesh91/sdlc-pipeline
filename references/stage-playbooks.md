@@ -38,7 +38,7 @@ names the exact path.
 
 | File | Written by | Required? |
 |---|---|---|
-| `product.md` | `product` — an Initiative's Product-Roadmap Task, or a standing-epic child | Yes, except a standing child routed past `product`. **Never for an Epic's Task** — its requirements are the Initiative's `product.md` (or the Epic's issue body, engineering-driven). |
+| `product.md` | `product` — an Initiative's Product-Roadmap Task, or a standing-epic child | Yes, except a standing child routed past `product`. **Never for an Epic's Task** — its requirements are the Initiative's `product.md` (or the Epic's issue body, engineering-driven) — except an approved amendment (`references/initiatives.md`, "Amending an approved `product.md`"). |
 | `architecture.md` | `architecture` — an Epic's Architecture-phase (or revision) Task, or a standing-epic child | Yes, except a standing child routed past `architecture` |
 | `lld.md` | `lld` — an Epic's LLD-phase Task only | Always; one `## Task` subsection per Task the Epic will run |
 
@@ -52,7 +52,10 @@ names the exact path.
   needed, say so in your handoff; do not create it.
 - Write each doc so the next stage can work from it alone, without the comment history.
   A doc may hold your working checklist; never use alternate filenames.
-- Edit a doc under `<docRoot>` only with `Edit`/`Write`, never a `python`/`sed` script.
+- Edit a doc under `<docRoot>` only with the `Edit`/`Write` tools — never `python`, `sed`,
+  `awk`, `cat <<EOF` or `echo >` through `Bash`, not even for a "mechanical" change. A tool
+  edit is an exact, reviewable diff of what you meant; a script silently clobbers text it
+  did not match.
 - Every `## Task` subsection of an Epic's `lld.md`, and a standing child's
   `architecture.md`, carries a `## Footprint` section in the exact parseable shape from
   `references/epics.md`, "How to size the Tasks": backticked paths, one per bullet.
