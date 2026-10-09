@@ -1583,7 +1583,10 @@ def _sdlc_run(tmp_path, *args, cwd=None):
     fake.mkdir(exist_ok=True)
     (fake / "claude").write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
     (fake / "claude").chmod(0o755)
-    env = {**os.environ, "PATH": f"{fake}:{os.path.dirname(sys.executable)}:/usr/bin:/bin"}
+    # No inherited $SDLC_CONFIG: scripts/tests' conftest exports the sample config's, which
+    # would win over `cwd`'s config when both suites run in one pytest call.
+    env = {**{k: v for k, v in os.environ.items() if k != "SDLC_CONFIG"},
+           "PATH": f"{fake}:{os.path.dirname(sys.executable)}:/usr/bin:/bin"}
     return subprocess.run([SDLC_RUN, *args], capture_output=True, text=True, env=env, timeout=10,
                           cwd=cwd)
 

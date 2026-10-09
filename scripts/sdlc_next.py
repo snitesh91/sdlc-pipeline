@@ -171,7 +171,10 @@ _PIPELINE_DEFAULTS = {
     # `initiativeEpics`: "cloud" makes a laptop Initiative run launch each runnable Epic in its
     # own cloud session (`launch-cloud-epic`) instead of driving it; `stallMinutes`: a live
     # cloud Epic with no GitHub activity this long is `stalled` in `cloud-status`.
-    "placement": {"cloudLabel": "sdlc:cloud", "initiativeEpics": "local", "stallMinutes": 90},
+    # `softOverlapPaths`: fnmatch globs (e.g. a migrations index, a docs table) whose shared
+    # edits are small to merge at epic close -- footprint overlap there never holds a launch.
+    "placement": {"cloudLabel": "sdlc:cloud", "initiativeEpics": "local", "stallMinutes": 90,
+                  "softOverlapPaths": []},
     # `command`: run by `development` in its worktree, green before `open-dev-pr`
     # (agents/development.md); "" = none.
     "prePr": {"command": ""},
@@ -197,7 +200,10 @@ _PIPELINE_DEFAULTS = {
     # `evidenceCarryForward.paths`: globs a commit after the tested head may touch without
     # invalidating the exploratory evidence (`{docRoot}` expands to `docRoot`).
     "epicClose": {"auto": False,
-                  "evidenceCarryForward": {"paths": ["**/*.md", "docs/**", "{docRoot}/**"]}},
+                  "evidenceCarryForward": {"paths": ["**/*.md", "docs/**", "{docRoot}/**"]},
+                  # Shell command close-epic runs in the epic worktree before the
+                  # exploratory pass (e.g. a dependency install); "" = none.
+                  "prepare": ""},
     # Priority / Effort `create-issue` sets when no flag names one (fields configured only).
     "issueDefaults": {"priority": "Medium", "effort": "Medium"},
     # Stage models and fan-out: one home, hooks/model_policy.json (agent_guard enforces it).
@@ -1964,9 +1970,22 @@ def integration_base_in(issues: dict, issue: int) -> str:
         return "main"
     parent_number = parent["number"]
     parent_entry = issues.get(parent_number)
-    if parent_entry is not None and (is_epic_standing(parent_entry) or is_initiative(parent_entry)):
+    if parent_entry is not None and is_initiative(parent_entry):
+        # A plain child of an Initiative with `branch: true` works where its product code
+        # lives; the Product-Roadmap Task (its docs gate) still integrates into main.
+        if (not _is_roadmap_task(entry)
+                and resolve_initiative_profile(parent_entry)["branch"]):
+            return initiative_branch(parent_number)
+        return "main"
+    if parent_entry is not None and is_epic_standing(parent_entry):
         return "main"
     return epic_branch(parent_number)
+
+
+def _is_roadmap_task(entry: dict) -> bool:
+    """An Initiative's Product-Roadmap Task (cut titled "Product Roadmap",
+    references/initiatives.md)."""
+    return "product roadmap" in str(entry.get("title") or "").lower()
 
 
 def last_transition_to(comments: list, to_role: str,
@@ -2356,16 +2375,66 @@ def clean_epic_worktree(epic: int, repo_path: str = ".",
     return {"cleaned": True, "path": path, "removed": removed}
 
 
+def _refresh_epic_worktree(branch: str, repo_path: str, runner: Runner) -> Optional[dict]:
+    """Fast-forward the epic's live worktree (where the exploratory pass runs) to
+    `origin/<branch>`; None without one. Never raises; a diverged tree is reported."""
+    try:
+        path = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
+        if path is None:
+            return None
+        out = _resume_live_worktree(path, branch, repo_path, runner)
+    except GhError as exc:
+        return {"synced_to_origin": False, "error": True, "reason": str(exc)}
+    return {k: v for k, v in out.items() if k not in ("created", "resumed", "reason")
+            or (k == "reason" and out.get("diverged"))}
+
+
+def _epic_close_prepare(worktree: Optional[dict], shell: Optional[Callable]) -> Optional[dict]:
+    """Run `pipeline.epicClose.prepare` (e.g. a dependency install) in the epic worktree
+    so the exploratory pass finds it ready; None when not configured. Never raises."""
+    command = (PIPELINE["epicClose"].get("prepare") or "").strip()
+    if not command:
+        return None
+    if not worktree or not worktree.get("path") or not worktree.get("synced_to_origin"):
+        return {"command": command, "ok": False, "ran": False,
+                "reason": "no epic worktree at origin's head -- `worktree-add <epic> --unit "
+                          "epic`, then re-run close-epic (or run the command there yourself)"}
+    try:
+        output = (shell or _default_shell)(command, worktree["path"])
+    except GhError as exc:
+        return {"command": command, "ok": False, "ran": True, "path": worktree["path"],
+                "error": str(exc)[-2000:]}
+    return {"command": command, "ok": True, "ran": True, "path": worktree["path"],
+            "output_tail": (output or "")[-500:]}
+
+
+def _sync_initiative_for_close(gh: GitHub, repo_path: str, initiative: int,
+                               runner: Runner) -> dict:
+    """Merge `main` into `initiative-<i>` (clean merges only) before an Epic closes into it,
+    so the epic PR's CI sees main's fixes. A conflict is reported, never forced."""
+    try:
+        out = cmd_sync_branch(gh, repo_path, initiative, unit="initiative", runner=runner,
+                              base="main")
+    except GhError as exc:
+        return {"initiative": initiative, "synced": False, "error": True, "reason": str(exc)}
+    return {k: v for k, v in out.items() if k != "issue"} | {"initiative": initiative}
+
+
 def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                     runner: Runner = _default_runner, carry_forward: bool = True,
-                    clean_worktree: bool = False) -> dict:
+                    clean_worktree: bool = False, shell: Optional[Callable] = None) -> dict:
     """Reconcile the epic branch with `main` (first call, then stop), or merge it once
     closing evidence is recorded (second call). Returns `merged`; refusals carry `reason`.
     Two calls because verification must run between the two merges. Idempotent: once the
     epic PR is MERGED, only the post-merge bookkeeping runs (`recovered`). `carry_forward=False`
     accepts only evidence stamped at the epic head itself. `clean_worktree` runs
     `clean_epic_worktree` right before a reconcile or the merge -- never on a refusal --
-    and refuses the call when the tree holds tracked changes (`worktree_clean`)."""
+    and refuses the call when the tree holds tracked changes (`worktree_clean`).
+    Every result carries the resolved `base`. While verification is still owed (the calls
+    before the exploratory pass): an Epic closing into `initiative-<i>` first merges `main`
+    into it (`initiative_sync`; a conflict refuses the call), the epic's live worktree is
+    fast-forwarded to origin (`epic_worktree`) and `pipeline.epicClose.prepare` runs there
+    (`prepare`)."""
     detail = gh.issue_view(epic)
     if not resolve_profile(detail)["closes"]:
         return {"epic": epic, "merged": False,
@@ -2378,11 +2447,12 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     # the reconcile and the epic PR. Suites the profile defers are not demanded here.
     base = epic_base(gh, epic, all_issues)
     deferred: tuple = ()
+    initiative = None
     if base != "main":
         by_number = {i["number"]: i for i in all_issues}
-        deferred = tuple(resolve_initiative_profile(initiative_of_in(by_number, epic))
-                         ["deferSuites"])
-    target = {"base": base} if base != "main" else {}
+        initiative = initiative_of_in(by_number, epic)
+        deferred = tuple(resolve_initiative_profile(initiative)["deferSuites"])
+    target = {"base": base}
     merged_prs = gh.pr_list_for_branch(branch, state="merged")
     if merged_prs:
         # A repeat call after the merge: `origin/epic-<n>` is gone, so never compare it.
@@ -2409,6 +2479,29 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     if base != "main":
         # An Epic cut before its Initiative opted in: stand the initiative branch up first.
         ensure_branch_on_origin(repo_path, base, runner=runner)
+    verifying = bool(_close_epic_exploratory_problems(gh, epic, branch, carry_forward))
+    if verifying and initiative is not None:
+        # Only while verification is owed: a later call never re-syncs, so a busy main
+        # cannot keep moving the tree under a finished exploratory pass.
+        target["initiative_sync"] = _sync_initiative_for_close(gh, repo_path,
+                                                               initiative["number"], runner)
+        if not target["initiative_sync"].get("synced"):
+            sync = target["initiative_sync"]
+            if not sync.get("base_missing"):
+                return {"epic": epic, "merged": False, "branch": branch, **target,
+                        "reason": f"`{base}` could not take `main` cleanly ("
+                                  + (f"conflict on {', '.join(sync.get('conflicting_files') or [])}"
+                                     if sync.get("conflict") else sync.get("reason", "sync failed"))
+                                  + f") -- resolve it in `worktree-add {initiative['number']} "
+                                    f"--unit initiative`'s tree, push, then re-run close-epic"}
+
+    def ready_tree() -> dict:
+        """The exploratory pass's tree: fast-forwarded, then prepared."""
+        tree = _refresh_epic_worktree(branch, repo_path, runner)
+        out = {"epic_worktree": tree} if tree else {}
+        prepared = _epic_close_prepare(tree, shell)
+        return {**out, **({"prepare": prepared} if prepared else {})}
+
     behind = gh.branch_behind_by(branch, base=base)
     if behind:
         refused = clean_refusal()
@@ -2432,17 +2525,18 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         evidence.pop("_missing_workflows")
         return _with_workspace(
             {"epic": epic, "merged": False, "branch": branch, "reconciled": behind, **target,
-             **evidence, **cleaned,
+             **evidence, **cleaned, **ready_tree(),
              "reason": f"picked up {behind} commit(s) from {base} -- run the exploratory pass "
                        f"against the reconciled branch, then re-run close-epic"},
             ws)
     existing = gh.pr_list_for_branch(branch)
-    if _close_epic_exploratory_problems(gh, epic, branch, carry_forward):
+    if verifying:
         evidence = _close_epic_evidence(gh, epic, branch, children,
                                         existing[0]["number"] if existing else None, carry_forward,
                                         base, deferred)
         evidence.pop("_missing_workflows")
         return {"epic": epic, "merged": False, "branch": branch, **target, **evidence,
+                **ready_tree(),
                 "reason": f"closing verification incomplete: "
                           f"{'; '.join(evidence['missing_verification'])}"}
     if existing:
@@ -5075,6 +5169,38 @@ def _handoff_already_posted(gh: GitHub, issue: int, text: str) -> bool:
 PR_REVIEW_OUTCOMES = ("clean", "rework")
 
 
+def review_escalation(rework_before: int, same_class_before: int, outcome: str,
+                      same_class: bool) -> Optional[dict]:
+    """The escalation report for a review pairing once this round is counted, or None:
+    `recommend` `replace` (context-reset replacement) at the first same-class round or
+    `escalation.replaceAt` consecutive bounces, `needs-human` at a second same-class round or
+    `escalation.needsHumanAt` bounces (references/rework.md). A report only: the orchestrator
+    decides, and goes to `needs-human` when the pairing's replacement is already spent."""
+    if outcome != "rework":
+        return None
+    rounds = rework_before + 1
+    same = same_class_before + (1 if same_class else 0)
+    if same >= 2 or rounds >= ESCALATION["needsHumanAt"]:
+        recommend = "needs-human"
+    elif same >= 1 or rounds >= ESCALATION["replaceAt"]:
+        recommend = "replace"
+    else:
+        return None
+    return {"recommend": recommend, "same_class_rounds": same,
+            "rework_since_last_clean": rounds,
+            "thresholds": {"replace_at": ESCALATION["replaceAt"],
+                           "needs_human_at": ESCALATION["needsHumanAt"]}}
+
+
+def _pairing_counts_or_empty(gh: GitHub, issue: int) -> dict:
+    """`pairing-counts` before a verdict is recorded; `{}` when the thread cannot be read
+    (the record still posts, only without an escalation report)."""
+    try:
+        return cmd_pairing_counts(gh, issue)
+    except GhError:
+        return {}
+
+
 def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary: str,
                          same_class_recurrence: bool = False) -> dict:
     """Post the `pr-review-outcome` marker (`clean` | `rework`, optional same-class flag)
@@ -5091,11 +5217,16 @@ def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary:
     if same_class_recurrence:
         headline += " **Same defect class as an earlier round — escalation candidate.**"
     same_class_field = " same-class:true" if same_class_recurrence else ""
+    before = _pairing_counts_or_empty(gh, issue) if outcome == "rework" else {}
     gh.issue_comment(issue, f"{headline} {summary}\n\n"
                              f"<!-- pr-review-outcome: {outcome}:{pr}"
                              f"{same_class_field} @ {timestamp} -->")
+    escalation = review_escalation(before.get("pr_review_rework_since_last_clean", 0),
+                                   before.get("pr_review_same_class_recurrence_count", 0),
+                                   outcome, same_class_recurrence)
     return {"issue": issue, "pr": pr, "outcome": outcome,
-            "same_class_recurrence": same_class_recurrence, "recorded": True}
+            "same_class_recurrence": same_class_recurrence, "recorded": True,
+            **({"escalation": escalation} if escalation else {})}
 
 
 # Tail of a suite run embedded in an attestation; bounded by GitHub's comment body limit.
@@ -5292,12 +5423,18 @@ def cmd_record_design_review(gh: GitHub, issue: int, role: str, outcome: str,
             gh.pr_comment(design_pr, f"{headline} {summary}")
             head = gh.pr_view(design_pr, fields="headRefOid").get("headRefOid")
             sha_field = f" sha:{head}" if head else ""
+    before = (((_pairing_counts_or_empty(gh, issue).get("design_review") or {}).get(role) or {})
+              if outcome == "rework" else {})
     gh.issue_comment(issue, f"{headline} {summary}\n\n"
                              f"<!-- design-review-outcome: {outcome}:{role}"
                              f"{same_class_field}{sha_field} @ {timestamp} -->")
+    escalation = review_escalation(before.get("rework_since_last_clean", 0),
+                                   before.get("same_class_recurrence_count", 0),
+                                   outcome, same_class_recurrence)
     return {"issue": issue, "unit": "issue", "role": role,
             "outcome": outcome, "same_class_recurrence": same_class_recurrence,
             "recorded": True, **({"design_pr": design_pr} if design_pr else {}),
+            **({"escalation": escalation} if escalation else {}),
             **({"reviewed_sha": sha_field.split(":")[1]} if sha_field else {})}
 
 
@@ -5856,10 +5993,16 @@ class MergeConflict(GhError):
 
 
 def _sync_conflict_key(path: str, branch: str, base: str, files: list, runner: Runner) -> str:
-    """`<base sha>.<branch sha>.<files digest>`: what makes a sync conflict a new one."""
-    shas = [(_origin_sha(path, b, runner) or "none")[:12] for b in (base, branch)]
+    """`<base>.<merge-base sha>.<files digest>`: what makes a sync conflict a new one. Never
+    a head sha: `base` or the branch moving on while the same conflict stands is the same
+    conflict; resolving it (the branch merges `base`) moves the merge-base."""
+    try:
+        fork = runner(["git", "-C", path, "merge-base", f"origin/{base}",
+                       f"origin/{branch}"]).strip() or "none"
+    except GhError:
+        fork = "none"
     digest = hashlib.sha1("\n".join(sorted(files)).encode()).hexdigest()[:12]
-    return ".".join([*shas, digest])
+    return ".".join([base, fork[:12], digest])
 
 
 def _sync_conflict_posted(gh: GitHub, issue: int, branch: str, key: str) -> bool:
@@ -7376,7 +7519,7 @@ def workflow_check_state(checks: list, workflow: str) -> str:
 
 def missing_required_workflows(changed_files: list, checks: list,
                                comments: list = None, head_sha: str = None,
-                               base_ref: Optional[str] = None) -> list:
+                               base_ref: Optional[str] = None, deferred: tuple = ()) -> list:
     """Names of required workflows the PR touches that have neither a passing GHA check
     from that workflow nor a `local-ci` attestation for `head_sha`. A base-scoped entry
     (`bases`) is skipped unless the PR's `base_ref` matches it."""
@@ -7389,10 +7532,24 @@ def missing_required_workflows(changed_files: list, checks: list,
             continue
         if workflow_check_state(checks, spec["workflow"]) == "passing":
             continue
-        if spec.get("suite") in attested:
+        if spec.get("suite") in attested or spec.get("suite") in deferred:
             continue
         missing.append(spec["workflow"])
     return missing
+
+
+def _pr_deferred_suites(gh: WorkItemProvider, head_ref: Optional[str],
+                        base_ref: Optional[str]) -> tuple:
+    """The Initiative profile's `deferSuites` for an epic PR `epic-<n>` -> `initiative-<i>`
+    (what close-epic defers to the initiative -> main merge), else `()`."""
+    head, base = _unit_of_branch(head_ref), _unit_of_branch(base_ref)
+    if not (head and head[0] == "epic" and base and base[0] == "initiative"):
+        return ()
+    try:
+        info = gh.issue_epic_info(base[1])
+    except GhError:
+        return ()
+    return tuple(resolve_initiative_profile(info)["deferSuites"])
 
 
 def base_delta_needs_reattest(base_delta_files: list) -> bool:
@@ -7442,11 +7599,13 @@ def touches_pipeline_config(changed_files: list) -> bool:
 
 def merge_gate_status(changed_files: list, checks: list,
                       comments: list = None, head_sha: str = None,
-                      base_ref: Optional[str] = None) -> tuple:
+                      base_ref: Optional[str] = None, deferred: tuple = ()) -> tuple:
     """`(status, missing_workflows)` for pr-checks and merge-pr. A pending/failed check
-    status wins over `missing-checks`, but `missing` is always returned alongside it."""
+    status wins over `missing-checks`, but `missing` is always returned alongside it.
+    Suites in `deferred` are never missing (`_pr_deferred_suites`)."""
     status = checks_status(checks)
-    missing = missing_required_workflows(changed_files, checks, comments, head_sha, base_ref)
+    missing = missing_required_workflows(changed_files, checks, comments, head_sha, base_ref,
+                                         deferred)
     if status != "passed":
         return status, missing
     return ("missing-checks" if missing else "passed"), missing
@@ -7599,12 +7758,19 @@ def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
     checks = gh.pr_checks(pr_number)
     view = gh.pr_view(pr_number, "comments,headRefOid,baseRefName")
     files = gh.pr_files(pr_number)
+    # An epic PR into its Initiative's branch owes no deferred suite, as in close-epic.
+    deferred: tuple = ()
+    if (_unit_of_branch(view.get("baseRefName")) or ("",))[0] == "initiative":
+        head_ref = gh.pr_view(pr_number, "headRefName").get("headRefName")
+        deferred = _pr_deferred_suites(gh, head_ref, view.get("baseRefName"))
     status, missing = merge_gate_status(
         files, checks,
-        view.get("comments", []), view.get("headRefOid"), view.get("baseRefName"))
+        view.get("comments", []), view.get("headRefOid"), view.get("baseRefName"), deferred)
     infra = enrich_failed_checks(gh, checks)
     result = {"pr": pr_number, "status": status,
               "missing_required_workflows": missing, "checks": checks, "infra_suspect": infra}
+    if deferred:
+        result["deferred_to_initiative"] = list(deferred)
     hints = ([_MISSING_WORKFLOW_HINT] if missing else []) + ([_infra_hint(pr_number)] if infra else [])
     if hints:
         result["hint"] = " ".join(hints)
@@ -7923,6 +8089,23 @@ def _cleanup_local_branch(repo_path: str, branch: str, runner: Runner, safe_refs
     return {"deleted": True}
 
 
+def _repo_path_outside_worktree(repo_path: str, branch: str, runner: Runner) -> str:
+    """`repo_path`, or the main checkout when `repo_path` lies inside the worktree holding
+    `branch` -- that tree is released first, and later `git -C <it>` calls would fail."""
+    try:
+        held = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
+        if not held:
+            return repo_path
+        real, held = os.path.realpath(repo_path), os.path.realpath(held)
+        if real != held and not real.startswith(held + os.sep):
+            return repo_path
+        entries = worktree_entries(repo_path, runner)
+    except (GhError, OSError):
+        return repo_path
+    main = entries[0]["path"] if entries else None
+    return main if main and os.path.realpath(main) != held else repo_path
+
+
 def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = ".",
                  runner: Optional[Runner] = None, base: Optional[str] = None,
                  dry_run: bool = False, shell: Optional[Callable] = None) -> dict:
@@ -7961,6 +8144,8 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
     if _docker_cleanup_enabled():
         # First: a container holding the tree's files (bind mounts) must go before it does.
         out["docker"] = docker_sweep(unit_docker_prefix(number, unit), runner, dry_run)
+    # Every later step runs `git -C repo_path`: never from inside the tree released below.
+    repo_path = _repo_path_outside_worktree(repo_path, branch, runner)
     if unit == "issue":
         out["review_worktree"] = cmd_release_review_worktree(number, repo_path, runner, shell,
                                                              dry_run)
@@ -8863,8 +9048,10 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
     slots. A candidate is `launchable` when it is open, not legacy, not running, not blocked by
     an open issue, not idle since its last session ended (unless `relaunch`), within the cap,
     and its footprint is disjoint from the running and already-chosen Epics' (unverifiable when
-    theirs is known and its own is not). Every other open candidate is in `waiting` with a
-    reason."""
+    theirs is known and its own is not) and from every cloud Epic whose work is not on its base
+    yet (`settled_overlap`; `needs_base_sync`). Footprint entries matching
+    `placement.softOverlapPaths` never collide. Every other open candidate is in `waiting`
+    with a reason."""
     by_number = {i["number"]: i for i in all_issues}
     comments = {} if comments is None else comments
 
@@ -8891,8 +9078,42 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
                 warnings.append(f"git fetch failed ({_first_line(str(e))}); footprints read "
                                 f"from the last fetched origin refs")
         if n not in footprints:
-            footprints[n] = epic_footprint(repo_path, by_number[n], runner, gh=gh)
+            footprints[n] = hard_footprint(epic_footprint(repo_path, by_number[n], runner, gh=gh))
         return footprints[n]
+
+    settled: list = []
+
+    def settled_overlap(n: int) -> Optional[dict]:
+        """An Epic no longer running whose footprint overlaps `n`'s and whose work is not yet
+        on `n`'s base: an open one whose session ended, or a closed one whose merge commit is
+        not an ancestor of `origin/<base>` (`needs_base_sync`)."""
+        mine = footprint_of(n)
+        if not mine:
+            return None
+        if not settled:
+            settled.append([i["number"] for i in all_issues if is_epic(i)
+                            and _cloud_placed(i, by_number) and i["number"] not in running
+                            and (i["state"] == "CLOSED"
+                                 or (sessions.get(i["number"]) or {}).get("ended"))])
+        base = epic_base_in(by_number, n)
+        for m in settled[0]:
+            if m == n or m in launchable:
+                continue
+            theirs = footprint_of(m)
+            if not theirs or not footprint_overlaps(mine, theirs):
+                continue
+            if by_number[m]["state"] != "CLOSED":
+                return {"reason": f"footprint overlaps #{m} (open; its cloud session ended "
+                                  f"before it merged)"}
+            merge = _epic_merge_commit(gh, m)
+            if merge is None or _is_ancestor(repo_path, merge, f"origin/{base}", runner):
+                continue
+            return {"reason": f"footprint overlaps closed #{m}, whose merge {merge[:12]} is not "
+                              f"on origin/{base} yet -- bring it into `{base}` first (an "
+                              f"initiative branch: `sync-branch <i> --unit initiative`), then "
+                              f"launch",
+                    "needs_base_sync": {"epic": m, "merge_commit": merge, "base": base}}
+        return None
 
     launchable, waiting = [], []
     for n in sorted(set(candidates)):
@@ -8926,8 +9147,14 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
                 hit = footprint_collision(footprint_of(n), others)
                 if hit:
                     reason = hit
+        sync = None
+        if reason is None:
+            sync = settled_overlap(n)
+            reason = (sync or {}).get("reason")
         if reason:
-            waiting.append({"epic": n, "reason": reason})
+            waiting.append({"epic": n, "reason": reason,
+                            **({"needs_base_sync": sync["needs_base_sync"]}
+                               if sync and sync.get("needs_base_sync") else {})})
         else:
             launchable.append(n)
     result = {"cap": cap, "free": max(0, cap - len(running)),
@@ -8936,6 +9163,36 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
     if warnings:
         result["warnings"] = warnings
     return result
+
+
+def hard_footprint(footprint: Optional[list]) -> Optional[list]:
+    """`footprint` without the `placement.softOverlapPaths` entries (None stays None)."""
+    soft = PIPELINE["placement"].get("softOverlapPaths") or []
+    if footprint is None or not soft:
+        return footprint
+    return [p for p in footprint
+            if not any(fnmatch.fnmatch(p, g) or fnmatch.fnmatch(_footprint_prefix(p), g)
+                       for g in soft)]
+
+
+def _epic_merge_commit(gh, epic: int) -> Optional[str]:
+    """The merge commit of `epic`'s merged integration PR; None when it never merged."""
+    try:
+        prs = gh.pr_list_for_branch(epic_branch(epic), state="merged")
+        if not prs:
+            return None
+        return ((gh.pr_view(prs[0]["number"], "mergeCommit").get("mergeCommit") or {})
+                .get("oid"))
+    except GhError:
+        return None
+
+
+def _is_ancestor(repo_path: str, commit: str, ref: str, runner: Runner) -> bool:
+    try:
+        runner(["git", "-C", repo_path, "merge-base", "--is-ancestor", commit, ref])
+        return True
+    except GhError:
+        return False
 
 
 def _initiative_epics(all_issues: list, initiative: int) -> list:
@@ -8978,8 +9235,10 @@ def cmd_launch_cloud_epic(gh: GitHub, epic: int, repo_path: str = ".", relaunch:
     survey = cloud_epic_survey(gh, all_issues, [epic], repo_path=repo_path, runner=runner,
                                relaunch=relaunch, comments=comments)
     if epic not in survey["launchable"]:
-        why = next((w["reason"] for w in survey["waiting"] if w["epic"] == epic), "not launchable")
-        return {**result, "refused": True, "reason": why,
+        wait = next((w for w in survey["waiting"] if w["epic"] == epic), {})
+        return {**result, "refused": True, "reason": wait.get("reason", "not launchable"),
+                **({"needs_base_sync": wait["needs_base_sync"]}
+                   if wait.get("needs_base_sync") else {}),
                 "running": [r["epic"] for r in survey["running"]], "cap": survey["cap"]}
     placed = cmd_place(gh, epic, "cloud", repo_path=repo_path, runner=runner)
     if placed.get("refused"):
@@ -10172,8 +10431,15 @@ def cmd_transition(gh: GitHub, issue: int, expect_stage: str, pr: Optional[int] 
                 failed=lambda r: not r.get("pr"))
     if expect_stage in REVIEW_ROLES:
         seq.run("start-comment", lambda: cmd_start_comment(gh, issue, expect_stage))
+    extra = {}
+    if expect_stage == "arch-review":
+        # Top level, resolved even when a step stopped: the unit's profile bar (an Epic
+        # phase-Task's is its Epic's profile), else the global `gates` default.
+        extra["skip_confidence_threshold"] = (
+            (seq.steps.get("start-comment") or {}).get("skip_confidence_threshold")
+            or _profile_for_issue(gh, issue)["gates"]["skipConfidenceThreshold"])
     return seq.report(failed_key="stopped_at", issue=issue, expect_stage=expect_stage,
-                      verified_stage=verify_stage, ready=not seq.stopped)
+                      verified_stage=verify_stage, ready=not seq.stopped, **extra)
 
 
 # `advance-standing --from`: the stage a standing child just finished (`none` = at pickup). A
