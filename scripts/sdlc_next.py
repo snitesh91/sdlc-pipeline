@@ -561,6 +561,12 @@ class GitHub:
     def pr_comment(self, number: int, body: str):
         self._run(["gh", "pr", "comment", str(number), "--repo", self.repo, "--body", body])
 
+    def pr_edit_body(self, number: int, body: str):
+        """Replace a PR's description: REST `PATCH pulls/<n>`, so it works through the cloud
+        proxy too (`gh pr edit` is GraphQL)."""
+        self._run(["gh", "api", "-X", "PATCH", f"repos/{self.repo}/pulls/{number}",
+                   "-f", f"body={body}"])
+
     def issue_create(self, title: str, body: str, labels: list) -> int:
         argv = ["gh", "api", f"repos/{self.repo}/issues", "-f", f"title={title}", "-f", f"body={body}"]
         for l in labels:
@@ -7456,6 +7462,37 @@ def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
     return _with_uncovered(result, files)
 
 
+PR_BODY_CAP = 65_536  # GitHub's PR body limit
+_CLOSES_RE = re.compile(r"^(?:Closes|Fixes|Resolves) #\d+\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def cmd_update_pr_body(gh: GitHub, pr: int, body_file: str) -> dict:
+    """Replace an open PR's description with `body_file`'s text (a rework round keeps the
+    description current). A `Closes #<n>` line the old body had and the new one lacks is kept,
+    so the merge still closes the issue. Refuses a closed/merged PR."""
+    try:
+        with io.open(os.path.expanduser(body_file), encoding="utf-8") as fh:
+            body = fh.read().strip()
+    except OSError as exc:
+        raise GhError(f"--body-file must be a readable file holding the PR description: {exc}")
+    if not body:
+        raise GhError("--body-file is empty -- a PR description must say something")
+    view = gh.pr_view(pr, fields="state,body")
+    if view.get("state") != "OPEN":
+        raise GhError(f"PR #{pr} is {view.get('state')}, not open -- only an open PR's "
+                      f"description is updated")
+    kept = [m.group(0).strip() for m in _CLOSES_RE.finditer(view.get("body") or "")
+            if m.group(0).strip().lower() not in body.lower()]
+    if kept:
+        body = body + "\n\n" + "\n".join(kept)
+    if len(body) > PR_BODY_CAP:
+        return {"pr": pr, "refused": True, "updated": False,
+                "reason": f"the description is {len(body):,} chars, over GitHub's "
+                          f"{PR_BODY_CAP:,}-char PR body limit; nothing was changed"}
+    gh.pr_edit_body(pr, body)
+    return {"pr": pr, "updated": True, "chars": len(body), "kept_closing_lines": kept}
+
+
 def cmd_rerun_checks(gh: GitHub, pr_number: int) -> dict:
     """Re-run the failed/cancelled jobs of every Actions run behind the PR head's failed
     checks (`gh run rerun <run> --failed`, once per run). A rerun that errors is reported in
@@ -10470,6 +10507,12 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("pr-checks")
     p.add_argument("pr", type=int)
     p.set_defaults(func=lambda a: cmd_pr_checks(get_work_item_provider(), a.pr))
+    p = sub.add_parser("update-pr-body",
+                        help="Replace an open pipeline PR's description from a file (REST)")
+    p.add_argument("pr", type=int)
+    p.add_argument("--body-file", required=True, help="File holding the new PR description")
+    p.set_defaults(func=lambda a: cmd_update_pr_body(get_work_item_provider(), a.pr,
+                                                     a.body_file))
     p = sub.add_parser("rerun-checks")
     p.add_argument("pr", type=int)
     p.set_defaults(func=lambda a: cmd_rerun_checks(get_work_item_provider(), a.pr))
