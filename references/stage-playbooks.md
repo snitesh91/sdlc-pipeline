@@ -168,18 +168,23 @@ requirements. Keep comments to a pointer plus a summary.
 
 ### Posting a handoff comment
 
-`product`, `architecture` and `lld` post theirs with
+`product`, `architecture`, `lld` and the review roles (`product-review`, `arch-review`,
+`lld-review`, `pr-review`) post theirs with
 `python3 "$SDLC" post-comment <n> --role <your role> --body-file <file>` — write the text to a
 file first. It is the only way these roles comment; post again every round (rework and
-gate-feedback included) — the stop hook refuses a `done` finish until you have. Review roles and
-`development` use their `record-*` / `handoff-to-pr-review` commands instead.
+gate-feedback included) — the stop hook refuses a `done` finish until you have. A review role
+then runs its `record-*` command too. `development` uses `handoff-to-pr-review` instead.
 
 ### Comment size is a contract
 
 - **Stage handoff comment: ≤ 2,000 characters.** Say what changed, where the doc/commit
   is, and the delta since the last round.
-- **Evidence-carrying comment** (`product-review`, `arch-review`/`lld-review`,
-  `pr-review`, `development`'s handoff): **≤ 6,000 characters.** Findings first, each as
+- **Review comment** (`post-comment` from a review role): **≤ 2,000 characters** — the
+  verdict, then each finding as a title, its `file:line` and the fix in one or two lines. No
+  pasted output or quotes: the detail stays in the PR diff or the committed doc the citation
+  points at.
+- **Evidence-carrying comment** (`development`'s handoff, a `record-*-review` `--summary`):
+  **≤ 6,000 characters.** Findings first, each as
   one heading plus at most three lines (what, why it matters, the fix — described, not
   applied). Non-blocking findings get one line each; the verdict gets one line. Put
   command output and quotes in a `<details>` block trimmed to the lines that prove the
