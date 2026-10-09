@@ -48,6 +48,21 @@ Do this yourself, not via a subagent: read the Product-Roadmap Task's approved
 - Do not cut their phase-Tasks by hand: the Initiative loop returns `cut-phase-tasks` for
   each Epic when it becomes runnable (SKILL.md, "Cutting an Epic's phase-Tasks").
 
+## Amending an approved `product.md`
+
+The Initiative's `product.md` passed Gate A; any change to it is an amendment and needs the
+operator's approval again (an in-session pre-approval counts: `approve-gate
+--by-operator-session`). Two paths:
+
+- **Standalone amendment** — cut a Task under the Initiative (`create-issue --parent
+  <initiative-n> --type Task`). It runs `product` → `product-review` → Gate A like the
+  Product-Roadmap Task, except `product` edits the approved doc in place — name its path
+  (the Product-Roadmap Task's `issue-<r>/product.md`) in the delegation prompt.
+- **An Epic's design needs it** (a non-standing Epic whose scope changes its Initiative's
+  IRD; it has no `product` stage) — its Architecture-phase Task amends that `product.md` on
+  the same design PR, and `arch-review` reviews both docs. Never `skip-gate` it, whatever the
+  confidence: open Gate B so the operator approves the amendment.
+
 ## The Initiative loop
 
 `next-action <initiative>` returns `none` only when nothing is left to do. While cut Epics
