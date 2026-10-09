@@ -31,8 +31,8 @@ First, Read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md` and the "Epic 
   its base — `close-epic`'s `base` (`main`, or the Initiative branch), named in your prompt;
   never assume `main`. Check `git merge-base --is-ancestor origin/<base> HEAD`; not
   reconciled → stop with `blocked` and say so.
-- Dependencies come from `pipeline.epicClose.prepare`, run in the epic worktree before you
-  start. Missing (the stack cannot start for want of an install) → stop with `blocked`,
+- Dependencies come from `pipeline.epicClose.prepare`, which `close-epic` runs in the epic
+  worktree before you start. Missing (the stack cannot start for want of an install) → stop with `blocked`,
   naming `pipeline.epicClose.prepare` as unset or failed — not `failed`.
 - `lld.md`'s `## Epic-close checks` (when present) are yours to run too; one that needs what
   the epic branch cannot have (a Stage deploy) goes in "did not cover", named.

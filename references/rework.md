@@ -143,8 +143,8 @@ at instance level — what the context-reset replacement is for.
   the context-reset replacement, or — if this pairing's replacement is already spent —
   `mark-needs-human`. Name the class, not the instance, in the replacement prompt or the
   reason.
-- **`escalation` in a result decides for you.** When `transition` or a `record-*-review`
-  result carries an `escalation` field (a same-class repeat round), act on it instead of
+- **`escalation` in a result decides for you.** When a `record-design-review` /
+  `record-pr-review` result carries an `escalation` field (`recommend: replace|needs-human`), act on it instead of
   resuming for another round: the context-reset replacement at the first threshold,
   `mark-needs-human` at the second.
 - A verdict that flags a same-class repeat only in prose (e.g. "Same defect class — escalation

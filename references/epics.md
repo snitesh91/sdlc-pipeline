@@ -369,8 +369,8 @@ chunks.
 
 **Closing verification — the exploratory pass** (`sdlc:exploratory`), run in the epic
 branch's worktree (`worktree-add <n> --unit epic`), never the main checkout. Its brief names
-`close-epic`'s `base`; `pipeline.epicClose.prepare` (when set) installs dependencies in that
-worktree first, and the pass also runs `lld.md`'s `## Epic-close checks`. **The pipeline
+`close-epic`'s `base`; `close-epic` runs `pipeline.epicClose.prepare` (when set) in that worktree
+first (its `prepare` result; `ok: false` → fix before the pass), and the pass also runs `lld.md`'s `## Epic-close checks`. **The pipeline
 never runs the full e2e suite** — at close or in any Task; the driven repo runs it outside
 the pipeline (e.g. nightly on its staging environment) and files what fails there.
 `close-epic` never asks for it. `record-epic-verification --kind e2e` is still accepted
