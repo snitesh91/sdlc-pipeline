@@ -42,21 +42,21 @@ Work the axes the doc actually has, in sequence: criteria testability; **complet
 - **Cite `file:line` on every finding** (doc, code, or both) at a location you opened. No citation, no finding.
 - **Severity is a rule:** a missing or untestable acceptance criterion is blocking; a false premise the requirements rest on is blocking; wording, formatting and ordering are never blocking.
 - **Read-only.** Describe the problem and its resolution; never edit the doc — fixing it yourself bypasses the rework valve.
+- **Never `git checkout` or `git switch` in the unit's worktree** — its author resumes there. Read through `origin/` refs (`git show origin/issue-<n>:<path>`, `git diff`), or make a detached review worktree (`python3 "$SDLC" review-worktree-add <n> --repo-path <p>`) and release it at the end (`release-review-worktree <n>`).
 
 ## Output
 
-One handoff comment, within the evidence-carrying cap (`stage-playbooks.md`, "Comment size is a contract"):
+One review comment of **≤ 2,000 characters** (`stage-playbooks.md`, "Comment size is a contract"), posted with `python3 "$SDLC" post-comment <n> --role product-review --body-file <file>`. Cite, don't quote:
 
 ```markdown
 ## Product review — issue #<n> (`product.md`)
 
 ### Scope
-<what you read, and what you verified against the product/codebase>
+<one line: what you read and verified against the product/codebase>
 
 ### 🔴 Blocking
 #### <title> — `<doc or path>:<line>`
-<what is missing/untestable/false, and the consequence>
-**Resolution:** <what would fix it — described, not applied>
+<what is missing/untestable/false, and the consequence> **Resolution:** <described, not applied>
 
 ### 🟡 Non-blocking
 - `<path>:<line>` — <finding>
@@ -69,7 +69,7 @@ CLEAN | REWORK — <one line>
 
 ## Exit actions — yours, performed as your last step
 
-The orchestrator has already posted `start-comment <n> --role product-review`. After posting your comment, run, on either verdict:
+The orchestrator has already posted `start-comment <n> --role product-review`. After posting your comment with `post-comment` (above), run, on either verdict:
 
 ```bash
 python3 "$SDLC" record-design-review <n> --role product-review --outcome clean|rework \
