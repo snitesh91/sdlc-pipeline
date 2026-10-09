@@ -5143,6 +5143,29 @@ def _handoff_already_posted(gh: GitHub, issue: int, text: str) -> bool:
 PR_REVIEW_OUTCOMES = ("clean", "rework")
 
 
+def review_escalation(rework_before: int, same_class_before: int, outcome: str,
+                      same_class: bool) -> Optional[dict]:
+    """The escalation report for a review pairing once this round is counted, or None:
+    `recommend` `replace` (context-reset replacement) at the first same-class round or
+    `escalation.replaceAt` consecutive bounces, `needs-human` at a second same-class round or
+    `escalation.needsHumanAt` bounces (references/rework.md). A report only: the orchestrator
+    decides, and goes to `needs-human` when the pairing's replacement is already spent."""
+    if outcome != "rework":
+        return None
+    rounds = rework_before + 1
+    same = same_class_before + (1 if same_class else 0)
+    if same >= 2 or rounds >= ESCALATION["needsHumanAt"]:
+        recommend = "needs-human"
+    elif same >= 1 or rounds >= ESCALATION["replaceAt"]:
+        recommend = "replace"
+    else:
+        return None
+    return {"recommend": recommend, "same_class_rounds": same,
+            "rework_since_last_clean": rounds,
+            "thresholds": {"replace_at": ESCALATION["replaceAt"],
+                           "needs_human_at": ESCALATION["needsHumanAt"]}}
+
+
 def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary: str,
                          same_class_recurrence: bool = False) -> dict:
     """Post the `pr-review-outcome` marker (`clean` | `rework`, optional same-class flag)
@@ -5159,11 +5182,16 @@ def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary:
     if same_class_recurrence:
         headline += " **Same defect class as an earlier round — escalation candidate.**"
     same_class_field = " same-class:true" if same_class_recurrence else ""
+    before = cmd_pairing_counts(gh, issue) if outcome == "rework" else {}
     gh.issue_comment(issue, f"{headline} {summary}\n\n"
                              f"<!-- pr-review-outcome: {outcome}:{pr}"
                              f"{same_class_field} @ {timestamp} -->")
+    escalation = review_escalation(before.get("pr_review_rework_since_last_clean", 0),
+                                   before.get("pr_review_same_class_recurrence_count", 0),
+                                   outcome, same_class_recurrence)
     return {"issue": issue, "pr": pr, "outcome": outcome,
-            "same_class_recurrence": same_class_recurrence, "recorded": True}
+            "same_class_recurrence": same_class_recurrence, "recorded": True,
+            **({"escalation": escalation} if escalation else {})}
 
 
 # Tail of a suite run embedded in an attestation; bounded by GitHub's comment body limit.
@@ -5303,12 +5331,18 @@ def cmd_record_design_review(gh: GitHub, issue: int, role: str, outcome: str,
             gh.pr_comment(design_pr, f"{headline} {summary}")
             head = gh.pr_view(design_pr, fields="headRefOid").get("headRefOid")
             sha_field = f" sha:{head}" if head else ""
+    before = ((cmd_pairing_counts(gh, issue)["design_review"].get(role) or {})
+              if outcome == "rework" else {})
     gh.issue_comment(issue, f"{headline} {summary}\n\n"
                              f"<!-- design-review-outcome: {outcome}:{role}"
                              f"{same_class_field}{sha_field} @ {timestamp} -->")
+    escalation = review_escalation(before.get("rework_since_last_clean", 0),
+                                   before.get("same_class_recurrence_count", 0),
+                                   outcome, same_class_recurrence)
     return {"issue": issue, "unit": "issue", "role": role,
             "outcome": outcome, "same_class_recurrence": same_class_recurrence,
             "recorded": True, **({"design_pr": design_pr} if design_pr else {}),
+            **({"escalation": escalation} if escalation else {}),
             **({"reviewed_sha": sha_field.split(":")[1]} if sha_field else {})}
 
 

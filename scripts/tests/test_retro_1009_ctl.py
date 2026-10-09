@@ -435,3 +435,38 @@ def test_an_overlap_confined_to_soft_paths_does_not_hold_a_launch(monkeypatch):
                    "body": "## Footprint\n\n- `src/b/**`\n- `docs/t.md`\n"}])
     survey = s.cloud_epic_survey(gh, gh.issue_list(), [3], runner=FakeGit())
     assert survey["launchable"] == [3]
+
+
+# --- 8. a repeated same-class bounce comes back with an escalation report -------------
+
+def _bounce(gh, n, same=False):
+    return s.cmd_record_design_review(gh, n, "arch-review", "rework", "same gap",
+                                      same_class_recurrence=same)
+
+
+def test_record_design_review_reports_escalation_on_same_class_rounds():
+    gh = FakeGh([{"number": 5, "labels": ["type:task"]}])
+    assert "escalation" not in _bounce(gh, 5)                       # round 1
+    second = _bounce(gh, 5, same=True)                               # round 2: same class
+    assert second["escalation"]["recommend"] == "replace"
+    assert second["escalation"]["same_class_rounds"] == 1
+    third = _bounce(gh, 5, same=True)                                # still the same class
+    assert third["escalation"] == {"recommend": "needs-human", "same_class_rounds": 2,
+                                   "rework_since_last_clean": 3,
+                                   "thresholds": {"replace_at": 3, "needs_human_at": 6}}
+
+
+def test_record_pr_review_reports_the_bounce_threshold():
+    gh = FakeGh([{"number": 5, "labels": ["type:task"]}])
+    rounds = [s.cmd_record_pr_review(gh, 5, 70, "rework", "r") for _ in range(3)]
+    assert [("escalation" in r) for r in rounds] == [False, False, True]
+    assert rounds[-1]["escalation"]["recommend"] == "replace"
+
+
+def test_distinct_findings_and_clean_rounds_carry_no_escalation():
+    # Positive control: unrelated rework rounds below the bar, and a clean verdict, report none.
+    gh = FakeGh([{"number": 5, "labels": ["type:task"]}])
+    assert "escalation" not in _bounce(gh, 5)
+    assert "escalation" not in _bounce(gh, 5)
+    assert "escalation" not in s.cmd_record_design_review(gh, 5, "arch-review", "clean", "ok")
+    assert "escalation" not in _bounce(gh, 5)                       # the count reset on clean
