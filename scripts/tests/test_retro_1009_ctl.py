@@ -302,3 +302,35 @@ def test_close_epic_into_main_never_syncs_an_initiative(repo):
     _epic_closing(repo, gh)
     result = s.cmd_close_epic(gh, 9, repo_path=str(repo))
     assert result["merged"] is False and "initiative_sync" not in result
+
+
+# --- 6. pr-checks honours the Initiative profile's deferSuites like close-epic ---------
+
+_DEFER = {"name": "tijori", "match": {"label": "initiative:branch"}, "branch": True,
+          "deferSuites": ["backend"]}
+
+
+def _epic_pr(head, base):
+    gh = FakeGh([{"number": 6, "labels": ["type:initiative", "initiative:branch"]},
+                 {"number": 9, "labels": ["type:epic"], "parent": 6}])
+    gh.pr_checks = lambda n: []
+    gh.pr_files = lambda n: ["backend/app.py"]
+    gh.pr_view = lambda n, fields="": {"comments": [], "headRefOid": "abc1234",
+                                       "baseRefName": base, "headRefName": head}
+    return gh
+
+
+def test_pr_checks_does_not_list_a_deferred_suite_on_an_epic_to_initiative_pr(monkeypatch):
+    monkeypatch.setitem(s.PIPELINE, "initiativeProfiles", [_DEFER])
+    result = s.cmd_pr_checks(_epic_pr("epic-9", "initiative-6"), 38)
+    assert result["missing_required_workflows"] == []
+    assert result["status"] == "passed"
+    assert result["deferred_to_initiative"] == ["backend"]
+
+
+def test_pr_checks_still_demands_the_suite_on_a_pr_into_main(monkeypatch):
+    # Positive control: deferral needs epic -> initiative; into main the suite is owed.
+    monkeypatch.setitem(s.PIPELINE, "initiativeProfiles", [_DEFER])
+    result = s.cmd_pr_checks(_epic_pr("epic-9", "main"), 38)
+    assert result["missing_required_workflows"] and result["status"] == "missing-checks"
+    assert "deferred_to_initiative" not in result

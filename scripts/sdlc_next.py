@@ -7280,7 +7280,7 @@ def workflow_check_state(checks: list, workflow: str) -> str:
 
 def missing_required_workflows(changed_files: list, checks: list,
                                comments: list = None, head_sha: str = None,
-                               base_ref: Optional[str] = None) -> list:
+                               base_ref: Optional[str] = None, deferred: tuple = ()) -> list:
     """Names of required workflows the PR touches that have neither a passing GHA check
     from that workflow nor a `local-ci` attestation for `head_sha`. A base-scoped entry
     (`bases`) is skipped unless the PR's `base_ref` matches it."""
@@ -7293,10 +7293,24 @@ def missing_required_workflows(changed_files: list, checks: list,
             continue
         if workflow_check_state(checks, spec["workflow"]) == "passing":
             continue
-        if spec.get("suite") in attested:
+        if spec.get("suite") in attested or spec.get("suite") in deferred:
             continue
         missing.append(spec["workflow"])
     return missing
+
+
+def _pr_deferred_suites(gh: WorkItemProvider, head_ref: Optional[str],
+                        base_ref: Optional[str]) -> tuple:
+    """The Initiative profile's `deferSuites` for an epic PR `epic-<n>` -> `initiative-<i>`
+    (what close-epic defers to the initiative -> main merge), else `()`."""
+    head, base = _unit_of_branch(head_ref), _unit_of_branch(base_ref)
+    if not (head and head[0] == "epic" and base and base[0] == "initiative"):
+        return ()
+    try:
+        info = gh.issue_epic_info(base[1])
+    except GhError:
+        return ()
+    return tuple(resolve_initiative_profile(info)["deferSuites"])
 
 
 def base_delta_needs_reattest(base_delta_files: list) -> bool:
@@ -7346,11 +7360,13 @@ def touches_pipeline_config(changed_files: list) -> bool:
 
 def merge_gate_status(changed_files: list, checks: list,
                       comments: list = None, head_sha: str = None,
-                      base_ref: Optional[str] = None) -> tuple:
+                      base_ref: Optional[str] = None, deferred: tuple = ()) -> tuple:
     """`(status, missing_workflows)` for pr-checks and merge-pr. A pending/failed check
-    status wins over `missing-checks`, but `missing` is always returned alongside it."""
+    status wins over `missing-checks`, but `missing` is always returned alongside it.
+    Suites in `deferred` are never missing (`_pr_deferred_suites`)."""
     status = checks_status(checks)
-    missing = missing_required_workflows(changed_files, checks, comments, head_sha, base_ref)
+    missing = missing_required_workflows(changed_files, checks, comments, head_sha, base_ref,
+                                         deferred)
     if status != "passed":
         return status, missing
     return ("missing-checks" if missing else "passed"), missing
@@ -7503,12 +7519,19 @@ def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
     checks = gh.pr_checks(pr_number)
     view = gh.pr_view(pr_number, "comments,headRefOid,baseRefName")
     files = gh.pr_files(pr_number)
+    # An epic PR into its Initiative's branch owes no deferred suite, as in close-epic.
+    deferred: tuple = ()
+    if (_unit_of_branch(view.get("baseRefName")) or ("",))[0] == "initiative":
+        head_ref = gh.pr_view(pr_number, "headRefName").get("headRefName")
+        deferred = _pr_deferred_suites(gh, head_ref, view.get("baseRefName"))
     status, missing = merge_gate_status(
         files, checks,
-        view.get("comments", []), view.get("headRefOid"), view.get("baseRefName"))
+        view.get("comments", []), view.get("headRefOid"), view.get("baseRefName"), deferred)
     infra = enrich_failed_checks(gh, checks)
     result = {"pr": pr_number, "status": status,
               "missing_required_workflows": missing, "checks": checks, "infra_suspect": infra}
+    if deferred:
+        result["deferred_to_initiative"] = list(deferred)
     hints = ([_MISSING_WORKFLOW_HINT] if missing else []) + ([_infra_hint(pr_number)] if infra else [])
     if hints:
         result["hint"] = " ".join(hints)
