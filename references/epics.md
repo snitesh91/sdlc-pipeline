@@ -368,7 +368,9 @@ never reaches `main`; merge its design PR). Remaining items: closing verificatio
 chunks.
 
 **Closing verification — the exploratory pass** (`sdlc:exploratory`), run in the epic
-branch's worktree (`worktree-add <n> --unit epic`), never the main checkout. **The pipeline
+branch's worktree (`worktree-add <n> --unit epic`), never the main checkout. Its brief names
+`close-epic`'s `base`; `pipeline.epicClose.prepare` (when set) installs dependencies in that
+worktree first, and the pass also runs `lld.md`'s `## Epic-close checks`. **The pipeline
 never runs the full e2e suite** — at close or in any Task; the driven repo runs it outside
 the pipeline (e.g. nightly on its staging environment) and files what fails there.
 `close-epic` never asks for it. `record-epic-verification --kind e2e` is still accepted
