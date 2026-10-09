@@ -91,7 +91,10 @@ Then Step 4.
 - **Hand-run `gh`:** read with `gh api` GETs (`gh api repos/<repo>/issues/<n>`,
   `.../issues/<n>/comments --paginate`, `.../pulls/<pr>`), never `gh issue view` / `gh pr view`.
   Write only through `python3 "$SDLC" <command>`; a reply on a PR is
-  `comment <pr> --body-file <f>`.
+  `comment <pr> --body-file <f>`. Control-plane writes work in the cloud. A delegation prompt
+  says exactly "read GitHub with `gh api` GETs; write only through `python3 "$SDLC"`
+  commands" — never "GETs only", which agents read as "no writes" and then misdiagnose a
+  control-plane failure.
 - **Token:** `GH_TOKEN` and `GITHUB_TOKEN` start as a proxy placeholder; the SessionStart hook
   overrides both from `tokenEnv` (e.g. `SDLC_GH_TOKEN`). The proxy decides access either way.
 
@@ -143,7 +146,8 @@ cloud session instead of driving it.
 - **Launchable:** open, not legacy, not blocked by an open issue, no live session, footprint
   disjoint from every live cloud Epic's (the union of its `lld.md` Tasks' footprints, else a
   `## Footprint` in the Epic's body; an unknown one cannot be shown disjoint from a known
-  one), within `parallelism.cloudSessions` (default 3) live sessions repo-wide. An Epic whose
+  one; paths matching `pipeline.placement.softOverlapPaths` never count as overlap), within
+  `parallelism.cloudSessions` (default 3) live sessions repo-wide. An Epic whose
   last session ended waits for new GitHub activity on it (`--relaunch` overrides).
 - **Idempotent:** an Epic with a live session marker is never relaunched (`already_running`).
   `ok: false` with `output_tail` means the CLI printed no session id: the marker records

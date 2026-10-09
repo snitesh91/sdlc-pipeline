@@ -1,8 +1,17 @@
 """SubagentStart: tell every sdlc:* agent where the control plane, docs and references are."""
 import os
 
-from _common import (CONFIG_DIRS, RESULT_FORMAT, agent_transcript, emit, first_prompt, load_json,
-                     plugin_root, prompt_header, read_input, repo_config, run, runs_dir, sdlc_role)
+from _common import (CONFIG_DIRS, RESULT_FORMAT, agent_transcript, cloud_session, emit,
+                     first_prompt, load_json, plugin_root, prompt_header, read_input, repo_config,
+                     run, runs_dir, sdlc_role)
+
+# A cloud session's GitHub rule. "GETs only" was read as "no GitHub writes at all", so agents
+# blamed it for a control-plane failure and never posted their own comments.
+CLOUD_GITHUB_LINE = (
+    'sdlc: cloud session: read GitHub with `gh api` GETs (`gh issue`/`gh pr` subcommands fail '
+    'through the proxy); write only through `python3 "$SDLC"` commands -- they work here '
+    '(post-comment, open-dev-pr, record-local-ci, ...), so a failing one is a control-plane '
+    'error to report as it is, not a ban on writes.')
 
 # Written by sdlc_next.py (`doc_roots_for`) in the run-state directory: unit -> resolved roots.
 DOC_ROOT_HINTS_FILE = "doc-roots.cache"
@@ -115,6 +124,8 @@ def main() -> int:
             f"{unit if unit is not None else '<your issue>'} and use its docRoot, "
             f"requirementsDir and docTemplates instead of the line above.")
     lines += initiative_lines(config, data)
+    if cloud_session():
+        lines.append(CLOUD_GITHUB_LINE)
     lines += [
         f"sdlc: ${{CLAUDE_PLUGIN_ROOT}} is {root}; its references are "
         f"{os.path.join(root, 'references')}.",

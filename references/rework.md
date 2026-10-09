@@ -143,12 +143,25 @@ at instance level — what the context-reset replacement is for.
   the context-reset replacement, or — if this pairing's replacement is already spent —
   `mark-needs-human`. Name the class, not the instance, in the replacement prompt or the
   reason.
+- **`escalation` in a result decides for you.** When a `record-design-review` /
+  `record-pr-review` result carries an `escalation` field (`recommend: replace|needs-human`), act on it instead of
+  resuming for another round: the context-reset replacement at the first threshold,
+  `mark-needs-human` at the second.
 - A verdict that flags a same-class repeat only in prose (e.g. "Same defect class — escalation
   candidate"), with no marker: on its first round, resume with the class-at-root instruction
   below; flagged again on the next consecutive round, escalate as if the count were 1.
 - Every resume message on such a pairing asks the agent to fix the class at the root
   (e.g. derive the guarded set live so an unknown case fails instead of passing), not
   the listed case.
+
+## Comment-only conditions
+
+A `pr-review` CONDITIONAL ACCEPT whose conditions are comment/docstring wording only, with
+the production code verified sound, is not a rework round (`agents/pr-review.md`, "Severity
+rules"). Apply each stated replacement yourself with `Edit` in the unit's worktree, commit,
+push, wait for the required checks (`pr-checks`; re-attest a suite the push staled), then
+`merge-pr` — no `development` resume, no second review. A condition without exact text, or
+one touching code, goes back to `development` as a normal round.
 
 ## Exception — test-only findings may merge-and-file (`pr-review` <-> `development` only)
 

@@ -201,7 +201,7 @@ def test_close_epic_without_the_opt_in_still_merges_into_main(opted_in):
 
     result = s.cmd_close_epic(gh, 9, runner=lambda argv: "")
 
-    assert result["merged"] is True and "base" not in result
+    assert result["merged"] is True and result["base"] == "main"
     assert calls["created"][0]["base"] == "main"
 
 
@@ -444,7 +444,7 @@ def test_close_epic_without_initiative_profiles_is_the_v0316_merge_into_main():
 
     result = s.cmd_close_epic(gh, 9, runner=lambda argv: "")
 
-    assert result["merged"] is True and "base" not in result
+    assert result["merged"] is True and result["base"] == "main"
     assert calls["behind_base"] == ["main"]
     assert calls["created"][0]["base"] == "main"
     assert calls["created"][0]["body"] == "Integration of every child of #9.\n\nCloses #9"

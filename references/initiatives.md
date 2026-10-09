@@ -27,6 +27,16 @@ Do this yourself, not via a subagent: read the Product-Roadmap Task's approved
   sibling has merged is cut wrong.
 - Each Epic's body carries a pointer to the Initiative's IRD plus its own explicit scope
   carve-out (the slice of the IRD it covers).
+- **Each Epic's body carries a coarse `## Footprint`** (directory globs, backticked, one per
+  bullet), estimated against the current code at cut time: until its `lld.md` exists it is
+  the only footprint the overlap checks can read, and an Epic with none never launches in
+  parallel (`references/cloud-mode.md`, "Initiative → cloud Epics").
+- **Carve for parallel running.** Set boundaries and `blockedBy` from feature dependencies
+  **and** file hotspots (a migrations index, the app module, a shared route list or test
+  util): Epics that must edit the same hotspot are sequenced, or the hotspot goes to one Epic
+  and the others' bodies state the constraint for their architecture/LLD. A small shared file
+  whose conflict is mechanical to resolve at epic close (a registration line, a docs table)
+  goes in `pipeline.placement.softOverlapPaths` instead — it does not serialise Epics.
 - Create each with `create-issue --parent <initiative-n> --type Epic --priority <P>
   --effort <E>`, Priority and Effort from the approved `product.md`'s sizing
   (`references/operations.md`, "Issue taxonomy").
@@ -37,6 +47,21 @@ Do this yourself, not via a subagent: read the Product-Roadmap Task's approved
   loop reads only these edges, never `product.md`.
 - Do not cut their phase-Tasks by hand: the Initiative loop returns `cut-phase-tasks` for
   each Epic when it becomes runnable (SKILL.md, "Cutting an Epic's phase-Tasks").
+
+## Amending an approved `product.md`
+
+The Initiative's `product.md` passed Gate A; any change to it is an amendment and needs the
+operator's approval again (an in-session pre-approval counts: `approve-gate
+--by-operator-session`). Two paths:
+
+- **Standalone amendment** — cut a Task under the Initiative (`create-issue --parent
+  <initiative-n> --type Task`). It runs `product` → `product-review` → Gate A like the
+  Product-Roadmap Task, except `product` edits the approved doc in place — name its path
+  (the Product-Roadmap Task's `issue-<r>/product.md`) in the delegation prompt.
+- **An Epic's design needs it** (a non-standing Epic whose scope changes its Initiative's
+  IRD; it has no `product` stage) — its Architecture-phase Task amends that `product.md` on
+  the same design PR, and `arch-review` reviews both docs. Never `skip-gate` it, whatever the
+  confidence: open Gate B so the operator approves the amendment.
 
 ## The Initiative loop
 

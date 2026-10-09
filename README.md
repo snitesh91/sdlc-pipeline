@@ -126,10 +126,12 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `pipeline.prePr.command` | `""` | Pre-PR check `development` runs green in its worktree, with `PRE_PR_BASE=origin/<PR base>` exported, before `open-dev-pr` (`agents/development.md`) |
 | `pipeline.retro.parkIssue` | unset | Open issue `park-finding` parks retro findings on (`references/retro.md`); issues labelled `pipeline.labels.retro` (`sdlc:retro`) are never pipeline work |
 | `pipeline.placement.stallMinutes` | 90 | A live cloud Epic with no GitHub activity this long is `stalled` in `cloud-status` |
+| `pipeline.placement.softOverlapPaths` | `[]` | fnmatch globs (e.g. a migrations index, a docs table) dropped from Epic footprints before `launch-cloud-epic`'s overlap check: overlap confined to them never holds a launch |
 | `pipeline.humanChannel` | `github` | Where the operator answers: `github` (needs-human, gate PRs) or `session` (the orchestrator asks with `AskUserQuestion` and records the answer; `references/cloud-mode.md`, "Human channel") |
 | `pipeline.orchestrator.model` | `hooks/model_policy.json` (`sonnet`) | Model `sdlc-run` starts the orchestrator on, and the one the session-start hook expects; a family (`opus`) or a full model id |
 | `pipeline.models.<role>` / `pipeline.fanout.<role>` | `hooks/model_policy.json` | Model per stage; which reviews fan out, how wide, at which model |
 | `pipeline.epicClose.auto` | `false` | Whether the orchestrator closes a verified epic itself |
+| `pipeline.epicClose.prepare` | `""` | Shell command `close-epic` runs in the epic worktree before the exploratory pass (e.g. a dependency install); reported as `prepare` |
 | `pipeline.issueDefaults.priority` / `.effort` | `Medium` / `Medium` | Priority / Effort `create-issue` sets when no flag or lld line names one |
 | `projectFields.issueTypeIds` | — | Native Issue Type ids; `create-issue` refuses a type missing here |
 | `projectFields.priorityFieldId` / `.priorityOptionIds` / `.effortFieldId` / `.effortOptionIds` | unset | Optional Priority / Effort fields; when set, `create-issue` writes them |

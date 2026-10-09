@@ -368,7 +368,9 @@ never reaches `main`; merge its design PR). Remaining items: closing verificatio
 chunks.
 
 **Closing verification — the exploratory pass** (`sdlc:exploratory`), run in the epic
-branch's worktree (`worktree-add <n> --unit epic`), never the main checkout. **The pipeline
+branch's worktree (`worktree-add <n> --unit epic`), never the main checkout. Its brief names
+`close-epic`'s `base`; `close-epic` runs `pipeline.epicClose.prepare` (when set) in that worktree
+first (its `prepare` result; `ok: false` → fix before the pass), and the pass also runs `lld.md`'s `## Epic-close checks`. **The pipeline
 never runs the full e2e suite** — at close or in any Task; the driven repo runs it outside
 the pipeline (e.g. nightly on its staging environment) and files what fails there.
 `close-epic` never asks for it. `record-epic-verification --kind e2e` is still accepted
@@ -411,7 +413,10 @@ stable pass of them (its evidence goal — one zero-retry run is not stability);
 **Close-blocker lane — only with operator authorisation.** A Blocker/Critical fix that
 passes the *fits* test ("Architecture deviation escalation") may skip `lld` and go
 straight to `set-stage <n> --stage development` against the epic branch; without the
-operator's say-so it runs the full lane. A fix that lands on `epic-<n>` after the tested head
+operator's say-so it runs the full lane. A design gap found in this lane, however small (one
+missing rule), goes through `open-arch-revision` ("Architecture deviation escalation"); never
+ask `development` to edit `epic-<n>/architecture.md` or `lld.md`, and never route such an edit
+to `pr-review` as a design check. A fix that lands on `epic-<n>` after the tested head
 is judged by "Evidence carry-forward" above: `close-epic`'s `evidence` field says what still
 stands and what must be re-run and re-recorded.
 

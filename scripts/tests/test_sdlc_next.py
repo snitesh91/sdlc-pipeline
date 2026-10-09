@@ -1410,7 +1410,10 @@ def test_record_pr_review_embeds_the_same_class_marker_and_pairing_counts_reads_
         def issue_comment(self, issue, body):
             posted["body"] = body
 
-    gh = RecordingGitHub(runner=ScriptedRunner({}))
+    gh = RecordingGitHub(runner=ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", REPO,
+         "--json", "number,title,labels,body,state,comments"): json.dumps({"comments": []}),
+    }))
     result = cmd_record_pr_review(gh, 9, 42, "rework", "same miss again",
                                   same_class_recurrence=True)
     assert result["same_class_recurrence"] is True
@@ -2007,7 +2010,7 @@ def test_open_dev_pr_creates_draft_pr_with_closes_and_sets_stage_field_to_pr_rev
 
 
 def test_open_dev_pr_reuses_an_already_open_pr_instead_of_opening_a_duplicate():
-    """A second open-dev-pr on the same branch reuses the open PR."""
+    """A second open-dev-pr on the same branch reuses the open PR (its comment is posted)."""
     from sdlc_next import GitHub, cmd_open_dev_pr
     from tests.test_sdlc_next import ScriptedRunner
     runner = ScriptedRunner({
@@ -2015,6 +2018,10 @@ def test_open_dev_pr_reuses_an_already_open_pr_instead_of_opening_a_duplicate():
          "--state", "open", "--json", "number,isDraft,headRefName,title,url"):
             json.dumps([{"number": 41, "isDraft": True, "headRefName": "issue-9",
                          "title": "Add widget", "url": "https://github.com/x/y/pull/41"}]),
+        ("gh", "issue", "view", "9", "--repo", "owner/repo",
+         "--json", "number,title,labels,body,state,comments"):
+            json.dumps({"comments": [{"body": "\u2705 Done. Draft PR: #41 \u2014 what was "
+                                              "built and why is in the PR description."}]}),
     })
     gh = GitHub(runner=runner)
     result = cmd_open_dev_pr(gh, issue=9, title="Add widget", body="Implements the widget.",
@@ -2973,7 +2980,8 @@ def test_sync_branch_returns_conflict_result_without_raising_and_posts_marker():
         ("git", "-C", "/repo", "diff", "--name-only", "--diff-filter=U"): "src/a.ts\n",
         ("git", "-C", "/repo", "merge", "--abort"): "",
     })
-    runner.prefix_responses = {("git", "-C", "/repo", "rev-parse"): "abc\n"}
+    runner.prefix_responses = {("git", "-C", "/repo", "rev-parse"): "abc\n",
+                               ("git", "-C", "/repo", "merge-base"): "abc\n"}
     runner.fail_on = {("git", "-C", "/repo", "merge", "origin/main")}
     gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([_issue(9)])})
     gh_runner.prefix_responses = {("gh", "issue", "comment", "9"): "",

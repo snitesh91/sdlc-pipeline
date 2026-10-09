@@ -38,7 +38,7 @@ names the exact path.
 
 | File | Written by | Required? |
 |---|---|---|
-| `product.md` | `product` — an Initiative's Product-Roadmap Task, or a standing-epic child | Yes, except a standing child routed past `product`. **Never for an Epic's Task** — its requirements are the Initiative's `product.md` (or the Epic's issue body, engineering-driven). |
+| `product.md` | `product` — an Initiative's Product-Roadmap Task, or a standing-epic child | Yes, except a standing child routed past `product`. **Never for an Epic's Task** — its requirements are the Initiative's `product.md` (or the Epic's issue body, engineering-driven) — except an approved amendment (`references/initiatives.md`, "Amending an approved `product.md`"). |
 | `architecture.md` | `architecture` — an Epic's Architecture-phase (or revision) Task, or a standing-epic child | Yes, except a standing child routed past `architecture` |
 | `lld.md` | `lld` — an Epic's LLD-phase Task only | Always; one `## Task` subsection per Task the Epic will run |
 
@@ -52,7 +52,10 @@ names the exact path.
   needed, say so in your handoff; do not create it.
 - Write each doc so the next stage can work from it alone, without the comment history.
   A doc may hold your working checklist; never use alternate filenames.
-- Edit a doc under `<docRoot>` only with `Edit`/`Write`, never a `python`/`sed` script.
+- Edit a doc under `<docRoot>` only with the `Edit`/`Write` tools — never `python`, `sed`,
+  `awk`, `cat <<EOF` or `echo >` through `Bash`, not even for a "mechanical" change. A tool
+  edit is an exact, reviewable diff of what you meant; a script silently clobbers text it
+  did not match.
 - Every `## Task` subsection of an Epic's `lld.md`, and a standing child's
   `architecture.md`, carries a `## Footprint` section in the exact parseable shape from
   `references/epics.md`, "How to size the Tasks": backticked paths, one per bullet.
@@ -165,18 +168,20 @@ requirements. Keep comments to a pointer plus a summary.
 
 ### Posting a handoff comment
 
-`product`, `architecture` and `lld` post theirs with
+`product`, `architecture`, `lld` and the review roles (`product-review`, `arch-review`,
+`lld-review`, `pr-review`) post theirs with
 `python3 "$SDLC" post-comment <n> --role <your role> --body-file <file>` — write the text to a
 file first. It is the only way these roles comment; post again every round (rework and
-gate-feedback included) — the stop hook refuses a `done` finish until you have. Review roles and
-`development` use their `record-*` / `handoff-to-pr-review` commands instead.
+gate-feedback included) — the stop hook refuses a `done` finish until you have. A review role
+then runs its `record-*` command too. `development` uses `handoff-to-pr-review` instead.
 
 ### Comment size is a contract
 
 - **Stage handoff comment: ≤ 2,000 characters.** Say what changed, where the doc/commit
   is, and the delta since the last round.
-- **Evidence-carrying comment** (`product-review`, `arch-review`/`lld-review`,
-  `pr-review`, `development`'s handoff): **≤ 6,000 characters.** Findings first, each as
+- **Evidence-carrying comment** (a review role's `post-comment`, `development`'s handoff, a
+  `record-*-review` `--summary`):
+  **≤ 6,000 characters.** Findings first, each as
   one heading plus at most three lines (what, why it matters, the fix — described, not
   applied). Non-blocking findings get one line each; the verdict gets one line. Put
   command output and quotes in a `<details>` block trimmed to the lines that prove the

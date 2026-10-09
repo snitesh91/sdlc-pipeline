@@ -363,7 +363,7 @@ The agent must *have* (not necessarily be pasted):
 1. The unit's number, title, body, full comment thread; for a phase-Task also its
    parent's number, title, body. **For anything large, give the `gh` command that
    fetches it** — pasted threads truncate prompts. In a cloud session that is a `gh api`
-   GET, never `gh issue view` (`references/cloud-mode.md`, "GitHub access in the cloud").
+   GET (reads only; writes go through `python3 "$SDLC"`), never `gh issue view` (`references/cloud-mode.md`, "GitHub access in the cloud").
 2. The exact doc path it owns (e.g. `<docRoot>/epic-<e>/lld.md` for an Epic's phase-Task,
    `<docRoot>/issue-<n>/product.md` otherwise). With per-product `docRoots`, `<docRoot>` is
    the unit's own: `start-stage`'s `doc_root`, or `python3 "$SDLC" doc-root <n>`. **For a functional

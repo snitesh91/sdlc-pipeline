@@ -283,7 +283,9 @@ def test_unchanged_epic_conflict_is_not_reposted_by_a_new_run(repo, runs):
     assert sum("sync-conflict: epic-9" in c for c in gh.comments_on(9)) == 1
 
 
-def test_a_moved_main_reposts_the_conflict(repo, runs):
+def test_a_moved_main_does_not_repost_the_same_conflict(repo, runs):
+    # Retro 2026-10-09 (sync-conflict-duplicate-post): main moving on while the same
+    # conflict stands is no new conflict -- the key carries no head sha.
     gh = _epic_tree()
     _conflicted_epic(repo)
     s.sync_epic_if_due(gh, 9, "run-1", str(repo))
@@ -291,8 +293,8 @@ def test_a_moved_main_reposts_the_conflict(repo, runs):
 
     moved = s.sync_epic_if_due(gh, 9, "run-1", str(repo))
 
-    assert moved["conflict"] and "already_posted" not in moved
-    assert sum("sync-conflict: epic-9" in c for c in gh.comments_on(9)) == 2
+    assert moved["conflict"] and moved["already_posted"] is True
+    assert sum("sync-conflict: epic-9" in c for c in gh.comments_on(9)) == 1
 
 
 # --- 8. merged-via and the development handoff are never double-posted ---

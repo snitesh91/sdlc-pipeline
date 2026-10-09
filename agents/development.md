@@ -76,6 +76,9 @@ comment's criterion→test map.
 - **Every map row's assertion names the criterion's own discriminating value** — the expected
   constant, string, status, count or field — not merely its type, shape or presence. An
   assertion that would pass for a sibling's output does not cover the criterion.
+- **Every criterion also gets a test for its failure or repeat case** — the dependency down,
+  the empty input, the second run over existing state — not only the success path. Map it as
+  its own row. Most `pr-review` bounces are a failure path nobody ran.
 - **One positive control per family.** Where several criteria share an assertion shape (sibling
   constants, error codes, states), make the code return a sibling of the correct value, run the
   family's tests, and confirm the right one goes red. A family that stays green is a finding.
@@ -244,7 +247,8 @@ included.
    integration/IT tier — those tests run against compiled `dist`, so a green run on a stale
    build proves nothing.
 8. **Test gates from "How to write the tests"** — criterion→test map complete with
-   discriminating assertions, family controls run, guards mutation-checked, tree clean.
+   discriminating assertions, a failure/repeat-case test per criterion, family controls run,
+   guards mutation-checked, tree clean.
 
 ## If you are a context-reset replacement
 
@@ -260,7 +264,9 @@ else is settled; do not reopen it.
 2. `python3 "$SDLC" open-dev-pr <n> --title "..." --body "..." --summary "..."` — opens the draft
    PR (on a rework round it reports the open one, `created: false`); it does not queue the
    review (step 5 does). A verify-only Task with no code change adds `--allow-empty`; its body
-   states what was verified and the evidence.
+   states what was verified and the evidence. On a rework round whose change alters what the
+   description says (an added file, a new delta, a changed verification step), rewrite it:
+   `python3 "$SDLC" update-pr-body <pr> --body-file <file>` — the description is your record.
 3. For **each suite the config requires a local attestation for** that this round ran (suite
    keys from the config's `requiredWorkflows[].suite`; which ones →
    `references/operations.md`, "Local-CI attestation"), on the **current head, after the last
