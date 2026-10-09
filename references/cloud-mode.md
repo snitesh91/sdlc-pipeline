@@ -91,7 +91,10 @@ Then Step 4.
 - **Hand-run `gh`:** read with `gh api` GETs (`gh api repos/<repo>/issues/<n>`,
   `.../issues/<n>/comments --paginate`, `.../pulls/<pr>`), never `gh issue view` / `gh pr view`.
   Write only through `python3 "$SDLC" <command>`; a reply on a PR is
-  `comment <pr> --body-file <f>`.
+  `comment <pr> --body-file <f>`. Control-plane writes work in the cloud. A delegation prompt
+  says exactly "read GitHub with `gh api` GETs; write only through `python3 "$SDLC"`
+  commands" — never "GETs only", which agents read as "no writes" and then misdiagnose a
+  control-plane failure.
 - **Token:** `GH_TOKEN` and `GITHUB_TOKEN` start as a proxy placeholder; the SessionStart hook
   overrides both from `tokenEnv` (e.g. `SDLC_GH_TOKEN`). The proxy decides access either way.
 

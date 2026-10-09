@@ -9,7 +9,8 @@
   or write the custom Stage/Pipeline Status fields.
 - `gh` reads and comments work; issue creation is `create-issue` only ("Issue taxonomy").
 - In a cloud session GraphQL and every `gh issue`/`gh pr` subcommand are blocked: read with
-  `gh api` GETs (`references/cloud-mode.md`, "GitHub access in the cloud").
+  `gh api` GETs, write only through `python3 "$SDLC"` commands (`references/cloud-mode.md`,
+  "GitHub access in the cloud").
 - The pipeline neither reads nor writes Projects v2 board state; Pipeline Status is the
   only status it maintains (`references/epics.md`, "Epic board Status").
 
