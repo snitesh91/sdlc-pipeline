@@ -1410,7 +1410,10 @@ def test_record_pr_review_embeds_the_same_class_marker_and_pairing_counts_reads_
         def issue_comment(self, issue, body):
             posted["body"] = body
 
-    gh = RecordingGitHub(runner=ScriptedRunner({}))
+    gh = RecordingGitHub(runner=ScriptedRunner({
+        ("gh", "issue", "view", "9", "--repo", REPO,
+         "--json", "number,title,labels,body,state,comments"): json.dumps({"comments": []}),
+    }))
     result = cmd_record_pr_review(gh, 9, 42, "rework", "same miss again",
                                   same_class_recurrence=True)
     assert result["same_class_recurrence"] is True

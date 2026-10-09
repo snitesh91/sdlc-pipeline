@@ -5166,6 +5166,15 @@ def review_escalation(rework_before: int, same_class_before: int, outcome: str,
                            "needs_human_at": ESCALATION["needsHumanAt"]}}
 
 
+def _pairing_counts_or_empty(gh: GitHub, issue: int) -> dict:
+    """`pairing-counts` before a verdict is recorded; `{}` when the thread cannot be read
+    (the record still posts, only without an escalation report)."""
+    try:
+        return cmd_pairing_counts(gh, issue)
+    except GhError:
+        return {}
+
+
 def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary: str,
                          same_class_recurrence: bool = False) -> dict:
     """Post the `pr-review-outcome` marker (`clean` | `rework`, optional same-class flag)
@@ -5182,7 +5191,7 @@ def cmd_record_pr_review(gh: GitHub, issue: int, pr: int, outcome: str, summary:
     if same_class_recurrence:
         headline += " **Same defect class as an earlier round — escalation candidate.**"
     same_class_field = " same-class:true" if same_class_recurrence else ""
-    before = cmd_pairing_counts(gh, issue) if outcome == "rework" else {}
+    before = _pairing_counts_or_empty(gh, issue) if outcome == "rework" else {}
     gh.issue_comment(issue, f"{headline} {summary}\n\n"
                              f"<!-- pr-review-outcome: {outcome}:{pr}"
                              f"{same_class_field} @ {timestamp} -->")
@@ -5331,7 +5340,7 @@ def cmd_record_design_review(gh: GitHub, issue: int, role: str, outcome: str,
             gh.pr_comment(design_pr, f"{headline} {summary}")
             head = gh.pr_view(design_pr, fields="headRefOid").get("headRefOid")
             sha_field = f" sha:{head}" if head else ""
-    before = ((cmd_pairing_counts(gh, issue)["design_review"].get(role) or {})
+    before = (((_pairing_counts_or_empty(gh, issue).get("design_review") or {}).get(role) or {})
               if outcome == "rework" else {})
     gh.issue_comment(issue, f"{headline} {summary}\n\n"
                              f"<!-- design-review-outcome: {outcome}:{role}"
