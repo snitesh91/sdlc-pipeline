@@ -7699,6 +7699,23 @@ def _cleanup_local_branch(repo_path: str, branch: str, runner: Runner, safe_refs
     return {"deleted": True}
 
 
+def _repo_path_outside_worktree(repo_path: str, branch: str, runner: Runner) -> str:
+    """`repo_path`, or the main checkout when `repo_path` lies inside the worktree holding
+    `branch` -- that tree is released first, and later `git -C <it>` calls would fail."""
+    try:
+        held = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
+        if not held:
+            return repo_path
+        real, held = os.path.realpath(repo_path), os.path.realpath(held)
+        if real != held and not real.startswith(held + os.sep):
+            return repo_path
+        entries = worktree_entries(repo_path, runner)
+    except (GhError, OSError):
+        return repo_path
+    main = entries[0]["path"] if entries else None
+    return main if main and os.path.realpath(main) != held else repo_path
+
+
 def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = ".",
                  runner: Optional[Runner] = None, base: Optional[str] = None,
                  dry_run: bool = False, shell: Optional[Callable] = None) -> dict:
@@ -7737,6 +7754,8 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
     if _docker_cleanup_enabled():
         # First: a container holding the tree's files (bind mounts) must go before it does.
         out["docker"] = docker_sweep(unit_docker_prefix(number, unit), runner, dry_run)
+    # Every later step runs `git -C repo_path`: never from inside the tree released below.
+    repo_path = _repo_path_outside_worktree(repo_path, branch, runner)
     if unit == "issue":
         out["review_worktree"] = cmd_release_review_worktree(number, repo_path, runner, shell,
                                                              dry_run)
