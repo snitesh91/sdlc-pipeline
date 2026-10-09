@@ -1179,6 +1179,28 @@ def test_subagent_start_tells_sdlc_agents_where_things_are(sdlc_repo):
     assert 'SDLC-RESULT: {"issue": <n>' in ctx
 
 
+@pytest.mark.parametrize("env", [{"CLAUDE_CODE_REMOTE": "true"}, {"SDLC_PLACEMENT": "cloud"}])
+def test_subagent_start_words_the_cloud_github_rule_as_read_vs_write(sdlc_repo, env):
+    """Regression (cloud-prompt-get-only-wording): 'gh api GETs only' read as 'no writes'."""
+    proc = run_hook("subagent_start.py", {"agent_id": "a1", "agent_type": "sdlc:development",
+                                          "cwd": sdlc_repo},
+                    env={"CLAUDE_PLUGIN_ROOT": "/plug", "SDLC_PLACEMENT": "",
+                         "CLAUDE_CODE_REMOTE": "", **env})
+    ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert ('read GitHub with `gh api` GETs' in ctx
+            and 'write only through `python3 "$SDLC"` commands' in ctx)
+    assert "GETs only" not in ctx
+
+
+def test_subagent_start_adds_no_cloud_line_locally(sdlc_repo):
+    proc = run_hook("subagent_start.py", {"agent_id": "a1", "agent_type": "sdlc:development",
+                                          "cwd": sdlc_repo},
+                    env={"CLAUDE_PLUGIN_ROOT": "/plug", "SDLC_PLACEMENT": "",
+                         "CLAUDE_CODE_REMOTE": ""})
+    assert "cloud session" not in json.loads(proc.stdout)["hookSpecificOutput"][
+        "additionalContext"]
+
+
 def test_subagent_start_ignores_other_agents_and_repos(sdlc_repo, plain_repo):
     for payload in ({"agent_type": "general-purpose", "cwd": sdlc_repo},
                     {"agent_type": "sdlc:lld", "cwd": plain_repo}):
