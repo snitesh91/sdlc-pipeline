@@ -243,8 +243,8 @@ orchestrator raises, and the pipeline merges it into `epic-<e>` on a clean revie
 2. **Re-check siblings at their current heads.** Immediately before committing, `git fetch
    origin` and re-read every sibling Epic branch (`origin/epic-<m>`) your design depends on
    or shares a hotspot with (migration numbering, route lists, shared modules); re-run the
-   proofs that touch them. Record the heads checked under a non-Task `## Sibling heads
-   checked` heading (`epic-<m> @ <sha>`). A sibling that landed mid-design is how an LLD
+   proofs that touch them. Record the heads checked under a non-Task
+   `## Sibling heads checked` heading (`epic-<m> @ <sha>`). A sibling that landed mid-design is how an LLD
    ships a stale collision.
 3. Commit and push to `origin/issue-<n>`.
 4. Post a short handoff comment (`stage-playbooks.md`, "Posting a handoff comment").
