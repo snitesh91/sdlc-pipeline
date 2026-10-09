@@ -141,3 +141,100 @@ def test_review_worktree_add_leaves_the_dev_worktree_on_its_branch(unit_tree):
                                                          cwd=repo).strip()
     assert _git("symbolic-ref", "--short", "HEAD", cwd=path).strip() == "issue-9"
     assert s.cmd_release_review_worktree(9, repo)["released"] is True
+
+
+# --- open-dev-pr: a lost create response, adoption (cloud-draft-pr-create) ---
+
+class _DevPrGh(FakeGh):
+    """FakeGh whose PR create can land the PR yet lose the response, as the cloud proxy did."""
+
+    def __init__(self, lose_response=False, draft_sticks=True, convert_fails=False, **kw):
+        super().__init__([{"number": 9, "labels": ["type:epic"]},
+                          {"number": 10, "labels": ["type:task"], "parent": 9,
+                           "stage": "development", "status": "in-progress"}], **kw)
+        self.lose_response, self.draft_sticks = lose_response, draft_sticks
+        self.convert_fails, self.converted = convert_fails, []
+
+    def files_since(self, sha, branch):
+        return []
+
+    def pr_create(self, base, head, title, body, draft=False):
+        n = super().pr_create(base, head, title, body, draft and self.draft_sticks)
+        if self.lose_response:
+            raise GhError(f"{s.PR_CREATE_NO_NUMBER}: POST repos/o/r/pulls returned None")
+        return n
+
+    def pr_convert_to_draft(self, n):
+        if self.convert_fails:
+            raise GhError("no route")
+        self.converted.append(n)
+        self.prs[n]["isDraft"] = True
+
+
+def _exit_posted(gh, pr):
+    return [c for c in gh.comments_on(10) if f"<!-- dev-pr-opened: #{pr} -->" in c]
+
+
+def test_open_dev_pr_recovers_a_create_whose_response_was_lost(monkeypatch):
+    """Regression: the cloud proxy answered the draft create with an empty body; the PR
+    existed but open-dev-pr failed, and the operator finished its exit by hand."""
+    monkeypatch.setattr(s, "dev_pr_scope_offenders", lambda *a, **k: {
+        "design_docs": [], "foreign_footprint": []})
+    gh = _DevPrGh(lose_response=True)
+    out = s.cmd_open_dev_pr(gh, 10, "t", "b", "Built it.")
+    assert out["created"] is True and out["pr"] == 101 and "recovered" in out
+    assert gh.issues[10]["stage"] == "pr-review" and len(_exit_posted(gh, 101)) == 1
+    assert gh.converted == []
+
+
+def test_open_dev_pr_drafts_a_recovered_pr_the_draft_flag_missed(monkeypatch):
+    monkeypatch.setattr(s, "dev_pr_scope_offenders", lambda *a, **k: {
+        "design_docs": [], "foreign_footprint": []})
+    gh = _DevPrGh(lose_response=True, draft_sticks=False)
+    out = s.cmd_open_dev_pr(gh, 10, "t", "b", "Built it.")
+    assert out["converted_to_draft"] is True and gh.prs[101]["isDraft"] is True
+
+
+def test_open_dev_pr_still_raises_when_no_pr_was_made(monkeypatch):
+    # Control: a failed create that made nothing is not papered over.
+    monkeypatch.setattr(s, "dev_pr_scope_offenders", lambda *a, **k: {
+        "design_docs": [], "foreign_footprint": []})
+    gh = _DevPrGh()
+    gh.pr_create = lambda *a, **k: (_ for _ in ()).throw(GhError("HTTP 422"))
+    with pytest.raises(GhError, match="422"):
+        s.cmd_open_dev_pr(gh, 10, "t", "b", "Built it.")
+    assert gh.issues[10]["stage"] == "development" and gh.comments_on(10) == []
+
+
+def test_open_dev_pr_adopts_an_open_pr_made_by_another_path():
+    """Regression: re-running open-dev-pr on a PR made by hand (MCP) reused it but skipped
+    set-stage and the comment, so the unit never left development."""
+    gh = _DevPrGh(prs={77: {"headRefName": "issue-10", "isDraft": False}})
+    out = s.cmd_open_dev_pr(gh, 10, "t", "b", "Built it.")
+    assert out["created"] is False and out["adopted"] is True and out["pr"] == 77
+    assert gh.issues[10]["stage"] == "pr-review" and len(_exit_posted(gh, 77)) == 1
+    assert gh.converted == [77] and out["converted_to_draft"] is True
+    # Idempotent: a second run is a plain reuse, no second comment.
+    again = s.cmd_open_dev_pr(gh, 10, "t", "b", "Built it.")
+    assert "adopted" not in again and len(_exit_posted(gh, 77)) == 1
+
+
+def test_open_dev_pr_adoption_warns_when_drafting_fails():
+    gh = _DevPrGh(prs={77: {"headRefName": "issue-10", "isDraft": False}}, convert_fails=True)
+    out = s.cmd_open_dev_pr(gh, 10, "t", "b", "Built it.")
+    assert out["adopted"] is True and "draft_warning" in out
+
+
+def test_rest_pr_create_raises_on_an_empty_response():
+    runner = ScriptedRunner()
+    runner.prefix_responses = {("gh", "api", "-X", "POST", "repos/owner/repo/pulls"): ""}
+    with pytest.raises(GhError, match=s.PR_CREATE_NO_NUMBER):
+        s.GitHubRest(runner=runner).pr_create("main", "issue-9", "t", "b", draft=True)
+
+
+def test_rest_convert_to_draft_uses_the_ccr_route_in_the_cloud(monkeypatch):
+    monkeypatch.setattr(s, "session_placement", lambda: {"placement": "cloud"})
+    runner = ScriptedRunner({("gh", "api", "-X", "POST",
+                              "repos/owner/repo/pulls/7/ccr/convert_to_draft"): ""})
+    s.GitHubRest(runner=runner).pr_convert_to_draft(7)
+    assert len(runner.calls) == 1

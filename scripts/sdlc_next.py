@@ -670,6 +670,9 @@ class GitHub:
     def pr_ready(self, number: int):
         self._run(["gh", "pr", "ready", str(number), "--repo", self.repo])
 
+    def pr_convert_to_draft(self, number: int):
+        self._run(["gh", "pr", "ready", str(number), "--repo", self.repo, "--undo"])
+
     def ensure_label(self, label: str):
         """Create `label` in the repo when missing (idempotent)."""
         self._run(["gh", "label", "create", label, "--repo", self.repo, "--force"])
@@ -1089,13 +1092,30 @@ class GitHubRest(GitHub):
     def pr_create(self, base: str, head: str, title: str, body: str, draft: bool = False) -> int:
         args = ["-f", f"title={title}", "-f", f"body={body}", "-f", f"head={head}",
                 "-f", f"base={base}"] + (["-F", "draft=true"] if draft else [])
-        return int(self._api_json(f"repos/{self.repo}/pulls", *args, method="POST")["number"])
+        try:
+            raw = self._api_json(f"repos/{self.repo}/pulls", *args, method="POST")
+        except ValueError:
+            raw = None
+        if not isinstance(raw, dict) or not isinstance(raw.get("number"), int):
+            # The cloud proxy has answered a draft create with an empty body although the PR
+            # was made; `open-dev-pr` then looks it up by its head branch.
+            raise GhError(f"{PR_CREATE_NO_NUMBER}: POST repos/{self.repo}/pulls "
+                          f"(head {head}) returned {str(raw)[:200]!r}")
+        return raw["number"]
 
     def pr_ready(self, number: int):
         self._no_rest_path(
             lambda: self._api(f"repos/{self.repo}/pulls/{number}/ccr/ready_for_review",
                               method="POST"),
             lambda: super(GitHubRest, self).pr_ready(number))
+
+    def pr_convert_to_draft(self, number: int):
+        """Public REST cannot draft an open PR: the proxy's `ccr` route in a cloud session
+        (the counterpart of `ccr/ready_for_review`), `gh pr ready --undo` locally."""
+        self._no_rest_path(
+            lambda: self._api(f"repos/{self.repo}/pulls/{number}/ccr/convert_to_draft",
+                              method="POST"),
+            lambda: super(GitHubRest, self).pr_convert_to_draft(number))
 
     def pr_add_label(self, number: int, label: str):
         self.issue_edit(number, add_labels=[label])
@@ -6802,24 +6822,74 @@ def _push_empty_commit(issue: int, repo_path: Optional[str], runner: Runner) -> 
     return _with_workspace({"branch": branch, "sha": sha}, ws)
 
 
+PR_CREATE_NO_NUMBER = "the PR create returned no PR number"
+_DEV_PR_OPENED_RE = re.compile(r"<!-- dev-pr-opened: #(\d+) -->")
+
+
+def _dev_pr_comment_posted(gh: GitHub, issue: int, pr: int) -> bool:
+    """Whether `open-dev-pr`'s comment for `pr` is on the issue (its marker, or the text an
+    earlier version posted)."""
+    for c in gh.issue_view(issue).get("comments", []):
+        body = c.get("body") or ""
+        if any(int(m) == pr for m in _DEV_PR_OPENED_RE.findall(body)) \
+                or f"Draft PR: #{pr} —" in body:
+            return True
+    return False
+
+
+def _finish_dev_pr(gh: GitHub, issue: int, pr: int, summary: str) -> None:
+    """Development's exit on its draft PR: Stage `pr-review` and the PR-opened comment."""
+    gh.set_stage_field(issue, "pr-review")
+    gh.issue_comment(issue,
+        f"✅ {summary} Draft PR: #{pr} — what was built and why is in the PR "
+        f"description.\n\n"
+        f"Not yet queued for review: `development` still owes `record-local-ci` per "
+        f"suite it ran and `handoff-to-pr-review`, which posts the marker "
+        f"`list-ready-for-review` reads.\n\n<!-- dev-pr-opened: #{pr} -->")
+
+
+def _ensure_draft(gh: GitHub, pr: dict) -> dict:
+    """`{}` when the PR is a draft, else the outcome of converting it (the review queue
+    reads draft status): `converted_to_draft`, or a `draft_warning` when that failed."""
+    if pr.get("isDraft"):
+        return {}
+    try:
+        gh.pr_convert_to_draft(pr["number"])
+        return {"converted_to_draft": True}
+    except GhError as e:
+        return {"draft_warning": f"PR #{pr['number']} is not a draft and converting it "
+                                 f"failed ({e}); mark it draft by hand before review"}
+
+
 def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
                     allow_empty: bool = False, repo_path: Optional[str] = None,
                     runner: Runner = _default_runner) -> dict:
     """Open the development draft PR and set Stage to `pr-review`; an already-open
-    PR on the branch is reused (`created: False`). A branch with no commits ahead of its
-    base gets an empty commit first only with `allow_empty` (`empty_commit`), else the
-    refusal names the flag. Returns `pr`, `created`."""
-    existing = gh.pr_list_for_branch(issue_branch(issue))
+    PR on the branch is reused (`created: False`) -- and, when this command's comment for it
+    is missing (a PR made by another path, or a create whose response was lost), adopted:
+    made a draft, Stage set, comment posted (`adopted: True`). A create that returns no PR
+    number is recovered by looking the PR up by its head branch (`recovered`). A branch with
+    no commits ahead of its base gets an empty commit first only with `allow_empty`
+    (`empty_commit`), else the refusal names the flag. Returns `pr`, `created`."""
+    branch = issue_branch(issue)
+    existing = gh.pr_list_for_branch(branch)
     if existing:
         pr_number = existing[0]["number"]
-        return {"issue": issue, "pr": pr_number, "created": False,
-                "reason": f"PR #{pr_number} is already open on {issue_branch(issue)} -- "
-                          f"reusing it rather than opening a duplicate"}
+        if _dev_pr_comment_posted(gh, issue, pr_number):
+            return {"issue": issue, "pr": pr_number, "created": False,
+                    "reason": f"PR #{pr_number} is already open on {branch} -- "
+                              f"reusing it rather than opening a duplicate"}
+        draft = _ensure_draft(gh, existing[0])
+        _finish_dev_pr(gh, issue, pr_number, summary)
+        return {"issue": issue, "pr": pr_number, "created": False, "adopted": True,
+                "reason": f"PR #{pr_number} was already open on {branch} without this "
+                          f"command's exit; adopted it (Stage pr-review, comment posted)",
+                **draft}
     base = integration_base(gh, issue)
     # Refuse a diff that authors a design doc or another Task's footprint file before opening
     # the PR (development authors no design doc; deviations belong in the PR description).
     try:
-        changed = gh.files_since(base, issue_branch(issue))
+        changed = gh.files_since(base, branch)
     except GhError:
         changed = []
     offenders, acknowledged = acknowledge_footprint_deviations(
@@ -6832,27 +6902,34 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
                 "acknowledged_deviations": acknowledged}
     pr_body = f"{body}\n\nCloses #{issue}"
     extra: dict = {}
+
+    def create() -> int:
+        try:
+            return gh.pr_create(base=base, head=branch, title=title, body=pr_body, draft=True)
+        except GhError as e:
+            if _NO_COMMITS_RE.search(str(e)):
+                raise
+            # The create may have landed with its response lost: adopt the PR it made.
+            found = gh.pr_list_for_branch(branch)
+            if not found:
+                raise
+            extra["recovered"] = f"{str(e)[:300]} -- found PR #{found[0]['number']} on {branch}"
+            extra.update(_ensure_draft(gh, found[0]))
+            return found[0]["number"]
+
     try:
-        pr_number = gh.pr_create(base=base, head=issue_branch(issue), title=title,
-                                 body=pr_body, draft=True)
+        pr_number = create()
     except GhError as e:
         if not _NO_COMMITS_RE.search(str(e)):
             raise
         if not allow_empty:
-            raise GhError(f"{issue_branch(issue)} has no commits ahead of {base}, so GitHub "
+            raise GhError(f"{branch} has no commits ahead of {base}, so GitHub "
                           f"refuses the PR. A verify-only Task re-runs open-dev-pr with "
                           f"--allow-empty (lands an empty commit first); otherwise commit and "
                           f"push the work, then re-run.\n{e}")
         extra["empty_commit"] = _push_empty_commit(issue, repo_path, runner)
-        pr_number = gh.pr_create(base=base, head=issue_branch(issue), title=title,
-                                 body=pr_body, draft=True)
-    gh.set_stage_field(issue, "pr-review")
-    gh.issue_comment(issue,
-        f"✅ {summary} Draft PR: #{pr_number} — what was built and why is in the PR "
-        f"description.\n\n"
-        f"Not yet queued for review: `development` still owes `record-local-ci` per "
-        f"suite it ran and `handoff-to-pr-review`, which posts the marker "
-        f"`list-ready-for-review` reads.")
+        pr_number = create()
+    _finish_dev_pr(gh, issue, pr_number, summary)
     return {"issue": issue, "pr": pr_number, "created": True,
             **({"acknowledged_deviations": acknowledged} if acknowledged else {}), **extra}
 
