@@ -5786,10 +5786,16 @@ class MergeConflict(GhError):
 
 
 def _sync_conflict_key(path: str, branch: str, base: str, files: list, runner: Runner) -> str:
-    """`<base sha>.<branch sha>.<files digest>`: what makes a sync conflict a new one."""
-    shas = [(_origin_sha(path, b, runner) or "none")[:12] for b in (base, branch)]
+    """`<base>.<merge-base sha>.<files digest>`: what makes a sync conflict a new one. Never
+    a head sha: `base` or the branch moving on while the same conflict stands is the same
+    conflict; resolving it (the branch merges `base`) moves the merge-base."""
+    try:
+        fork = runner(["git", "-C", path, "merge-base", f"origin/{base}",
+                       f"origin/{branch}"]).strip() or "none"
+    except GhError:
+        fork = "none"
     digest = hashlib.sha1("\n".join(sorted(files)).encode()).hexdigest()[:12]
-    return ".".join([*shas, digest])
+    return ".".join([base, fork[:12], digest])
 
 
 def _sync_conflict_posted(gh: GitHub, issue: int, branch: str, key: str) -> bool:

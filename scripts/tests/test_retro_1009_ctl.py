@@ -126,3 +126,51 @@ def test_the_roadmap_task_and_unopted_initiatives_still_integrate_into_main(monk
     plain = _branch_tree({"number": 20, "labels": ["type:bug"], "parent": 6, "title": "bug"},
                          labels=("type:initiative",))
     assert s.integration_base_in(plain, 20) == "main"
+
+
+# --- 9. a sync-conflict comment is posted once per standing conflict -----------------
+
+def _sync_conflicts(gh, branch="issue-30"):
+    return sum(f"sync-conflict: {branch}" in c for c in gh.comments_on(30))
+
+
+def _conflicted_task(repo):
+    from tests.test_v2_phase_tasks import _advance_origin
+    gh = FakeGh([{"number": 30, "labels": ["type:task"], "stage": "development"}])
+    gh._run = s._default_runner
+    _advance_origin(repo, "main", "shared.txt", "base\n")
+    _git("push", "-q", "origin", "origin/main:refs/heads/issue-30", cwd=repo)
+    _advance_origin(repo, "issue-30", "shared.txt", "task side\n")
+    _advance_origin(repo, "main", "shared.txt", "main side\n")
+    return gh, _advance_origin
+
+
+def test_a_conflict_is_not_reposted_when_both_heads_move_on(repo):
+    gh, advance = _conflicted_task(repo)
+    first = s.cmd_sync_branch(gh, str(repo), 30)
+    advance(repo, "main", "other.txt", "unrelated\n")       # main moves (the PR 2581 case)
+    advance(repo, "issue-30", "mine.txt", "more work\n")    # and so does the branch
+
+    second = s.cmd_sync_branch(gh, str(repo), 30)
+
+    assert first["conflict"] and second["conflict"] and second["already_posted"] is True
+    assert _sync_conflicts(gh) == 1
+
+
+def test_a_new_conflict_after_a_resolution_is_posted(repo):
+    # Positive control: once resolved (the branch merged its base), a later conflict on the
+    # same file is a new one.
+    gh, advance = _conflicted_task(repo)
+    s.cmd_sync_branch(gh, str(repo), 30)
+    _git("fetch", "-q", "origin", cwd=repo)
+    _git("checkout", "-q", "-B", "fix", "origin/issue-30", cwd=repo)
+    _git("merge", "-q", "-X", "ours", "origin/main", "-m", "resolve", cwd=repo)
+    _git("push", "-q", "origin", "fix:issue-30", cwd=repo)
+    _git("checkout", "-q", "main", cwd=repo)
+    advance(repo, "issue-30", "shared.txt", "task side 2\n")
+    advance(repo, "main", "shared.txt", "main side 2\n")
+
+    again = s.cmd_sync_branch(gh, str(repo), 30)
+
+    assert again["conflict"] and "already_posted" not in again
+    assert _sync_conflicts(gh) == 2
