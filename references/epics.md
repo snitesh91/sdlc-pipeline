@@ -413,7 +413,10 @@ stable pass of them (its evidence goal — one zero-retry run is not stability);
 **Close-blocker lane — only with operator authorisation.** A Blocker/Critical fix that
 passes the *fits* test ("Architecture deviation escalation") may skip `lld` and go
 straight to `set-stage <n> --stage development` against the epic branch; without the
-operator's say-so it runs the full lane. A fix that lands on `epic-<n>` after the tested head
+operator's say-so it runs the full lane. A design gap found in this lane, however small (one
+missing rule), goes through `open-arch-revision` ("Architecture deviation escalation"); never
+ask `development` to edit `epic-<n>/architecture.md` or `lld.md`, and never route such an edit
+to `pr-review` as a design check. A fix that lands on `epic-<n>` after the tested head
 is judged by "Evidence carry-forward" above: `close-epic`'s `evidence` field says what still
 stands and what must be re-run and re-recorded.
 
