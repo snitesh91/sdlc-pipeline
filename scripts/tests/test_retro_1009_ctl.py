@@ -174,3 +174,131 @@ def test_a_new_conflict_after_a_resolution_is_posted(repo):
 
     assert again["conflict"] and "already_posted" not in again
     assert _sync_conflicts(gh) == 2
+
+
+# --- 4/10. close-epic readies the epic worktree for the exploratory pass ---------------
+
+def _git_backed(gh, repo):
+    """GitHub-side compares answered from the real origin."""
+    gh.repo, gh._run = str(repo), s._default_runner
+    gh.pr_list_for_branch = lambda branch, state="open": []
+
+    def behind(head, base="main"):
+        _git("fetch", "-q", "origin", cwd=repo)
+        return int(_git("rev-list", "--count", f"origin/{head}..origin/{base}", cwd=repo))
+    gh.branch_behind_by = behind
+    gh.base_delta_files = lambda head, base="main": []
+    return gh
+
+
+def _epic_closing(repo, gh):
+    """Epic 9's children are closed, no verification yet; its live worktree is at origin."""
+    _git_backed(gh, repo)
+    wt = s.cmd_worktree_add(gh, 9, unit="epic", repo_path=str(repo))["path"]
+    return wt
+
+
+def _head(path, ref="HEAD"):
+    return _git("rev-parse", ref, cwd=path).strip()
+
+
+def test_close_epic_fast_forwards_a_stale_epic_worktree(repo):
+    from tests.test_v2_phase_tasks import _advance_origin
+    gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
+    wt = _epic_closing(repo, gh)
+    _advance_origin(repo, "epic-9", "task.txt", "a Task merged on GitHub\n")
+
+    result = s.cmd_close_epic(gh, 9, repo_path=str(repo))
+
+    assert _head(wt) == _head(repo, "origin/epic-9")
+    assert result["merged"] is False and result["base"] == "main"
+    assert result["epic_worktree"]["behind_before"] == 1
+    assert "prepare" not in result          # nothing configured
+
+
+def test_close_epic_runs_the_configured_prepare_in_the_epic_worktree(repo, monkeypatch):
+    monkeypatch.setitem(s.PIPELINE["epicClose"], "prepare", "echo installed > prepared.txt")
+    gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
+    wt = _epic_closing(repo, gh)
+
+    result = s.cmd_close_epic(gh, 9, repo_path=str(repo))
+
+    assert result["prepare"]["ok"] is True and result["prepare"]["ran"] is True
+    assert (Path(wt) / "prepared.txt").read_text() == "installed\n"
+    assert result["epic_worktree"]["behind_before"] == 0
+
+
+def test_close_epic_reports_prepare_without_an_epic_worktree(repo, monkeypatch):
+    # Positive control: no live worktree -- nothing is fast-forwarded and prepare does not run.
+    monkeypatch.setitem(s.PIPELINE["epicClose"], "prepare", "false")
+    gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
+    _git_backed(gh, repo)
+    _git("push", "-q", "origin", "origin/main:refs/heads/epic-9", cwd=repo)
+
+    result = s.cmd_close_epic(gh, 9, repo_path=str(repo))
+
+    assert "epic_worktree" not in result
+    assert result["prepare"]["ran"] is False and result["prepare"]["ok"] is False
+
+
+def test_close_epic_without_a_worktree_or_prepare_adds_nothing(repo):
+    # Positive control: no live worktree, no `prepare` configured -- the result is unchanged.
+    gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
+    _git_backed(gh, repo)
+    _git("push", "-q", "origin", "origin/main:refs/heads/epic-9", cwd=repo)
+
+    result = s.cmd_close_epic(gh, 9, repo_path=str(repo))
+
+    assert result["merged"] is False and result["missing_verification"]
+    assert "epic_worktree" not in result and "prepare" not in result
+
+
+# --- 5. close-epic into initiative-<i> first merges main into it ----------------------
+
+_OPT_IN = {"name": "tijori", "match": {"label": "initiative:branch"}, "branch": True}
+
+
+def _initiative_epic(repo, monkeypatch):
+    monkeypatch.setitem(s.PIPELINE, "initiativeProfiles", [_OPT_IN])
+    gh = FakeGh([{"number": 6, "labels": ["type:initiative", "initiative:branch"]},
+                 {"number": 9, "labels": ["type:epic"], "parent": 6},
+                 {"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"}])
+    _git_backed(gh, repo)
+    _git("push", "-q", "origin", "origin/main:refs/heads/initiative-6", cwd=repo)
+    _git("push", "-q", "origin", "origin/main:refs/heads/epic-9", cwd=repo)
+    return gh
+
+
+def test_close_epic_into_an_initiative_branch_first_syncs_it_with_main(repo, monkeypatch):
+    from tests.test_v2_phase_tasks import _advance_origin, _origin_file
+    gh = _initiative_epic(repo, monkeypatch)
+    _advance_origin(repo, "main", "main-fix.txt", "fix\n")
+
+    result = s.cmd_close_epic(gh, 9, repo_path=str(repo))
+
+    assert result["base"] == "initiative-6" and result["merged"] is False
+    assert result["initiative_sync"]["synced"] is True
+    assert _origin_file(repo, "initiative-6", "main-fix.txt") == "fix\n"
+
+
+def test_close_epic_refuses_when_main_conflicts_with_the_initiative_branch(repo, monkeypatch):
+    from tests.test_v2_phase_tasks import _advance_origin
+    gh = _initiative_epic(repo, monkeypatch)
+    _advance_origin(repo, "initiative-6", "shared.txt", "initiative side\n")
+    _advance_origin(repo, "main", "shared.txt", "main side\n")
+    before = _head(repo, "origin/initiative-6")
+
+    result = s.cmd_close_epic(gh, 9, repo_path=str(repo))
+
+    assert result["merged"] is False and result["initiative_sync"]["conflict"] is True
+    assert "shared.txt" in result["reason"] and "reconciled" not in result
+    _git("fetch", "-q", "origin", cwd=repo)
+    assert _head(repo, "origin/initiative-6") == before
+
+
+def test_close_epic_into_main_never_syncs_an_initiative(repo):
+    # Positive control: an Epic closing into main has no initiative branch to sync.
+    gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
+    _epic_closing(repo, gh)
+    result = s.cmd_close_epic(gh, 9, repo_path=str(repo))
+    assert result["merged"] is False and "initiative_sync" not in result

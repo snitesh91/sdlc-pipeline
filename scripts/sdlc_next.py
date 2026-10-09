@@ -197,7 +197,10 @@ _PIPELINE_DEFAULTS = {
     # `evidenceCarryForward.paths`: globs a commit after the tested head may touch without
     # invalidating the exploratory evidence (`{docRoot}` expands to `docRoot`).
     "epicClose": {"auto": False,
-                  "evidenceCarryForward": {"paths": ["**/*.md", "docs/**", "{docRoot}/**"]}},
+                  "evidenceCarryForward": {"paths": ["**/*.md", "docs/**", "{docRoot}/**"]},
+                  # Shell command close-epic runs in the epic worktree before the
+                  # exploratory pass (e.g. a dependency install); "" = none.
+                  "prepare": ""},
     # Priority / Effort `create-issue` sets when no flag names one (fields configured only).
     "issueDefaults": {"priority": "Medium", "effort": "Medium"},
     # Stage models and fan-out: one home, hooks/model_policy.json (agent_guard enforces it).
@@ -2343,16 +2346,66 @@ def clean_epic_worktree(epic: int, repo_path: str = ".",
     return {"cleaned": True, "path": path, "removed": removed}
 
 
+def _refresh_epic_worktree(branch: str, repo_path: str, runner: Runner) -> Optional[dict]:
+    """Fast-forward the epic's live worktree (where the exploratory pass runs) to
+    `origin/<branch>`; None without one. Never raises; a diverged tree is reported."""
+    try:
+        path = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
+        if path is None:
+            return None
+        out = _resume_live_worktree(path, branch, repo_path, runner)
+    except GhError as exc:
+        return {"synced_to_origin": False, "error": True, "reason": str(exc)}
+    return {k: v for k, v in out.items() if k not in ("created", "resumed", "reason")
+            or (k == "reason" and out.get("diverged"))}
+
+
+def _epic_close_prepare(worktree: Optional[dict], shell: Optional[Callable]) -> Optional[dict]:
+    """Run `pipeline.epicClose.prepare` (e.g. a dependency install) in the epic worktree
+    so the exploratory pass finds it ready; None when not configured. Never raises."""
+    command = (PIPELINE["epicClose"].get("prepare") or "").strip()
+    if not command:
+        return None
+    if not worktree or not worktree.get("path") or not worktree.get("synced_to_origin"):
+        return {"command": command, "ok": False, "ran": False,
+                "reason": "no epic worktree at origin's head -- `worktree-add <epic> --unit "
+                          "epic`, then re-run close-epic (or run the command there yourself)"}
+    try:
+        output = (shell or _default_shell)(command, worktree["path"])
+    except GhError as exc:
+        return {"command": command, "ok": False, "ran": True, "path": worktree["path"],
+                "error": str(exc)[-2000:]}
+    return {"command": command, "ok": True, "ran": True, "path": worktree["path"],
+            "output_tail": (output or "")[-500:]}
+
+
+def _sync_initiative_for_close(gh: GitHub, repo_path: str, initiative: int,
+                               runner: Runner) -> dict:
+    """Merge `main` into `initiative-<i>` (clean merges only) before an Epic closes into it,
+    so the epic PR's CI sees main's fixes. A conflict is reported, never forced."""
+    try:
+        out = cmd_sync_branch(gh, repo_path, initiative, unit="initiative", runner=runner,
+                              base="main")
+    except GhError as exc:
+        return {"initiative": initiative, "synced": False, "error": True, "reason": str(exc)}
+    return {k: v for k, v in out.items() if k != "issue"} | {"initiative": initiative}
+
+
 def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                     runner: Runner = _default_runner, carry_forward: bool = True,
-                    clean_worktree: bool = False) -> dict:
+                    clean_worktree: bool = False, shell: Optional[Callable] = None) -> dict:
     """Reconcile the epic branch with `main` (first call, then stop), or merge it once
     closing evidence is recorded (second call). Returns `merged`; refusals carry `reason`.
     Two calls because verification must run between the two merges. Idempotent: once the
     epic PR is MERGED, only the post-merge bookkeeping runs (`recovered`). `carry_forward=False`
     accepts only evidence stamped at the epic head itself. `clean_worktree` runs
     `clean_epic_worktree` right before a reconcile or the merge -- never on a refusal --
-    and refuses the call when the tree holds tracked changes (`worktree_clean`)."""
+    and refuses the call when the tree holds tracked changes (`worktree_clean`).
+    Every result carries the resolved `base`. While verification is still owed (the calls
+    before the exploratory pass): an Epic closing into `initiative-<i>` first merges `main`
+    into it (`initiative_sync`; a conflict refuses the call), the epic's live worktree is
+    fast-forwarded to origin (`epic_worktree`) and `pipeline.epicClose.prepare` runs there
+    (`prepare`)."""
     detail = gh.issue_view(epic)
     if not resolve_profile(detail)["closes"]:
         return {"epic": epic, "merged": False,
@@ -2365,11 +2418,12 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     # the reconcile and the epic PR. Suites the profile defers are not demanded here.
     base = epic_base(gh, epic, all_issues)
     deferred: tuple = ()
+    initiative = None
     if base != "main":
         by_number = {i["number"]: i for i in all_issues}
-        deferred = tuple(resolve_initiative_profile(initiative_of_in(by_number, epic))
-                         ["deferSuites"])
-    target = {"base": base} if base != "main" else {}
+        initiative = initiative_of_in(by_number, epic)
+        deferred = tuple(resolve_initiative_profile(initiative)["deferSuites"])
+    target = {"base": base}
     merged_prs = gh.pr_list_for_branch(branch, state="merged")
     if merged_prs:
         # A repeat call after the merge: `origin/epic-<n>` is gone, so never compare it.
@@ -2396,6 +2450,29 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     if base != "main":
         # An Epic cut before its Initiative opted in: stand the initiative branch up first.
         ensure_branch_on_origin(repo_path, base, runner=runner)
+    verifying = bool(_close_epic_exploratory_problems(gh, epic, branch, carry_forward))
+    if verifying and initiative is not None:
+        # Only while verification is owed: a later call never re-syncs, so a busy main
+        # cannot keep moving the tree under a finished exploratory pass.
+        target["initiative_sync"] = _sync_initiative_for_close(gh, repo_path,
+                                                               initiative["number"], runner)
+        if not target["initiative_sync"].get("synced"):
+            sync = target["initiative_sync"]
+            if not sync.get("base_missing"):
+                return {"epic": epic, "merged": False, "branch": branch, **target,
+                        "reason": f"`{base}` could not take `main` cleanly ("
+                                  + (f"conflict on {', '.join(sync.get('conflicting_files') or [])}"
+                                     if sync.get("conflict") else sync.get("reason", "sync failed"))
+                                  + f") -- resolve it in `worktree-add {initiative['number']} "
+                                    f"--unit initiative`'s tree, push, then re-run close-epic"}
+
+    def ready_tree() -> dict:
+        """The exploratory pass's tree: fast-forwarded, then prepared."""
+        tree = _refresh_epic_worktree(branch, repo_path, runner)
+        out = {"epic_worktree": tree} if tree else {}
+        prepared = _epic_close_prepare(tree, shell)
+        return {**out, **({"prepare": prepared} if prepared else {})}
+
     behind = gh.branch_behind_by(branch, base=base)
     if behind:
         refused = clean_refusal()
@@ -2419,17 +2496,18 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         evidence.pop("_missing_workflows")
         return _with_workspace(
             {"epic": epic, "merged": False, "branch": branch, "reconciled": behind, **target,
-             **evidence, **cleaned,
+             **evidence, **cleaned, **ready_tree(),
              "reason": f"picked up {behind} commit(s) from {base} -- run the exploratory pass "
                        f"against the reconciled branch, then re-run close-epic"},
             ws)
     existing = gh.pr_list_for_branch(branch)
-    if _close_epic_exploratory_problems(gh, epic, branch, carry_forward):
+    if verifying:
         evidence = _close_epic_evidence(gh, epic, branch, children,
                                         existing[0]["number"] if existing else None, carry_forward,
                                         base, deferred)
         evidence.pop("_missing_workflows")
         return {"epic": epic, "merged": False, "branch": branch, **target, **evidence,
+                **ready_tree(),
                 "reason": f"closing verification incomplete: "
                           f"{'; '.join(evidence['missing_verification'])}"}
     if existing:
