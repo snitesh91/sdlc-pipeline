@@ -1938,9 +1938,22 @@ def integration_base_in(issues: dict, issue: int) -> str:
         return "main"
     parent_number = parent["number"]
     parent_entry = issues.get(parent_number)
-    if parent_entry is not None and (is_epic_standing(parent_entry) or is_initiative(parent_entry)):
+    if parent_entry is not None and is_initiative(parent_entry):
+        # A plain child of an Initiative with `branch: true` works where its product code
+        # lives; the Product-Roadmap Task (its docs gate) still integrates into main.
+        if (not _is_roadmap_task(entry)
+                and resolve_initiative_profile(parent_entry)["branch"]):
+            return initiative_branch(parent_number)
+        return "main"
+    if parent_entry is not None and is_epic_standing(parent_entry):
         return "main"
     return epic_branch(parent_number)
+
+
+def _is_roadmap_task(entry: dict) -> bool:
+    """An Initiative's Product-Roadmap Task (cut titled "Product Roadmap",
+    references/initiatives.md)."""
+    return "product roadmap" in str(entry.get("title") or "").lower()
 
 
 def last_transition_to(comments: list, to_role: str,

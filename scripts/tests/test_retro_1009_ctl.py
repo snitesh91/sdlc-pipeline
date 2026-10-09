@@ -96,3 +96,33 @@ def test_transition_into_lld_review_has_no_skip_threshold(repo):
 
     assert result["ready"] is True
     assert "skip_confidence_threshold" not in result
+
+
+# --- 3. a plain child of a branch:true Initiative integrates into initiative-<i> ------
+
+_BRANCH_PROFILE = {"name": "tijori", "match": {"label": "initiative:branch"}, "branch": True}
+
+
+def _branch_tree(*extra, labels=("type:initiative", "initiative:branch")):
+    return {i["number"]: i for i in FakeGh([
+        {"number": 6, "labels": list(labels), "title": "Tijori"}, *extra]).issue_list()}
+
+
+def test_a_plain_initiative_child_integrates_into_the_initiative_branch(monkeypatch):
+    monkeypatch.setitem(s.PIPELINE, "initiativeProfiles", [_BRANCH_PROFILE])
+    issues = _branch_tree({"number": 20, "labels": ["type:bug"], "parent": 6,
+                           "title": "tijori-api: crash on empty ledger"})
+
+    assert s.integration_base_in(issues, 20) == "initiative-6"
+
+
+def test_the_roadmap_task_and_unopted_initiatives_still_integrate_into_main(monkeypatch):
+    # Positive controls: the Product-Roadmap Task, and any child of an Initiative without
+    # `branch: true`, keep `main`.
+    monkeypatch.setitem(s.PIPELINE, "initiativeProfiles", [_BRANCH_PROFILE])
+    issues = _branch_tree({"number": 7, "labels": ["type:task"], "parent": 6,
+                           "title": "Product Roadmap"})
+    assert s.integration_base_in(issues, 7) == "main"
+    plain = _branch_tree({"number": 20, "labels": ["type:bug"], "parent": 6, "title": "bug"},
+                         labels=("type:initiative",))
+    assert s.integration_base_in(plain, 20) == "main"
