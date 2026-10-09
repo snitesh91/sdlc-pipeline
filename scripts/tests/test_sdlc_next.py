@@ -2973,7 +2973,8 @@ def test_sync_branch_returns_conflict_result_without_raising_and_posts_marker():
         ("git", "-C", "/repo", "diff", "--name-only", "--diff-filter=U"): "src/a.ts\n",
         ("git", "-C", "/repo", "merge", "--abort"): "",
     })
-    runner.prefix_responses = {("git", "-C", "/repo", "rev-parse"): "abc\n"}
+    runner.prefix_responses = {("git", "-C", "/repo", "rev-parse"): "abc\n",
+                               ("git", "-C", "/repo", "merge-base"): "abc\n"}
     runner.fail_on = {("git", "-C", "/repo", "merge", "origin/main")}
     gh_runner = ScriptedRunner({tuple(_list_argv()): _list_response([_issue(9)])})
     gh_runner.prefix_responses = {("gh", "issue", "comment", "9"): "",
