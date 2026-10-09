@@ -9967,8 +9967,15 @@ def cmd_transition(gh: GitHub, issue: int, expect_stage: str, pr: Optional[int] 
                 failed=lambda r: not r.get("pr"))
     if expect_stage in REVIEW_ROLES:
         seq.run("start-comment", lambda: cmd_start_comment(gh, issue, expect_stage))
+    extra = {}
+    if expect_stage == "arch-review":
+        # Top level, resolved even when a step stopped: the unit's profile bar (an Epic
+        # phase-Task's is its Epic's profile), else the global `gates` default.
+        extra["skip_confidence_threshold"] = (
+            (seq.steps.get("start-comment") or {}).get("skip_confidence_threshold")
+            or _profile_for_issue(gh, issue)["gates"]["skipConfidenceThreshold"])
     return seq.report(failed_key="stopped_at", issue=issue, expect_stage=expect_stage,
-                      verified_stage=verify_stage, ready=not seq.stopped)
+                      verified_stage=verify_stage, ready=not seq.stopped, **extra)
 
 
 # `advance-standing --from`: the stage a standing child just finished (`none` = at pickup). A

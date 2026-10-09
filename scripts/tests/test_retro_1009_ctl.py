@@ -51,3 +51,48 @@ def test_skip_gate_given_the_repo_root_cleans_the_branches(repo):
     assert result["phase_task_complete"] is True
     assert "warnings" not in result
     assert not _local(repo, "issue-10")
+
+
+# --- 2. transition --expect-stage arch-review surfaces the skip bar at top level ------
+
+def _author_doc(gh, repo, issue, path, text="# design\n"):
+    gh._run = s._default_runner
+    wt = s.cmd_worktree_add(gh, issue, repo_path=str(repo))["path"]
+    target = Path(wt) / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text)
+    _git("add", path, cwd=wt)
+    _git("commit", "-qm", f"add {path}", cwd=wt)
+    _git("push", "-q", "origin", f"issue-{issue}", cwd=wt)
+    return wt
+
+
+def _initiative_tree(*extra):
+    return FakeGh([{"number": 6, "labels": ["type:initiative", "initiative:cloud"]},
+                   {"number": 9, "labels": ["type:epic"], "parent": 6}, *extra])
+
+
+def test_transition_into_arch_review_returns_the_epic_profile_skip_threshold(repo, monkeypatch):
+    monkeypatch.setitem(s.PIPELINE, "profiles", [{"name": "default", "match": "*",
+                                                  "gates": {"skipConfidenceThreshold": 85}}])
+    monkeypatch.setitem(s.PIPELINE, "initiativeProfiles", [
+        {"name": "cloud", "match": {"label": "initiative:cloud"}, "placement": "cloud"}])
+    gh = _initiative_tree({"number": 10, "labels": ["type:task"], "parent": 9,
+                           "stage": "architecture"})
+    wt = _author_doc(gh, repo, 10, f"{DOC}/epic-9/architecture.md")
+
+    result = s.cmd_transition(gh, 10, "arch-review", repo_path=wt)
+
+    assert result["ready"] is True
+    assert result["skip_confidence_threshold"] == 85
+
+
+def test_transition_into_lld_review_has_no_skip_threshold(repo):
+    # Positive control: only arch-review carries the bar.
+    gh = _initiative_tree({"number": 11, "labels": ["type:task"], "parent": 9, "stage": "lld"})
+    wt = _author_doc(gh, repo, 11, f"{DOC}/epic-9/lld.md")
+
+    result = s.cmd_transition(gh, 11, "lld-review", repo_path=wt)
+
+    assert result["ready"] is True
+    assert "skip_confidence_threshold" not in result
