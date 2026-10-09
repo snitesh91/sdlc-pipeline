@@ -163,17 +163,19 @@
       "cycleCap": 8
     },
     "epicClose": {
-      "_comment": "`auto`: the orchestrator makes the second close-epic call itself. `evidenceCarryForward.paths`: globs a commit on epic-<n> after the tested head may touch without staling the exploratory record ({docRoot} expands to docRoot; the pipeline config file never carries forward). Widen it for fixture/evidence directories, never for source or tests.",
+      "_comment": "`auto`: the orchestrator makes the second close-epic call itself. `evidenceCarryForward.paths`: globs a commit on epic-<n> after the tested head may touch without staling the exploratory record ({docRoot} expands to docRoot; the pipeline config file never carries forward). Widen it for fixture/evidence directories, never for source or tests. `prepare`: shell command close-epic runs in the epic worktree (fast-forwarded to origin first) on each call made before the exploratory pass, e.g. a dependency install; result in close-epic's `prepare`. Empty = none.",
       "auto": false,
       "evidenceCarryForward": {
         "paths": ["**/*.md", "docs/**", "{docRoot}/**"]
-      }
+      },
+      "prepare": ""
     },
     "placement": {
-      "_comment": "Cloud vs local sessions never drive the same Epic. An Epic carrying `cloudLabel` (or whose Initiative does) is driven only by a cloud session (CLAUDE_CODE_REMOTE, or SDLC_PLACEMENT=cloud), every other Epic only by a local one; `place <n> --where cloud|local` moves it. `initiativeEpics: cloud` makes a laptop Initiative run launch each runnable Epic in its own cloud session (`launch-cloud-epic`, at most `parallelism.cloudSessions`); `stallMinutes` is when `cloud-status` calls a quiet one stalled. See references/cloud-mode.md.",
+      "_comment": "Cloud vs local sessions never drive the same Epic. An Epic carrying `cloudLabel` (or whose Initiative does) is driven only by a cloud session (CLAUDE_CODE_REMOTE, or SDLC_PLACEMENT=cloud), every other Epic only by a local one; `place <n> --where cloud|local` moves it. `initiativeEpics: cloud` makes a laptop Initiative run launch each runnable Epic in its own cloud session (`launch-cloud-epic`, at most `parallelism.cloudSessions`); `stallMinutes` is when `cloud-status` calls a quiet one stalled. `softOverlapPaths`: fnmatch globs (a migrations index, a docs table) whose footprint overlap never holds a launch. See references/cloud-mode.md.",
       "cloudLabel": "sdlc:cloud",
       "initiativeEpics": "local",
-      "stallMinutes": 90
+      "stallMinutes": 90,
+      "softOverlapPaths": []
     },
     "humanChannel": "github",
     "prePr": {
