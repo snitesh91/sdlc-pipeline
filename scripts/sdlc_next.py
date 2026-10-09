@@ -5146,14 +5146,45 @@ def _stage_and_status(gh: WorkItemProvider, issue: int) -> tuple:
             PIPELINE_STATUS_FIELD_NAMES.get(fields.get("Pipeline Status")))
 
 
-# Authoring stages that hand off with a free-text comment; `post-comment` is their only path.
-POST_COMMENT_ROLES = ("product", "architecture", "lld")
+# Stages that post a free-text comment on their unit; `post-comment` is their only path (a
+# stage agent's `gh issue/pr comment` is denied, and a cloud session has no other write path).
+# Authoring stages post their handoff; `development` a rework note; review roles their full
+# review (the verdict marker stays `record-design-review` / `record-pr-review`).
+POST_COMMENT_REVIEW_ROLES = ("product-review", "arch-review", "lld-review", "pr-review")
+POST_COMMENT_ROLES = ("product", "architecture", "lld", "development", *POST_COMMENT_REVIEW_ROLES)
+# role -> the Stage values its unit sits at while the role holds it: a review role has no Stage
+# of its own but the one it follows; development's rework runs at Stage `pr-review`.
+POST_COMMENT_STAGES = {"development": ("development", "pr-review"),
+                       "product-review": ("product",), "arch-review": ("architecture",),
+                       "lld-review": ("lld",), "pr-review": ("pr-review",)}
+_PAUSED_FOR_REGATE_PREFIX = "⏸️ Paused — `"  # cmd_pause_for_epic_regate's comment
+
+
+def post_comment_cap(role: str) -> int:
+    """A review is an evidence-carrying comment (EVIDENCE_CAP); every other role's is a
+    stage handoff (HANDOFF_CAP) -- references/stage-playbooks.md, "Comment size is a contract"."""
+    return EVIDENCE_CAP if role in POST_COMMENT_REVIEW_ROLES else HANDOFF_CAP
+
+
+def parked_for_epic_regate(gh: WorkItemProvider, issue: int) -> bool:
+    """Whether `issue` is parked by `pause-for-epic-regate`: its latest pause comment is newer
+    than its latest stage-start comment (a resumed unit is re-claimed, which posts one)."""
+    paused = started = -1
+    for i, c in enumerate(gh.issue_view(issue).get("comments", [])):
+        body = c.get("body") or ""
+        if body.startswith(_PAUSED_FOR_REGATE_PREFIX):
+            paused = i
+        elif "Picking this up" in body:
+            started = i
+    return paused > started
 
 
 def cmd_post_comment(gh: WorkItemProvider, issue: int, role: str, body_file: str) -> dict:
-    """Post an authoring stage's handoff comment, tagged with a `role-comment` marker that
-    `subagent_stop` looks for. Refused unless `issue` is at `role` and claimed (in-progress, or
-    its gate open while the stage revises on feedback)."""
+    """Post a stage's own comment on its unit, tagged with a `role-comment` marker that
+    `subagent_stop` looks for. Refused unless `issue` is at the role's Stage and claimed
+    (in-progress, its gate open while the stage revises on feedback, or parked `todo` by
+    `pause-for-epic-regate`). Over the role's cap (2,000 chars; 6,000 for a review) nothing
+    is posted: `refused` with the length and the cap."""
     if role not in POST_COMMENT_ROLES:
         raise GhError(f"role must be one of {POST_COMMENT_ROLES}, got {role!r}")
     try:
@@ -5163,13 +5194,20 @@ def cmd_post_comment(gh: WorkItemProvider, issue: int, role: str, body_file: str
         raise GhError(f"--body-file must be a readable file holding the comment text: {exc}")
     if not body:
         raise GhError("--body-file is empty -- a handoff comment must say something")
-    if len(body) > HANDOFF_CAP:
-        return {"refused": True,
-                "reason": f"the comment is {len(body):,} chars, over the {HANDOFF_CAP:,}-char "
-                          f"handoff cap (references/stage-playbooks.md, \"Comment size is a "
-                          f"contract\"); trim it and re-run"}
+    cap = post_comment_cap(role)
+    if len(body) > cap:
+        kind = "review (evidence-carrying)" if role in POST_COMMENT_REVIEW_ROLES else "handoff"
+        return {"refused": True, "posted": False, "chars": len(body), "cap": cap,
+                "reason": f"NOTHING WAS POSTED: the comment is {len(body):,} chars, over the "
+                          f"{cap:,}-char cap for a `{role}` {kind} comment "
+                          f"(references/stage-playbooks.md, \"Comment size is a contract\"). "
+                          f"Cut it to <= {cap:,} chars (check with `wc -c`) and re-run; the "
+                          f"control plane never truncates or splits a comment"}
     stage, status = _stage_and_status(gh, issue)
-    if stage != role or status not in ("in-progress", *GATE_PENDING_STATUSES):
+    stages = POST_COMMENT_STAGES.get(role, (role,))
+    claimed = status in ("in-progress", *GATE_PENDING_STATUSES) or (
+        status == "todo" and stage in stages and parked_for_epic_regate(gh, issue))
+    if stage not in stages or not claimed:
         raise GhError(f"#{issue} is at Stage {stage!r} / status {status!r}, not claimed at "
                       f"{role!r} -- post-comment only serves the stage that holds the claim")
     gh.issue_comment(issue, f"{body}\n\n<!-- role-comment: {role} @ {_utc_now_marker()} -->")
@@ -10208,11 +10246,13 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_record_design_review(
         get_work_item_provider(), a.issue, a.role, a.outcome, a.summary, a.same_class_recurrence))
     p = sub.add_parser("post-comment",
-                        help="Post a product/architecture/lld stage's handoff comment from a file")
+                        help="Post a stage's own comment (handoff, rework note or review) "
+                             "on its unit from a file")
     p.add_argument("issue", type=int)
     p.add_argument("--role", required=True, choices=list(POST_COMMENT_ROLES))
     p.add_argument("--body-file", required=True,
-                    help="File holding the comment text (<= 2,000 chars)")
+                    help=f"File holding the comment text (<= {HANDOFF_CAP:,} chars; "
+                         f"<= {EVIDENCE_CAP:,} for a review role)")
     p.set_defaults(func=lambda a: cmd_post_comment(
         get_work_item_provider(), a.issue, a.role, a.body_file))
     p = sub.add_parser("check-gate")
