@@ -171,7 +171,10 @@ _PIPELINE_DEFAULTS = {
     # `initiativeEpics`: "cloud" makes a laptop Initiative run launch each runnable Epic in its
     # own cloud session (`launch-cloud-epic`) instead of driving it; `stallMinutes`: a live
     # cloud Epic with no GitHub activity this long is `stalled` in `cloud-status`.
-    "placement": {"cloudLabel": "sdlc:cloud", "initiativeEpics": "local", "stallMinutes": 90},
+    # `softOverlapPaths`: fnmatch globs (e.g. a migrations index, a docs table) whose shared
+    # edits are small to merge at epic close -- footprint overlap there never holds a launch.
+    "placement": {"cloudLabel": "sdlc:cloud", "initiativeEpics": "local", "stallMinutes": 90,
+                  "softOverlapPaths": []},
     # `command`: run by `development` in its worktree, green before `open-dev-pr`
     # (agents/development.md); "" = none.
     "prePr": {"command": ""},
@@ -8778,8 +8781,10 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
     slots. A candidate is `launchable` when it is open, not legacy, not running, not blocked by
     an open issue, not idle since its last session ended (unless `relaunch`), within the cap,
     and its footprint is disjoint from the running and already-chosen Epics' (unverifiable when
-    theirs is known and its own is not). Every other open candidate is in `waiting` with a
-    reason."""
+    theirs is known and its own is not) and from every cloud Epic whose work is not on its base
+    yet (`settled_overlap`; `needs_base_sync`). Footprint entries matching
+    `placement.softOverlapPaths` never collide. Every other open candidate is in `waiting`
+    with a reason."""
     by_number = {i["number"]: i for i in all_issues}
     comments = {} if comments is None else comments
 
@@ -8806,8 +8811,42 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
                 warnings.append(f"git fetch failed ({_first_line(str(e))}); footprints read "
                                 f"from the last fetched origin refs")
         if n not in footprints:
-            footprints[n] = epic_footprint(repo_path, by_number[n], runner, gh=gh)
+            footprints[n] = hard_footprint(epic_footprint(repo_path, by_number[n], runner, gh=gh))
         return footprints[n]
+
+    settled: list = []
+
+    def settled_overlap(n: int) -> Optional[dict]:
+        """An Epic no longer running whose footprint overlaps `n`'s and whose work is not yet
+        on `n`'s base: an open one whose session ended, or a closed one whose merge commit is
+        not an ancestor of `origin/<base>` (`needs_base_sync`)."""
+        mine = footprint_of(n)
+        if not mine:
+            return None
+        if not settled:
+            settled.append([i["number"] for i in all_issues if is_epic(i)
+                            and _cloud_placed(i, by_number) and i["number"] not in running
+                            and (i["state"] == "CLOSED"
+                                 or (sessions.get(i["number"]) or {}).get("ended"))])
+        base = epic_base_in(by_number, n)
+        for m in settled[0]:
+            if m == n or m in launchable:
+                continue
+            theirs = footprint_of(m)
+            if not theirs or not footprint_overlaps(mine, theirs):
+                continue
+            if by_number[m]["state"] != "CLOSED":
+                return {"reason": f"footprint overlaps #{m} (open; its cloud session ended "
+                                  f"before it merged)"}
+            merge = _epic_merge_commit(gh, m)
+            if merge is None or _is_ancestor(repo_path, merge, f"origin/{base}", runner):
+                continue
+            return {"reason": f"footprint overlaps closed #{m}, whose merge {merge[:12]} is not "
+                              f"on origin/{base} yet -- bring it into `{base}` first (an "
+                              f"initiative branch: `sync-branch <i> --unit initiative`), then "
+                              f"launch",
+                    "needs_base_sync": {"epic": m, "merge_commit": merge, "base": base}}
+        return None
 
     launchable, waiting = [], []
     for n in sorted(set(candidates)):
@@ -8841,8 +8880,14 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
                 hit = footprint_collision(footprint_of(n), others)
                 if hit:
                     reason = hit
+        sync = None
+        if reason is None:
+            sync = settled_overlap(n)
+            reason = (sync or {}).get("reason")
         if reason:
-            waiting.append({"epic": n, "reason": reason})
+            waiting.append({"epic": n, "reason": reason,
+                            **({"needs_base_sync": sync["needs_base_sync"]}
+                               if sync and sync.get("needs_base_sync") else {})})
         else:
             launchable.append(n)
     result = {"cap": cap, "free": max(0, cap - len(running)),
@@ -8851,6 +8896,36 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
     if warnings:
         result["warnings"] = warnings
     return result
+
+
+def hard_footprint(footprint: Optional[list]) -> Optional[list]:
+    """`footprint` without the `placement.softOverlapPaths` entries (None stays None)."""
+    soft = PIPELINE["placement"].get("softOverlapPaths") or []
+    if footprint is None or not soft:
+        return footprint
+    return [p for p in footprint
+            if not any(fnmatch.fnmatch(p, g) or fnmatch.fnmatch(_footprint_prefix(p), g)
+                       for g in soft)]
+
+
+def _epic_merge_commit(gh, epic: int) -> Optional[str]:
+    """The merge commit of `epic`'s merged integration PR; None when it never merged."""
+    try:
+        prs = gh.pr_list_for_branch(epic_branch(epic), state="merged")
+        if not prs:
+            return None
+        return ((gh.pr_view(prs[0]["number"], "mergeCommit").get("mergeCommit") or {})
+                .get("oid"))
+    except GhError:
+        return None
+
+
+def _is_ancestor(repo_path: str, commit: str, ref: str, runner: Runner) -> bool:
+    try:
+        runner(["git", "-C", repo_path, "merge-base", "--is-ancestor", commit, ref])
+        return True
+    except GhError:
+        return False
 
 
 def _initiative_epics(all_issues: list, initiative: int) -> list:
@@ -8893,8 +8968,10 @@ def cmd_launch_cloud_epic(gh: GitHub, epic: int, repo_path: str = ".", relaunch:
     survey = cloud_epic_survey(gh, all_issues, [epic], repo_path=repo_path, runner=runner,
                                relaunch=relaunch, comments=comments)
     if epic not in survey["launchable"]:
-        why = next((w["reason"] for w in survey["waiting"] if w["epic"] == epic), "not launchable")
-        return {**result, "refused": True, "reason": why,
+        wait = next((w for w in survey["waiting"] if w["epic"] == epic), {})
+        return {**result, "refused": True, "reason": wait.get("reason", "not launchable"),
+                **({"needs_base_sync": wait["needs_base_sync"]}
+                   if wait.get("needs_base_sync") else {}),
                 "running": [r["epic"] for r in survey["running"]], "cap": survey["cap"]}
     placed = cmd_place(gh, epic, "cloud", repo_path=repo_path, runner=runner)
     if placed.get("refused"):

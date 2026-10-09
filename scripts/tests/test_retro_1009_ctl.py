@@ -334,3 +334,104 @@ def test_pr_checks_still_demands_the_suite_on_a_pr_into_main(monkeypatch):
     result = s.cmd_pr_checks(_epic_pr("epic-9", "main"), 38)
     assert result["missing_required_workflows"] and result["status"] == "missing-checks"
     assert "deferred_to_initiative" not in result
+
+
+# --- 7. a cloud launch waits for an overlapping Epic's merge to reach its base ----------
+
+from tests.test_cloud_epics import CLOUD, FakeClaude, FakeGit, LAUNCH_OUT, _ended, _launched  # noqa: E402,E501
+from tests.test_cloud_epics import CloudGh  # noqa: E402
+
+FP = "## Footprint\n\n- `scripts/lib/env-secrets-keys.sh`\n- `{own}/**`\n"
+
+
+class AncestryGit(FakeGit):
+    """`merge-base --is-ancestor <c> <ref>` succeeds only for the listed (commit, ref) pairs."""
+
+    def __init__(self, ancestors=()):
+        super().__init__()
+        self.ancestors = set(ancestors)
+
+    def __call__(self, argv):
+        if "--is-ancestor" in argv:
+            self.calls.append(argv)
+            if (argv[-2], argv[-1]) not in self.ancestors:
+                raise s.GhError("not an ancestor")
+            return ""
+        return super().__call__(argv)
+
+
+def _cross_base(monkeypatch):
+    """Bookshaw Epic #1759 (cloud, closed into main via PR 90) and Tijori Epic #2142 cut
+    from initiative-1994, both editing the same shared script."""
+    monkeypatch.setitem(s.PIPELINE, "initiativeProfiles", [_OPT_IN])
+    gh = CloudGh([
+        {"number": 1326, "labels": ["type:initiative", CLOUD]},
+        {"number": 1759, "labels": ["type:epic"], "parent": 1326, "state": "CLOSED",
+         "body": FP.format(own="apps/bookshaw"), "comments": [_launched(), _ended()]},
+        {"number": 1994, "labels": ["type:initiative", "initiative:branch", CLOUD]},
+        {"number": 2142, "labels": ["type:epic"], "parent": 1994,
+         "body": FP.format(own="apps/tijori")},
+    ])
+    gh.prs[90] = {"headRefName": "epic-1759", "baseRefName": "main", "state": "MERGED",
+                  "mergeCommit": {"oid": "m1759"}}
+    gh.pr_list_for_branch = lambda branch, state="open": (
+        [{"number": 90}] if (branch, state) == ("epic-1759", "merged") else [])
+    gh.pr_view = lambda n, fields="": gh.prs[n]
+    return gh
+
+
+def test_launch_waits_when_a_closed_overlapping_epics_merge_is_not_on_its_base(monkeypatch):
+    gh = _cross_base(monkeypatch)
+    git = AncestryGit({("m1759", "origin/main")})       # on main, not on initiative-1994
+    claude = FakeClaude(LAUNCH_OUT)
+
+    result = s.cmd_launch_cloud_epic(gh, 2142, runner=git, claude=claude)
+
+    assert result["refused"] is True and claude.calls == []
+    assert result["needs_base_sync"] == {"epic": 1759, "merge_commit": "m1759",
+                                         "base": "initiative-1994"}
+
+
+def test_launch_proceeds_once_the_merge_reached_the_base(monkeypatch):
+    # Positive control: after `sync-branch 1994 --unit initiative` the merge is on the base.
+    gh = _cross_base(monkeypatch)
+    git = AncestryGit({("m1759", "origin/initiative-1994")})
+    monkeypatch.setattr(s, "cmd_place", lambda *a, **k: {"placed": "cloud"})
+
+    result = s.cmd_launch_cloud_epic(gh, 2142, runner=git, claude=FakeClaude(LAUNCH_OUT))
+
+    assert result["launched"] is True
+
+
+def test_soft_overlap_paths_never_hold_a_launch(monkeypatch):
+    gh = _cross_base(monkeypatch)
+    monkeypatch.setitem(s.PIPELINE["placement"], "softOverlapPaths", ["scripts/lib/*.sh"])
+    monkeypatch.setattr(s, "cmd_place", lambda *a, **k: {"placed": "cloud"})
+
+    result = s.cmd_launch_cloud_epic(gh, 2142, runner=AncestryGit(),
+                                     claude=FakeClaude(LAUNCH_OUT))
+
+    assert result["launched"] is True
+
+
+def test_a_hard_overlap_with_a_running_epic_still_waits_despite_soft_paths(monkeypatch):
+    # Positive control: soft paths only drop their own entries; real overlap still blocks.
+    monkeypatch.setitem(s.PIPELINE["placement"], "softOverlapPaths", ["docs/*"])
+    gh = CloudGh([{"number": 1, "labels": ["type:initiative"]},
+                  {"number": 2, "labels": ["type:epic", CLOUD], "parent": 1,
+                   "comments": [_launched()], "body": "## Footprint\n\n- `src/a/**`\n- `docs/t.md`\n"},
+                  {"number": 3, "labels": ["type:epic"], "parent": 1,
+                   "body": "## Footprint\n\n- `src/a/x.py`\n- `docs/t.md`\n"}])
+    survey = s.cloud_epic_survey(gh, gh.issue_list(), [3], runner=FakeGit())
+    assert survey["waiting"] == [{"epic": 3, "reason": "footprint overlaps active/eligible #2"}]
+
+
+def test_an_overlap_confined_to_soft_paths_does_not_hold_a_launch(monkeypatch):
+    monkeypatch.setitem(s.PIPELINE["placement"], "softOverlapPaths", ["docs/*"])
+    gh = CloudGh([{"number": 1, "labels": ["type:initiative"]},
+                  {"number": 2, "labels": ["type:epic", CLOUD], "parent": 1,
+                   "comments": [_launched()], "body": "## Footprint\n\n- `src/a/**`\n- `docs/t.md`\n"},
+                  {"number": 3, "labels": ["type:epic"], "parent": 1,
+                   "body": "## Footprint\n\n- `src/b/**`\n- `docs/t.md`\n"}])
+    survey = s.cloud_epic_survey(gh, gh.issue_list(), [3], runner=FakeGit())
+    assert survey["launchable"] == [3]
