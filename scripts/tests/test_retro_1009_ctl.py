@@ -238,3 +238,60 @@ def test_rest_convert_to_draft_uses_the_ccr_route_in_the_cloud(monkeypatch):
                               "repos/owner/repo/pulls/7/ccr/convert_to_draft"): ""})
     s.GitHubRest(runner=runner).pr_convert_to_draft(7)
     assert len(runner.calls) == 1
+
+
+# --- record-local-ci: a non-attestable suite on a PR no required workflow covers ---
+
+IT_SPEC = {"workflow": "Backend Integration Tests", "suite": "backend-it",
+           "prefixes": ("backend/",), "files": (), "excludeGlobs": ("**/*.md",),
+           "bases": ("main", "initiative-*"), "attestable": False}
+
+
+@pytest.fixture
+def it_suite(monkeypatch, tmp_path):
+    monkeypatch.setattr(s, "LOCAL_CI_SUITES", ("backend", "backend-it"))
+    monkeypatch.setattr(s, "NON_ATTESTABLE_SUITES", frozenset({"backend-it"}))
+    monkeypatch.setattr(s, "REQUIRED_WORKFLOWS", (IT_SPEC,))
+    out = tmp_path / "o.txt"
+    out.write_text("Tests: 312 passed\n")
+    return str(out)
+
+
+def _pr_gh(base, files):
+    return FakeGh([{"number": 1, "labels": ["type:task"]}],
+                  prs={42: {"headRefName": "issue-1", "baseRefName": base, "files": files}})
+
+
+@pytest.mark.parametrize("base,files", [("epic-9", ["backend/x.py"]),      # scoped to main
+                                        ("main", ["frontend/a.ts"])])      # path uncovered
+def test_record_local_ci_records_a_non_attestable_suite_no_workflow_requires(it_suite, base,
+                                                                             files):
+    """Regression (no-required-workflow-no-attestation): a Task PR into epic-* runs the IT
+    suite, nothing requires it there, and record-local-ci refused to record the run."""
+    gh = _pr_gh(base, files)
+    out = s.cmd_record_local_ci(gh, 42, "backend-it", "abc1234", "make backend-it", it_suite)
+    assert out["attested"] is True and out["stands_in_for_check"] is False
+    assert repr(base) in out["accepted_because"]
+    assert "local-ci: backend-it:42 @ abc1234" in gh.prs[42]["comments"][-1]
+
+
+@pytest.mark.parametrize("base", ["main", "initiative-1994"])
+def test_record_local_ci_still_refuses_a_non_attestable_suite_its_workflow_covers(it_suite,
+                                                                                   base):
+    gh = _pr_gh(base, ["docs/x.md", "backend/x.py"])
+    with pytest.raises(GhError, match="attestable: false") as exc:
+        s.cmd_record_local_ci(gh, 42, "backend-it", "abc1234", "make backend-it", it_suite)
+    assert gh.prs[42]["comments"] == []
+
+
+
+def test_record_local_ci_attestable_suite_carries_no_acceptance_field(it_suite):
+    out = s.cmd_record_local_ci(_pr_gh("main", ["backend/x.py"]), 42, "backend", "abc1234",
+                                "make test", it_suite)
+    assert out["attested"] is True and "accepted_because" not in out
+
+
+def test_the_refusal_names_the_covering_workflow_and_base(it_suite):
+    gh = _pr_gh("main", ["backend/x.py"])
+    with pytest.raises(GhError, match="Backend Integration Tests.*'main'"):
+        s.cmd_record_local_ci(gh, 42, "backend-it", "abc1234", "make backend-it", it_suite)

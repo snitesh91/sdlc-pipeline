@@ -5132,10 +5132,6 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
     the PR head. Returns `attested`, `evidence_lines`."""
     if suite not in LOCAL_CI_SUITES:
         raise GhError(f"suite must be one of {LOCAL_CI_SUITES}, got {suite!r}")
-    if suite in NON_ATTESTABLE_SUITES:
-        raise GhError(f"the {suite!r} suite is configured `attestable: false` -- a local-ci "
-                      f"attestation cannot stand in for it; only a passing GitHub Actions check "
-                      f"satisfies its required workflow")
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha or ""):
         raise GhError(f"sha must be a 7-40 char hex commit id, got {sha!r}")
     if not (command or "").strip():
@@ -5150,6 +5146,8 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
         raise GhError(f"--command {command.strip()!r} does not match the {suite!r} suite's "
                       f"requiredWorkflows[].commandPattern {pattern!r} -- attest the real "
                       f"suite command")
+    accepted = (_non_attestable_suite_uncovered(gh, pr, suite)
+                if suite in NON_ATTESTABLE_SUITES else {})
     evidence = read_ci_evidence(output)
     timestamp = _utc_now_marker()
     fence = "```"
@@ -5161,7 +5159,28 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
                        f"<!-- local-ci: {suite}:{pr} @ {sha} -->\n"
                        f"<!-- attested-at: {timestamp} -->")
     return {"pr": pr, "suite": suite, "sha": sha, "command": command.strip(),
-            "evidence_lines": len(evidence.splitlines()), "attested": True}
+            "evidence_lines": len(evidence.splitlines()), "attested": True, **accepted}
+
+
+def _non_attestable_suite_uncovered(gh: GitHub, pr: int, suite: str) -> dict:
+    """An `attestable: false` suite is attested only as a record, when none of its required
+    workflows applies to the PR's base and covers a changed path (a PR into `epic-*` while the
+    workflow is scoped to `main`): nothing else records that the suite ran. Raises when one
+    does -- only its passing GitHub Actions check satisfies it. Returns `accepted_because`."""
+    base = gh.pr_view(pr, fields="baseRefName").get("baseRefName")
+    files = gh.pr_files(pr)
+    covering = [w["workflow"] for w in REQUIRED_WORKFLOWS
+                if w["suite"] == suite and _workflow_applies_to_base(w, base)
+                and any(_workflow_covers(w, p) for p in files)]
+    if covering:
+        raise GhError(f"the {suite!r} suite is configured `attestable: false` and its required "
+                      f"workflow ({', '.join(covering)}) covers this PR into {base!r} -- a "
+                      f"local-ci attestation cannot stand in for it; only a passing GitHub "
+                      f"Actions check satisfies it")
+    return {"accepted_because": f"`attestable: false` suite recorded, not standing in for a "
+                                f"check: no required workflow for {suite!r} covers this PR's "
+                                f"{len(files)} changed path(s) on base {base!r}",
+            "stands_in_for_check": False}
 
 
 def _stage_and_status(gh: WorkItemProvider, issue: int) -> tuple:
