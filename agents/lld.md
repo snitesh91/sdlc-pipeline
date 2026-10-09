@@ -28,8 +28,10 @@ the codebase.
    Task's subsection under a slug heading — you do **not** create the issues. The orchestrator
    creates them after `lld-review` clears.
 5. **Author the design, never the code.** You commit `lld.md` only — no `src/**`,
-   `test/**`, config, seed or migration file. Code a design needs to be unambiguous is a
-   fenced spec snippet inside `lld.md` that `development` implements test-first.
+   `test/**`, config, seed or migration file, and never `architecture.md` or `product.md`.
+   Code a design needs to be unambiguous is a fenced spec snippet inside `lld.md` that
+   `development` implements test-first. A needed architecture change is a deviation
+   ("First move"), never an edit.
 
 ## First move: fits or deviates
 
@@ -161,7 +163,12 @@ Write every metadata line below plain — never wrapped in backticks.
   counts as a stable pass of them versus a flake (`references/epics.md`, "Epic closing"). Not the run itself — see below.
 - **Acceptance criteria**, carried from the Epic (unchanged, or with the revision stated).
   Each is observable and unambiguous enough to write a failing test from without reading code.
-  A criterion is a product behaviour, never a pipeline step.
+  A criterion is a product behaviour, never a pipeline step. **Every decision that keeps
+  state or has a failure mode carries a criterion for its failure, empty and repeat case**
+  (the dependency errors or hangs, nothing to process, a second run over earlier state) —
+  not only the success path. A check that needs a Stage deploy (or anything only `main`
+  has) is never a Task's criterion: the Task merges into `epic-<e>` first. List it under a
+  non-Task `## Epic-close checks` heading; the closing verification runs it.
 - **Honest risks.** "No risks identified" by default is a finding about the document.
 - **Out of scope** for this Task, explicitly.
 - **`## Footprint`** in the exact parseable shape from `references/epics.md`, "How to size the
@@ -233,8 +240,14 @@ orchestrator raises, and the pipeline merges it into `epic-<e>` on a clean revie
 1. Write `<docRoot>/epic-<e>/lld.md` per "The document" — exactly that path, not
    `issue-<n>/`; `verify-exit` fails otherwise. `Write` the skeleton once, then `Edit` one
    Task subsection at a time — not one huge `Write`.
-2. Commit and push to `origin/issue-<n>`.
-3. Post a short handoff comment (`stage-playbooks.md`, "Posting a handoff comment").
+2. **Re-check siblings at their current heads.** Immediately before committing, `git fetch
+   origin` and re-read every sibling Epic branch (`origin/epic-<m>`) your design depends on
+   or shares a hotspot with (migration numbering, route lists, shared modules); re-run the
+   proofs that touch them. Record the heads checked under a non-Task `## Sibling heads
+   checked` heading (`epic-<m> @ <sha>`). A sibling that landed mid-design is how an LLD
+   ships a stale collision.
+3. Commit and push to `origin/issue-<n>`.
+4. Post a short handoff comment (`stage-playbooks.md`, "Posting a handoff comment").
 
 A deviating piece: stop and report per "First move" (outcome `blocked`). **Rework round:**
 same worktree and branch; edit `lld.md` in place, commit, push. Genuine ambiguity: stop and
