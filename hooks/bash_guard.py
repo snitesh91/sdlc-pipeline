@@ -52,15 +52,23 @@ ROLE_COMMANDS = {
     "product": {"post-comment", "resolve-thread", "comment"},
     "architecture": {"post-comment", "resolve-thread", "comment"},
     "lld": {"post-comment"},
-    "product-review": {"record-design-review"},
-    "design-review": {"record-design-review"},
-    "development": {"open-dev-pr", "record-local-ci", "handoff-to-pr-review"},
+    # Reviewers post their full review with `post-comment` and read the unit's branch in their
+    # own detached review tree (`review-worktree-add`), never by checking out in its dev tree.
+    "product-review": {"record-design-review", "post-comment", "review-worktree-add",
+                       "release-review-worktree"},
+    "design-review": {"record-design-review", "post-comment", "review-worktree-add",
+                      "release-review-worktree"},
+    # `post-comment`: a rework note; `update-pr-body`: the PR description after rework.
+    "development": {"open-dev-pr", "record-local-ci", "handoff-to-pr-review", "post-comment",
+                    "update-pr-body"},
     # pr-review makes its own review tree first and releases it last.
     "pr-review": {"record-pr-review", "record-local-ci", "review-worktree-add",
-                  "release-review-worktree"},
+                  "release-review-worktree", "post-comment"},
     "initiative-close": {"record-initiative-verification"},
 }
 REVIEW_ROLES = {"product-review", "design-review", "pr-review"}
+# Agent role -> the `post-comment --role` values it may pass (default: its own role).
+POST_COMMENT_AS = {"design-review": {"arch-review", "lld-review"}}
 CONTROL_PLANE_REFS = {"$SDLC", "${SDLC}"}
 
 # A run's state file is written by `next-action --run-id` and outlives its run (only
@@ -90,7 +98,9 @@ REASONS = {
                          "stop, and end with your SDLC-RESULT (outcome `blocked`, naming "
                          "`sync-branch <n>` as the needed step); the orchestrator syncs the "
                          "branch and resumes you on the new head.",
-    "post-comment-role": f"post-comment serves only your own stage: pass --role <your role> ({SDLC} post-comment <n> --role <r> --body-file <f>).",
+    "post-comment-role": f"post-comment serves only your own stage: pass --role <your role> ({SDLC} post-comment <n> --role <r> --body-file <f>; sdlc:design-review passes arch-review or lld-review).",
+    "gh-comment": f"Stage agents never post with hand-run `gh pr comment` / `gh issue comment`: use {SDLC} post-comment <issue> --role <your role> --body-file <f> (<= 2,000 chars; <= 6,000 for a review). product/architecture reply on their gate PR with {SDLC} comment <pr> --body-file <f>.",
+    "run-rerun": f"Re-running CI is the orchestrator's: do not run `gh run rerun`. Report the failed check (name, run URL, why it is a flake) in your SDLC-RESULT/handoff; the orchestrator runs {SDLC} rerun-checks <pr>.",
     "stash": "git stash is blocked for stage agents: every worktree of a repo shares one stash "
              "stack, so a parallel agent's `stash pop` can take your work or you theirs. For a "
              "mutation check copy the file to .sdlc-scratch/ and restore it, or commit and "
@@ -319,8 +329,15 @@ def check_role(words: list, role: str):
         return "orchestrator-only"
     if words[0] == "git" and _git_sub(words[1:])[0] == "stash":
         return "stash"
-    if cmd == "post-comment" and _flag_value(words, "--role") != role:
+    if cmd == "post-comment" and _flag_value(words, "--role") not in POST_COMMENT_AS.get(
+            role, {role}):
         return "post-comment-role"
+    if words[0] == "gh":
+        pos = _positionals(words[1:], {"-R", "--repo"})
+        if pos[:2] in (["pr", "comment"], ["issue", "comment"]):
+            return "gh-comment"
+        if pos[:2] == ["run", "rerun"]:
+            return "run-rerun"
     if role in REVIEW_ROLES and words[0] == "git":
         sub, rest = _git_sub(words[1:])
         if (sub in ("commit", "push", "merge") or (sub == "reset" and "--hard" in rest)

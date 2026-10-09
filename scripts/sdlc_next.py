@@ -561,6 +561,12 @@ class GitHub:
     def pr_comment(self, number: int, body: str):
         self._run(["gh", "pr", "comment", str(number), "--repo", self.repo, "--body", body])
 
+    def pr_edit_body(self, number: int, body: str):
+        """Replace a PR's description: REST `PATCH pulls/<n>`, so it works through the cloud
+        proxy too (`gh pr edit` is GraphQL)."""
+        self._run(["gh", "api", "-X", "PATCH", f"repos/{self.repo}/pulls/{number}",
+                   "-f", f"body={body}"])
+
     def issue_create(self, title: str, body: str, labels: list) -> int:
         argv = ["gh", "api", f"repos/{self.repo}/issues", "-f", f"title={title}", "-f", f"body={body}"]
         for l in labels:
@@ -663,6 +669,9 @@ class GitHub:
 
     def pr_ready(self, number: int):
         self._run(["gh", "pr", "ready", str(number), "--repo", self.repo])
+
+    def pr_convert_to_draft(self, number: int):
+        self._run(["gh", "pr", "ready", str(number), "--repo", self.repo, "--undo"])
 
     def ensure_label(self, label: str):
         """Create `label` in the repo when missing (idempotent)."""
@@ -1083,13 +1092,30 @@ class GitHubRest(GitHub):
     def pr_create(self, base: str, head: str, title: str, body: str, draft: bool = False) -> int:
         args = ["-f", f"title={title}", "-f", f"body={body}", "-f", f"head={head}",
                 "-f", f"base={base}"] + (["-F", "draft=true"] if draft else [])
-        return int(self._api_json(f"repos/{self.repo}/pulls", *args, method="POST")["number"])
+        try:
+            raw = self._api_json(f"repos/{self.repo}/pulls", *args, method="POST")
+        except ValueError:
+            raw = None
+        if not isinstance(raw, dict) or not isinstance(raw.get("number"), int):
+            # The cloud proxy has answered a draft create with an empty body although the PR
+            # was made; `open-dev-pr` then looks it up by its head branch.
+            raise GhError(f"{PR_CREATE_NO_NUMBER}: POST repos/{self.repo}/pulls "
+                          f"(head {head}) returned {str(raw)[:200]!r}")
+        return raw["number"]
 
     def pr_ready(self, number: int):
         self._no_rest_path(
             lambda: self._api(f"repos/{self.repo}/pulls/{number}/ccr/ready_for_review",
                               method="POST"),
             lambda: super(GitHubRest, self).pr_ready(number))
+
+    def pr_convert_to_draft(self, number: int):
+        """Public REST cannot draft an open PR: the proxy's `ccr` route in a cloud session
+        (the counterpart of `ccr/ready_for_review`), `gh pr ready --undo` locally."""
+        self._no_rest_path(
+            lambda: self._api(f"repos/{self.repo}/pulls/{number}/ccr/convert_to_draft",
+                              method="POST"),
+            lambda: super(GitHubRest, self).pr_convert_to_draft(number))
 
     def pr_add_label(self, number: int, label: str):
         self.issue_edit(number, add_labels=[label])
@@ -5106,10 +5132,6 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
     the PR head. Returns `attested`, `evidence_lines`."""
     if suite not in LOCAL_CI_SUITES:
         raise GhError(f"suite must be one of {LOCAL_CI_SUITES}, got {suite!r}")
-    if suite in NON_ATTESTABLE_SUITES:
-        raise GhError(f"the {suite!r} suite is configured `attestable: false` -- a local-ci "
-                      f"attestation cannot stand in for it; only a passing GitHub Actions check "
-                      f"satisfies its required workflow")
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha or ""):
         raise GhError(f"sha must be a 7-40 char hex commit id, got {sha!r}")
     if not (command or "").strip():
@@ -5124,6 +5146,8 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
         raise GhError(f"--command {command.strip()!r} does not match the {suite!r} suite's "
                       f"requiredWorkflows[].commandPattern {pattern!r} -- attest the real "
                       f"suite command")
+    accepted = (_non_attestable_suite_uncovered(gh, pr, suite)
+                if suite in NON_ATTESTABLE_SUITES else {})
     evidence = read_ci_evidence(output)
     timestamp = _utc_now_marker()
     fence = "```"
@@ -5135,7 +5159,28 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
                        f"<!-- local-ci: {suite}:{pr} @ {sha} -->\n"
                        f"<!-- attested-at: {timestamp} -->")
     return {"pr": pr, "suite": suite, "sha": sha, "command": command.strip(),
-            "evidence_lines": len(evidence.splitlines()), "attested": True}
+            "evidence_lines": len(evidence.splitlines()), "attested": True, **accepted}
+
+
+def _non_attestable_suite_uncovered(gh: GitHub, pr: int, suite: str) -> dict:
+    """An `attestable: false` suite is attested only as a record, when none of its required
+    workflows applies to the PR's base and covers a changed path (a PR into `epic-*` while the
+    workflow is scoped to `main`): nothing else records that the suite ran. Raises when one
+    does -- only its passing GitHub Actions check satisfies it. Returns `accepted_because`."""
+    base = gh.pr_view(pr, fields="baseRefName").get("baseRefName")
+    files = gh.pr_files(pr)
+    covering = [w["workflow"] for w in REQUIRED_WORKFLOWS
+                if w["suite"] == suite and _workflow_applies_to_base(w, base)
+                and any(_workflow_covers(w, p) for p in files)]
+    if covering:
+        raise GhError(f"the {suite!r} suite is configured `attestable: false` and its required "
+                      f"workflow ({', '.join(covering)}) covers this PR into {base!r} -- a "
+                      f"local-ci attestation cannot stand in for it; only a passing GitHub "
+                      f"Actions check satisfies it")
+    return {"accepted_because": f"`attestable: false` suite recorded, not standing in for a "
+                                f"check: no required workflow for {suite!r} covers this PR's "
+                                f"{len(files)} changed path(s) on base {base!r}",
+            "stands_in_for_check": False}
 
 
 def _stage_and_status(gh: WorkItemProvider, issue: int) -> tuple:
@@ -5146,14 +5191,45 @@ def _stage_and_status(gh: WorkItemProvider, issue: int) -> tuple:
             PIPELINE_STATUS_FIELD_NAMES.get(fields.get("Pipeline Status")))
 
 
-# Authoring stages that hand off with a free-text comment; `post-comment` is their only path.
-POST_COMMENT_ROLES = ("product", "architecture", "lld")
+# Stages that post a free-text comment on their unit; `post-comment` is their only path (a
+# stage agent's `gh issue/pr comment` is denied, and a cloud session has no other write path).
+# Authoring stages post their handoff; `development` a rework note; review roles their full
+# review (the verdict marker stays `record-design-review` / `record-pr-review`).
+POST_COMMENT_REVIEW_ROLES = ("product-review", "arch-review", "lld-review", "pr-review")
+POST_COMMENT_ROLES = ("product", "architecture", "lld", "development", *POST_COMMENT_REVIEW_ROLES)
+# role -> the Stage values its unit sits at while the role holds it: a review role has no Stage
+# of its own but the one it follows; development's rework runs at Stage `pr-review`.
+POST_COMMENT_STAGES = {"development": ("development", "pr-review"),
+                       "product-review": ("product",), "arch-review": ("architecture",),
+                       "lld-review": ("lld",), "pr-review": ("pr-review",)}
+_PAUSED_FOR_REGATE_PREFIX = "⏸️ Paused — `"  # cmd_pause_for_epic_regate's comment
+
+
+def post_comment_cap(role: str) -> int:
+    """A review is an evidence-carrying comment (EVIDENCE_CAP); every other role's is a
+    stage handoff (HANDOFF_CAP) -- references/stage-playbooks.md, "Comment size is a contract"."""
+    return EVIDENCE_CAP if role in POST_COMMENT_REVIEW_ROLES else HANDOFF_CAP
+
+
+def parked_for_epic_regate(gh: WorkItemProvider, issue: int) -> bool:
+    """Whether `issue` is parked by `pause-for-epic-regate`: its latest pause comment is newer
+    than its latest stage-start comment (a resumed unit is re-claimed, which posts one)."""
+    paused = started = -1
+    for i, c in enumerate(gh.issue_view(issue).get("comments", [])):
+        body = c.get("body") or ""
+        if body.startswith(_PAUSED_FOR_REGATE_PREFIX):
+            paused = i
+        elif "Picking this up" in body:
+            started = i
+    return paused > started
 
 
 def cmd_post_comment(gh: WorkItemProvider, issue: int, role: str, body_file: str) -> dict:
-    """Post an authoring stage's handoff comment, tagged with a `role-comment` marker that
-    `subagent_stop` looks for. Refused unless `issue` is at `role` and claimed (in-progress, or
-    its gate open while the stage revises on feedback)."""
+    """Post a stage's own comment on its unit, tagged with a `role-comment` marker that
+    `subagent_stop` looks for. Refused unless `issue` is at the role's Stage and claimed
+    (in-progress, its gate open while the stage revises on feedback, or parked `todo` by
+    `pause-for-epic-regate`). Over the role's cap (2,000 chars; 6,000 for a review) nothing
+    is posted: `refused` with the length and the cap."""
     if role not in POST_COMMENT_ROLES:
         raise GhError(f"role must be one of {POST_COMMENT_ROLES}, got {role!r}")
     try:
@@ -5163,13 +5239,20 @@ def cmd_post_comment(gh: WorkItemProvider, issue: int, role: str, body_file: str
         raise GhError(f"--body-file must be a readable file holding the comment text: {exc}")
     if not body:
         raise GhError("--body-file is empty -- a handoff comment must say something")
-    if len(body) > HANDOFF_CAP:
-        return {"refused": True,
-                "reason": f"the comment is {len(body):,} chars, over the {HANDOFF_CAP:,}-char "
-                          f"handoff cap (references/stage-playbooks.md, \"Comment size is a "
-                          f"contract\"); trim it and re-run"}
+    cap = post_comment_cap(role)
+    if len(body) > cap:
+        kind = "review (evidence-carrying)" if role in POST_COMMENT_REVIEW_ROLES else "handoff"
+        return {"refused": True, "posted": False, "chars": len(body), "cap": cap,
+                "reason": f"NOTHING WAS POSTED: the comment is {len(body):,} chars, over the "
+                          f"{cap:,}-char cap for a `{role}` {kind} comment "
+                          f"(references/stage-playbooks.md, \"Comment size is a contract\"). "
+                          f"Cut it to <= {cap:,} chars (check with `wc -c`) and re-run; the "
+                          f"control plane never truncates or splits a comment"}
     stage, status = _stage_and_status(gh, issue)
-    if stage != role or status not in ("in-progress", *GATE_PENDING_STATUSES):
+    stages = POST_COMMENT_STAGES.get(role, (role,))
+    claimed = status in ("in-progress", *GATE_PENDING_STATUSES) or (
+        status == "todo" and stage in stages and parked_for_epic_regate(gh, issue))
+    if stage not in stages or not claimed:
         raise GhError(f"#{issue} is at Stage {stage!r} / status {status!r}, not claimed at "
                       f"{role!r} -- post-comment only serves the stage that holds the claim")
     gh.issue_comment(issue, f"{body}\n\n<!-- role-comment: {role} @ {_utc_now_marker()} -->")
@@ -6758,24 +6841,74 @@ def _push_empty_commit(issue: int, repo_path: Optional[str], runner: Runner) -> 
     return _with_workspace({"branch": branch, "sha": sha}, ws)
 
 
+PR_CREATE_NO_NUMBER = "the PR create returned no PR number"
+_DEV_PR_OPENED_RE = re.compile(r"<!-- dev-pr-opened: #(\d+) -->")
+
+
+def _dev_pr_comment_posted(gh: GitHub, issue: int, pr: int) -> bool:
+    """Whether `open-dev-pr`'s comment for `pr` is on the issue (its marker, or the text an
+    earlier version posted)."""
+    for c in gh.issue_view(issue).get("comments", []):
+        body = c.get("body") or ""
+        if any(int(m) == pr for m in _DEV_PR_OPENED_RE.findall(body)) \
+                or f"Draft PR: #{pr} —" in body:
+            return True
+    return False
+
+
+def _finish_dev_pr(gh: GitHub, issue: int, pr: int, summary: str) -> None:
+    """Development's exit on its draft PR: Stage `pr-review` and the PR-opened comment."""
+    gh.set_stage_field(issue, "pr-review")
+    gh.issue_comment(issue,
+        f"✅ {summary} Draft PR: #{pr} — what was built and why is in the PR "
+        f"description.\n\n"
+        f"Not yet queued for review: `development` still owes `record-local-ci` per "
+        f"suite it ran and `handoff-to-pr-review`, which posts the marker "
+        f"`list-ready-for-review` reads.\n\n<!-- dev-pr-opened: #{pr} -->")
+
+
+def _ensure_draft(gh: GitHub, pr: dict) -> dict:
+    """`{}` when the PR is a draft, else the outcome of converting it (the review queue
+    reads draft status): `converted_to_draft`, or a `draft_warning` when that failed."""
+    if pr.get("isDraft"):
+        return {}
+    try:
+        gh.pr_convert_to_draft(pr["number"])
+        return {"converted_to_draft": True}
+    except GhError as e:
+        return {"draft_warning": f"PR #{pr['number']} is not a draft and converting it "
+                                 f"failed ({e}); mark it draft by hand before review"}
+
+
 def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
                     allow_empty: bool = False, repo_path: Optional[str] = None,
                     runner: Runner = _default_runner) -> dict:
     """Open the development draft PR and set Stage to `pr-review`; an already-open
-    PR on the branch is reused (`created: False`). A branch with no commits ahead of its
-    base gets an empty commit first only with `allow_empty` (`empty_commit`), else the
-    refusal names the flag. Returns `pr`, `created`."""
-    existing = gh.pr_list_for_branch(issue_branch(issue))
+    PR on the branch is reused (`created: False`) -- and, when this command's comment for it
+    is missing (a PR made by another path, or a create whose response was lost), adopted:
+    made a draft, Stage set, comment posted (`adopted: True`). A create that returns no PR
+    number is recovered by looking the PR up by its head branch (`recovered`). A branch with
+    no commits ahead of its base gets an empty commit first only with `allow_empty`
+    (`empty_commit`), else the refusal names the flag. Returns `pr`, `created`."""
+    branch = issue_branch(issue)
+    existing = gh.pr_list_for_branch(branch)
     if existing:
         pr_number = existing[0]["number"]
-        return {"issue": issue, "pr": pr_number, "created": False,
-                "reason": f"PR #{pr_number} is already open on {issue_branch(issue)} -- "
-                          f"reusing it rather than opening a duplicate"}
+        if _dev_pr_comment_posted(gh, issue, pr_number):
+            return {"issue": issue, "pr": pr_number, "created": False,
+                    "reason": f"PR #{pr_number} is already open on {branch} -- "
+                              f"reusing it rather than opening a duplicate"}
+        draft = _ensure_draft(gh, existing[0])
+        _finish_dev_pr(gh, issue, pr_number, summary)
+        return {"issue": issue, "pr": pr_number, "created": False, "adopted": True,
+                "reason": f"PR #{pr_number} was already open on {branch} without this "
+                          f"command's exit; adopted it (Stage pr-review, comment posted)",
+                **draft}
     base = integration_base(gh, issue)
     # Refuse a diff that authors a design doc or another Task's footprint file before opening
     # the PR (development authors no design doc; deviations belong in the PR description).
     try:
-        changed = gh.files_since(base, issue_branch(issue))
+        changed = gh.files_since(base, branch)
     except GhError:
         changed = []
     offenders, acknowledged = acknowledge_footprint_deviations(
@@ -6788,27 +6921,34 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
                 "acknowledged_deviations": acknowledged}
     pr_body = f"{body}\n\nCloses #{issue}"
     extra: dict = {}
+
+    def create() -> int:
+        try:
+            return gh.pr_create(base=base, head=branch, title=title, body=pr_body, draft=True)
+        except GhError as e:
+            if _NO_COMMITS_RE.search(str(e)):
+                raise
+            # The create may have landed with its response lost: adopt the PR it made.
+            found = gh.pr_list_for_branch(branch)
+            if not found:
+                raise
+            extra["recovered"] = f"{str(e)[:300]} -- found PR #{found[0]['number']} on {branch}"
+            extra.update(_ensure_draft(gh, found[0]))
+            return found[0]["number"]
+
     try:
-        pr_number = gh.pr_create(base=base, head=issue_branch(issue), title=title,
-                                 body=pr_body, draft=True)
+        pr_number = create()
     except GhError as e:
         if not _NO_COMMITS_RE.search(str(e)):
             raise
         if not allow_empty:
-            raise GhError(f"{issue_branch(issue)} has no commits ahead of {base}, so GitHub "
+            raise GhError(f"{branch} has no commits ahead of {base}, so GitHub "
                           f"refuses the PR. A verify-only Task re-runs open-dev-pr with "
                           f"--allow-empty (lands an empty commit first); otherwise commit and "
                           f"push the work, then re-run.\n{e}")
         extra["empty_commit"] = _push_empty_commit(issue, repo_path, runner)
-        pr_number = gh.pr_create(base=base, head=issue_branch(issue), title=title,
-                                 body=pr_body, draft=True)
-    gh.set_stage_field(issue, "pr-review")
-    gh.issue_comment(issue,
-        f"✅ {summary} Draft PR: #{pr_number} — what was built and why is in the PR "
-        f"description.\n\n"
-        f"Not yet queued for review: `development` still owes `record-local-ci` per "
-        f"suite it ran and `handoff-to-pr-review`, which posts the marker "
-        f"`list-ready-for-review` reads.")
+        pr_number = create()
+    _finish_dev_pr(gh, issue, pr_number, summary)
     return {"issue": issue, "pr": pr_number, "created": True,
             **({"acknowledged_deviations": acknowledged} if acknowledged else {}), **extra}
 
@@ -7007,6 +7147,52 @@ STAGE_RECORD_FILENAMES = {
 }
 
 
+# verify-exit checks the unit's dev worktree is on its branch and pushed for these stages (the
+# authoring stages, and development's exit, verified as `pr-review`). Tests' fake runners
+# script no worktree, so conftest turns it off; its own tests turn it back on.
+VERIFY_EXIT_HEAD_CHECK = True
+HEAD_CHECKED_STAGES = ("product", "architecture", "lld", "development", "pr-review")
+
+
+def unit_head_problem(issue: int, repo_path: str,
+                      runner: Runner = _default_runner) -> Optional[dict]:
+    """Why the unit's dev worktree does not hold its pushed work, or None: a detached HEAD or
+    another branch there (commits made there are on no `issue-<n>`, so `git push origin
+    issue-<n>` pushes nothing), or a local HEAD that differs from `origin/issue-<n>`. None
+    when no dev worktree is registered or origin cannot be fetched (`skipped`)."""
+    branch, path = issue_branch(issue), worktree_path("issue", issue)
+    try:
+        entry = _registered_worktree(repo_path, path, runner)
+    except GhError as exc:
+        return {"ok": True, "skipped": f"worktree lookup failed: {exc}"}
+    if entry is None:
+        return None
+    if entry["branch"] != branch:
+        held = "a detached HEAD" if entry["branch"] is None else f"branch {entry['branch']}"
+        return {"ok": False, "path": path, "detached": entry["branch"] is None,
+                "reason": f"{path} is on {held}, not {branch}: commits made there are on no "
+                          f"{branch}, and `git push origin {branch}` pushes nothing, so the "
+                          f"work is not on origin. Check out {branch} in {path} (bring any "
+                          f"commits made while detached onto it), push, then re-run. Reviewers "
+                          f"never check out in a unit's dev worktree: they use "
+                          f"review-worktree-add."}
+    remote: Optional[str] = None
+    try:
+        _run_retry_transient(["git", "-C", path, "fetch", "origin", branch], runner)
+        remote = runner(["git", "-C", path, "rev-parse", f"origin/{branch}"]).strip()
+    except GhError as exc:
+        if "couldn't find remote ref" not in str(exc).lower():
+            return {"ok": True, "skipped": f"could not fetch origin/{branch}: {exc}"}
+    local = runner(["git", "-C", path, "rev-parse", "HEAD"]).strip()
+    if local == remote:
+        return None
+    return {"ok": False, "path": path, "local_head": local, "origin_head": remote,
+            "reason": f"{path}'s HEAD {local[:10]} is not origin/{branch} "
+                      f"({remote[:10] if remote else 'absent'}): the stage's work is not pushed "
+                      f"(or origin moved under it). Push {branch} (`git -C {path} push origin "
+                      f"{branch}`), then re-run."}
+
+
 def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_stage: str,
                      pr: Optional[int] = None, runner: Runner = _default_runner) -> dict:
     """Post-handoff check: Stage field matches `expect_stage`, the stage's docs and
@@ -7113,6 +7299,13 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
                     "reason",
                     f"{record_filename} has an unresolved citation -- see "
                     f"result['citations'] for which one and what was cited vs. found.")
+    if VERIFY_EXIT_HEAD_CHECK and expect in HEAD_CHECKED_STAGES:
+        head = unit_head_problem(issue, repo_path, runner)
+        if head is not None:
+            result["head_check"] = head
+            if head.get("ok") is False:
+                result["ok"] = False
+                result.setdefault("reason", head["reason"])
     log = runner(["git", "-C", repo_path, "log", "--oneline", "-5"]).strip()
     result["recent_commits"] = log.splitlines() if log else []
     return result
@@ -7416,6 +7609,37 @@ def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
     if hints:
         result["hint"] = " ".join(hints)
     return _with_uncovered(result, files)
+
+
+PR_BODY_CAP = 65_536  # GitHub's PR body limit
+_CLOSES_RE = re.compile(r"^(?:Closes|Fixes|Resolves) #\d+\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def cmd_update_pr_body(gh: GitHub, pr: int, body_file: str) -> dict:
+    """Replace an open PR's description with `body_file`'s text (a rework round keeps the
+    description current). A `Closes #<n>` line the old body had and the new one lacks is kept,
+    so the merge still closes the issue. Refuses a closed/merged PR."""
+    try:
+        with io.open(os.path.expanduser(body_file), encoding="utf-8") as fh:
+            body = fh.read().strip()
+    except OSError as exc:
+        raise GhError(f"--body-file must be a readable file holding the PR description: {exc}")
+    if not body:
+        raise GhError("--body-file is empty -- a PR description must say something")
+    view = gh.pr_view(pr, fields="state,body")
+    if view.get("state") != "OPEN":
+        raise GhError(f"PR #{pr} is {view.get('state')}, not open -- only an open PR's "
+                      f"description is updated")
+    kept = [m.group(0).strip() for m in _CLOSES_RE.finditer(view.get("body") or "")
+            if m.group(0).strip().lower() not in body.lower()]
+    if kept:
+        body = body + "\n\n" + "\n".join(kept)
+    if len(body) > PR_BODY_CAP:
+        return {"pr": pr, "refused": True, "updated": False,
+                "reason": f"the description is {len(body):,} chars, over GitHub's "
+                          f"{PR_BODY_CAP:,}-char PR body limit; nothing was changed"}
+    gh.pr_edit_body(pr, body)
+    return {"pr": pr, "updated": True, "chars": len(body), "kept_closing_lines": kept}
 
 
 def cmd_rerun_checks(gh: GitHub, pr_number: int) -> dict:
@@ -10208,11 +10432,13 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_record_design_review(
         get_work_item_provider(), a.issue, a.role, a.outcome, a.summary, a.same_class_recurrence))
     p = sub.add_parser("post-comment",
-                        help="Post a product/architecture/lld stage's handoff comment from a file")
+                        help="Post a stage's own comment (handoff, rework note or review) "
+                             "on its unit from a file")
     p.add_argument("issue", type=int)
     p.add_argument("--role", required=True, choices=list(POST_COMMENT_ROLES))
     p.add_argument("--body-file", required=True,
-                    help="File holding the comment text (<= 2,000 chars)")
+                    help=f"File holding the comment text (<= {HANDOFF_CAP:,} chars; "
+                         f"<= {EVIDENCE_CAP:,} for a review role)")
     p.set_defaults(func=lambda a: cmd_post_comment(
         get_work_item_provider(), a.issue, a.role, a.body_file))
     p = sub.add_parser("check-gate")
@@ -10430,6 +10656,12 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("pr-checks")
     p.add_argument("pr", type=int)
     p.set_defaults(func=lambda a: cmd_pr_checks(get_work_item_provider(), a.pr))
+    p = sub.add_parser("update-pr-body",
+                        help="Replace an open pipeline PR's description from a file (REST)")
+    p.add_argument("pr", type=int)
+    p.add_argument("--body-file", required=True, help="File holding the new PR description")
+    p.set_defaults(func=lambda a: cmd_update_pr_body(get_work_item_provider(), a.pr,
+                                                     a.body_file))
     p = sub.add_parser("rerun-checks")
     p.add_argument("pr", type=int)
     p.set_defaults(func=lambda a: cmd_rerun_checks(get_work_item_provider(), a.pr))

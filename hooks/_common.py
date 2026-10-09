@@ -125,6 +125,15 @@ def orchestrator_model(config: dict) -> str:
     return (policy_file().get("orchestrator") or {}).get("model") or "sonnet"
 
 
+def cloud_session() -> bool:
+    """Whether this is a Claude Code cloud session, as sdlc_next.py's `session_placement`
+    decides it: `SDLC_PLACEMENT`, else a truthy `CLAUDE_CODE_REMOTE`."""
+    explicit = os.environ.get("SDLC_PLACEMENT", "").strip().lower()
+    if explicit:
+        return explicit == "cloud"
+    return os.environ.get("CLAUDE_CODE_REMOTE", "").strip().lower() in ("true", "1")
+
+
 def sdlc_role(agent_type) -> str:
     """`<role>` for an `sdlc:<role>` agent type, else ""."""
     agent_type = str(agent_type or "")

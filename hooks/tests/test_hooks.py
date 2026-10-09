@@ -458,6 +458,21 @@ ROLE_ALLOWED = [
     ("sdlc:architecture", CP + "post-comment 5 --body-file /tmp/c.md --role=architecture"),
     ("sdlc:lld", CP + "post-comment 5 --role lld --body-file /tmp/c.md"),
     ("sdlc:product", CP + "comment 40 --body-file /tmp/reply.md"),
+    # Review roles post their full review; development a rework note (retro 2026-10-09).
+    ("sdlc:design-review", CP + "post-comment 5 --role arch-review --body-file /tmp/r.md"),
+    ("sdlc:design-review", CP + "post-comment 5 --role=lld-review --body-file /tmp/r.md"),
+    ("sdlc:product-review", CP + "post-comment 5 --role product-review --body-file /tmp/r.md"),
+    ("sdlc:pr-review", CP + "post-comment 5 --role pr-review --body-file /tmp/r.md"),
+    ("sdlc:development", CP + "post-comment 5 --role development --body-file /tmp/n.md"),
+    ("sdlc:development", CP + "update-pr-body 9 --body-file /tmp/body.md"),
+    # Design/product reviewers read the branch in their own detached review tree.
+    ("sdlc:design-review", CP + "review-worktree-add 5 --repo-path /r"),
+    ("sdlc:design-review", CP + "release-review-worktree 5"),
+    ("sdlc:product-review", CP + "review-worktree-add 5 --repo-path /r"),
+    ("sdlc:product-review", CP + "release-review-worktree 5"),
+    # Read-only gh stays open; the main thread keeps its own gh.
+    ("sdlc:development", "gh run view 123 --log-failed"),
+    ("sdlc:development", "gh pr view 9 --comments"),
     ("sdlc:architecture", CP + "comment 40 --body-file /tmp/reply.md"),
     ("sdlc:product", CP + "resolve-thread --thread-id T1 --reply 'applied'"),
     ("sdlc:architecture", CP + "resolve-thread --thread-id T1"),
@@ -523,9 +538,22 @@ ROLE_DENIED = [
     ("sdlc:design-review", CP + "waive-gate 5 --stage architecture --summary s", "orchestrator"),
     ("sdlc:product", CP + "post-comment 5 --role architecture --body-file f", "only your own stage"),
     ("sdlc:lld", CP + "post-comment 5 --body-file f", "only your own stage"),
-    ("sdlc:design-review", CP + "post-comment 5 --role lld --body-file f", "orchestrator"),
-    ("sdlc:development", CP + "post-comment 5 --role development --body-file f", "orchestrator"),
-    ("sdlc:pr-review", CP + "post-comment 5 --role pr-review --body-file f", "orchestrator"),
+    ("sdlc:design-review", CP + "post-comment 5 --role lld --body-file f", "only your own stage"),
+    ("sdlc:design-review", CP + "post-comment 5 --role pr-review --body-file f",
+     "only your own stage"),
+    ("sdlc:product-review", CP + "post-comment 5 --role arch-review --body-file f",
+     "only your own stage"),
+    ("sdlc:development", CP + "post-comment 5 --role pr-review --body-file f",
+     "only your own stage"),
+    ("sdlc:lld", CP + "update-pr-body 9 --body-file f", "orchestrator"),
+    ("sdlc:pr-review", CP + "update-pr-body 9 --body-file f", "orchestrator"),
+    # Stage agents post through post-comment / comment, never hand-run gh (retro 2026-10-09).
+    ("sdlc:development", "gh pr comment 2588 --body-file note.md", "post-comment"),
+    ("sdlc:development", "gh -R o/r pr comment 9 -b x", "post-comment"),
+    ("sdlc:pr-review", "gh issue comment 5 --body x", "post-comment"),
+    ("sdlc:architecture", "gh pr comment 40 --body-file r.md", "comment <pr> --body-file"),
+    ("sdlc:development", "gh run rerun 123 --failed", "rerun-checks"),
+    ("sdlc:pr-review", "cd /w && gh run rerun --failed 123", "rerun-checks"),
     ("sdlc:pr-review", "git commit -am fix", "read-only on the branch"),
     ("sdlc:pr-review", "git push origin issue-5", "read-only on the branch"),
     ("sdlc:design-review", "git -C /w merge origin/main", "read-only on the branch"),
@@ -550,6 +578,9 @@ def test_orchestrator_and_other_agents_keep_every_command(sdlc_repo, agent_type)
     assert guard(CP + "route 5 --to development --reason r", sdlc_repo, agent_type) is None
     assert guard(CP + "review-worktree-add 5 --repo-path /r", sdlc_repo, agent_type) is None
     assert guard(CP + "prune-stale --repo-path /r", sdlc_repo, agent_type) is None
+    assert guard(CP + "update-pr-body 9 --body-file f", sdlc_repo, agent_type) is None
+    assert guard("gh run rerun 123 --failed && gh pr comment 9 -b x", sdlc_repo,
+                 agent_type) is None
     assert guard("git commit -m x && git reset --hard", sdlc_repo, agent_type) is None
 
 
@@ -1146,6 +1177,28 @@ def test_subagent_start_tells_sdlc_agents_where_things_are(sdlc_repo):
     assert "docRoot=docs/sdlc" in ctx and "/plug/references" in ctx
     assert "docTemplates=docs/sdlc/_templates" in ctx
     assert 'SDLC-RESULT: {"issue": <n>' in ctx
+
+
+@pytest.mark.parametrize("env", [{"CLAUDE_CODE_REMOTE": "true"}, {"SDLC_PLACEMENT": "cloud"}])
+def test_subagent_start_words_the_cloud_github_rule_as_read_vs_write(sdlc_repo, env):
+    """Regression (cloud-prompt-get-only-wording): 'gh api GETs only' read as 'no writes'."""
+    proc = run_hook("subagent_start.py", {"agent_id": "a1", "agent_type": "sdlc:development",
+                                          "cwd": sdlc_repo},
+                    env={"CLAUDE_PLUGIN_ROOT": "/plug", "SDLC_PLACEMENT": "",
+                         "CLAUDE_CODE_REMOTE": "", **env})
+    ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert ('read GitHub with `gh api` GETs' in ctx
+            and 'write only through `python3 "$SDLC"` commands' in ctx)
+    assert "GETs only" not in ctx
+
+
+def test_subagent_start_adds_no_cloud_line_locally(sdlc_repo):
+    proc = run_hook("subagent_start.py", {"agent_id": "a1", "agent_type": "sdlc:development",
+                                          "cwd": sdlc_repo},
+                    env={"CLAUDE_PLUGIN_ROOT": "/plug", "SDLC_PLACEMENT": "",
+                         "CLAUDE_CODE_REMOTE": ""})
+    assert "cloud session" not in json.loads(proc.stdout)["hookSpecificOutput"][
+        "additionalContext"]
 
 
 def test_subagent_start_ignores_other_agents_and_repos(sdlc_repo, plain_repo):

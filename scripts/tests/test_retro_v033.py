@@ -369,10 +369,15 @@ def test_missing_required_workflows_honours_a_base_scope(monkeypatch):
 def test_record_local_ci_refuses_a_non_attestable_suite(monkeypatch, tmp_path):
     monkeypatch.setattr(s, "LOCAL_CI_SUITES", ("backend", "backend-it"))
     monkeypatch.setattr(s, "NON_ATTESTABLE_SUITES", frozenset({"backend-it"}))
+    monkeypatch.setattr(s, "REQUIRED_WORKFLOWS", (_spec(workflow="Backend IT", suite="backend-it",
+                                                        attestable=False),))
     out = tmp_path / "o.txt"
     out.write_text("ok\n")
+    gh = FakeGh([{"number": 1, "labels": ["type:task"]}],
+                prs={42: {"headRefName": "issue-1", "baseRefName": "main",
+                          "files": ["backend/x.py"]}})
     with pytest.raises(GhError, match="attestable: false"):
-        s.cmd_record_local_ci(_rec_gh(), 42, "backend-it", "abc1234", "make it", str(out))
+        s.cmd_record_local_ci(gh, 42, "backend-it", "abc1234", "make it", str(out))
     # Positive control: an attestable suite still records.
     assert s.cmd_record_local_ci(_rec_gh(), 42, "backend", "abc1234", "make test",
                                  str(out))["attested"] is True
