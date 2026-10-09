@@ -192,8 +192,8 @@ orchestrator resumes `product` (or `architecture`).
 ## Step 4 — Report
 
 Post one comment in this shape with
-`python3 "$SDLC" post-comment <n> --role pr-review --body-file <file>`, within the **2,000-
-character** review-comment cap of `references/stage-playbooks.md`, "Comment size is a
+`python3 "$SDLC" post-comment <n> --role pr-review --body-file <file>`, within the **6,000-
+character** evidence-comment cap of `references/stage-playbooks.md`, "Comment size is a
 contract": keep the Verification table to the commands that decide the verdict, and cite
 `file:line` rather than quoting — the detail stays in the PR. Omit
 any section with no findings — never an empty `Blocking` heading. Never restate the diff or PR

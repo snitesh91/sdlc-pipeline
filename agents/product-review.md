@@ -46,7 +46,7 @@ Work the axes the doc actually has, in sequence: criteria testability; **complet
 
 ## Output
 
-One review comment of **≤ 2,000 characters** (`stage-playbooks.md`, "Comment size is a contract"), posted with `python3 "$SDLC" post-comment <n> --role product-review --body-file <file>`. Cite, don't quote:
+One review comment of **≤ 6,000 characters** (`stage-playbooks.md`, "Comment size is a contract"), posted with `python3 "$SDLC" post-comment <n> --role product-review --body-file <file>`. Cite, don't quote:
 
 ```markdown
 ## Product review — issue #<n> (`product.md`)

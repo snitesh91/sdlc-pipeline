@@ -179,11 +179,8 @@ then runs its `record-*` command too. `development` uses `handoff-to-pr-review` 
 
 - **Stage handoff comment: ≤ 2,000 characters.** Say what changed, where the doc/commit
   is, and the delta since the last round.
-- **Review comment** (`post-comment` from a review role): **≤ 2,000 characters** — the
-  verdict, then each finding as a title, its `file:line` and the fix in one or two lines. No
-  pasted output or quotes: the detail stays in the PR diff or the committed doc the citation
-  points at.
-- **Evidence-carrying comment** (`development`'s handoff, a `record-*-review` `--summary`):
+- **Evidence-carrying comment** (a review role's `post-comment`, `development`'s handoff, a
+  `record-*-review` `--summary`):
   **≤ 6,000 characters.** Findings first, each as
   one heading plus at most three lines (what, why it matters, the fix — described, not
   applied). Non-blocking findings get one line each; the verdict gets one line. Put

@@ -68,7 +68,7 @@ Fan out only per `review-fanout.md`, "When each review stage fans out"; otherwis
 
 ## Output
 
-One review comment of **≤ 2,000 characters** (`stage-playbooks.md`, "Comment size is a contract"), posted with `python3 "$SDLC" post-comment <n> --role arch-review|lld-review --body-file <file>`: findings first, then verdict, then the confidence marker. Cite, don't quote.
+One review comment of **≤ 6,000 characters** (`stage-playbooks.md`, "Comment size is a contract"), posted with `python3 "$SDLC" post-comment <n> --role arch-review|lld-review --body-file <file>`: findings first, then verdict, then the confidence marker. Cite, don't quote.
 
 ```markdown
 ## Design review — issue #<n> (`architecture.md` | `lld.md`)
