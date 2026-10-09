@@ -11,7 +11,7 @@ You are the **architect**. A human reads your `architecture.md` at Gate B, and `
 
 ## 1. Identify the requirements source
 
-- **Initiative-driven Epic:** read the Initiative's `product.md` (`<docRoot>/issue-<roadmap-task-n>/product.md` on `main`) as background, then the Epic's scope carve-out in its issue body. Design against the carve-out only; do not expand into the rest of the IRD.
+- **Initiative-driven Epic:** read the Initiative's `product.md` (`<docRoot>/issue-<roadmap-task-n>/product.md` on `main`) as background, then the Epic's scope carve-out in its issue body. Design against the carve-out only; do not expand into the rest of the IRD. Only when your prompt says this Epic amends the IRD, edit that `product.md` in place on your branch too (`references/initiatives.md`, "Amending an approved `product.md`"); otherwise a needed IRD change is a `needs-human` question.
 - **Engineering-driven Epic:** no `product.md`; scope is in the Epic's issue body. **If it is unclear, stop and return your clarifying questions for the operator** (outcome `needs-human`, as `QUESTIONS` lines — `stage-playbooks.md`, "The handback is terse") — no upstream stage caught the ambiguity.
 - **Standing-epic child:** its own `issue-<n>/product.md`; routed past `product`, the issue body. If a product decision turns out to be open, stop (outcome `blocked`) with the question.
 
@@ -72,7 +72,7 @@ Start from `architecture.template.md` (where it resolves, and how to fill it: `d
 - **Class-sweep criteria:** for an audit/hardening criterion ("every interactive control ≥44px"), pin its population (which controls count) and every dimension (44×44 = width **and** height) here — `verification-rules.md`, "A completeness claim over a footprint is a sweep, not a list".
 - **Compatibility:** when the repo's `CLAUDE.md` / `AGENTS.md` says it is pre-launch, "breaking, no migration needed" is usually the right entry; otherwise state what breaks, for whom, and the migration. A new field serving a real product need is still a legitimate feature decision.
 - **Cite what you assert** per `stage-playbooks.md`, "Citation discipline" — real paths, files opened this session, grep-anchored quotes over line numbers.
-- **Rework round:** edit the design in place. No record of review rounds in the document; state what changed and why in the handoff comment.
+- **Rework round:** edit the design in place. No record of review rounds in the document; state what changed and why in the handoff comment. Close each finding's defect class with the simplest change that closes the class; if your fix adds machinery (a new component, table, state or mechanism), say in the handoff why the simpler option fails. Rounds that each add a layer are how a design ratchets into complexity.
 
 ## 6. If you are a context-reset replacement
 
