@@ -283,9 +283,9 @@ for a suite with no PR-level CI (a workflow that runs only on push to `main`).
   merge brought in touches its paths or the pipeline config. A failing run is never
   overridden. The carried check reads `<workflow> (carried)` with `carried_from`. So after
   the merge train syncs a PR, cancel the redundant run instead of waiting for it.
-- A standalone fix PR into `main` can skip the full CI run only where the repo opts in: mark
-  that workflow's entry `attestable: true` (optionally `bases`-scoped), and `development`
-  attests the suite it ran locally (`record-local-ci`). The default stays as configured.
+- A standalone fix PR into `main` may carry a local attestation (`record-local-ci`) instead
+  of the workflow's check for any entry left attestable (the default, below); mark an entry
+  `attestable: false` to demand the CI check on every PR it applies to.
 - `merge-pr` accepts `--run-id`: the terminal-unit count is booked under that run rather
   than whatever id last wrote the epic's run-state file (which may be a throwaway probe
   run's). Without it, the state file's current id stands.
