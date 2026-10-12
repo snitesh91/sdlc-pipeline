@@ -925,14 +925,15 @@ def _policy_repo(tmp_path, pipeline=None):
 
 
 def launch(cwd, tmp_path, subagent_type, model="opus", prompt="do it", parent=None,
-           transcript=None):
+           transcript=None, env=None):
     tool_input = {"subagent_type": subagent_type, "model": model, "prompt": prompt,
                   "description": "d", "run_in_background": True}
     payload = {"tool_name": "Agent", "tool_input": tool_input, "cwd": cwd,
                "transcript_path": transcript or str(tmp_path / "s.jsonl")}
     if parent:
         payload.update(agent_id=parent[0], agent_type=parent[1])
-    proc = run_hook("agent_guard.py", payload, env={"CLAUDE_PLUGIN_DATA": str(tmp_path / "data")})
+    proc = run_hook("agent_guard.py", payload,
+                    env={"CLAUDE_PLUGIN_DATA": str(tmp_path / "data"), **(env or {})})
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout)["hookSpecificOutput"] if proc.stdout.strip() else None
 
@@ -1657,3 +1658,40 @@ def test_agent_frontmatter_models_match_the_policy():
             head = f.read().split("\n---", 1)[0]
         want = models["arch-review"] if role == "design-review" else models[role]
         assert f"\nmodel: {want}" in head, role
+
+
+# --- reviewDepth: light (light-review-profile) ---
+
+def _light_runs(tmp_path, depth):
+    runs = tmp_path / "runs"
+    runs.mkdir(exist_ok=True)
+    (runs / "initiative-profiles.cache").write_text(json.dumps(
+        {"5": {"initiative": 2, "name": "spike", "reviewDepth": depth}}))
+    return {"SDLC_RUNS_DIR": str(runs)}
+
+
+@pytest.mark.parametrize("parent,prompt", [
+    ("sdlc:design-review", "ROLE: lld-review ISSUE: 5\nReview"),
+    ("sdlc:pr-review", "ROLE: pr-review ISSUE: 5 EPIC: 3\nReview")])
+def test_agent_guard_denies_fanout_under_a_light_review_initiative(tmp_path, sdlc_repo, parent,
+                                                                   prompt):
+    _parent_transcript(tmp_path, "p1", prompt)
+    out = launch(sdlc_repo, tmp_path, "general-purpose", parent=("p1", parent),
+                 env=_light_runs(tmp_path, "light"))
+    assert out["permissionDecision"] == "deny" and "reviewDepth: light" in \
+        out["permissionDecisionReason"]
+
+
+def test_agent_guard_allows_fanout_under_a_full_review_initiative(tmp_path, sdlc_repo):
+    # Positive control: the same unit at the default depth still fans out.
+    _parent_transcript(tmp_path, "p1", "ROLE: lld-review ISSUE: 5\nReview")
+    out = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet",
+                 parent=("p1", "sdlc:design-review"), env=_light_runs(tmp_path, "full"))
+    assert forced_model(out) == "opus"
+
+
+def test_subagent_start_names_a_light_review_depth(initiative_repo, tmp_path):
+    hint = {"initiative": 2, "name": "spike", "reviewDepth": "light"}
+    ctx = _initiative_ctx(initiative_repo, tmp_path, "ROLE: pr-review ISSUE: 5 EPIC: 3",
+                          hints={"5": hint})
+    assert "reviewDepth: light" in ctx and "skips the mutation probe" in ctx

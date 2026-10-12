@@ -137,7 +137,9 @@ standing Integration-test / e2e-test Tasks), `deferSuites` (suite keys `close-ep
 demand of an Epic closing into the initiative branch), `closeSuites` (suite keys, need not be
 in `requiredWorkflows`, that `merge-initiative-pr` needs attested at the initiative PR head;
 `record-local-ci` accepts them), `placement` (`cloud` | `local`; overrides
-`placement.initiativeEpics` for this Initiative). Prefixes: `branches.initiativePrefix` (`initiative-`),
+`placement.initiativeEpics` for this Initiative), `reviewDepth` (`full` | `light`; `light` =
+every review under it runs single-pass, the guard denies fan-out, and `pr-review` skips the
+mutation probe — for throwaway or feasibility work). Prefixes: `branches.initiativePrefix` (`initiative-`),
 `worktrees.initiativePrefix` (`sdlc-initiative-`). `initiative-profile <n>` prints the
 profile governing any unit; `start-stage` records it for the SubagentStart hook.
 

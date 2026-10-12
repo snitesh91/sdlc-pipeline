@@ -95,7 +95,7 @@ mutation probes), and state layer coverage in the report.
 - **Is every acceptance criterion covered by a test that fails when it is violated?** Check the
   handoff's criterion→test map against the diff, not against itself.
 
-**Mutation-probe selectively.** Take the one or two guards carrying the real acceptance, break
+**Mutation-probe selectively** (never under `reviewDepth: light` — say so in the report). Take the one or two guards carrying the real acceptance, break
 the behaviour in your detached worktree, confirm the test goes red, revert with
 `git restore <file>` (`git status` clean; the guard denies `git checkout --` to a reviewer).
 If the auto-mode permission classifier denies the transient `src` edit the probe needs, do
@@ -277,6 +277,10 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
     of scope for its layers, a new code path the fix introduced, or a genuine miss) and pass
     `--same-class-recurrence` to `record-pr-review`. A sentence in the summary does not
     escalate; the flag does.
+- **Design-doc drift** (the code is right, an Epic's `architecture.md`/`lld.md` is now stale) is
+  never a finding for `development`: a development PR may not edit `epic-*/` docs. Open Epic:
+  the orchestrator cuts a revision (`open-arch-revision`). Closed Epic: non-blocking — name the
+  doc, section and what is now true under `### Deviations from the design` in the PR body.
 - **Deeper problem** → report it; the PR stays draft. Standing-epic child: the orchestrator
   resumes `product` (or `architecture`). Epic Task: `development` if task-local; if it
   contradicts the Epic's design, the architecture deviation escalation
