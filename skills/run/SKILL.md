@@ -295,7 +295,7 @@ Every result except `skip`/`none`/`stop-at-cap` carries `unit`: `"issue"`, or `"
   action still stands). `skipped`/`due: null` need nothing. A non-empty `design_touch`
   (incoming files the Epic's design names) → judge whether the design still holds, else
   `open-arch-revision`; a non-empty `schema_touch` → confirm every app using that package has
-  its migration, else route the gap to the owning unit.
+  its migration, else route the gap to the owning unit; `touches_error` → report it (the sync stands).
 - **Before ending on `none`:** `list-needs-human` (skim each reason; clear a stale one
   with a comment), `check-epics-closeable` (idempotent) and `audit-issues --epic <n>` (`--initiative <n>` on an Initiative)
   (run each flagged issue's `repair` command, filling any `<P>`/`<T>`; never re-create
