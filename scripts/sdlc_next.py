@@ -1786,10 +1786,12 @@ _LOCAL_CI_MARKER = re.compile(
     r"<!--\s*local-ci:\s*([\w-]+):(\d+)\s*@\s*([0-9a-fA-F]{7,40})\s*-->")
 
 # Plus every Initiative profile's `closeSuites` (attested on the initiative PR only).
+# `e2e` is built in: the e2e-test Task attests its own specs' run even where no workflow or
+# profile names an e2e suite (no merge gate requires it then; it is the PR's record).
 LOCAL_CI_SUITES = tuple(dict.fromkeys(
     [w["suite"] for w in CONFIG["requiredWorkflows"]]
     + [suite for prof in PIPELINE["initiativeProfiles"] or [] for suite in
-       prof.get("closeSuites") or []]))
+       prof.get("closeSuites") or []] + ["e2e"]))
 
 # Fail at config load on a suite key the marker regex could never match.
 for _suite in LOCAL_CI_SUITES:

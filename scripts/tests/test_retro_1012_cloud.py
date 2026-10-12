@@ -158,3 +158,23 @@ def test_open_dev_pr_fallback_warns_when_drafting_fails(monkeypatch):
     gh = _DraftlessGh(convert_fails=True)
     out = s.cmd_open_dev_pr(gh, 10, "t", "b", "Built it.")
     assert "draft_warning" in out and gh.issues[10]["stage"] == "pr-review"
+
+
+# --- record-local-ci: `e2e` is always a suite key -----------------------------------------
+
+def test_e2e_is_a_local_ci_suite_without_any_config():
+    assert "e2e" in s.LOCAL_CI_SUITES
+
+
+def test_record_local_ci_attests_e2e(tmp_path):
+    posted = []
+    gh = type("G", (), {"pr_comment": lambda self, pr, body: posted.append(body)})()
+    log = tmp_path / "out.txt"
+    log.write_text("2 passed (14s)\n")
+    out = s.cmd_record_local_ci(gh, 5, "e2e", "a" * 40, "npx playwright test x.spec.ts", str(log))
+    assert out["attested"] is True and "`e2e`" in posted[0]
+
+
+def test_record_local_ci_still_refuses_an_unknown_suite():
+    with pytest.raises(s.GhError, match="suite must be one of"):
+        s.cmd_record_local_ci(None, 5, "nope", "a" * 40, "x", "ok")
