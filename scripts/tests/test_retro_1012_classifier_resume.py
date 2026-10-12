@@ -43,3 +43,21 @@ def test_a_later_plain_park_overrides_an_earlier_classifier_one():
     _park(gh)
     s.cmd_mark_needs_human(gh, 1, "a scope call", repo_path="/nonexistent")
     assert s.decide_next_action(gh, 90, run_id="run-b")["action"] == "none"
+
+
+def _resume_of(gh, number):
+    s.cmd_mark_needs_human(gh, number, "classifier denied launch", classifier_denied="launch",
+                           run_id="run-a")
+    children = [i for i in gh.issue_list() if i["number"] == number]
+    return s._classifier_denied_resume(gh, children, "run-b")
+
+
+def test_a_classifier_denied_epic_resumes_as_an_epic_unit():
+    gh = FakeGh([{"number": 80, "labels": ["type:initiative"]},
+                 {"number": 90, "labels": ["type:epic"], "parent": 80, "status": "todo"}])
+    assert _resume_of(gh, 90)["unit"] == "epic"
+
+
+def test_a_classifier_denied_task_still_resumes_as_an_issue_unit():
+    """Positive control."""
+    assert _resume_of(_tree(), 1)["unit"] == "issue"

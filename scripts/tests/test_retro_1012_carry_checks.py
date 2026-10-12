@@ -68,3 +68,30 @@ def test_the_config_switch_turns_it_off(monkeypatch):
     gh = Gh([_check("Backend CI", "pending")], [_check("Backend CI", "pass")],
             ["frontend/x.ts"])
     assert s.workflow_check_state(s.effective_checks(gh, 1), "Backend CI") == "pending"
+
+
+class _BranchGh(Gh):
+    def pr_view(self, pr, fields=""):
+        return {"headRefOid": "h2", "baseRefName": "initiative-6", "comments": []}
+
+
+def _branch_only_workflow(monkeypatch):
+    spec = next(w for w in s.REQUIRED_WORKFLOWS if w["workflow"] == "Backend CI")
+    extra = {**spec, "workflow": "Branch CI", "bases": ()}
+    monkeypatch.setattr(s, "required_workflows",
+                        lambda base=None: s.REQUIRED_WORKFLOWS + ((extra,) if base and base != "main" else ()))
+
+
+def test_a_workflow_only_the_base_branch_config_requires_carries_too(monkeypatch):
+    _branch_only_workflow(monkeypatch)
+    gh = _BranchGh([_check("Branch CI", "pending")], [_check("Branch CI", "pass")],
+                   ["frontend/x.ts"])
+    assert s.workflow_check_state(s.effective_checks(gh, 1), "Branch CI") == "passing"
+
+
+def test_a_base_branch_workflow_still_reruns_when_the_sync_hits_its_paths(monkeypatch):
+    """Positive control."""
+    _branch_only_workflow(monkeypatch)
+    gh = _BranchGh([_check("Branch CI", "pending")], [_check("Branch CI", "pass")],
+                   ["backend/other.py"])
+    assert s.workflow_check_state(s.effective_checks(gh, 1), "Branch CI") == "pending"

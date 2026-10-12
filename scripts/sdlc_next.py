@@ -3858,7 +3858,11 @@ def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: st
                               f"{base} unmoved"}
         result = cmd_sync_branch(gh, repo_path, epic, "epic", runner=runner, base=base)
         if result.get("synced") and main_sha and epic_sha != main_sha:
-            result.update(epic_sync_touches(repo_path, epic, epic_sha, main_sha, runner, gh))
+            try:
+                result.update(epic_sync_touches(repo_path, epic, epic_sha, main_sha, runner, gh))
+            except GhError as e:
+                # The sync already pushed; a failed report must not undo its record.
+                result["touches_error"] = str(e)
         _fetch_origin(repo_path, runner)
         record = {"main": main_sha, "epic": _origin_sha(repo_path, branch, runner),
                   "terminal": terminal, "at": _utc_now_marker()}
@@ -3875,7 +3879,8 @@ def epic_sync_touches(repo_path: str, epic: int, epic_sha: str, base_sha: str,
                       runner: Runner = _default_runner,
                       gh: Optional[WorkItemProvider] = None) -> dict:
     """What an epic sync brought in from its base (`epic_sha...base_sha`): `design_touch`, the
-    files the Epic's `architecture.md`/`lld.md` name (the path or a parent dir of 2+ segments);
+    files the Epic's `architecture.md`/`lld.md` name (the path or a parent dir of 3+ segments;
+    a 2-segment app root is named everywhere);
     `schema_touch`, the files matching `pipeline.sync.schemaGlobs`. Empty lists when none."""
     delta = runner(["git", "-C", repo_path, "diff", "--name-only",
                     f"{epic_sha}...{base_sha}"]).split()
@@ -3889,7 +3894,7 @@ def epic_sync_touches(repo_path: str, epic: int, epic_sha: str, base_sha: str,
 
     def named(path):
         parts = path.split("/")
-        return any("/".join(parts[:i]) in docs for i in range(len(parts), 1, -1))
+        return any("/".join(parts[:i]) in docs for i in range(len(parts), 2, -1))
 
     globs = PIPELINE["sync"].get("schemaGlobs") or []
     return {"design_touch": [p for p in delta if docs and named(p)],
@@ -8007,7 +8012,7 @@ def _carry_checks_across_sync(gh: GitHub, pr: int, checks: list) -> list:
     view = gh.pr_view(pr, "headRefOid,baseRefName")
     head, base = view.get("headRefOid"), view.get("baseRefName")
     files = gh.pr_files(pr)
-    wanted = [spec for spec in REQUIRED_WORKFLOWS
+    wanted = [spec for spec in required_workflows(base)
               if _workflow_applies_to_base(spec, base)
               and any(_workflow_covers(spec, p) for p in files)
               and _carriable(checks, spec["workflow"])]
@@ -8552,7 +8557,8 @@ def _classifier_denied_resume(gh: GitHub, children: list, run_id: Optional[str])
         gh.set_pipeline_status_field(issue["number"], "in-progress")
         gh.issue_comment(issue["number"], f"▶️ Resumed by run `{run_id}` after the auto-mode "
                                           f"classifier denied `{m.group(1)}`.")
-        return {"action": "resume", "issue": issue["number"], "unit": "issue",
+        return {"action": "resume", "issue": issue["number"],
+                "unit": "epic" if is_epic(issue) else "issue",
                 "stage": current_stage(issue), "reason_code": "classifier_denied",
                 "denied_step": m.group(1),
                 "reason": f"parked by run {m.group(2)} when the classifier denied "

@@ -55,7 +55,7 @@ def test_epic_sync_reports_design_and_schema_touch(repo, runs):
     gh = _epic_tree()
     _cut_epic(repo)
     _advance_origin(repo, "epic-9", f"{DOC}/epic-9/architecture.md",
-                    "Uses `packages/outbox` for sends.\n")
+                    "Uses `packages/outbox/src` for sends.\n")
     _advance_origin(repo, "main", "packages/outbox/src/outbox.entity.ts", "x\n")
     _advance_origin(repo, "main", "apps/other/README.md", "y\n")
 
@@ -77,3 +77,23 @@ def test_epic_sync_reports_no_touch_for_an_unrelated_delta(repo, runs):
 
     assert sync["synced"] is True
     assert not sync.get("design_touch") and not sync.get("schema_touch")
+
+
+def test_epic_sync_ignores_a_two_segment_app_root_the_design_names(repo, runs):
+    """Regression: naming `apps/api` flagged every sync that touched the app."""
+    gh = _epic_tree()
+    _cut_epic(repo)
+    _advance_origin(repo, "epic-9", f"{DOC}/epic-9/architecture.md", "Lives in `apps/api`.\n")
+    _advance_origin(repo, "main", "apps/api/src/x.ts", "y\n")
+    assert not s.sync_epic_if_due(gh, 9, "run-1", str(repo)).get("design_touch")
+
+
+def test_a_failed_touch_report_keeps_the_pushed_sync(repo, runs, monkeypatch):
+    def boom(*a, **k):
+        raise s.GhError("git show failed")
+    monkeypatch.setattr(s, "epic_sync_touches", boom)
+    gh = _epic_tree()
+    _cut_epic(repo)
+    _advance_origin(repo, "main", "apps/other/src/x.ts", "y\n")
+    sync = s.sync_epic_if_due(gh, 9, "run-1", str(repo))
+    assert sync["synced"] is True and sync["touches_error"] == "git show failed"
