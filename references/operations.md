@@ -297,6 +297,8 @@ for a suite with no PR-level CI (a workflow that runs only on push to `main`).
   `true`): the workflow runs on every PR the entry applies to, so only its passing check
   satisfies the suite — no stage runs it locally, `record-local-ci` refuses it, and
   `close-epic` lists it under `awaiting_checks` instead of `unattested_suites`.
+- A PR into a branch other than `main` also owes the entries that branch's own committed
+  config adds (`origin/<base>`); the local config's entry wins on a shared `workflow` name.
 
 **`pr-checks` status `missing-checks`** is never "still running" — never poll it. When it
 is set, `pr-checks` returns a `hint` field naming the causes in likelihood order (and

@@ -257,7 +257,9 @@ All other rework follows `references/rework.md`.
   close it takes one merge from `origin/main`, is verified whole, and merges to `main`
   once.
 - **Straight into `main`** only: a standing epic's children, a parentless issue, an
-  Initiative's Product-Roadmap Task (their gate PRs are `issue-<n>` → `main`).
+  Initiative's Product-Roadmap Task (their gate PRs are `issue-<n>` → `main`). A standing
+  Epic under an Initiative with an initiative branch sends its children to `initiative-<i>`
+  instead.
   `integration_base()` decides from the native `parent` relationship, never a label,
   stage or branch name.
 - **An Epic's design docs reach `epic-<n>` only through a phase-Task's design PR**
@@ -324,7 +326,9 @@ never reaches `main`; merge its design PR). Remaining items: closing verificatio
 
 1. First call: refuses on open children (`open_children`); otherwise, when `epic-<n>` is
    behind `origin/main`, reconciles it and stops (`reconciled`); when already current it
-   goes straight to the evidence check below. Every result carries the required suites the
+   goes straight to the evidence check below. When everything `main` gained lies in the
+   carry-forward set (below) and the epic never touched those files, it skips the reconcile
+   (`reconcile_skipped`: `{behind, files}`) and goes on as if current. Every result carries the required suites the
    epic's changes cover that nothing yet satisfies at the epic head — `unattested_suites`
    (attestable: run and attest) and `awaiting_checks` (`attestable: false`: only the epic
    PR's check can satisfy them; never run locally) — and `evidence` (`exploratory` and each

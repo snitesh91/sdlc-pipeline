@@ -2179,8 +2179,8 @@ PHASE_TASK_STAGES = frozenset({"architecture", "arch-review", "lld", "lld-review
 def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
     """Branch this unit integrates into: `epic-<parent>` for every child of a non-standing
     Epic (phase-Tasks included); for an Epic, its opted-in Initiative's `initiative-<i>`
-    (`epic_base`); else `main` (initiatives, other epics, parentless issues, standing/Initiative
-    children)."""
+    (`epic_base`); for a standing Epic's child, that Epic's base; else `main` (initiatives,
+    parentless issues, Initiative children)."""
     if unit == "initiative":
         return "main"
     if unit == "epic":
@@ -2207,7 +2207,8 @@ def integration_base_in(issues: dict, issue: int) -> str:
             return initiative_branch(parent_number)
         return "main"
     if parent_entry is not None and is_epic_standing(parent_entry):
-        return "main"
+        # A standing Epic has no branch; its children land where the Epic itself would.
+        return epic_base_in(issues, parent_number)
     return epic_branch(parent_number)
 
 
@@ -2418,6 +2419,10 @@ def _epic_child_chain(gh, branch: str, children: list, base: str = "main") -> di
     return {"prs": prs, "direct": direct}
 
 
+PR_FILES_CAP = 3000
+COMPARE_FILES_CAP = 300
+
+
 def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
                          epic_pr: Optional[int], carry_forward: bool = True,
                          base: str = "main", deferred: tuple = ()) -> dict:
@@ -2429,14 +2434,15 @@ def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
     suite), `unattested` / `awaiting` (attestable / non-attestable suites still `missing`),
     `missing` (their workflows),
     `breaks` (why a chain failed) and `carried_files`."""
-    truncated = len(epic_files) >= 300
+    # The PR files API lists up to 3000 paths; only the compare fallback stops at 300.
+    truncated = len(epic_files) >= (PR_FILES_CAP if epic_pr is not None else COMPARE_FILES_CAP)
     view, checks = {}, []
     if epic_pr is not None:
         view = gh.pr_view(epic_pr, "comments,headRefOid")
         checks = gh.pr_checks(epic_pr)
     chain = None
     suites, unattested, awaiting, missing, breaks, carried = {}, [], [], [], {}, set()
-    for spec in REQUIRED_WORKFLOWS:
+    for spec in required_workflows(base):
         suite = spec["suite"]
         if not _workflow_applies_to_base(spec, base):
             continue
@@ -2745,6 +2751,10 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         return out
 
     behind = gh.branch_behind_by(branch, base=base)
+    skipped = _reconcile_skippable(gh, branch, base, behind) if carry_forward else None
+    if skipped:
+        target["reconcile_skipped"] = skipped
+        behind = 0
     if behind:
         refused = clean_refusal()
         if refused:
@@ -2811,6 +2821,25 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     gh.pr_merge(pr_number)
     return _finish_epic_close(gh, epic, None, pr_number, children, all_issues, repo_path,
                               runner, {**target, **evidence, **cleaned}, base=base)
+
+
+def _reconcile_skippable(gh, branch: str, base: str, behind: int) -> Optional[dict]:
+    """`{behind, files}` when every file `base` gained lies in the evidence carry-forward set
+    and the epic never touched it: a reconcile would only re-stale the closing evidence."""
+    if not behind:
+        return None
+    try:
+        incoming = gh.base_delta_files(branch, base=base)
+        if not incoming or len(incoming) >= COMPARE_FILES_CAP:
+            return None
+        if not all(evidence_carries_forward(p) for p in incoming):
+            return None
+        epic_files = gh.base_delta_files(base, base=branch)
+    except GhError:
+        return None
+    if len(epic_files) >= COMPARE_FILES_CAP or set(incoming) & set(epic_files):
+        return None
+    return {"behind": behind, "files": sorted(incoming)}
 
 
 def _finish_epic_close(gh, epic: int, detail: Optional[dict], pr_number: int, children: list,
@@ -2986,9 +3015,41 @@ def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
     return {"initiative": initiative, "closeable": True, "epics": state["epics"]}
 
 
-def cmd_close_initiative(gh: GitHub, initiative: int) -> dict:
+_SCAFFOLDING_HITS_CAP = 50
+
+
+def initiative_scaffolding(gh: GitHub, initiative: int, repo_path: str = ".",
+                           runner: Runner = _default_runner,
+                           all_issues: Optional[list] = None) -> list:
+    """What still names the landed initiative branch or defers work to "Initiative close":
+    `{path, line, text}` grep hits on `origin/main` (design docs aside) and `{issue, title}`
+    for closed descendants whose body says so. A list to clear, never a gate."""
+    needles = (initiative_branch(initiative), "Initiative close")
+    hits: list = []
+    try:
+        _run_retry_transient(["git", "-C", repo_path, "fetch", "origin", "main"], runner)
+        out = runner(["git", "-C", repo_path, "grep", "-n", "-I", "-F",
+                      *[a for n in needles for a in ("-e", n)], "origin/main", "--"])
+    except GhError:
+        out = ""  # git grep exits 1 on no match
+    roots = tuple(f"{r}/" for r in all_doc_roots())
+    for raw in out.splitlines():
+        parts = raw.split(":", 3)
+        if len(parts) < 4 or parts[1].startswith(roots):
+            continue
+        hits.append({"path": parts[1], "line": int(parts[2]), "text": parts[3].strip()[:200]})
+    issues = all_issues if all_issues is not None else gh.issue_list()
+    for i in _descendants(issues, initiative):
+        if i.get("state") == "CLOSED" and any(n in (i.get("body") or "") for n in needles):
+            hits.append({"issue": i["number"], "title": i.get("title")})
+    return hits[:_SCAFFOLDING_HITS_CAP]
+
+
+def cmd_close_initiative(gh: GitHub, initiative: int, repo_path: str = ".",
+                         runner: Runner = _default_runner) -> dict:
     """Close the Initiative once every cut Epic is closed and its verification is
-    recorded. Returns `closed`; refusals carry `reason`."""
+    recorded. Returns `closed`; refusals carry `reason`. Closing one that had a branch also
+    returns `scaffolding` (`initiative_scaffolding`)."""
     check = cmd_check_initiative_closeable(gh, initiative)
     if not check["closeable"]:
         return {"initiative": initiative, "closed": False,
@@ -2998,10 +3059,14 @@ def cmd_close_initiative(gh: GitHub, initiative: int) -> dict:
     if missing:
         return {"initiative": initiative, "closed": False, "missing_verification": missing,
                 "reason": f"closing verification incomplete: {'; '.join(missing)}"}
+    extra: dict = {}
+    if (PIPELINE["initiativeProfiles"]
+            and resolve_initiative_profile(gh.issue_epic_info(initiative))["branch"]):
+        extra["scaffolding"] = initiative_scaffolding(gh, initiative, repo_path, runner)
     gh.issue_close(initiative)
     # Also set here so a repo without the `issues: closed` Action still ends correct.
     cmd_mark_issue_closed(gh, initiative)
-    return {"initiative": initiative, "closed": True, "epics": check["epics"]}
+    return {"initiative": initiative, "closed": True, "epics": check["epics"], **extra}
 
 
 def _initiative_branch_refusal(gh: GitHub, initiative: int, action: str) -> tuple:
@@ -3133,7 +3198,9 @@ def cmd_merge_initiative_pr(gh: GitHub, initiative: int, repo_path: str = ".",
         f"<!-- initiative-merged: {initiative} pr:{pr} @ {_utc_now_marker()} -->")
     cleanup = cleanup_unit(gh, initiative, "initiative", repo_path, runner, base="main")
     return _with_warnings({"initiative": initiative, "merged": True, "pr": pr, "branch": branch,
-                           "epics": epics, "evidence": evidence, "cleanup": cleanup}, cleanup)
+                           "epics": epics, "evidence": evidence, "cleanup": cleanup,
+                           "scaffolding": initiative_scaffolding(gh, initiative, repo_path,
+                                                                 runner)}, cleanup)
 
 
 def find_gate_comments_cutoff(pr: dict) -> str:
@@ -5442,7 +5509,7 @@ def required_check_states(gh: GitHub, pr: int) -> Optional[dict]:
         return None
     base = gh.pr_view(pr, "headRefOid,baseRefName").get("baseRefName")
     files = gh.pr_files(pr)
-    required = {w["workflow"] for w in REQUIRED_WORKFLOWS if _workflow_applies_to_base(w, base)
+    required = {w["workflow"] for w in required_workflows(base) if _workflow_applies_to_base(w, base)
                 and any(_workflow_covers(w, p) for p in files)}
     mine = [c for c in checks if c.get("workflow", "") in required]
     failed = [c for c in mine if _is_failed_check(c)]
@@ -5622,7 +5689,7 @@ def _non_attestable_suite_uncovered(gh: GitHub, pr: int, suite: str) -> dict:
     does -- only its passing GitHub Actions check satisfies it. Returns `accepted_because`."""
     base = gh.pr_view(pr, fields="baseRefName").get("baseRefName")
     files = gh.pr_files(pr)
-    covering = [w["workflow"] for w in REQUIRED_WORKFLOWS
+    covering = [w["workflow"] for w in required_workflows(base)
                 if w["suite"] == suite and _workflow_applies_to_base(w, base)
                 and any(_workflow_covers(w, p) for p in files)]
     if covering:
@@ -7821,14 +7888,51 @@ def checks_status(checks: list) -> str:
 # `bases`: the PR base branches (names or fnmatch globs) this entry applies to (empty = every
 # base). `attestable`:
 # False when no `local-ci` attestation can stand in for it (a passing GHA check only).
-REQUIRED_WORKFLOWS = tuple(
-    {"workflow": w["workflow"], "suite": w["suite"],
-     "prefixes": tuple(w["prefixes"]), "files": tuple(w.get("files", ())),
-     "excludeGlobs": tuple(w.get("excludeGlobs", ())),
-     "bases": tuple(w.get("bases", ())),
-     "attestable": w.get("attestable", True)}
-    for w in CONFIG["requiredWorkflows"]
-)
+def _normalise_workflows(raw: list) -> tuple:
+    return tuple(
+        {"workflow": w["workflow"], "suite": w["suite"],
+         "prefixes": tuple(w["prefixes"]), "files": tuple(w.get("files", ())),
+         "excludeGlobs": tuple(w.get("excludeGlobs", ())),
+         "bases": tuple(w.get("bases", ())),
+         "attestable": w.get("attestable", True)}
+        for w in raw)
+
+
+REQUIRED_WORKFLOWS = _normalise_workflows(CONFIG["requiredWorkflows"])
+_BASE_WORKFLOWS_CACHE: dict = {}
+
+
+def _base_config_workflows(base_ref: str, runner: "Runner" = None) -> list:
+    """`requiredWorkflows` from the config as committed on `origin/<base_ref>`; [] when it
+    cannot be read (no such ref, no config there, not a git checkout)."""
+    path = _find_config()
+    if not path:
+        return []
+    run = runner or _default_runner
+    try:
+        top = run(["git", "-C", os.path.dirname(os.path.abspath(path)), "rev-parse",
+                   "--show-toplevel"]).strip()
+        rel = os.path.relpath(os.path.abspath(path), top)
+        raw = json.loads(run(["git", "-C", top, "show", f"origin/{base_ref}:{rel}"]))
+        return list(raw.get("requiredWorkflows") or [])
+    except (GhError, OSError, ValueError, AttributeError):
+        return []
+
+
+def required_workflows(base_ref: Optional[str] = None) -> tuple:
+    """`REQUIRED_WORKFLOWS` plus any entry the base branch's own config adds (a workflow an
+    epic or initiative branch introduced before `main` has it). Local entries win by name."""
+    if not base_ref or base_ref == "main":
+        return REQUIRED_WORKFLOWS
+    if base_ref not in _BASE_WORKFLOWS_CACHE:
+        try:
+            _BASE_WORKFLOWS_CACHE[base_ref] = _normalise_workflows(
+                _base_config_workflows(base_ref))
+        except (KeyError, TypeError):
+            _BASE_WORKFLOWS_CACHE[base_ref] = ()
+    names = {w["workflow"] for w in REQUIRED_WORKFLOWS}
+    return REQUIRED_WORKFLOWS + tuple(w for w in _BASE_WORKFLOWS_CACHE[base_ref]
+                                      if w["workflow"] not in names)
 
 # Suites whose attestation `record-local-ci` refuses (`attestable: false`): only a passing
 # GHA check satisfies their required workflow.
@@ -7931,7 +8035,7 @@ def missing_required_workflows(changed_files: list, checks: list,
     (`bases`) is skipped unless the PR's `base_ref` matches it."""
     attested = local_ci_suites_attested(comments or [], head_sha)
     missing = []
-    for spec in REQUIRED_WORKFLOWS:
+    for spec in required_workflows(base_ref):
         if not _workflow_applies_to_base(spec, base_ref):
             continue
         if not any(_workflow_covers(spec, p) for p in changed_files):
@@ -7983,17 +8087,18 @@ def _is_doc_path(path: str) -> bool:
 _UNCOVERED_HINT = "no required workflow covers these paths; no suite ran for them"
 
 
-def uncovered_paths(changed_files: list) -> list:
+def uncovered_paths(changed_files: list, base_ref: Optional[str] = None) -> list:
     """Changed non-doc files (the pipeline config aside) no required workflow covers on any
     base: a config coverage gap. A path whose suite is scoped to another base is covered."""
+    workflows = required_workflows(base_ref)
     return [p for p in changed_files
             if not _is_doc_path(p) and os.path.basename(p) != CONFIG_FILENAME
-            and not any(_workflow_covers(w, p) for w in REQUIRED_WORKFLOWS)]
+            and not any(_workflow_covers(w, p) for w in workflows)]
 
 
-def _with_uncovered(result: dict, changed_files: list) -> dict:
+def _with_uncovered(result: dict, changed_files: list, base_ref: Optional[str] = None) -> dict:
     """`result` plus `uncovered_paths`/`uncovered_hint` when any; a warning, never a gate."""
-    uncovered = uncovered_paths(changed_files)
+    uncovered = uncovered_paths(changed_files, base_ref)
     return {**result, "uncovered_paths": uncovered, "uncovered_hint": _UNCOVERED_HINT} \
         if uncovered else result
 
@@ -8072,7 +8177,7 @@ def pr_stale_attestations(gh: WorkItemProvider, issue: int, pr: int) -> dict:
     fresh = local_ci_suites_attested(comments, head)
     latest = _latest_attested_sha_by_suite(comments)
     stale, carried, passed_by_check = [], [], []
-    for spec in REQUIRED_WORKFLOWS:
+    for spec in required_workflows(base_ref):
         suite = spec.get("suite")
         if not suite or suite in NON_ATTESTABLE_SUITES:
             continue
@@ -8180,7 +8285,7 @@ def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
     hints = ([_MISSING_WORKFLOW_HINT] if missing else []) + ([_infra_hint(pr_number)] if infra else [])
     if hints:
         result["hint"] = " ".join(hints)
-    return _with_uncovered(result, files)
+    return _with_uncovered(result, files, view.get("baseRefName"))
 
 
 PR_BODY_CAP = 65_536  # GitHub's PR body limit
@@ -8307,7 +8412,7 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
     gh.pr_comment(pr_number, f"Auto-merged under the pipeline's scoped PR-merge override — "
                               f"see \"PRs merge automatically\" in the pipeline docs.")
     return _with_uncovered(_finalize_merged_pr(gh, pr_number, issue, repo_path, base, files,
-                                               carried_forward, run_id=run_id), files)
+                                               carried_forward, run_id=run_id), files, base)
 
 
 def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
@@ -11498,7 +11603,9 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("close-initiative",
                         help="Close the Initiative once its Epics are closed and verified")
     p.add_argument("initiative", type=int)
-    p.set_defaults(func=lambda a: cmd_close_initiative(get_work_item_provider(), a.initiative))
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.set_defaults(func=lambda a: cmd_close_initiative(get_work_item_provider(), a.initiative,
+                                                       a.repo_path))
     p = sub.add_parser("record-initiative-verification",
                         help="Record an Initiative's closing verification and its outcome")
     p.add_argument("initiative", type=int)
