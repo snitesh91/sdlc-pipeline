@@ -56,3 +56,27 @@ def test_merge_pr_leaves_closing_a_main_merge_to_github(opted_in, monkeypatch):
     gh = _standing_tree(opt_in=False)
     out = _finalize(gh, monkeypatch, s.integration_base(gh, 12))
     assert out["issue_closed"] is False and gh.issues[12]["state"] == "OPEN"
+
+
+# --- 3. close-epic scopes suites to the epic PR's own (complete) file list --------------
+
+class _EpicPrGh:
+    def pr_view(self, n, fields=""):
+        return {"comments": [], "headRefOid": "feedface"}
+
+    def pr_checks(self, n):
+        return [{"name": "Frontend CI", "bucket": "pass", "workflow": "Frontend CI"}]
+
+
+def test_a_big_epic_pr_requires_only_the_suites_its_files_touch():
+    files = [f"frontend/f{i}.ts" for i in range(347)]
+    out = s._epic_suite_evidence(_EpicPrGh(), "epic-9", [], files, 77, False)
+    assert out["suites"]["backend"] == "not_required"
+    assert out["missing"] == []
+
+
+def test_a_compare_delta_at_its_cap_is_still_treated_as_truncated():
+    """Positive control: without an epic PR the 300-file compare list may be cut short."""
+    files = [f"frontend/f{i}.ts" for i in range(300)]
+    out = s._epic_suite_evidence(_EpicPrGh(), "epic-9", [], files, None, False)
+    assert out["suites"]["backend"] == "missing"

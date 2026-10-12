@@ -2190,6 +2190,10 @@ def _epic_child_chain(gh, branch: str, children: list, base: str = "main") -> di
     return {"prs": prs, "direct": direct}
 
 
+PR_FILES_CAP = 3000
+COMPARE_FILES_CAP = 300
+
+
 def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
                          epic_pr: Optional[int], carry_forward: bool = True,
                          base: str = "main", deferred: tuple = ()) -> dict:
@@ -2201,7 +2205,8 @@ def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
     suite), `unattested` / `awaiting` (attestable / non-attestable suites still `missing`),
     `missing` (their workflows),
     `breaks` (why a chain failed) and `carried_files`."""
-    truncated = len(epic_files) >= 300
+    # The PR files API lists up to 3000 paths; only the compare fallback stops at 300.
+    truncated = len(epic_files) >= (PR_FILES_CAP if epic_pr is not None else COMPARE_FILES_CAP)
     view, checks = {}, []
     if epic_pr is not None:
         view = gh.pr_view(epic_pr, "comments,headRefOid")
