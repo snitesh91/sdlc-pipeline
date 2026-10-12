@@ -185,7 +185,9 @@ _PIPELINE_DEFAULTS = {
     "humanChannel": "github",
     # A failed CI check whose failed-step log matches one of these (regex, case-insensitive)
     # is flagged `infra_suspect`: the runner broke, not the code -- fix it, `rerun-checks`.
-    "ci": {"infraFailurePatterns": [
+    # `carryChecksAcrossSync`: a required workflow's pass on the head before a sync merge
+    # stands for the synced head when the merged-in delta misses its paths.
+    "ci": {"carryChecksAcrossSync": True, "infraFailurePatterns": [
         "No space left on device", "ENOSPC", "Cannot connect to the Docker daemon",
         "docker daemon not running", "Is the docker daemon running",
         "The runner has received a shutdown signal", "lost communication with the server",
@@ -206,6 +208,10 @@ _PIPELINE_DEFAULTS = {
                   "prepare": ""},
     # Priority / Effort `create-issue` sets when no flag names one (fields configured only).
     "issueDefaults": {"priority": "Medium", "effort": "Medium"},
+    # `schemaGlobs`: an epic sync whose incoming base delta touches one of these is reported
+    # `schema_touch` (a shared entity change needs a migration in every consuming app).
+    "sync": {"schemaGlobs": ["packages/**/*.entity.ts", "packages/**/entities/**",
+                             "packages/**/migrations/**", "packages/**/schema.prisma"]},
     # Stage models and fan-out: one home, hooks/model_policy.json (agent_guard enforces it).
     "orchestrator": {"model": (_MODEL_POLICY.get("orchestrator") or {}).get("model", "sonnet")},
     "models": _MODEL_POLICY.get("models", {}),
@@ -248,6 +254,8 @@ _INITIATIVE_PROFILE_DEFAULTS = {
     "closeSuites": [],    # suite keys (any name, e.g. "e2e") `merge-initiative-pr` also needs
                           # a `record-local-ci` attestation for at the initiative PR's head
     "placement": None,    # "cloud"|"local" overrides `pipeline.placement.initiativeEpics`
+    "reviewDepth": "full",  # "light": reviews run single-pass (no fan-out), pr-review skips
+                            # the mutation probe -- for throwaway or feasibility work
 }
 
 
@@ -359,7 +367,21 @@ def _utc_now_marker() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _may_move_origin(argv: list) -> bool:
+    """A push, a refspec fetch, or any GitHub write (a merge moves a branch server-side)."""
+    if argv[:1] == ["git"]:
+        return "push" in argv or ("fetch" in argv[3:4] and len(argv) > 5)
+    if argv[:2] == ["gh", "api"]:
+        if "-X" in argv[:-1]:
+            return argv[argv.index("-X") + 1].upper() != "GET"
+        return any(a in ("-f", "-F", "--field", "--raw-field", "--input") for a in argv)
+    return argv[:1] == ["gh"] and argv[2:3] not in (["view"], ["list"], ["checks"], ["diff"],
+                                                     ["status"])
+
+
 def _default_runner(argv: list) -> str:
+    if _may_move_origin(argv):
+        _PUSH_GENERATION[0] += 1
     result = subprocess.run(argv, capture_output=True, text=True)
     if result.returncode != 0:
         raise GhError(f"command failed ({result.returncode}): {' '.join(argv)}\n{result.stderr}")
@@ -559,6 +581,17 @@ class GitHub:
     def issue_set_body(self, number: int, body: str):
         self._run(["gh", "issue", "edit", str(number), "--repo", self.repo, "--body", body])
 
+    def auto_deletes_head_branches(self) -> bool:
+        """The repo's `delete_branch_on_merge` (False when unreadable); cached per process."""
+        if not hasattr(self, "_auto_delete_heads"):
+            try:
+                out = self._run(["gh", "api", f"repos/{self.repo}", "--jq",
+                                 ".delete_branch_on_merge"]).strip()
+                self._auto_delete_heads = out == "true"
+            except GhError:
+                self._auto_delete_heads = False
+        return self._auto_delete_heads
+
     def delete_branch(self, branch: str):
         """Delete `origin/<branch>` GitHub-side (REST); a missing ref raises GhError
         (`cleanup_unit` re-checks origin, so an already-gone branch counts as deleted)."""
@@ -667,6 +700,12 @@ class GitHub:
                           "--jq", ".commits[]?.sha"])
         return [line for line in out.splitlines() if line.strip()]
 
+    def commit_parents(self, sha: str) -> list:
+        """Parent shas of one commit, first parent first."""
+        out = self._run(["gh", "api", f"repos/{self.repo}/commits/{sha}",
+                          "--jq", ".parents[].sha"])
+        return [line for line in out.splitlines() if line.strip()]
+
     def commit_files(self, sha: str) -> list:
         """Files one commit changed against its first parent (capped at 300)."""
         out = self._run(["gh", "api", f"repos/{self.repo}/commits/{sha}",
@@ -771,6 +810,46 @@ def _number_from_url(url: Optional[str]) -> Optional[int]:
 
 # Upper bound on pages `GitHubRest._api_items` walks (100 items each).
 _REST_MAX_PAGES = 200
+_ISSUE_CACHE_TTL_S = 6 * 3600
+_ISSUE_CACHE_OVERLAP_S = 600
+_ISSUE_KEYS = ("number", "title", "body", "created_at", "updated_at", "state", "labels",
+               "type", "parent", "parent_issue_url", "milestone", "issue_field_values")
+
+
+def _issue_cache_enabled() -> bool:
+    return os.environ.get("SDLC_ISSUE_CACHE", "on").strip().lower() not in ("0", "off", "false")
+
+
+def _issue_cache_path(repo: str) -> str:
+    """Closed-issue cache: `$SDLC_CACHE_DIR`, else `<worktrees.root>/.sdlc-cache`."""
+    root = os.environ.get("SDLC_CACHE_DIR") or os.path.join(
+        PIPELINE["worktrees"]["root"], ".sdlc-cache")
+    return os.path.join(root, re.sub(r"[^A-Za-z0-9._-]", "_", repo) + "-issues.json")
+
+
+def _slim_issue(raw: dict) -> dict:
+    return {k: raw[k] for k in _ISSUE_KEYS if k in raw}
+
+
+def _read_json(path: str) -> Optional[dict]:
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_json_atomic(path: str, data: dict) -> None:
+    """Best effort: a cache that cannot be written only costs the next process a relist."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 class GitHubRest(GitHub):
@@ -782,6 +861,77 @@ class GitHubRest(GitHub):
         super().__init__(repo, runner)
         self._owner = repo.split("/", 1)[0]
         self._org_fields: Optional[list] = None
+        # issue_list() index: raw REST issues by number, refreshed per issue this process
+        # mutates (`_dirty`), or wholesale (`_stale`) after a mutation it cannot attribute.
+        self._index: Optional[dict] = None
+        self._dirty: set = set()
+        self._stale = False
+        self._sub_issue_child = False  # add/remove_sub_issue mark the child themselves
+        self._run = self._tracked(runner)
+
+    _MUTATING_FLAGS = ("-f", "-F", "--field", "--raw-field", "--input")
+    _READ_VERBS = ("view", "list", "diff", "checks", "status")
+
+    def _tracked(self, runner: Runner) -> Runner:
+        def run(argv: list) -> str:
+            created = self._note_mutation(argv)
+            out = runner(argv)
+            if created and self._index is not None:
+                try:
+                    self._dirty.add(int(json.loads(out)["number"]))
+                except (ValueError, KeyError, TypeError):
+                    self._stale = True
+            return out
+        return run
+
+    def _note_mutation(self, argv: list) -> bool:
+        """Mark what a write invalidates in the issue index: the issue it names, else all.
+        Returns True for an issue create, whose number only its output carries."""
+        if self._index is None or len(argv) < 3 or argv[0] != "gh":
+            return False
+        kind, verb = argv[1], argv[2]
+        if kind == "issue":
+            if verb in self._READ_VERBS or verb == "comment":
+                return False
+            if len(argv) > 3 and argv[3].isdigit():
+                self._dirty.add(int(argv[3]))
+            else:
+                self._stale = True
+            return False
+        if kind == "pr":
+            # Only a merge can change an issue (a closing keyword closes it).
+            self._stale = self._stale or verb == "merge"
+            return False
+        if kind != "api":
+            return False
+        args, method, path, i = argv[2:], None, "", 0
+        while i < len(args):
+            if args[i] == "-X" and i + 1 < len(args):
+                method, i = args[i + 1].upper(), i + 2
+                continue
+            if not path and not args[i].startswith("-"):
+                path = args[i]
+            i += 2 if args[i] in self._MUTATING_FLAGS + ("--jq", "-q", "-H") else 1
+        method = method or ("POST" if any(a in self._MUTATING_FLAGS for a in args) else "GET")
+        repo = re.escape(self.repo)
+        if path == "graphql":
+            self._stale = self._stale or any(
+                a.startswith("query=") and a[6:].lstrip().startswith("mutation") for a in args)
+            return False
+        if method == "GET":
+            return False
+        if re.fullmatch(rf"repos/{repo}/issues", path):
+            return True
+        m = re.match(rf"repos/{repo}/issues/(\d+)(/[^?]*)?$", path)
+        if m:
+            tail = m.group(2) or ""
+            if tail.startswith("/sub_issue"):
+                self._stale = self._stale or not self._sub_issue_child
+            elif not tail.startswith(("/comments", "/dependencies")):
+                self._dirty.add(int(m.group(1)))
+        elif re.fullmatch(rf"repos/{repo}/pulls/\d+/merge", path):
+            self._stale = True
+        return False
 
     def graphql(self, query: str, **variables: str) -> dict:
         if session_placement()["placement"] == "cloud":
@@ -914,9 +1064,68 @@ class GitHubRest(GitHub):
     # --- issues ----------------------------------------------------------------------
 
     def issue_list(self) -> list:
-        items = self._api_items(f"repos/{self.repo}/issues?state=all&per_page=100"
-                                f"&sort=created&direction=asc")
-        return without_retro_issues([self._node(i) for i in items if not i.get("pull_request")])
+        """Every issue, open and closed. Served from a per-process index that refetches only
+        what this process changed; across processes closed issues come from the disk cache
+        (`_issue_cache_path`) and only open plus recently updated ones are listed."""
+        if not _issue_cache_enabled():
+            items = self._list_issues("all")
+            return without_retro_issues([self._node(i) for i in items])
+        if self._index is None or self._stale:
+            self._index, self._stale = self._load_index(), False
+            self._dirty.clear()
+        for number in sorted(self._dirty):
+            try:
+                raw = self._issue(number)
+            except GhError as e:
+                if "HTTP 404" not in str(e) and "HTTP 410" not in str(e):
+                    raise
+                raw = None
+            if raw and not raw.get("pull_request"):
+                self._index[number] = _slim_issue(raw)
+            else:
+                self._index.pop(number, None)
+        self._dirty.clear()
+        return without_retro_issues(
+            [self._node(self._index[n]) for n in sorted(
+                self._index, key=lambda n: (self._index[n].get("created_at") or "", n))])
+
+    def _list_issues(self, state: str, extra: str = "&sort=created&direction=asc") -> list:
+        return [i for i in self._api_items(f"repos/{self.repo}/issues?state={state}"
+                                           f"&per_page=100{extra}")
+                if not i.get("pull_request")]
+
+    def _load_index(self) -> dict:
+        """Open issues listed live; closed ones from the disk cache, topped up with every
+        issue updated since its last refresh (minus `_ISSUE_CACHE_OVERLAP_S`), and fully
+        relisted once `_ISSUE_CACHE_TTL_S` has passed."""
+        path = _issue_cache_path(self.repo)
+        now = time.time()
+        cache = _read_json(path) or {}
+        try:
+            closed = {int(k): dict(v) for k, v in cache["closed"].items()}
+            full_at, fetched_at = float(cache["full_at"]), float(cache["fetched_at"])
+            fresh = cache["repo"] == self.repo and now - full_at <= _ISSUE_CACHE_TTL_S
+        except (KeyError, TypeError, ValueError, AttributeError):
+            # A malformed or older-schema cache is no cache.
+            fresh = False
+        if not fresh:
+            items = self._list_issues("all")
+            full_at = now
+            index = {i["number"]: _slim_issue(i) for i in items}
+        else:
+            since = datetime.fromtimestamp(fetched_at - _ISSUE_CACHE_OVERLAP_S,
+                                           timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            for i in self._list_issues("closed", f"&since={since}&sort=updated"
+                                                 f"&direction=asc"):
+                closed[i["number"]] = _slim_issue(i)
+            index = dict(closed)
+            for i in self._list_issues("open"):
+                index[i["number"]] = _slim_issue(i)
+            # A closed-cache entry that is open again is now listed open.
+        _write_json_atomic(path, {
+            "repo": self.repo, "full_at": full_at, "fetched_at": now,
+            "closed": {str(n): v for n, v in index.items() if v.get("state") == "closed"}})
+        return index
 
     def _comments(self, number: int) -> list:
         return [{"id": c.get("node_id"), "author": {"login": (c.get("user") or {}).get("login")},
@@ -1017,12 +1226,22 @@ class GitHubRest(GitHub):
         self._clear_field(number, self._field(STAGE_FIELD_ID, "stageFieldId"))
 
     def add_sub_issue(self, parent_number: int, child_number: int):
-        self._api(f"repos/{self.repo}/issues/{parent_number}/sub_issues",
-                  "-F", f"sub_issue_id={self._issue_db_id(child_number)}", method="POST")
+        self._sub_issue_write(f"repos/{self.repo}/issues/{parent_number}/sub_issues",
+                              child_number, "POST")
 
     def remove_sub_issue(self, parent_number: int, child_number: int):
-        self._api(f"repos/{self.repo}/issues/{parent_number}/sub_issue",
-                  "-F", f"sub_issue_id={self._issue_db_id(child_number)}", method="DELETE")
+        self._sub_issue_write(f"repos/{self.repo}/issues/{parent_number}/sub_issue",
+                              child_number, "DELETE")
+
+    def _sub_issue_write(self, path: str, child_number: int, method: str):
+        db_id = self._issue_db_id(child_number)
+        self._sub_issue_child = True
+        try:
+            self._api(path, "-F", f"sub_issue_id={db_id}", method=method)
+        finally:
+            self._sub_issue_child = False
+        if self._index is not None:
+            self._dirty.add(child_number)
 
     def issue_comment(self, number: int, body: str):
         self._api(f"repos/{self.repo}/issues/{number}/comments", "-f", f"body={body}",
@@ -1140,7 +1359,10 @@ class GitHubRest(GitHub):
     def pr_checks(self, number: int) -> list:
         """`gh pr checks --json name,state,bucket,link,workflow` from the head's check runs and
         commit statuses; `workflow` is the Actions run's workflow name, else ""."""
-        sha = self._api_json(f"repos/{self.repo}/pulls/{number}")["head"]["sha"]
+        return self.commit_checks(self._api_json(f"repos/{self.repo}/pulls/{number}")["head"]["sha"])
+
+    def commit_checks(self, sha: str) -> list:
+        """`pr_checks`' shape for any commit."""
         runs = self._api_items(f"repos/{self.repo}/commits/{sha}/check-runs?per_page=100",
                                ".check_runs[]")
         workflows = {}
@@ -1334,7 +1556,7 @@ def effective_gates(epic_issue: Optional[dict]) -> dict:
 
 def is_epic_standing(issue: dict) -> bool:
     """Standing epic (profile `epicLevelPhase` false): no phase-Tasks; each child runs
-    its own full flow and integrates into `main`."""
+    its own full flow and integrates into its integration base (`integration_base`)."""
     return not resolve_profile(issue)["epicLevelPhase"]
 
 
@@ -1610,6 +1832,15 @@ def session_placement() -> dict:
     return {"placement": "local", "signal": "default"}
 
 
+def cloud_skips_local_cleanup() -> bool:
+    """A cloud session's container, `/tmp` worktrees included, is discarded when it ends, so
+    local filesystem cleanup there is skipped (an invalid `SDLC_PLACEMENT` counts as local)."""
+    try:
+        return session_placement()["placement"] == "cloud"
+    except GhError:
+        return False
+
+
 def unit_placement(number: int, lookup: Callable[[int], Optional[dict]]) -> dict:
     """`{placement, epic}` (+ `label_on` when cloud): a unit belongs to its Epic (an Initiative,
     or an Initiative's own Task, to the Initiative), which is cloud-placed when it or an ancestor
@@ -1766,10 +1997,12 @@ _LOCAL_CI_MARKER = re.compile(
     r"<!--\s*local-ci:\s*([\w-]+):(\d+)\s*@\s*([0-9a-fA-F]{7,40})\s*-->")
 
 # Plus every Initiative profile's `closeSuites` (attested on the initiative PR only).
+# `e2e` is built in: the e2e-test Task attests its own specs' run even where no workflow or
+# profile names an e2e suite (no merge gate requires it then; it is the PR's record).
 LOCAL_CI_SUITES = tuple(dict.fromkeys(
     [w["suite"] for w in CONFIG["requiredWorkflows"]]
     + [suite for prof in PIPELINE["initiativeProfiles"] or [] for suite in
-       prof.get("closeSuites") or []]))
+       prof.get("closeSuites") or []] + ["e2e"]))
 
 # Fail at config load on a suite key the marker regex could never match.
 for _suite in LOCAL_CI_SUITES:
@@ -1950,8 +2183,8 @@ PHASE_TASK_STAGES = frozenset({"architecture", "arch-review", "lld", "lld-review
 def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
     """Branch this unit integrates into: `epic-<parent>` for every child of a non-standing
     Epic (phase-Tasks included); for an Epic, its opted-in Initiative's `initiative-<i>`
-    (`epic_base`); else `main` (initiatives, other epics, parentless issues, standing/Initiative
-    children)."""
+    (`epic_base`); for a standing Epic's child, that Epic's base; else `main` (initiatives,
+    parentless issues, Initiative children)."""
     if unit == "initiative":
         return "main"
     if unit == "epic":
@@ -1978,7 +2211,8 @@ def integration_base_in(issues: dict, issue: int) -> str:
             return initiative_branch(parent_number)
         return "main"
     if parent_entry is not None and is_epic_standing(parent_entry):
-        return "main"
+        # A standing Epic has no branch; its children land where the Epic itself would.
+        return epic_base_in(issues, parent_number)
     return epic_branch(parent_number)
 
 
@@ -2189,6 +2423,10 @@ def _epic_child_chain(gh, branch: str, children: list, base: str = "main") -> di
     return {"prs": prs, "direct": direct}
 
 
+PR_FILES_CAP = 3000
+COMPARE_FILES_CAP = 300
+
+
 def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
                          epic_pr: Optional[int], carry_forward: bool = True,
                          base: str = "main", deferred: tuple = ()) -> dict:
@@ -2200,14 +2438,15 @@ def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
     suite), `unattested` / `awaiting` (attestable / non-attestable suites still `missing`),
     `missing` (their workflows),
     `breaks` (why a chain failed) and `carried_files`."""
-    truncated = len(epic_files) >= 300
+    # The PR files API lists up to 3000 paths; only the compare fallback stops at 300.
+    truncated = len(epic_files) >= (PR_FILES_CAP if epic_pr is not None else COMPARE_FILES_CAP)
     view, checks = {}, []
     if epic_pr is not None:
         view = gh.pr_view(epic_pr, "comments,headRefOid")
         checks = gh.pr_checks(epic_pr)
     chain = None
     suites, unattested, awaiting, missing, breaks, carried = {}, [], [], [], {}, set()
-    for spec in REQUIRED_WORKFLOWS:
+    for spec in required_workflows(base):
         suite = spec["suite"]
         if not _workflow_applies_to_base(spec, base):
             continue
@@ -2389,6 +2628,13 @@ def _refresh_epic_worktree(branch: str, repo_path: str, runner: Runner) -> Optio
             or (k == "reason" and out.get("diverged"))}
 
 
+_PREPARE_UNSET_WARNING = (
+    "pipeline.epicClose.prepare is unset: the epic worktree has no dependencies installed, so "
+    "the exploratory pass may return blocked. Set it to the repo's install command "
+    "(references/epics.md, \"Epic closing\"); until then run that install in the epic "
+    "worktree before the pass.")
+
+
 def _epic_close_prepare(worktree: Optional[dict], shell: Optional[Callable]) -> Optional[dict]:
     """Run `pipeline.epicClose.prepare` (e.g. a dependency install) in the epic worktree
     so the exploratory pass finds it ready; None when not configured. Never raises."""
@@ -2500,9 +2746,17 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         tree = _refresh_epic_worktree(branch, repo_path, runner)
         out = {"epic_worktree": tree} if tree else {}
         prepared = _epic_close_prepare(tree, shell)
-        return {**out, **({"prepare": prepared} if prepared else {})}
+        if prepared:
+            return {**out, "prepare": prepared}
+        if tree:
+            out["prepare_warning"] = _PREPARE_UNSET_WARNING
+        return out
 
     behind = gh.branch_behind_by(branch, base=base)
+    skipped = _reconcile_skippable(gh, branch, base, behind) if carry_forward else None
+    if skipped:
+        target["reconcile_skipped"] = skipped
+        behind = 0
     if behind:
         refused = clean_refusal()
         if refused:
@@ -2569,6 +2823,25 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     gh.pr_merge(pr_number)
     return _finish_epic_close(gh, epic, None, pr_number, children, all_issues, repo_path,
                               runner, {**target, **evidence, **cleaned}, base=base)
+
+
+def _reconcile_skippable(gh, branch: str, base: str, behind: int) -> Optional[dict]:
+    """`{behind, files}` when every file `base` gained lies in the evidence carry-forward set
+    and the epic never touched it: a reconcile would only re-stale the closing evidence."""
+    if not behind:
+        return None
+    try:
+        incoming = gh.base_delta_files(branch, base=base)
+        if not incoming or len(incoming) >= COMPARE_FILES_CAP:
+            return None
+        if not all(evidence_carries_forward(p) for p in incoming):
+            return None
+        epic_files = gh.base_delta_files(base, base=branch)
+    except GhError:
+        return None
+    if len(epic_files) >= COMPARE_FILES_CAP or set(incoming) & set(epic_files):
+        return None
+    return {"behind": behind, "files": sorted(incoming)}
 
 
 def _finish_epic_close(gh, epic: int, detail: Optional[dict], pr_number: int, children: list,
@@ -2744,9 +3017,41 @@ def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
     return {"initiative": initiative, "closeable": True, "epics": state["epics"]}
 
 
-def cmd_close_initiative(gh: GitHub, initiative: int) -> dict:
+_SCAFFOLDING_HITS_CAP = 50
+
+
+def initiative_scaffolding(gh: GitHub, initiative: int, repo_path: str = ".",
+                           runner: Runner = _default_runner,
+                           all_issues: Optional[list] = None) -> list:
+    """What still names the landed initiative branch or defers work to "Initiative close":
+    `{path, line, text}` grep hits on `origin/main` (design docs aside) and `{issue, title}`
+    for closed descendants whose body says so. A list to clear, never a gate."""
+    needles = (initiative_branch(initiative), "Initiative close")
+    hits: list = []
+    try:
+        _run_retry_transient(["git", "-C", repo_path, "fetch", "origin", "main"], runner)
+        out = runner(["git", "-C", repo_path, "grep", "-n", "-I", "-F",
+                      *[a for n in needles for a in ("-e", n)], "origin/main", "--"])
+    except GhError:
+        out = ""  # git grep exits 1 on no match
+    roots = tuple(f"{r}/" for r in all_doc_roots())
+    for raw in out.splitlines():
+        parts = raw.split(":", 3)
+        if len(parts) < 4 or parts[1].startswith(roots):
+            continue
+        hits.append({"path": parts[1], "line": int(parts[2]), "text": parts[3].strip()[:200]})
+    issues = all_issues if all_issues is not None else gh.issue_list()
+    for i in _descendants(issues, initiative):
+        if i.get("state") == "CLOSED" and any(n in (i.get("body") or "") for n in needles):
+            hits.append({"issue": i["number"], "title": i.get("title")})
+    return hits[:_SCAFFOLDING_HITS_CAP]
+
+
+def cmd_close_initiative(gh: GitHub, initiative: int, repo_path: str = ".",
+                         runner: Runner = _default_runner) -> dict:
     """Close the Initiative once every cut Epic is closed and its verification is
-    recorded. Returns `closed`; refusals carry `reason`."""
+    recorded. Returns `closed`; refusals carry `reason`. Closing one that had a branch also
+    returns `scaffolding` (`initiative_scaffolding`)."""
     check = cmd_check_initiative_closeable(gh, initiative)
     if not check["closeable"]:
         return {"initiative": initiative, "closed": False,
@@ -2756,10 +3061,14 @@ def cmd_close_initiative(gh: GitHub, initiative: int) -> dict:
     if missing:
         return {"initiative": initiative, "closed": False, "missing_verification": missing,
                 "reason": f"closing verification incomplete: {'; '.join(missing)}"}
+    extra: dict = {}
+    if (PIPELINE["initiativeProfiles"]
+            and resolve_initiative_profile(gh.issue_epic_info(initiative))["branch"]):
+        extra["scaffolding"] = initiative_scaffolding(gh, initiative, repo_path, runner)
     gh.issue_close(initiative)
     # Also set here so a repo without the `issues: closed` Action still ends correct.
     cmd_mark_issue_closed(gh, initiative)
-    return {"initiative": initiative, "closed": True, "epics": check["epics"]}
+    return {"initiative": initiative, "closed": True, "epics": check["epics"], **extra}
 
 
 def _initiative_branch_refusal(gh: GitHub, initiative: int, action: str) -> tuple:
@@ -2891,7 +3200,9 @@ def cmd_merge_initiative_pr(gh: GitHub, initiative: int, repo_path: str = ".",
         f"<!-- initiative-merged: {initiative} pr:{pr} @ {_utc_now_marker()} -->")
     cleanup = cleanup_unit(gh, initiative, "initiative", repo_path, runner, base="main")
     return _with_warnings({"initiative": initiative, "merged": True, "pr": pr, "branch": branch,
-                           "epics": epics, "evidence": evidence, "cleanup": cleanup}, cleanup)
+                           "epics": epics, "evidence": evidence, "cleanup": cleanup,
+                           "scaffolding": initiative_scaffolding(gh, initiative, repo_path,
+                                                                 runner)}, cleanup)
 
 
 def find_gate_comments_cutoff(pr: dict) -> str:
@@ -3250,7 +3561,7 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
             try:
                 lane.update(dev_lane_slots(gh, repo_path, epic, all_issues, runner=runner))
                 if lane["occupied"] or lane["cross_epic"]:
-                    runner(["git", "-C", repo_path, "fetch", "origin"])
+                    _fetch_origin(repo_path, runner)
                     lane["footprints"] = dev_lane_footprints(lane, repo_path, by_number,
                                                              runner=runner, gh=gh)
             except GhError as e:
@@ -3340,6 +3651,10 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
             merged = _merged_design_action(gh, issue, epic)
             if merged:
                 return merged
+
+    denied = _classifier_denied_resume(gh, children, run_id)
+    if denied:
+        return denied
 
     # Crash-recovery: the unit's own open children only.
     in_progress = [i for i in children if pipeline_status(i) == "in-progress"]
@@ -3517,7 +3832,7 @@ def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: st
         branch = epic_branch(epic)
         # `main`, or the opted-in Initiative's branch the Epic closes into.
         base = epic_base(gh, epic, issues)
-        _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
+        _fetch_origin(repo_path, runner)
         epic_sha = _origin_sha(repo_path, branch, runner)
         if epic_sha is None:
             return {"skipped": f"origin/{branch} does not exist yet"}
@@ -3546,7 +3861,13 @@ def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: st
                               f"{EPIC_SYNC_EVERY_MERGES} merges since the last sync, "
                               f"{base} unmoved"}
         result = cmd_sync_branch(gh, repo_path, epic, "epic", runner=runner, base=base)
-        _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
+        if result.get("synced") and main_sha and epic_sha != main_sha:
+            try:
+                result.update(epic_sync_touches(repo_path, epic, epic_sha, main_sha, runner, gh))
+            except GhError as e:
+                # The sync already pushed; a failed report must not undo its record.
+                result["touches_error"] = str(e)
+        _fetch_origin(repo_path, runner)
         record = {"main": main_sha, "epic": _origin_sha(repo_path, branch, runner),
                   "terminal": terminal, "at": _utc_now_marker()}
         if result.get("conflict"):
@@ -3556,6 +3877,32 @@ def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: st
         return {**result, "due": due}
     except GhError as e:
         return {"synced": False, "error": str(e)}
+
+
+def epic_sync_touches(repo_path: str, epic: int, epic_sha: str, base_sha: str,
+                      runner: Runner = _default_runner,
+                      gh: Optional[WorkItemProvider] = None) -> dict:
+    """What an epic sync brought in from its base (`epic_sha...base_sha`): `design_touch`, the
+    files the Epic's `architecture.md`/`lld.md` name (the path or a parent dir of 3+ segments;
+    a 2-segment app root is named everywhere);
+    `schema_touch`, the files matching `pipeline.sync.schemaGlobs`. Empty lists when none."""
+    delta = runner(["git", "-C", repo_path, "diff", "--name-only",
+                    f"{epic_sha}...{base_sha}"]).split()
+    docs = ""
+    for name in ("architecture.md", "lld.md"):
+        try:
+            docs += runner(["git", "-C", repo_path, "show", f"{epic_sha}:"
+                            f"{doc_root_for(epic, gh)}/epic-{epic}/{name}"])
+        except GhError:
+            pass
+
+    def named(path):
+        parts = path.split("/")
+        return any("/".join(parts[:i]) in docs for i in range(len(parts), 2, -1))
+
+    globs = PIPELINE["sync"].get("schemaGlobs") or []
+    return {"design_touch": [p for p in delta if docs and named(p)],
+            "schema_touch": [p for p in delta if any(_glob_matches(p, g) for g in globs)]}
 
 
 def sync_initiative_if_due(gh: GitHub, entry: dict, run_id: str, repo_path: str = ".",
@@ -3573,7 +3920,7 @@ def sync_initiative_if_due(gh: GitHub, entry: dict, run_id: str, repo_path: str 
     if entry["state"] != "OPEN":
         return {"skipped": f"Initiative #{n} is closed"}
     branch = initiative_branch(n)
-    _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
+    _fetch_origin(repo_path, runner)
     head = _origin_sha(repo_path, branch, runner)
     if head is None:
         return {"skipped": f"origin/{branch} does not exist yet (the first Epic's "
@@ -3591,7 +3938,7 @@ def sync_initiative_if_due(gh: GitHub, entry: dict, run_id: str, repo_path: str 
         return {"synced": False, "due": None, "branch": branch,
                 "reason": "not due: this run already synced it and main is unmoved"}
     result = cmd_sync_branch(gh, repo_path, n, "initiative", runner=runner, base="main")
-    _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
+    _fetch_origin(repo_path, runner)
     record = {"main": main_sha, "initiative": _origin_sha(repo_path, branch, runner),
               "at": _utc_now_marker()}
     if result.get("conflict"):
@@ -3810,6 +4157,15 @@ def slice_task_subsection(doc_text: str, task_number: int) -> Optional[str]:
         if _task_heading_matches(entry, task_number):
             return doc_text[entry["start"]:entry["end"]].rstrip() + "\n"
     return None
+
+
+def lld_task_headings_dropped(base_text: str, new_text: str) -> list:
+    """Task headings on the epic branch's `lld.md` that a revised copy no longer carries
+    (as `#<n>` or the key), so `lld-section` would stop finding them."""
+    def ids(text):
+        return {f"#{h['number']}" if h["number"] else (h["task_key"] or h["key"])
+                for h in parse_task_headings(text)}
+    return sorted(ids(base_text) - ids(new_text))
 
 
 def cmd_lld_section(repo_path: str, epic: int, task,
@@ -4148,6 +4504,46 @@ _TRANSIENT_NET_RE = re.compile(
     re.IGNORECASE)
 
 
+# Common git dir -> push generation at its last `git fetch origin` this process.
+_FETCHED: dict = {}
+_PUSH_GENERATION = [0]
+
+
+def _fetch_dedupe_enabled() -> bool:
+    return os.environ.get("SDLC_FETCH_DEDUPE", "on").strip().lower() not in ("0", "off", "false")
+
+
+def _common_git_dir(path: str) -> str:
+    """The repo's shared git dir (one per clone, whichever worktree `path` is)."""
+    dot_git = os.path.join(path, ".git")
+    try:
+        if os.path.isfile(dot_git):
+            with open(dot_git) as f:
+                gitdir = f.read().split("gitdir:", 1)[1].strip()
+            gitdir = os.path.join(path, gitdir)
+            common = os.path.join(gitdir, "commondir")
+            if os.path.isfile(common):
+                with open(common) as f:
+                    return os.path.realpath(os.path.join(gitdir, f.read().strip()))
+            return os.path.realpath(gitdir)
+    except (OSError, IndexError):
+        pass
+    return os.path.realpath(dot_git if os.path.isdir(dot_git) else path)
+
+
+def _fetch_origin(path: str, runner: Runner):
+    """`git fetch origin`, once per clone per process until something pushes: worktrees share
+    one ref store, so a second fetch moments later only re-reads the same refs."""
+    key = _common_git_dir(path) if _fetch_dedupe_enabled() and runner is _default_runner \
+        else None
+    if key is not None and _FETCHED.get(key) == _PUSH_GENERATION[0]:
+        return ""
+    out = _run_retry_transient(["git", "-C", path, "fetch", "origin"], runner)
+    if key is not None:
+        _FETCHED[key] = _PUSH_GENERATION[0]
+    return out
+
+
 def _run_retry_transient(argv: list, runner: Runner, attempts: int = 2):
     """Run a git network command, retrying once on a transient network error."""
     for i in range(attempts):
@@ -4189,7 +4585,7 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
     existing = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
     if existing:
         return _with_scratch(_resume_live_worktree(existing, branch, repo_path, runner))
-    _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
+    _fetch_origin(repo_path, runner)
     on_origin = runner(["git", "-C", repo_path, "branch", "-r", "--list",
                         f"origin/{branch}"]).strip()
     if on_origin:
@@ -4234,7 +4630,7 @@ def _resume_live_worktree(path: str, branch: str, repo_path: str, runner: Runner
     """Return the live worktree holding `branch`, fast-forwarded to origin when
     strictly behind. A diverged branch is reported (`diverged`) and never reset.
     Adds `synced_to_origin` and `behind_before` (None when origin lacks the branch)."""
-    runner(["git", "-C", repo_path, "fetch", "origin"])
+    _fetch_origin(repo_path, runner)
     result = {"created": False, "path": path, "branch": branch, "resumed": True,
               "reason": "branch already checked out in a live worktree"}
     if not origin_branch_exists(repo_path, branch, runner=runner):
@@ -4536,7 +4932,7 @@ def cmd_review_worktree_add(number: int, repo_path: str = ".",
     with its scratch dir. Never a local `issue-<n>` branch: `development` must stay free
     to hold it for rework."""
     branch, path = issue_branch(number), review_worktree_path(number)
-    _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
+    _fetch_origin(repo_path, runner)
     if not origin_branch_exists(repo_path, branch, runner=runner):
         raise GhError(f"origin/{branch} does not exist -- nothing to review")
     entry = _registered_worktree(repo_path, path, runner)
@@ -4712,7 +5108,7 @@ class BranchWorkspace:
                     f"command will use the branch's own worktree or an ephemeral one.")
             self.path = live
             return self
-        r(["git", "-C", base, "fetch", "origin"])
+        _fetch_origin(base, r)
         on_origin = origin_branch_exists(base, branch, runner=r)
         try:
             r(["git", "-C", base, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"])
@@ -4788,7 +5184,7 @@ def ensure_branch_on_origin(repo_path: str, branch: str, base: str = "main",
                             runner: Runner = _default_runner) -> str:
     """Make `origin/<branch>` exist before writing to it. Returns `"exists"`,
     `"pushed-local"` (local ref pushed as-is) or `"created"` (cut from `origin/<base>`)."""
-    runner(["git", "-C", repo_path, "fetch", "origin"])
+    _fetch_origin(repo_path, runner)
     if origin_branch_exists(repo_path, branch, runner=runner):
         return "exists"
     try:
@@ -4798,7 +5194,7 @@ def ensure_branch_on_origin(repo_path: str, branch: str, base: str = "main",
     except GhError:
         source, outcome = f"refs/remotes/origin/{base}", "created"
     runner(["git", "-C", repo_path, "push", "origin", f"{source}:refs/heads/{branch}"])
-    runner(["git", "-C", repo_path, "fetch", "origin"])
+    _fetch_origin(repo_path, runner)
     return outcome
 
 
@@ -4952,7 +5348,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
     children = [i for i in open_issues if not is_epic(i) and i.get("parent")
                 and i["parent"]["number"] == epic]
 
-    runner(["git", "-C", repo_path, "fetch", "origin"])
+    _fetch_origin(repo_path, runner)
     lane = dev_lane_slots(gh, repo_path, epic, all_issues, runner=runner, cap=limit)
     active_branches = lane["active_branches"]
 
@@ -5041,7 +5437,7 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
     children = [i for i in open_issues if not is_epic(i) and i.get("parent")
                 and i["parent"]["number"] == epic]
 
-    runner(["git", "-C", repo_path, "fetch", "origin"])
+    _fetch_origin(repo_path, runner)
     active_branches = active_worktree_branches(repo_path, runner=runner)
 
     eligible, skipped = [], []
@@ -5115,12 +5511,12 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
 def required_check_states(gh: GitHub, pr: int) -> Optional[dict]:
     """The PR head's checks from the required workflows it touches (base-scoped):
     `{failing, infra_suspect, pending}` lists of checks; None when no check reported at all."""
-    checks = gh.pr_checks(pr)
+    checks = effective_checks(gh, pr)
     if not checks:
         return None
     base = gh.pr_view(pr, "headRefOid,baseRefName").get("baseRefName")
     files = gh.pr_files(pr)
-    required = {w["workflow"] for w in REQUIRED_WORKFLOWS if _workflow_applies_to_base(w, base)
+    required = {w["workflow"] for w in required_workflows(base) if _workflow_applies_to_base(w, base)
                 and any(_workflow_covers(w, p) for p in files)}
     mine = [c for c in checks if c.get("workflow", "") in required]
     failed = [c for c in mine if _is_failed_check(c)]
@@ -5300,7 +5696,7 @@ def _non_attestable_suite_uncovered(gh: GitHub, pr: int, suite: str) -> dict:
     does -- only its passing GitHub Actions check satisfies it. Returns `accepted_because`."""
     base = gh.pr_view(pr, fields="baseRefName").get("baseRefName")
     files = gh.pr_files(pr)
-    covering = [w["workflow"] for w in REQUIRED_WORKFLOWS
+    covering = [w["workflow"] for w in required_workflows(base)
                 if w["suite"] == suite and _workflow_applies_to_base(w, base)
                 and any(_workflow_covers(w, p) for p in files)]
     if covering:
@@ -5792,7 +6188,7 @@ def _epic_lld_is_numbered_copy(repo_path: str, issue: int, epic: int, runner: Ru
     it: merging the branch's copy back would revert the numbering."""
     doc = f"{doc_root_for(epic, gh)}/epic-{epic}/lld.md"
     try:
-        runner(["git", "-C", repo_path, "fetch", "origin"])
+        _fetch_origin(repo_path, runner)
         src = runner(["git", "-C", repo_path, "show", f"origin/{issue_branch(issue)}:{doc}"])
         dest = runner(["git", "-C", repo_path, "show", f"origin/{epic_branch(epic)}:{doc}"])
     except GhError:
@@ -5902,15 +6298,16 @@ def _merge_design_pr_of(gh: GitHub, issue: int, repo_path: Optional[str], runner
 
 def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, doc: str,
                    next_stage: str, summary: str, runner: Runner = _default_runner) -> dict:
-    """Open a human-review gate: a new `issue-<n>` -> `main` PR, or -- for a non-standing Epic's
-    architecture phase-Task -- its already-open design PR into `epic-<e>` (no second PR)."""
+    """Open a human-review gate: a new `issue-<n>` PR into its integration base, or -- for a
+    non-standing Epic's architecture phase-Task -- its already-open design PR into `epic-<e>`."""
     stage = doc.rsplit(".", 1)[0]
     epic = design_phase_epic(gh, issue, stage)
-    head, base = issue_branch(issue), "main" if epic is None else epic_branch(epic)
+    head = issue_branch(issue)
+    base = _gate_base(gh, issue) if epic is None else epic_branch(epic)
     doc_path = f"{design_doc_dir(epic, issue, gh)}/{doc}"
     # Cite the pushed head, not a local HEAD: the PR only contains what is on origin.
     repo_path = repo_path or "."
-    runner(["git", "-C", repo_path, "fetch", "origin"])
+    _fetch_origin(repo_path, runner)
     sha = runner(["git", "-C", repo_path, "rev-parse", f"origin/{head}"]).strip()
     if epic is None:
         pr_number = gh.pr_create(
@@ -5964,7 +6361,7 @@ def git_reconcile_branch(repo_path: str, branch: str, base: str = "main",
     """Fetch, fast-forward `branch` to its origin tip, merge `origin/<base>` and push.
     Always a merge, never a rebase: squash-merged PRs share no ancestry with their
     branches. Raises `MergeConflict` (after `merge --abort`) on real unmerged paths."""
-    _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
+    _fetch_origin(repo_path, runner)
     runner(["git", "-C", repo_path, "checkout", branch])
     # A stale local tip would make the final push non-fast-forward; ff-only so a
     # genuinely diverged branch fails loudly instead of being reset.
@@ -6029,7 +6426,7 @@ def cmd_sync_branch(gh: GitHub, repo_path: Optional[str], issue: int, unit: str 
     result = {"issue": issue, "unit": unit, "branch": branch, "base": base, "synced": True}
     with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
         # Fetch first so the existence check never reads a stale remote-tracking ref.
-        runner(["git", "-C", ws.path, "fetch", "origin"])
+        _fetch_origin(ws.path, runner)
         if not origin_branch_exists(ws.path, base, runner=runner):
             result.update({
                 "synced": False, "base_missing": True,
@@ -6074,7 +6471,7 @@ def cmd_merge_lld_doc(gh: GitHub, repo_path: Optional[str], epic: int,
     epic_br = epic_branch(epic)
     doc_path = f"{doc_root_for(epic, gh)}/epic-{epic}/lld.md"
     with branch_lock(epic_br), BranchWorkspace(epic_br, repo_path, runner) as ws:
-        runner(["git", "-C", ws.path, "fetch", "origin"])
+        _fetch_origin(ws.path, runner)
         blob = _blob_at(ws.path, f"origin/{epic_br}", doc_path, runner)
         tip = (runner(["git", "-C", ws.path, "rev-parse", f"origin/{epic_br}"]).strip()
                if blob is not None else None)
@@ -6322,7 +6719,7 @@ def _commit_doc_to_epic_branch(repo_path: Optional[str], epic: str, doc_path: st
     with branch_lock(epic):
         ensure_branch_on_origin(repo_path or ".", epic, runner=runner)
         with BranchWorkspace(epic, repo_path, runner) as ws:
-            runner(["git", "-C", ws.path, "fetch", "origin"])
+            _fetch_origin(ws.path, runner)
             unpushed = runner(["git", "-C", ws.path, "diff", "--name-only",
                                f"origin/{epic}...{epic}"]).split()
             if runner(["git", "-C", ws.path, "status", "--porcelain"]).strip():
@@ -6406,7 +6803,7 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
     Idempotent: existing issues are matched back by their `task-key` marker."""
     epic_br = epic_branch(epic)
     doc_path = f"{doc_root_for(epic, gh)}/epic-{epic}/lld.md"
-    runner(["git", "-C", repo_path, "fetch", "origin"])
+    _fetch_origin(repo_path, runner)
     try:
         doc = runner(["git", "-C", repo_path, "show", f"origin/{epic_br}:{doc_path}"])
     except GhError:
@@ -6532,6 +6929,14 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
     return {**result, "tasks": key_to_number, **published}
 
 
+def _gate_base(gh: GitHub, issue: int) -> str:
+    """Where a non-phase gate PR merges: the unit's `integration_base` (a standing child under
+    an initiative branch); `main`, looking nothing up, while no profile sets `branch`."""
+    if not any(prof.get("branch") for prof in PIPELINE["initiativeProfiles"] or []):
+        return "main"
+    return integration_base(gh, issue)
+
+
 def phase_task_parent(gh: GitHub, issue: int) -> Optional[dict]:
     """`{"number", "kind": "initiative"|"epic"}` when `issue`'s parent makes it a
     phase-Task, else None. Only meaningful on a gate path: under an Initiative or
@@ -6604,9 +7009,10 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
                        f"field verbatim; it is the gate's owning doc-stage, not a target you pick")
     branch = issue_branch(issue)
     parent = phase_task_parent(gh, issue)
-    # The gate merged into `main`, or into its Epic's branch for a phase-Task of a
-    # non-standing Epic (its design PR), so reconcile the issue branch with that.
-    base = epic_branch(parent["number"]) if parent and parent["kind"] == "epic" else "main"
+    # The gate merged into the unit's integration base (its Epic's branch for a phase-Task
+    # of a non-standing Epic), so reconcile the issue branch with that.
+    base = (epic_branch(parent["number"]) if parent and parent["kind"] == "epic"
+            else _gate_base(gh, issue))
     with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
         git_reconcile_branch(ws.path, branch, base=base, runner=runner)
     if parent is not None:
@@ -7030,7 +7436,8 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
     PR on the branch is reused (`created: False`) -- and, when this command's comment for it
     is missing (a PR made by another path, or a create whose response was lost), adopted:
     made a draft, Stage set, comment posted (`adopted: True`). A create that returns no PR
-    number is recovered by looking the PR up by its head branch (`recovered`). A branch with
+    number is recovered by looking the PR up by its head branch (`recovered`), else created
+    plain and then drafted (`draft_fallback`, `draft_warning` when that fails). A branch with
     no commits ahead of its base gets an empty commit first only with `allow_empty`
     (`empty_commit`), else the refusal names the flag. Returns `pr`, `created`."""
     branch = issue_branch(issue)
@@ -7073,6 +7480,13 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
                 raise
             # The create may have landed with its response lost: adopt the PR it made.
             found = gh.pr_list_for_branch(branch)
+            if not found and PR_CREATE_NO_NUMBER in str(e):
+                # The cloud proxy has failed draft creates whole while plain ones pass:
+                # create it plain, then draft it (the review queue reads draft status).
+                n = gh.pr_create(base=base, head=branch, title=title, body=pr_body)
+                extra["draft_fallback"] = f"draft create failed ({str(e)[:200]}); created plain"
+                extra.update(_ensure_draft(gh, {"number": n, "isDraft": False}))
+                return n
             if not found:
                 raise
             extra["recovered"] = f"{str(e)[:300]} -- found PR #{found[0]['number']} on {branch}"
@@ -7442,6 +7856,26 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
                     "reason",
                     f"{record_filename} has an unresolved citation -- see "
                     f"result['citations'] for which one and what was cited vs. found.")
+    if epic is not None and expect == "architecture":
+        # A revision Task may also update `lld.md` Task sections; it must keep every heading.
+        lld_path = os.path.join(docs_dir, "lld.md")
+        if os.path.isfile(lld_path):
+            try:
+                base_lld = runner(["git", "-C", repo_path, "show",
+                                   f"origin/{epic_branch(epic)}:{docs_rel}/lld.md"])
+            except GhError:
+                base_lld = None
+            if base_lld is not None:
+                with open(lld_path, "r") as f:
+                    dropped = lld_task_headings_dropped(base_lld, f.read())
+                if dropped:
+                    result["ok"] = False
+                    result["lld_headings_dropped"] = dropped
+                    result.setdefault(
+                        "reason",
+                        f"{docs_rel}/lld.md drops Task heading(s) {', '.join(dropped)} that "
+                        f"origin/{epic_branch(epic)} carries -- a revision edits a Task's "
+                        f"section body only; keep every `## Task` heading as it is.")
     if VERIFY_EXIT_HEAD_CHECK and expect in HEAD_CHECKED_STAGES:
         head = unit_head_problem(issue, repo_path, runner)
         if head is not None:
@@ -7471,14 +7905,51 @@ def checks_status(checks: list) -> str:
 # `bases`: the PR base branches (names or fnmatch globs) this entry applies to (empty = every
 # base). `attestable`:
 # False when no `local-ci` attestation can stand in for it (a passing GHA check only).
-REQUIRED_WORKFLOWS = tuple(
-    {"workflow": w["workflow"], "suite": w["suite"],
-     "prefixes": tuple(w["prefixes"]), "files": tuple(w.get("files", ())),
-     "excludeGlobs": tuple(w.get("excludeGlobs", ())),
-     "bases": tuple(w.get("bases", ())),
-     "attestable": w.get("attestable", True)}
-    for w in CONFIG["requiredWorkflows"]
-)
+def _normalise_workflows(raw: list) -> tuple:
+    return tuple(
+        {"workflow": w["workflow"], "suite": w["suite"],
+         "prefixes": tuple(w["prefixes"]), "files": tuple(w.get("files", ())),
+         "excludeGlobs": tuple(w.get("excludeGlobs", ())),
+         "bases": tuple(w.get("bases", ())),
+         "attestable": w.get("attestable", True)}
+        for w in raw)
+
+
+REQUIRED_WORKFLOWS = _normalise_workflows(CONFIG["requiredWorkflows"])
+_BASE_WORKFLOWS_CACHE: dict = {}
+
+
+def _base_config_workflows(base_ref: str, runner: "Runner" = None) -> list:
+    """`requiredWorkflows` from the config as committed on `origin/<base_ref>`; [] when it
+    cannot be read (no such ref, no config there, not a git checkout)."""
+    path = _find_config()
+    if not path:
+        return []
+    run = runner or _default_runner
+    try:
+        top = run(["git", "-C", os.path.dirname(os.path.abspath(path)), "rev-parse",
+                   "--show-toplevel"]).strip()
+        rel = os.path.relpath(os.path.abspath(path), top)
+        raw = json.loads(run(["git", "-C", top, "show", f"origin/{base_ref}:{rel}"]))
+        return list(raw.get("requiredWorkflows") or [])
+    except (GhError, OSError, ValueError, AttributeError):
+        return []
+
+
+def required_workflows(base_ref: Optional[str] = None) -> tuple:
+    """`REQUIRED_WORKFLOWS` plus any entry the base branch's own config adds (a workflow an
+    epic or initiative branch introduced before `main` has it). Local entries win by name."""
+    if not base_ref or base_ref == "main":
+        return REQUIRED_WORKFLOWS
+    if base_ref not in _BASE_WORKFLOWS_CACHE:
+        try:
+            _BASE_WORKFLOWS_CACHE[base_ref] = _normalise_workflows(
+                _base_config_workflows(base_ref))
+        except (KeyError, TypeError):
+            _BASE_WORKFLOWS_CACHE[base_ref] = ()
+    names = {w["workflow"] for w in REQUIRED_WORKFLOWS}
+    return REQUIRED_WORKFLOWS + tuple(w for w in _BASE_WORKFLOWS_CACHE[base_ref]
+                                      if w["workflow"] not in names)
 
 # Suites whose attestation `record-local-ci` refuses (`attestable: false`): only a passing
 # GHA check satisfies their required workflow.
@@ -7517,6 +7988,62 @@ def workflow_check_state(checks: list, workflow: str) -> str:
     return "passing" if "pass" in buckets else "skipped"
 
 
+_CARRY_MAX_SYNCS = 5
+
+
+def effective_checks(gh: GitHub, pr: int) -> list:
+    """The PR head's checks, with each required workflow still pending, cancelled or absent
+    on a sync merge carried from the head it last passed on (`_carry_checks_across_sync`)."""
+    checks = gh.pr_checks(pr)
+    if not PIPELINE["ci"].get("carryChecksAcrossSync", True) \
+            or not hasattr(gh, "commit_checks"):
+        return checks
+    try:
+        return _carry_checks_across_sync(gh, pr, checks)
+    except GhError:
+        return checks
+
+
+def _carriable(checks: list, workflow: str) -> bool:
+    buckets = {c.get("bucket") for c in checks if c.get("workflow", "") == workflow}
+    return not buckets - {"pending", "cancel"}
+
+
+def _carry_checks_across_sync(gh: GitHub, pr: int, checks: list) -> list:
+    """Walk back through sync merges (two-parent heads, first parent = the PR's own line) to
+    the last head a workflow passed on; carry that pass when nothing merged in since touches
+    the workflow's paths or the pipeline config (`_suite_reattest_needed`)."""
+    view = gh.pr_view(pr, "headRefOid,baseRefName")
+    head, base = view.get("headRefOid"), view.get("baseRefName")
+    files = gh.pr_files(pr)
+    wanted = [spec for spec in required_workflows(base)
+              if _workflow_applies_to_base(spec, base)
+              and any(_workflow_covers(spec, p) for p in files)
+              and _carriable(checks, spec["workflow"])]
+    sha, carried = head, {}
+    for _ in range(_CARRY_MAX_SYNCS):
+        if not wanted:
+            break
+        parents = gh.commit_parents(sha)
+        if len(parents) != 2:
+            break
+        sha = parents[0]
+        delta = gh.files_since(sha, head)
+        prior = gh.commit_checks(sha)
+        for spec in list(wanted):
+            if _suite_reattest_needed(spec, delta):
+                wanted.remove(spec)
+            elif workflow_check_state(prior, spec["workflow"]) == "passing":
+                carried[spec["workflow"]] = sha
+                wanted.remove(spec)
+    if not carried:
+        return checks
+    kept = [c for c in checks if c.get("workflow", "") not in carried]
+    return kept + [{"name": f"{w} (carried)", "state": "SUCCESS", "bucket": "pass",
+                    "link": "", "workflow": w, "carried_from": sha}
+                   for w, sha in carried.items()]
+
+
 def missing_required_workflows(changed_files: list, checks: list,
                                comments: list = None, head_sha: str = None,
                                base_ref: Optional[str] = None, deferred: tuple = ()) -> list:
@@ -7525,7 +8052,7 @@ def missing_required_workflows(changed_files: list, checks: list,
     (`bases`) is skipped unless the PR's `base_ref` matches it."""
     attested = local_ci_suites_attested(comments or [], head_sha)
     missing = []
-    for spec in REQUIRED_WORKFLOWS:
+    for spec in required_workflows(base_ref):
         if not _workflow_applies_to_base(spec, base_ref):
             continue
         if not any(_workflow_covers(spec, p) for p in changed_files):
@@ -7577,17 +8104,18 @@ def _is_doc_path(path: str) -> bool:
 _UNCOVERED_HINT = "no required workflow covers these paths; no suite ran for them"
 
 
-def uncovered_paths(changed_files: list) -> list:
+def uncovered_paths(changed_files: list, base_ref: Optional[str] = None) -> list:
     """Changed non-doc files (the pipeline config aside) no required workflow covers on any
     base: a config coverage gap. A path whose suite is scoped to another base is covered."""
+    workflows = required_workflows(base_ref)
     return [p for p in changed_files
             if not _is_doc_path(p) and os.path.basename(p) != CONFIG_FILENAME
-            and not any(_workflow_covers(w, p) for w in REQUIRED_WORKFLOWS)]
+            and not any(_workflow_covers(w, p) for w in workflows)]
 
 
-def _with_uncovered(result: dict, changed_files: list) -> dict:
+def _with_uncovered(result: dict, changed_files: list, base_ref: Optional[str] = None) -> dict:
     """`result` plus `uncovered_paths`/`uncovered_hint` when any; a warning, never a gate."""
-    uncovered = uncovered_paths(changed_files)
+    uncovered = uncovered_paths(changed_files, base_ref)
     return {**result, "uncovered_paths": uncovered, "uncovered_hint": _UNCOVERED_HINT} \
         if uncovered else result
 
@@ -7662,11 +8190,11 @@ def pr_stale_attestations(gh: WorkItemProvider, issue: int, pr: int) -> dict:
     comments = view.get("comments", [])
     base_ref = view.get("baseRefName")
     changed = gh.pr_files(pr)
-    checks = gh.pr_checks(pr)
+    checks = effective_checks(gh, pr)
     fresh = local_ci_suites_attested(comments, head)
     latest = _latest_attested_sha_by_suite(comments)
     stale, carried, passed_by_check = [], [], []
-    for spec in REQUIRED_WORKFLOWS:
+    for spec in required_workflows(base_ref):
         suite = spec.get("suite")
         if not suite or suite in NON_ATTESTABLE_SUITES:
             continue
@@ -7755,7 +8283,7 @@ def _infra_hint(pr_number: int) -> str:
 
 
 def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
-    checks = gh.pr_checks(pr_number)
+    checks = effective_checks(gh, pr_number)
     view = gh.pr_view(pr_number, "comments,headRefOid,baseRefName")
     files = gh.pr_files(pr_number)
     # An epic PR into its Initiative's branch owes no deferred suite, as in close-epic.
@@ -7774,7 +8302,7 @@ def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
     hints = ([_MISSING_WORKFLOW_HINT] if missing else []) + ([_infra_hint(pr_number)] if infra else [])
     if hints:
         result["hint"] = " ".join(hints)
-    return _with_uncovered(result, files)
+    return _with_uncovered(result, files, view.get("baseRefName"))
 
 
 PR_BODY_CAP = 65_536  # GitHub's PR body limit
@@ -7877,7 +8405,7 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
     # merge fail, never land a commit whose checks were not the ones read below.
     view = gh.pr_view(pr_number, "comments,headRefOid")
     head = view.get("headRefOid")
-    checks = gh.pr_checks(pr_number)
+    checks = effective_checks(gh, pr_number)
     files = gh.pr_files(pr_number)
     # `base` (integration_base) is the PR's base branch -- no extra field fetch needed.
     status, missing = merge_gate_status(files, checks, view.get("comments", []), head, base)
@@ -7901,7 +8429,7 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
     gh.pr_comment(pr_number, f"Auto-merged under the pipeline's scoped PR-merge override — "
                               f"see \"PRs merge automatically\" in the pipeline docs.")
     return _with_uncovered(_finalize_merged_pr(gh, pr_number, issue, repo_path, base, files,
-                                               carried_forward, run_id=run_id), files)
+                                               carried_forward, run_id=run_id), files, base)
 
 
 def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,
@@ -7973,7 +8501,10 @@ def _release_parked_unit(issue: int, base_repo: str, runner: Runner) -> dict:
 
 def _release_unit_worktree(issue: int, base_repo: str = ".",
                             runner: Runner = _default_runner) -> dict:
-    """Release whichever of `issue-<n>` / `epic-<n>` currently has a worktree."""
+    """Release whichever of `issue-<n>` / `epic-<n>` currently has a worktree (kept in the
+    cloud; a resume reuses it)."""
+    if cloud_skips_local_cleanup():
+        return {"released": False, "skipped": "cloud"}
     for branch in (issue_branch(issue), epic_branch(issue)):
         result = release_worktree(branch, runner=runner, base_repo=base_repo)
         if result.get("released") or result.get("reason") != "no worktree":
@@ -7992,12 +8523,52 @@ def cmd_mark_blocked(gh: GitHub, issue: int, dep: int, repo_path: str = ".") -> 
             **_release_parked_unit(issue, repo_path, gh._run)}
 
 
-def cmd_mark_needs_human(gh: GitHub, issue: int, reason: str, repo_path: str = ".") -> dict:
-    """Park the unit as needs-human with `reason`; release its worktree and docker stack."""
+def cmd_mark_needs_human(gh: GitHub, issue: int, reason: str, repo_path: str = ".",
+                         classifier_denied: Optional[str] = None,
+                         run_id: Optional[str] = None) -> dict:
+    """Park the unit as needs-human with `reason`; release its worktree and docker stack.
+    `classifier_denied` (the denied step) parks it for the next run to resume instead: the
+    worktree, with any unpushed work, is kept."""
     gh.set_pipeline_status_field(issue, "needs-human")
-    gh.issue_comment(issue, f"🙋 Needs human input — {reason}")
+    marker = (f"\n\n<!-- sdlc:classifier-denied step={classifier_denied} "
+              f"run={run_id or '-'} @ {_utc_now_marker()} -->" if classifier_denied else "")
+    gh.issue_comment(issue, f"🙋 Needs human input — {reason}{marker}")
+    if classifier_denied:
+        return {"issue": issue, "status": "needs-human", "classifier_denied": classifier_denied,
+                "resumes": "on the next run (a new --run-id); the worktree is kept"}
     return {"issue": issue, "status": "needs-human",
             **_release_parked_unit(issue, repo_path, gh._run)}
+
+
+_CLASSIFIER_DENIED_MARKER = re.compile(
+    r"<!--\s*sdlc:classifier-denied\s+step=(\S+)\s+run=(\S+)")
+
+
+def _classifier_denied_resume(gh: GitHub, children: list, run_id: Optional[str]) -> Optional[dict]:
+    """A needs-human child parked by an auto-mode classifier denial in an earlier run: flip it
+    back to in-progress and resume it. Never within the run that parked it (it would loop)."""
+    if not run_id:
+        return None
+    for issue in sorted(children, key=sort_key):
+        if pipeline_status(issue) != "needs-human":
+            continue
+        comments = gh.issue_view(issue["number"]).get("comments") or []
+        latest = next((c for c in reversed(comments)
+                       if _NEEDS_HUMAN_REASON.search(c.get("body", ""))), None)
+        m = latest and _CLASSIFIER_DENIED_MARKER.search(latest.get("body", ""))
+        if not m or m.group(2) == run_id:
+            continue
+        gh.set_pipeline_status_field(issue["number"], "in-progress")
+        gh.issue_comment(issue["number"], f"▶️ Resumed by run `{run_id}` after the auto-mode "
+                                          f"classifier denied `{m.group(1)}`.")
+        return {"action": "resume", "issue": issue["number"],
+                "unit": "epic" if is_epic(issue) else "issue",
+                "stage": current_stage(issue), "reason_code": "classifier_denied",
+                "denied_step": m.group(1),
+                "reason": f"parked by run {m.group(2)} when the classifier denied "
+                          f"`{m.group(1)}`: retry that step first (references/operations.md, "
+                          f"\"Auto-mode classifier denies a composite\")"}
+    return None
 
 
 def cmd_mark_todo(gh: GitHub, issue: int) -> dict:
@@ -8049,6 +8620,11 @@ def _cleanup_remote_branch(gh: GitHub, repo_path: str, branch: str, runner: Runn
                           f"unmerged work is kept"}
     if dry_run:
         return {"deleted": False, "head": head, "would_delete": True}
+    if (cloud_skips_local_cleanup()
+            and any(p.get("state") == "MERGED" and p.get("headRefOid") == head for p in listed)
+            and getattr(gh, "auto_deletes_head_branches", bool)()):
+        # The cloud proxy refuses ref deletes (403); GitHub drops a merged PR's head itself.
+        return {"deleted": False, "head": head, "skipped": "repo auto-deletes merged heads"}
     try:
         gh.delete_branch(branch)
     except GhError as exc:
@@ -8114,7 +8690,7 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
     review worktree, its worktree (releaseCommand first), `origin/<branch>`, then the local
     ref, then `git worktree prune`. Never raises; each part reports what it did or why not
     (`docker`, `review_worktree`, `worktree`, `remote_branch`, `local_branch`,
-    `worktree_pruned`).
+    `worktree_pruned`). In a cloud session the worktree parts are skipped (`skipped: "cloud"`).
     `base` defaults to the unit's integration base, resolved only when needed."""
     runner = runner or gh._run
     repo_path = repo_path or "."
@@ -8146,10 +8722,14 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
         out["docker"] = docker_sweep(unit_docker_prefix(number, unit), runner, dry_run)
     # Every later step runs `git -C repo_path`: never from inside the tree released below.
     repo_path = _repo_path_outside_worktree(repo_path, branch, runner)
+    local_fs = not cloud_skips_local_cleanup()
     if unit == "issue":
-        out["review_worktree"] = cmd_release_review_worktree(number, repo_path, runner, shell,
-                                                             dry_run)
-    if dry_run:
+        out["review_worktree"] = (cmd_release_review_worktree(number, repo_path, runner, shell,
+                                                              dry_run)
+                                  if local_fs else {"skipped": "cloud"})
+    if not local_fs:
+        out["worktree"] = {"released": False, "skipped": "cloud"}
+    elif dry_run:
         try:
             held = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
         except GhError:
@@ -8159,7 +8739,7 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
     else:
         out["worktree"] = release_worktree(branch, runner=runner, base_repo=repo_path,
                                            shell=shell, safe_refs=safe_refs)
-    if unit == "issue" and out["worktree"].get("reason") == "no worktree":
+    if local_fs and unit == "issue" and out["worktree"].get("reason") == "no worktree":
         # Before the remote delete: `origin/issue-<n>` is one of the refs that vouch for it.
         detached = release_detached_dev_worktree(number, repo_path, runner, shell, safe_refs,
                                                  dry_run)
@@ -8169,7 +8749,7 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
                                                   safe_refs, dry_run)
     out["local_branch"] = _cleanup_local_branch(repo_path, branch, runner, safe_refs,
                                                 out["remote_branch"], dry_run)
-    if not dry_run:
+    if not dry_run and local_fs:
         try:
             runner(["git", "-C", repo_path, "worktree", "prune"])
             out["worktree_pruned"] = True
@@ -8374,8 +8954,13 @@ def cmd_prune_stale(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] =
                                  _stale_run_states(closed, dry_run)},
                             *swept["units"])
     if not dry_run:
-        for key, argv in (("worktree_pruned", ["git", "-C", repo_path, "worktree", "prune"]),
-                          ("fetch_pruned", ["git", "-C", repo_path, "fetch", "--prune", "origin"])):
+        steps = [("fetch_pruned", ["git", "-C", repo_path, "fetch", "--prune", "origin"])]
+        if cloud_skips_local_cleanup():
+            result["worktree_pruned"] = False
+            result["skipped"] = "cloud"
+        else:
+            steps.insert(0, ("worktree_pruned", ["git", "-C", repo_path, "worktree", "prune"]))
+        for key, argv in steps:
             try:
                 _run_retry_transient(argv, runner)
                 result[key] = True
@@ -9073,7 +9658,7 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
         if not fetched[0]:
             fetched[0] = True
             try:
-                runner(["git", "-C", repo_path, "fetch", "origin"])
+                _fetch_origin(repo_path, runner)
             except GhError as e:
                 warnings.append(f"git fetch failed ({_first_line(str(e))}); footprints read "
                                 f"from the last fetched origin refs")
@@ -10050,11 +10635,13 @@ def cmd_teardown_epic_stack(epic: int, keep_data: bool = False,
             os.remove(p)
             removed.append(p)
     data_abs = os.path.join(lay["workspace_root"], lay["data_dir"])
-    if not keep_data and os.path.isdir(data_abs):
+    data_skipped = cloud_skips_local_cleanup()
+    if not keep_data and not data_skipped and os.path.isdir(data_abs):
         shutil.rmtree(data_abs, ignore_errors=True)
         removed.append(data_abs)
     return {"epic": epic, "torn_down": True, "profile": lay["profile"], "project": lay["project"],
-            "down_command": cmd, "removed": removed}
+            "down_command": cmd, "removed": removed,
+            **({"data_kept": "cloud"} if data_skipped and not keep_data else {})}
 
 
 # --- Composite commands: ordered sequences of existing commands ---------------
@@ -10972,7 +11559,12 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--reason", required=True)
     p.add_argument("--repo-path", default=".",
                     help="Repo root (to release the unit's worktree)")
-    p.set_defaults(func=lambda a: cmd_mark_needs_human(get_work_item_provider(), a.issue, a.reason, a.repo_path))
+    p.add_argument("--classifier-denied", default=None, metavar="STEP",
+                    help="The auto-mode classifier denied STEP (e.g. open-dev-pr): keep the "
+                         "worktree; the next run's next-action resumes the unit")
+    p.add_argument("--run-id", default=None, help="This run's id (with --classifier-denied)")
+    p.set_defaults(func=lambda a: cmd_mark_needs_human(get_work_item_provider(), a.issue, a.reason, a.repo_path,
+                                                       a.classifier_denied, a.run_id))
     p = sub.add_parser("show-config",
                         help="Print the effective config and the running plugin version")
     p.set_defaults(func=lambda a: cmd_show_config())
@@ -11031,7 +11623,9 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("close-initiative",
                         help="Close the Initiative once its Epics are closed and verified")
     p.add_argument("initiative", type=int)
-    p.set_defaults(func=lambda a: cmd_close_initiative(get_work_item_provider(), a.initiative))
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.set_defaults(func=lambda a: cmd_close_initiative(get_work_item_provider(), a.initiative,
+                                                       a.repo_path))
     p = sub.add_parser("record-initiative-verification",
                         help="Record an Initiative's closing verification and its outcome")
     p.add_argument("initiative", type=int)

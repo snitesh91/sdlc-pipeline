@@ -66,7 +66,8 @@ task:       development -> [pr-review] -> auto-merge into epic-<n> -> CLOSED
 - **Standing profile** (`epicLevelPhase: false`): technical (RTB) tasks only; no
   phase-Tasks, no epic branch, no human gate. Each child runs only the stages it needs of
   `product -> [product-review] -> architecture -> [arch-review] -> development ->
-  [pr-review] -> CLOSED` ("Routing a standing child") and merges straight to `main`.
+  [pr-review] -> CLOSED` ("Routing a standing child") and merges into its integration base (`main`, or `initiative-<i>` under an initiative
+  branch — `references/epics.md`, "The epic integration branch").
   **Legacy profile** (`driven: false`): skipped entirely, Tasks included.
 - **Every Epic has two standing Tasks** (Integration-test, e2e-test), specified by `lld`,
   running after every functional Task merges — none when its Initiative's profile sets
@@ -138,8 +139,8 @@ It runs `architecture` (editing `epic-<n>/architecture.md` in place) → design 
 `arch-review` → merge, like the Architecture-phase Task. Park the reporting unit right away
 with `pause-for-epic-regate <n> --epic <epic-n> [--gate-pr <pr>] --found-by <stage that found it>`
 (`--gate-pr` only once the revision's design PR exists); once the revision closes, resume its
-agent directly — never `set-stage` it. If `lld.md` must change too,
-resume or re-run the LLD pass before the affected Tasks proceed. Escalation (third /
+agent directly — never `set-stage` it. The revision also updates the affected Tasks'
+`lld.md` sections; a new Task's design needs a fresh `lld` pass. Escalation (third /
 sixth deviation, `mark-needs-human` on the Epic): `references/epics.md`, "Architecture
 deviation escalation".
 
@@ -147,7 +148,7 @@ deviation escalation".
 
 Run from the driven repo's root; everything project-specific is in its `sdlc-pipeline.config.json`.
 
-- **SessionStart** exports `$SDLC` (the control plane) and `GITHUB_TOKEN` (from the config's `tokenEnv` var, else `tokenPath`, overriding any ambient one). If it reports the token missing, get it from the operator first; relay its optional `rtk init` hint once, never block on it. After a compaction it restates the run you were driving; on an off-policy session model it hints at a restart with `sdlc-run <n>` — advisory (may be stale after `/model`): mention it once, never stop on it.
+- **SessionStart** exports `$SDLC` (the control plane) and `GITHUB_TOKEN` (from the config's `tokenEnv` var, else `tokenPath`, overriding any ambient one — locally only when no ambient token is set). If it reports the token missing, get it from the operator first; relay its optional `rtk init` hint once, never block on it. After a compaction it restates the run you were driving; on an off-policy session model it hints at a restart with `sdlc-run <n>` — advisory (may be stale after `/model`): mention it once, never stop on it.
 - **PreToolUse (Bash)** denies hand-run GitHub mutations, GraphQL, `git worktree add` (except `--detach`), force-push and rebase, and limits each stage agent to its role's commands (and denies it `git stash` and `claude`). An operator-directed PR outside the pipeline passes on the main thread when it names a non-pipeline branch: `gh pr create --head <branch> ...`, `gh pr merge <branch>`. An operator-directed issue body/label edit: `edit-issue` (Building blocks). A denial names the `python3 "$SDLC"` command to run instead — run it; never work around the guard. The main thread is guarded only while its session drives a run (a run-state file written by `next-action --run-id` within `guard.mainThreadFreshnessHours`, default 8; `guard.mainThread: "always"` guards every session) — an unguarded call logs one stderr line, so a run without `--run-id` is visible, never silent.
 - **PreToolUse (Agent)** sets every `sdlc:*` agent's `model` from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (config `pipeline.models` / `pipeline.fanout` override it), caps review fan-out, and lets only its `explore` roles launch a read-only `Explore` search. It denies an `sdlc:design-review` prompt lacking the header when the two review roles' models differ.
 - **SubagentStart** gives each `sdlc:*` agent `$SDLC`, its unit's `docRoot` / `requirementsDir` (per-product `docRoots`), `docTemplates`, its Initiative profile when one is configured (standing test Tasks off, initiative branch), the references path and the `SDLC-RESULT` format.
@@ -291,7 +292,10 @@ Every result except `skip`/`none`/`stop-at-cap` carries `unit`: `"issue"`, or `"
 - **`epic_sync`** (`--sync-epic`) keeps `epic-<n>` from rotting against `main`. On
   `conflict` (reported once, then `pending` until `main` or the epic head moves) →
   `references/parallelism.md`, "Git-conflict handling"; on `error` → report it (the
-  action still stands). `skipped`/`due: null` need nothing.
+  action still stands). `skipped`/`due: null` need nothing. A non-empty `design_touch`
+  (incoming files the Epic's design names) → judge whether the design still holds, else
+  `open-arch-revision`; a non-empty `schema_touch` → confirm every app using that package has
+  its migration, else route the gap to the owning unit; `touches_error` → report it (the sync stands).
 - **Before ending on `none`:** `list-needs-human` (skim each reason; clear a stale one
   with a comment), `check-epics-closeable` (idempotent) and `audit-issues --epic <n>` (`--initiative <n>` on an Initiative)
   (run each flagged issue's `repair` command, filling any `<P>`/`<T>`; never re-create
@@ -541,7 +545,8 @@ what) and end with the Initiative's own `none` reason. Above the fold:
 - Any epic `check-epics-closeable` newly notified; any `product_cap` deferral.
 - Every issue `audit-issues` flagged (an Epic with no phase-Tasks included) and whether you repaired it.
 - One cost line: `python3 "$(dirname "$SDLC")/sdlc_metrics.py" report --run <run-id>` →
-  `totals` (est. USD, tokens, tool calls, peak context) for this run's agents.
+  `totals` (est. USD, tokens, tool calls, peak context) for this run's agents. Pass the id
+  `next-action` got, never a regenerated one; a `warning` lists `recent_runs` to pick from.
 
 ## Step 5 — Retrospective (only when the operator asks)
 

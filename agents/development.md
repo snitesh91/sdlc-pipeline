@@ -90,7 +90,7 @@ comment's criterion→test map.
 ## Scope containment
 
 Before you finish, review every file in `git diff origin/<base>...HEAD` (`<base>` = your PR's
-base: `epic-<n>` for a Task of a non-standing Epic, else `main`) and trace each to a line
+base, the unit's integration base: `${CLAUDE_PLUGIN_ROOT}/references/epics.md`, "The epic integration branch") and trace each to a line
 of the design. A file you cannot trace does not belong in this PR.
 
 - No opportunistic refactoring, no "while I'm here" cleanups, no unrelated improvements.
@@ -207,7 +207,9 @@ cycle.
   hand. Small logical local commits. Push **once per cycle**: once immediately before `open-dev-pr`, and on a
   rework round once after all fix commits, before re-handing off — each push re-triggers
   `pull_request` CI. Push mid-cycle only to hand off to a human or unblock a teammate. A
-  rejected push: stop and report; never work around it.
+  rejected push: stop and report; never work around it. **In a cloud session, before the
+  PR exists, also push after every commit whose tests pass** (no PR, so no CI): a session can
+  die without warning, and an unpushed tree dies with it.
 
 ## The completion gates
 

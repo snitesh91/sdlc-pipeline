@@ -20,7 +20,7 @@ A profile is a label-matched bundle of toggles in `pipeline.profiles`; the first
 | Toggle | Default | Non-default effect |
 |---|---|---|
 | `driven` | `true` | `false` = **legacy**: skip the epic and every child |
-| `epicLevelPhase` | `true` | `false` = **standing**: no phase-Tasks; each child runs its own full per-issue flow into `main` |
+| `epicLevelPhase` | `true` | `false` = **standing**: no phase-Tasks; each child runs its own full per-issue flow into its integration base ("The epic integration branch") |
 | `childrenNeedArchitectedEpic` | `true` | `false` = children dev-lane eligible without `epic:architected` |
 | `closes` | `true` | `false` = never closes, no integration branch |
 | `gates.skipConfidenceThreshold` | `80` (global) | per-profile Gate B skip bar |
@@ -241,7 +241,8 @@ Task in `development`, a review) first decides whether its work fits it:
      once a Task's PR exists Stage stays `pr-review` for life (`open-dev-pr` sets it once;
      `handoff-to-pr-review` never touches it), so a hand `set-stage development` desyncs it and
      `transition`'s `verify-exit` refuses. An LLD-phase Task resumes `lld` against the revised
-     doc; if `lld.md` must change, re-run the LLD pass before the affected Tasks proceed.
+     doc. A revision updates the affected Tasks' `lld.md` sections in the same design PR (headings
+     kept); only a new Task needs a fresh `lld` pass.
   4. Valve: count the `lld`/`development` <-> `architecture-revision` pairing on its
      own. The third unsettled deviation on the same Epic swaps in the context-reset
      replacement architect for rounds 4–6; the sixth → `mark-needs-human` **on the Epic**.
@@ -256,7 +257,9 @@ All other rework follows `references/rework.md`.
   close it takes one merge from `origin/main`, is verified whole, and merges to `main`
   once.
 - **Straight into `main`** only: a standing epic's children, a parentless issue, an
-  Initiative's Product-Roadmap Task (their gate PRs are `issue-<n>` → `main`).
+  Initiative's Product-Roadmap Task (their gate PRs are `issue-<n>` → `main`). A standing
+  Epic under an Initiative with an initiative branch sends its children to `initiative-<i>`
+  instead.
   `integration_base()` decides from the native `parent` relationship, never a label,
   stage or branch name.
 - **An Epic's design docs reach `epic-<n>` only through a phase-Task's design PR**
@@ -323,7 +326,9 @@ never reaches `main`; merge its design PR). Remaining items: closing verificatio
 
 1. First call: refuses on open children (`open_children`); otherwise, when `epic-<n>` is
    behind `origin/main`, reconciles it and stops (`reconciled`); when already current it
-   goes straight to the evidence check below. Every result carries the required suites the
+   goes straight to the evidence check below. When everything `main` gained lies in the
+   carry-forward set (below) and the epic never touched those files, it skips the reconcile
+   (`reconcile_skipped`: `{behind, files}`) and goes on as if current. Every result carries the required suites the
    epic's changes cover that nothing yet satisfies at the epic head — `unattested_suites`
    (attestable: run and attest) and `awaiting_checks` (`attestable: false`: only the epic
    PR's check can satisfy them; never run locally) — and `evidence` (`exploratory` and each
@@ -370,7 +375,10 @@ chunks.
 **Closing verification — the exploratory pass** (`sdlc:exploratory`), run in the epic
 branch's worktree (`worktree-add <n> --unit epic`), never the main checkout. Its brief names
 `close-epic`'s `base`; `close-epic` runs `pipeline.epicClose.prepare` (when set) in that worktree
-first (its `prepare` result; `ok: false` → fix before the pass), and the pass also runs `lld.md`'s `## Epic-close checks`. **The pipeline
+first (its `prepare` result; `ok: false` → fix before the pass). Set `prepare` to the repo's
+dependency install: unset, `close-epic` returns `prepare_warning`, and you run that install in
+the epic worktree before the pass. An exploratory pass `blocked` on missing dependencies →
+run the install, then resume it. The pass also runs `lld.md`'s `## Epic-close checks`. **The pipeline
 never runs the full e2e suite** — at close or in any Task; the driven repo runs it outside
 the pipeline (e.g. nightly on its staging environment) and files what fails there.
 `close-epic` never asks for it. `record-epic-verification --kind e2e` is still accepted
@@ -394,7 +402,8 @@ record a verification you did not run clean.**
 **The e2e-test Task authors this Epic's specs and runs only those** — the specs it adds or
 changes, never the full suite — against a stack built from `epic-<n>` (the Epic's isolated
 stack, or one stood up from the epic worktree). The shared dev stack serves `main` and lacks
-the Epic's changes, so a run there proves nothing. Sequence the Task after the Tasks whose
+the Epic's changes, so a run there proves nothing. It attests that run with `record-local-ci
+--suite e2e` (`e2e` is always a valid key). Sequence the Task after the Tasks whose
 surfaces it proves. Per-child `development` runs only the specs for surfaces that child moved.
 
 **Triage new-spec and exploratory deltas:**

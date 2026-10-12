@@ -45,7 +45,7 @@ rework valve. Work in your own **detached** worktree; sibling reviews run concur
    your prompt>`; `cd` to its `path` and `git fetch origin`. Never review in the unit's
    development worktree.
 2. Diff: `git diff origin/<base>...HEAD` (three dots), `<base>` being the PR's base branch
-   (`epic-<n>` for a Task of a non-standing Epic, else `main`; the orchestrator's prompt or
+   (the unit's integration base, `${CLAUDE_PLUGIN_ROOT}/references/epics.md`, "The epic integration branch"; the orchestrator's prompt or
    `gh pr view <pr> --json baseRefName` names it; in a cloud session
    `gh api repos/<repo>/pulls/<pr> --jq .base.ref`). Empty is a **finding**: report that the PR
    has no changes against `origin/<base>` and stop.
@@ -95,7 +95,7 @@ mutation probes), and state layer coverage in the report.
 - **Is every acceptance criterion covered by a test that fails when it is violated?** Check the
   handoff's criterion→test map against the diff, not against itself.
 
-**Mutation-probe selectively.** Take the one or two guards carrying the real acceptance, break
+**Mutation-probe selectively** (never under `reviewDepth: light` — say so in the report). Take the one or two guards carrying the real acceptance, break
 the behaviour in your detached worktree, confirm the test goes red, revert with
 `git restore <file>` (`git status` clean; the guard denies `git checkout --` to a reviewer).
 If the auto-mode permission classifier denies the transient `src` edit the probe needs, do
@@ -169,11 +169,9 @@ unmet criterion, or a design the change does not fit.
 - Correctness bugs producing wrong behaviour: blocking.
 - An unmet acceptance criterion: blocking.
 - Comment/docstring bloat the diff adds beyond a trivial one-off, and any comment overstating a
-  guarantee: must be fixed — but when every such finding is wording only and you verified the
-  production code under it sound, it is **not** a REWORK: verdict CONDITIONAL ACCEPT, each
-  finding giving the exact replacement text (or "delete lines a–b") for the orchestrator to
-  apply before merge (`references/rework.md`, "Comment-only conditions"). A comment that
-  reveals a code defect is that defect, rated as such.
+  guarantee: blocking, so REWORK. Give the exact replacement text (or "delete lines a–b") so
+  `development` applies it in one round. A comment that reveals a code defect is that defect,
+  rated as such.
 - Style and naming preferences: never blocking; if the linter does not enforce it, a suggestion
   at most.
 - Never re-flag what a clean lint run already covers.
@@ -238,10 +236,10 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
 **Verdicts:**
 
 - **CLEAN** — nothing blocking, all layers ran.
-- **CONDITIONAL ACCEPT** — nothing blocking; named non-blocking findings ride along. State
-  each condition and what closes it, and write the residue where it will be seen again (an
-  issue or your review comment), not only in the review thread. Comment-only fixes (Severity
-  rules) ride here as exact replacement text.
+- **CONDITIONAL ACCEPT** — nothing blocking; named non-blocking findings ride along and never
+  hold the merge. Nothing is applied before merge: write the residue where it will be seen again
+  (an issue or your review comment). Anything that must change before merge is blocking, so
+  REWORK.
 - **REWORK** — one or more blocking findings, or CI failing.
 
 ## Exit actions — yours, in order
@@ -279,6 +277,10 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
     of scope for its layers, a new code path the fix introduced, or a genuine miss) and pass
     `--same-class-recurrence` to `record-pr-review`. A sentence in the summary does not
     escalate; the flag does.
+- **Design-doc drift** (the code is right, an Epic's `architecture.md`/`lld.md` is now stale) is
+  never a finding for `development`: a development PR may not edit `epic-*/` docs. Open Epic:
+  the orchestrator cuts a revision (`open-arch-revision`). Closed Epic: non-blocking — name the
+  doc, section and what is now true under `### Deviations from the design` in the PR body.
 - **Deeper problem** → report it; the PR stays draft. Standing-epic child: the orchestrator
   resumes `product` (or `architecture`). Epic Task: `development` if task-local; if it
   contradicts the Epic's design, the architecture deviation escalation

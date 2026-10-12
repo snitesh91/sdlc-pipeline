@@ -2,9 +2,11 @@
 
 ## Repo access
 
-- `GITHUB_TOKEN` must be set for every `gh` and control-plane call; the SessionStart
-  hook exports it and `GH_TOKEN` from the config's `tokenEnv` var, else `tokenPath`,
-  overriding any ambient one.
+- Every `gh` and control-plane call needs a token. Locally, an ambient `GH_TOKEN` /
+  `GITHUB_TOKEN` (e.g. from direnv) is used as is. Otherwise, and always in a cloud container
+  (`CLAUDE_CODE_REMOTE`, whatever `SDLC_PLACEMENT` says), the SessionStart hook exports both from
+  the config's `tokenEnv` var, else `tokenPath`; a local `gh` login only silences its
+  missing-token warning.
 - The token must be a **classic** PAT (`ghp_`); fine-grained PATs cannot read check-runs
   or write the custom Stage/Pipeline Status fields.
 - `gh` reads and comments work; issue creation is `create-issue` only ("Issue taxonomy").
@@ -43,6 +45,10 @@ default`), then re-run the command (composites are idempotent).
 A denied `git push` or `open-dev-pr` never parks a finished unit: run the denied step yourself
 from the main thread (or ask the operator to approve it), then resume the agent for its remaining exit actions. The
 operator can add the allow rules ("Auto-mode allow rules for `development`'s push and PR").
+When the main thread is denied too, park it with `mark-needs-human <n> --reason "..."
+--classifier-denied <step> --run-id "$RUN_ID"`: the worktree is kept, and the next run's
+`next-action` returns it as `resume` (`reason_code: classifier_denied`, `denied_step`). Retry
+`denied_step` first. The run that parked it never resumes it.
 
 A classifier **outage** (no verdict or a classifier error on every state-changing call while
 reads work) is neither a denial nor a stage failure. An agent's `failed` / `blocked` citing
@@ -137,7 +143,9 @@ standing Integration-test / e2e-test Tasks), `deferSuites` (suite keys `close-ep
 demand of an Epic closing into the initiative branch), `closeSuites` (suite keys, need not be
 in `requiredWorkflows`, that `merge-initiative-pr` needs attested at the initiative PR head;
 `record-local-ci` accepts them), `placement` (`cloud` | `local`; overrides
-`placement.initiativeEpics` for this Initiative). Prefixes: `branches.initiativePrefix` (`initiative-`),
+`placement.initiativeEpics` for this Initiative), `reviewDepth` (`full` | `light`; `light` =
+every review under it runs single-pass, the guard denies fan-out, and `pr-review` skips the
+mutation probe — for throwaway or feasibility work). Prefixes: `branches.initiativePrefix` (`initiative-`),
 `worktrees.initiativePrefix` (`sdlc-initiative-`). `initiative-profile <n>` prints the
 profile governing any unit; `start-stage` records it for the SubagentStart hook.
 
@@ -269,6 +277,15 @@ for a suite with no PR-level CI (a workflow that runs only on push to `main`).
   `satisfied_by_check`. A non-attestable suite is never held here; `merge-pr` gates it.
 - `merge-pr` / `pr-checks` apply the same OR rule per suite; `merge-pr` also refuses on any
   failing or pending check on the PR.
+- **A check carries across a sync merge** (`pipeline.ci.carryChecksAcrossSync`, default
+  `true`): when the head is a sync merge and a required workflow's run on it is pending,
+  cancelled or absent, its pass on the head before the merge counts, provided nothing the
+  merge brought in touches its paths or the pipeline config. A failing run is never
+  overridden. The carried check reads `<workflow> (carried)` with `carried_from`. So after
+  the merge train syncs a PR, cancel the redundant run instead of waiting for it.
+- A standalone fix PR into `main` may carry a local attestation (`record-local-ci`) instead
+  of the workflow's check for any entry left attestable (the default, below); mark an entry
+  `attestable: false` to demand the CI check on every PR it applies to.
 - `merge-pr` accepts `--run-id`: the terminal-unit count is booked under that run rather
   than whatever id last wrote the epic's run-state file (which may be a throwaway probe
   run's). Without it, the state file's current id stands.
@@ -282,6 +299,8 @@ for a suite with no PR-level CI (a workflow that runs only on push to `main`).
   `true`): the workflow runs on every PR the entry applies to, so only its passing check
   satisfies the suite — no stage runs it locally, `record-local-ci` refuses it, and
   `close-epic` lists it under `awaiting_checks` instead of `unattested_suites`.
+- A PR into a branch other than `main` also owes the entries that branch's own committed
+  config adds (`origin/<base>`); the local config's entry wins on a shared `workflow` name.
 
 **`pr-checks` status `missing-checks`** is never "still running" — never poll it. When it
 is set, `pr-checks` returns a `hint` field naming the causes in likelihood order (and
@@ -315,8 +334,8 @@ as a shortcut, never skipping a check `merge-pr` enforces:
 2. Read each affected PR's real state (`gh pr view <pr> --json state,mergedAt`; in a cloud
    session `gh api repos/<repo>/pulls/<pr> --jq '{state, merged_at}'`); a merged PR needs
    no second merge.
-3. Squash, never a merge commit, in an ephemeral worktree on `origin/<base>` (`epic-<n>` for
-   a Task of a non-standing Epic, else `main`): `git merge --squash origin/issue-<n>`,
+3. Squash, never a merge commit, in an ephemeral worktree on `origin/<base>` (the unit's
+   integration base: `references/epics.md`, "The epic integration branch"): `git merge --squash origin/issue-<n>`,
    `git commit -m "<title> (Closes #<n>)"`, `git push origin <base>`. Never force-push
    `main`; reconcile forward.
 4. Once the API is back: close the PR with the audit-trail comment `merge-pr` would post,

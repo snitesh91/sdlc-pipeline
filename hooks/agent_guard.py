@@ -11,7 +11,7 @@ import os
 import time
 
 from _common import (agent_transcript, emit, first_prompt, load_json, model_policy, plugin_data_dir,
-                     prompt_header, read_input, repo_config, run, sdlc_role)
+                     prompt_header, read_input, repo_config, run, runs_dir, sdlc_role)
 
 DESIGN_REVIEW = "design-review"
 DESIGN_REVIEW_ROLES = ("arch-review", "lld-review")
@@ -58,6 +58,17 @@ def fanout_label(header: dict, tool_input: dict) -> str:
     """What a slot holder is called back to the parent: its `AXIS:`, else its description."""
     return str(header.get("axis") or tool_input.get("description")
                or tool_input.get("subagent_type") or "child")
+
+
+def light_review(config: dict, header: dict) -> bool:
+    """Whether the parent's unit (its ISSUE, else EPIC) sits under an Initiative profile with
+    `reviewDepth: light`, per the control plane's hint file."""
+    hints = load_json(os.path.join(runs_dir(config), "initiative-profiles.cache"))
+    for key in ("issue", "epic"):
+        hint = hints.get(str(header.get(key) or "").strip("`#*"))
+        if isinstance(hint, dict):
+            return hint.get("reviewDepth") == "light"
+    return False
 
 
 def parent_transcript(data: dict) -> str:
@@ -170,6 +181,11 @@ def main() -> int:
                        f"{parent} fan-out policy.")
     fanout = policy["fanout"].get(parent) or {}
     suffix = f" ({warning})" if warning else ""
+    if fanout.get("allowed") and light_review(
+            load_json(config), prompt_header(first_prompt(parent_transcript(data)))):
+        deny(f"{parent} runs single-pass under a reviewDepth: light Initiative; work the axes "
+             f"yourself.")
+        return 0
     if not fanout.get("allowed"):
         if parent in policy["fanout"]:
             deny(f"{parent} reviews in a single pass; work the axes yourself.{suffix}")

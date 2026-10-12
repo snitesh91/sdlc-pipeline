@@ -79,6 +79,9 @@ def initiative_lines(config: dict, data: dict) -> list:
                          f"(testTasks: false): carve no Integration-test / e2e-test Task and "
                          f"never require them; a Task's own section names any integration/e2e "
                          f"coverage it needs; the Initiative's final runs gate its merge to main.")
+        if hint.get("reviewDepth") == "light":
+            lines.append(f"sdlc: Initiative #{i} sets reviewDepth: light: review in one pass "
+                         f"with no fan-out children, and pr-review skips the mutation probe.")
         if hint.get("branch"):
             lines.append(f"sdlc: Initiative #{i}'s Epics integrate into its initiative branch, "
                          f"not main; it reaches main once, at initiative close.")

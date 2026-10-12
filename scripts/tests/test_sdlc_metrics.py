@@ -201,3 +201,18 @@ def test_data_dir_prefers_the_env_var_and_falls_back_outside_a_cache(tmp_path, m
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path / "checkout"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg2"))
     assert _common.plugin_data_dir() == str(tmp_path / "cfg2" / "plugins" / "data" / "sdlc")
+
+
+def test_an_unknown_run_id_warns_and_lists_the_recent_runs_instead_of_silent_zeros():
+    records = [_rec("d1", "development", 2.0, epic=9, run_id="r-1"),
+               {**_rec("d2", "development", 1.0, epic=9, run_id="r-2"),
+                "ts": "2026-09-19T10:00:00Z"}]
+    result = m.report(records, run="r-regenerated")
+    assert result["totals"]["runs"] == 0
+    assert "r-regenerated" in result["warning"]
+    assert [r["run_id"] for r in result["recent_runs"]] == ["r-2", "r-1"]
+
+
+def test_a_known_run_id_carries_no_warning():
+    result = m.report([_rec("d1", "development", 2.0, epic=9, run_id="r-1")], run="r-1")
+    assert result["totals"]["runs"] == 1 and "warning" not in result

@@ -72,7 +72,7 @@ The resume message must:
   inventory, measurements, fits-vs-deviates call, overlap enumeration — whichever apply).
 - **Scope the new pass to the delta**, plus a regression check that the delta could not
   have disturbed what was accepted. Prove it: open with `git diff --stat origin/<base>`
-  (the unit's integration base: `epic-<n>` for a child of a non-standing Epic, else `main`)
+  (the unit's integration base: `references/epics.md`, "The epic integration branch")
   showing the change was doc-only.
 - **Re-derive fully when the delta is code**, or when it touches the premise an earlier
   conclusion rested on.
@@ -153,15 +153,6 @@ at instance level — what the context-reset replacement is for.
 - Every resume message on such a pairing asks the agent to fix the class at the root
   (e.g. derive the guarded set live so an unknown case fails instead of passing), not
   the listed case.
-
-## Comment-only conditions
-
-A `pr-review` CONDITIONAL ACCEPT whose conditions are comment/docstring wording only, with
-the production code verified sound, is not a rework round (`agents/pr-review.md`, "Severity
-rules"). Apply each stated replacement yourself with `Edit` in the unit's worktree, commit,
-push, wait for the required checks (`pr-checks`; re-attest a suite the push staled), then
-`merge-pr` — no `development` resume, no second review. A condition without exact text, or
-one touching code, goes back to `development` as a normal round.
 
 ## Exception — test-only findings may merge-and-file (`pr-review` <-> `development` only)
 
