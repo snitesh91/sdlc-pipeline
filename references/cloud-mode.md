@@ -97,8 +97,8 @@ Then Step 4.
 - **Review threads:** `check-gate` thread ids read `ccr:<pr>:<comment-id>`; pass them to
   `resolve-thread` unchanged. A thread id from a local session does not work here.
 - **Branch deletes:** the proxy refuses them. Enable the repo's auto-delete of head branches;
-  then unit cleanup skips the delete silently. Without it, a branch left over comes back as a
-  `warnings` line (`references/operations.md`, "Worktree release").
+  then unit cleanup skips the delete silently when a merged PR's head is the branch head. Otherwise
+  a branch left over comes back as a `warnings` line (`references/operations.md`, "Worktree release").
 - **Draft PRs:** `open-dev-pr` recovers a draft create the proxy answers with no body (adopts
   the PR by head branch, else creates it plain and drafts it via `ccr/convert_to_draft`). A
   `draft_warning` means drafting failed: relay it; the PR must be a draft before review.

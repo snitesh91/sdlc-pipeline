@@ -69,6 +69,26 @@ def test_cloud_still_warns_when_the_repo_keeps_merged_heads(repo, cloud):
     assert any("could not be deleted" in w for w in result.get("warnings", []))
 
 
+def _remote_cleanup(monkeypatch, pr_head):
+    monkeypatch.setattr(s, "_remote_head", lambda *a: "abc")
+    monkeypatch.setattr(s, "_landed", lambda *a: True)
+    gh = _refusing(type("G", (), {})())
+    gh.auto_deletes_head_branches = lambda: True
+    prs = lambda: [{"number": 1, "state": "MERGED", "headRefOid": pr_head}]
+    return s._cleanup_remote_branch(gh, ".", "issue-5", None, prs, lambda: [], False)
+
+
+def test_cloud_warns_when_no_merged_pr_has_the_branch_head(monkeypatch, cloud):
+    # GitHub auto-deletes only a merged PR's head; a branch landed another way would leak.
+    out = _remote_cleanup(monkeypatch, "other")
+    assert "skipped" not in out and out["error"] is True
+
+
+def test_cloud_skips_silently_when_a_merged_pr_has_the_branch_head(monkeypatch, cloud):
+    """Positive control."""
+    assert _remote_cleanup(monkeypatch, "abc")["skipped"] == "repo auto-deletes merged heads"
+
+
 def test_local_deletes_even_when_the_repo_auto_deletes_heads(repo):
     gh = _real(_task(), repo)
     gh.auto_deletes_head_branches = lambda: True

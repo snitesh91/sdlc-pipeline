@@ -8620,8 +8620,10 @@ def _cleanup_remote_branch(gh: GitHub, repo_path: str, branch: str, runner: Runn
                           f"unmerged work is kept"}
     if dry_run:
         return {"deleted": False, "head": head, "would_delete": True}
-    if cloud_skips_local_cleanup() and getattr(gh, "auto_deletes_head_branches", bool)():
-        # The cloud proxy refuses ref deletes (403); GitHub drops a merged head itself.
+    if (cloud_skips_local_cleanup()
+            and any(p.get("state") == "MERGED" and p.get("headRefOid") == head for p in listed)
+            and getattr(gh, "auto_deletes_head_branches", bool)()):
+        # The cloud proxy refuses ref deletes (403); GitHub drops a merged PR's head itself.
         return {"deleted": False, "head": head, "skipped": "repo auto-deletes merged heads"}
     try:
         gh.delete_branch(branch)
