@@ -1101,14 +1101,19 @@ class GitHubRest(GitHub):
         path = _issue_cache_path(self.repo)
         now = time.time()
         cache = _read_json(path) or {}
-        closed = {int(k): v for k, v in (cache.get("closed") or {}).items()}
-        if cache.get("repo") != self.repo or now - float(cache.get("full_at") or 0) \
-                > _ISSUE_CACHE_TTL_S:
+        try:
+            closed = {int(k): dict(v) for k, v in cache["closed"].items()}
+            full_at, fetched_at = float(cache["full_at"]), float(cache["fetched_at"])
+            fresh = cache["repo"] == self.repo and now - full_at <= _ISSUE_CACHE_TTL_S
+        except (KeyError, TypeError, ValueError, AttributeError):
+            # A malformed or older-schema cache is no cache.
+            fresh = False
+        if not fresh:
             items = self._list_issues("all")
             full_at = now
             index = {i["number"]: _slim_issue(i) for i in items}
         else:
-            since = datetime.fromtimestamp(float(cache["fetched_at"]) - _ISSUE_CACHE_OVERLAP_S,
+            since = datetime.fromtimestamp(fetched_at - _ISSUE_CACHE_OVERLAP_S,
                                            timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             for i in self._list_issues("closed", f"&since={since}&sort=updated"
                                                  f"&direction=asc"):
@@ -1117,7 +1122,6 @@ class GitHubRest(GitHub):
             for i in self._list_issues("open"):
                 index[i["number"]] = _slim_issue(i)
             # A closed-cache entry that is open again is now listed open.
-            full_at = float(cache["full_at"])
         _write_json_atomic(path, {
             "repo": self.repo, "full_at": full_at, "fetched_at": now,
             "closed": {str(n): v for n, v in index.items() if v.get("state") == "closed"}})

@@ -143,3 +143,17 @@ def test_with_the_cache_off_every_call_relists(monkeypatch):
     gh.issue_list()
     gh.issue_list()
     assert runner.lists_called() == ["all", "all"]
+
+
+@pytest.mark.parametrize("bad", [
+    {"repo": "owner/repo", "full_at": 9e12, "closed": {"x": {}}},        # non-numeric key
+    {"repo": "owner/repo", "full_at": 9e12, "closed": {}},               # older schema: no fetched_at
+    {"repo": "owner/repo", "full_at": 9e12, "fetched_at": 9e12, "closed": ["5"]},
+])
+def test_a_malformed_cache_is_treated_as_no_cache(cache, bad):
+    path = s._issue_cache_path("owner/repo")
+    with open(path, "w") as f:
+        json.dump(bad, f)
+    runner = _world()
+    assert [i["number"] for i in GitHubRest(runner=runner).issue_list()] == [5, 7]
+    assert runner.lists_called() == ["all"]
