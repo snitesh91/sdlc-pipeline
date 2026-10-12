@@ -169,11 +169,9 @@ unmet criterion, or a design the change does not fit.
 - Correctness bugs producing wrong behaviour: blocking.
 - An unmet acceptance criterion: blocking.
 - Comment/docstring bloat the diff adds beyond a trivial one-off, and any comment overstating a
-  guarantee: must be fixed — but when every such finding is wording only and you verified the
-  production code under it sound, it is **not** a REWORK: verdict CONDITIONAL ACCEPT, each
-  finding giving the exact replacement text (or "delete lines a–b") for the orchestrator to
-  apply before merge (`references/rework.md`, "Comment-only conditions"). A comment that
-  reveals a code defect is that defect, rated as such.
+  guarantee: blocking, so REWORK. Give the exact replacement text (or "delete lines a–b") so
+  `development` applies it in one round. A comment that reveals a code defect is that defect,
+  rated as such.
 - Style and naming preferences: never blocking; if the linter does not enforce it, a suggestion
   at most.
 - Never re-flag what a clean lint run already covers.
@@ -238,10 +236,10 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
 **Verdicts:**
 
 - **CLEAN** — nothing blocking, all layers ran.
-- **CONDITIONAL ACCEPT** — nothing blocking; named non-blocking findings ride along. State
-  each condition and what closes it, and write the residue where it will be seen again (an
-  issue or your review comment), not only in the review thread. Comment-only fixes (Severity
-  rules) ride here as exact replacement text.
+- **CONDITIONAL ACCEPT** — nothing blocking; named non-blocking findings ride along and never
+  hold the merge. Nothing is applied before merge: write the residue where it will be seen again
+  (an issue or your review comment). Anything that must change before merge is blocking, so
+  REWORK.
 - **REWORK** — one or more blocking findings, or CI failing.
 
 ## Exit actions — yours, in order

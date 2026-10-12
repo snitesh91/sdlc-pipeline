@@ -154,15 +154,6 @@ at instance level — what the context-reset replacement is for.
   (e.g. derive the guarded set live so an unknown case fails instead of passing), not
   the listed case.
 
-## Comment-only conditions
-
-A `pr-review` CONDITIONAL ACCEPT whose conditions are comment/docstring wording only, with
-the production code verified sound, is not a rework round (`agents/pr-review.md`, "Severity
-rules"). Apply each stated replacement yourself with `Edit` in the unit's worktree, commit,
-push, wait for the required checks (`pr-checks`; re-attest a suite the push staled), then
-`merge-pr` — no `development` resume, no second review. A condition without exact text, or
-one touching code, goes back to `development` as a normal round.
-
 ## Exception — test-only findings may merge-and-file (`pr-review` <-> `development` only)
 
 On what would otherwise be the escalating sixth bounce: if **every** outstanding finding
