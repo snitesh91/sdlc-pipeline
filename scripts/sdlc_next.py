@@ -559,6 +559,17 @@ class GitHub:
     def issue_set_body(self, number: int, body: str):
         self._run(["gh", "issue", "edit", str(number), "--repo", self.repo, "--body", body])
 
+    def auto_deletes_head_branches(self) -> bool:
+        """The repo's `delete_branch_on_merge` (False when unreadable); cached per process."""
+        if not hasattr(self, "_auto_delete_heads"):
+            try:
+                out = self._run(["gh", "api", f"repos/{self.repo}", "--jq",
+                                 ".delete_branch_on_merge"]).strip()
+                self._auto_delete_heads = out == "true"
+            except GhError:
+                self._auto_delete_heads = False
+        return self._auto_delete_heads
+
     def delete_branch(self, branch: str):
         """Delete `origin/<branch>` GitHub-side (REST); a missing ref raises GhError
         (`cleanup_unit` re-checks origin, so an already-gone branch counts as deleted)."""
@@ -1610,6 +1621,15 @@ def session_placement() -> dict:
     return {"placement": "local", "signal": "default"}
 
 
+def cloud_skips_local_cleanup() -> bool:
+    """A cloud session's container, `/tmp` worktrees included, is discarded when it ends, so
+    local filesystem cleanup there is skipped (an invalid `SDLC_PLACEMENT` counts as local)."""
+    try:
+        return session_placement()["placement"] == "cloud"
+    except GhError:
+        return False
+
+
 def unit_placement(number: int, lookup: Callable[[int], Optional[dict]]) -> dict:
     """`{placement, epic}` (+ `label_on` when cloud): a unit belongs to its Epic (an Initiative,
     or an Initiative's own Task, to the Initiative), which is cloud-placed when it or an ancestor
@@ -2370,6 +2390,8 @@ def clean_epic_worktree(epic: int, repo_path: str = ".",
                           f"by hand), then re-run"}
     if not lines:
         return {"cleaned": False, "path": path, "removed": [], "reason": "already clean"}
+    if cloud_skips_local_cleanup():
+        return {"cleaned": False, "path": path, "removed": [], "skipped": "cloud"}
     out = runner(["git", "-C", path, "clean", "-fd"])
     removed = [l[len("Removing "):] for l in out.splitlines() if l.startswith("Removing ")]
     return {"cleaned": True, "path": path, "removed": removed}
@@ -7973,7 +7995,10 @@ def _release_parked_unit(issue: int, base_repo: str, runner: Runner) -> dict:
 
 def _release_unit_worktree(issue: int, base_repo: str = ".",
                             runner: Runner = _default_runner) -> dict:
-    """Release whichever of `issue-<n>` / `epic-<n>` currently has a worktree."""
+    """Release whichever of `issue-<n>` / `epic-<n>` currently has a worktree (kept in the
+    cloud; a resume reuses it)."""
+    if cloud_skips_local_cleanup():
+        return {"released": False, "skipped": "cloud"}
     for branch in (issue_branch(issue), epic_branch(issue)):
         result = release_worktree(branch, runner=runner, base_repo=base_repo)
         if result.get("released") or result.get("reason") != "no worktree":
@@ -8049,6 +8074,9 @@ def _cleanup_remote_branch(gh: GitHub, repo_path: str, branch: str, runner: Runn
                           f"unmerged work is kept"}
     if dry_run:
         return {"deleted": False, "head": head, "would_delete": True}
+    if cloud_skips_local_cleanup() and getattr(gh, "auto_deletes_head_branches", bool)():
+        # The cloud proxy refuses ref deletes (403); GitHub drops a merged head itself.
+        return {"deleted": False, "head": head, "skipped": "repo auto-deletes merged heads"}
     try:
         gh.delete_branch(branch)
     except GhError as exc:
@@ -8114,7 +8142,7 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
     review worktree, its worktree (releaseCommand first), `origin/<branch>`, then the local
     ref, then `git worktree prune`. Never raises; each part reports what it did or why not
     (`docker`, `review_worktree`, `worktree`, `remote_branch`, `local_branch`,
-    `worktree_pruned`).
+    `worktree_pruned`). In a cloud session the worktree parts are skipped (`skipped: "cloud"`).
     `base` defaults to the unit's integration base, resolved only when needed."""
     runner = runner or gh._run
     repo_path = repo_path or "."
@@ -8146,10 +8174,14 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
         out["docker"] = docker_sweep(unit_docker_prefix(number, unit), runner, dry_run)
     # Every later step runs `git -C repo_path`: never from inside the tree released below.
     repo_path = _repo_path_outside_worktree(repo_path, branch, runner)
+    local_fs = not cloud_skips_local_cleanup()
     if unit == "issue":
-        out["review_worktree"] = cmd_release_review_worktree(number, repo_path, runner, shell,
-                                                             dry_run)
-    if dry_run:
+        out["review_worktree"] = (cmd_release_review_worktree(number, repo_path, runner, shell,
+                                                              dry_run)
+                                  if local_fs else {"skipped": "cloud"})
+    if not local_fs:
+        out["worktree"] = {"released": False, "skipped": "cloud"}
+    elif dry_run:
         try:
             held = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
         except GhError:
@@ -8159,7 +8191,7 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
     else:
         out["worktree"] = release_worktree(branch, runner=runner, base_repo=repo_path,
                                            shell=shell, safe_refs=safe_refs)
-    if unit == "issue" and out["worktree"].get("reason") == "no worktree":
+    if local_fs and unit == "issue" and out["worktree"].get("reason") == "no worktree":
         # Before the remote delete: `origin/issue-<n>` is one of the refs that vouch for it.
         detached = release_detached_dev_worktree(number, repo_path, runner, shell, safe_refs,
                                                  dry_run)
@@ -8169,7 +8201,7 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
                                                   safe_refs, dry_run)
     out["local_branch"] = _cleanup_local_branch(repo_path, branch, runner, safe_refs,
                                                 out["remote_branch"], dry_run)
-    if not dry_run:
+    if not dry_run and local_fs:
         try:
             runner(["git", "-C", repo_path, "worktree", "prune"])
             out["worktree_pruned"] = True
@@ -8374,8 +8406,13 @@ def cmd_prune_stale(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] =
                                  _stale_run_states(closed, dry_run)},
                             *swept["units"])
     if not dry_run:
-        for key, argv in (("worktree_pruned", ["git", "-C", repo_path, "worktree", "prune"]),
-                          ("fetch_pruned", ["git", "-C", repo_path, "fetch", "--prune", "origin"])):
+        steps = [("fetch_pruned", ["git", "-C", repo_path, "fetch", "--prune", "origin"])]
+        if cloud_skips_local_cleanup():
+            result["worktree_pruned"] = False
+            result["skipped"] = "cloud"
+        else:
+            steps.insert(0, ("worktree_pruned", ["git", "-C", repo_path, "worktree", "prune"]))
+        for key, argv in steps:
             try:
                 _run_retry_transient(argv, runner)
                 result[key] = True
@@ -10050,11 +10087,13 @@ def cmd_teardown_epic_stack(epic: int, keep_data: bool = False,
             os.remove(p)
             removed.append(p)
     data_abs = os.path.join(lay["workspace_root"], lay["data_dir"])
-    if not keep_data and os.path.isdir(data_abs):
+    data_skipped = cloud_skips_local_cleanup()
+    if not keep_data and not data_skipped and os.path.isdir(data_abs):
         shutil.rmtree(data_abs, ignore_errors=True)
         removed.append(data_abs)
     return {"epic": epic, "torn_down": True, "profile": lay["profile"], "project": lay["project"],
-            "down_command": cmd, "removed": removed}
+            "down_command": cmd, "removed": removed,
+            **({"data_kept": "cloud"} if data_skipped and not keep_data else {})}
 
 
 # --- Composite commands: ordered sequences of existing commands ---------------
