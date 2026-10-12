@@ -123,6 +123,7 @@ def report(records: list, epic: int | None = None, since: str | None = None,
     """Totals plus per-group runs, tokens, cost, tool calls, peak context, median duration
     and outcome counts; `run` keeps one control-plane run (`next-action --run-id`)."""
     records = attribute_children(latest_records(records))
+    known_runs = _recent_runs(records)
     if since:
         records = [r for r in records if (r.get("ts") or "") >= since]
     if epic is not None:
@@ -143,9 +144,26 @@ def report(records: list, epic: int | None = None, since: str | None = None,
             key = (routes.get(r.get("issue")) if by == "route" else str(r.get(by) or "")) \
                 or "unattributed"
             _add(groups.setdefault(key, _blank()), summed, r.get("est_cost_usd", 0), r)
-    return {"filters": {"epic": epic, "since": since, "by": by, "run": run},
-            "totals": _finish(totals),
-            "groups": {k: _finish(g) for k, g in sorted(groups.items())}}
+    result = {"filters": {"epic": epic, "since": since, "by": by, "run": run},
+              "totals": _finish(totals),
+              "groups": {k: _finish(g) for k, g in sorted(groups.items())}}
+    if run and not records:
+        # A run id regenerated in a later shell (`date +%s`-`$$` again) matches nothing.
+        result["warning"] = (f"no record carries run id {run!r}: pass the id next-action got "
+                             f"(the run-state file's `run_id`), one of `recent_runs`")
+        result["recent_runs"] = known_runs
+    return result
+
+
+def _recent_runs(records: list, limit: int = 10) -> list:
+    """The latest run ids in the store, newest first, with each one's record count."""
+    runs: dict = {}
+    for r in records:
+        if r.get("run_id"):
+            seen = runs.setdefault(r["run_id"], {"run_id": r["run_id"], "records": 0, "last": ""})
+            seen["records"] += 1
+            seen["last"] = max(seen["last"], r.get("ts") or "")
+    return sorted(runs.values(), key=lambda x: x["last"], reverse=True)[:limit]
 
 
 def _session_repo(transcript: str, fallback: str) -> str:
