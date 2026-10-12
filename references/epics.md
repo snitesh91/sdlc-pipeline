@@ -256,7 +256,9 @@ All other rework follows `references/rework.md`.
   close it takes one merge from `origin/main`, is verified whole, and merges to `main`
   once.
 - **Straight into `main`** only: a standing epic's children, a parentless issue, an
-  Initiative's Product-Roadmap Task (their gate PRs are `issue-<n>` → `main`).
+  Initiative's Product-Roadmap Task (their gate PRs are `issue-<n>` → `main`). A standing
+  Epic under an Initiative with an initiative branch sends its children to `initiative-<i>`
+  instead.
   `integration_base()` decides from the native `parent` relationship, never a label,
   stage or branch name.
 - **An Epic's design docs reach `epic-<n>` only through a phase-Task's design PR**
