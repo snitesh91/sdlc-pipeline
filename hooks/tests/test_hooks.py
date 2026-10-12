@@ -44,6 +44,7 @@ def run_hook(name, payload, env=None):
     full_env["CLAUDE_PLUGIN_DATA"] = DATA_DIR
     # A stub `gh` with no stored login, so the host's own gh login never leaks into a hook.
     full_env["PATH"] = FAKE_GH_DIR + os.pathsep + full_env.get("PATH", "")
+    full_env["GH_CONFIG_DIR"] = FAKE_GH_DIR  # no hosts.yml: no stored login
     full_env.update(env or {})
     proc = subprocess.run([sys.executable, os.path.join(HOOKS, name)], input=json.dumps(payload),
                           capture_output=True, text=True, env=full_env, timeout=10)
@@ -1729,11 +1730,26 @@ def test_cloud_ambient_gh_token_is_still_overridden_by_token_env(tmp_path):
     assert 'export GITHUB_TOKEN="$MY_GH_TOKEN"' in content
 
 
+def _gh_login(tmp_path):
+    conf = tmp_path / "ghconf"
+    conf.mkdir(parents=True, exist_ok=True)
+    (conf / "hosts.yml").write_text("github.com:\n    user: someone\n    git_protocol: ssh\n")
+    return {"GH_CONFIG_DIR": str(conf)}
+
+
 def test_local_gh_login_silences_the_missing_token_warning(tmp_path):
-    _, ctx = _token_start(tmp_path, {"tokenEnv": "MY_GH_TOKEN"}, {"FAKE_GH_LOGGED_IN": "1"})
+    _, ctx = _token_start(tmp_path, {"tokenEnv": "MY_GH_TOKEN"}, _gh_login(tmp_path))
     assert "yield no token" not in ctx
-    _, ctx = _token_start(tmp_path / "b", {}, {"FAKE_GH_LOGGED_IN": "1"})
+    _, ctx = _token_start(tmp_path / "b", {}, _gh_login(tmp_path / "b"))
     assert "GITHUB_TOKEN is unset" not in ctx
+
+
+def test_a_cloud_container_placed_local_still_overrides_the_placeholder(tmp_path):
+    # SDLC_PLACEMENT names the Epic placement; the container's GH_TOKEN is still a placeholder.
+    content, _ = _token_start(tmp_path, {"tokenEnv": "MY_GH_TOKEN"},
+                              {"GH_TOKEN": "placeholder", "MY_GH_TOKEN": "ghp_env",
+                               "CLAUDE_CODE_REMOTE": "true", "SDLC_PLACEMENT": "local"})
+    assert 'export GITHUB_TOKEN="$MY_GH_TOKEN"' in content
 
 
 def test_local_without_gh_login_still_warns(tmp_path):

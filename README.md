@@ -60,9 +60,10 @@ sdlc.config.sample.json          config template
 5. **Token**: point the config's `tokenPath` at a file holding a classic PAT (`ghp_`), or name an
    env var in `tokenEnv`; fine-grained PATs cannot read check-runs or write the custom fields.
    Locally, an ambient `GH_TOKEN`/`GITHUB_TOKEN` (e.g. per-folder via direnv) is used as is and
-   the hook exports nothing. Otherwise, and always in the cloud, the SessionStart hook exports the
+   the hook exports nothing. Otherwise, and always in a cloud container (`CLAUDE_CODE_REMOTE`), the
+   SessionStart hook exports the
    `tokenEnv` var, else the `tokenPath` file, as `GITHUB_TOKEN` and `GH_TOKEN`, overriding any
-   ambient one, and warns when it is not a `ghp_` token (no warning locally when `gh` is logged in).
+   ambient one, and warns when it is not a `ghp_` token (no missing-token warning locally when `gh`'s `hosts.yml` names a login).
 6. Optional: a repo-specific `<docRoot>/<pipeline.docTemplates>/{product,architecture}.template.md`
    (default `_templates`) overrides the plugin's templates.
 7. Recommended: enable the repo setting **Settings → General → Automatically delete head

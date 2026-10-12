@@ -4,9 +4,8 @@ off policy; after a compaction, restate the run being driven."""
 import os
 import shlex
 import shutil
-import subprocess
 
-from _common import (cloud_session, emit, load_json, orchestrator_model, plugin_root, read_input,
+from _common import (emit, load_json, orchestrator_model, plugin_root, read_input,
                      repo_config, run, run_states)
 from _metrics import model_family
 
@@ -44,13 +43,23 @@ def _ambient_token() -> bool:
     return bool(os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"))
 
 
+def _remote_container() -> bool:
+    """A real cloud container, whose GH_TOKEN is a proxy placeholder; `SDLC_PLACEMENT` names the
+    Epic placement, not the container, so it never decides the token."""
+    return os.environ.get("CLAUDE_CODE_REMOTE", "").strip().lower() in ("true", "1")
+
+
 def _gh_logged_in() -> bool:
-    """Whether `gh` has a stored login (local keyring/config read, no network)."""
-    if shutil.which("gh") is None:
-        return False
+    """Whether `gh` has a stored login: its hosts.yml names a host. A file read, not `gh auth
+    token` -- a spawn costs ~100 ms and a keyring prompt can hang."""
+    base = (os.environ.get("GH_CONFIG_DIR")
+            or os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                            "gh"))
     try:
-        return subprocess.run(["gh", "auth", "token"], capture_output=True, timeout=2).returncode == 0
-    except (OSError, subprocess.SubprocessError):
+        with open(os.path.join(base, "hosts.yml")) as f:
+            return any(line[:1] not in (" ", "\t", "#") and line.rstrip().endswith(":")
+                       for line in f)
+    except OSError:
         return False
 
 
@@ -95,7 +104,7 @@ def main() -> int:
     token = _token_path(cfg, config)
     env_name = _token_env(cfg)
     token_file = token if token and os.path.isfile(token) else None
-    cloud = cloud_session()
+    cloud = _remote_container()
     if not cloud and _ambient_token():
         pass  # plain `gh` is already the right account; the configured source would override it
     elif env_name or token_file:

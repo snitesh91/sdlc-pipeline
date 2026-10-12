@@ -3,8 +3,10 @@
 ## Repo access
 
 - Every `gh` and control-plane call needs a token. Locally, an ambient `GH_TOKEN` /
-  `GITHUB_TOKEN` (e.g. from direnv) or a `gh` login is used as is. Otherwise, and always in the
-  cloud, the SessionStart hook exports both from the config's `tokenEnv` var, else `tokenPath`.
+  `GITHUB_TOKEN` (e.g. from direnv) is used as is. Otherwise, and always in a cloud container
+  (`CLAUDE_CODE_REMOTE`, whatever `SDLC_PLACEMENT` says), the SessionStart hook exports both from
+  the config's `tokenEnv` var, else `tokenPath`; a local `gh` login only silences its
+  missing-token warning.
 - The token must be a **classic** PAT (`ghp_`); fine-grained PATs cannot read check-runs
   or write the custom Stage/Pipeline Status fields.
 - `gh` reads and comments work; issue creation is `create-issue` only ("Issue taxonomy").
