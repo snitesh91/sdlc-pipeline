@@ -2,6 +2,11 @@
 
 Use these directly only when no composite (SKILL.md, "Deterministic control plane") fits.
 
+Issue reads come from a per-process index; across processes closed issues come from
+`<worktrees.root>/.sdlc-cache/` (`SDLC_CACHE_DIR`), relisted every 6 hours. A wrong-looking
+issue state → rerun with `SDLC_ISSUE_CACHE=off`. `git fetch origin` runs once per clone per
+process until something pushes or writes to GitHub (`SDLC_FETCH_DEDUPE=off` disables it).
+
 | Command | What it owns |
 |---|---|
 | `next-action <epic\|initiative> --run-id <id> --sync-epic [--repo-path <p>] [--skip-epic <n> ...]` | The one unit to work (Step 1); on an Initiative, the Epic to descend into (`references/initiatives.md`, "The Initiative loop"). `--repo-path` (default `.`) is where it reads the dev lane's slot holders. `--sync-epic` keeps a non-standing Epic's `epic-<n>` current with `main` first (`epic_sync`, Step 1) |
