@@ -180,3 +180,30 @@ def test_base_config_workflows_reads_the_committed_config_on_origin(repo, monkey
     names = [w["workflow"] for w in s._base_config_workflows("initiative-6")]
     assert "Tijori IT" in names
     assert s._base_config_workflows("no-such-branch") == []
+
+
+# --- 4. initiative close lists what still names the initiative branch ------------------
+
+def test_initiative_scaffolding_lists_repo_hits_and_closed_issues(repo):
+    from tests.test_v2_phase_tasks import _git, _push_doc_branch
+    _push_doc_branch(repo, "main", ".github/workflows/deploy.yml",
+                     "on: workflow_dispatch\n# run with --ref initiative-6\n")
+    _push_doc_branch(repo, "main", "docs/sdlc/epic-9/architecture.md", "initiative-6 history\n")
+    gh = FakeGh([{"number": 6, "labels": ["type:initiative"]},
+                 {"number": 9, "labels": ["type:epic"], "parent": 6, "state": "CLOSED"},
+                 {"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED",
+                  "body": "Remove the shim at Initiative close."},
+                 {"number": 11, "labels": ["type:task"], "parent": 9, "state": "CLOSED",
+                  "body": "Done."}])
+    hits = s.initiative_scaffolding(gh, 6, repo_path=str(repo))
+    assert {"path": ".github/workflows/deploy.yml", "line": 2,
+            "text": "# run with --ref initiative-6"} in hits
+    assert {"issue": 10, "title": "issue 10"} in hits
+    assert not any(h.get("path", "").startswith("docs/sdlc/") or h.get("issue") == 11
+                   for h in hits)
+
+
+def test_initiative_scaffolding_is_empty_when_nothing_names_it(repo):
+    """Positive control."""
+    gh = FakeGh([{"number": 6, "labels": ["type:initiative"]}])
+    assert s.initiative_scaffolding(gh, 6, repo_path=str(repo)) == []

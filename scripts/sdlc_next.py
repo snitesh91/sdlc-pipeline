@@ -2773,9 +2773,41 @@ def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
     return {"initiative": initiative, "closeable": True, "epics": state["epics"]}
 
 
-def cmd_close_initiative(gh: GitHub, initiative: int) -> dict:
+_SCAFFOLDING_HITS_CAP = 50
+
+
+def initiative_scaffolding(gh: GitHub, initiative: int, repo_path: str = ".",
+                           runner: Runner = _default_runner,
+                           all_issues: Optional[list] = None) -> list:
+    """What still names the landed initiative branch or defers work to "Initiative close":
+    `{path, line, text}` grep hits on `origin/main` (design docs aside) and `{issue, title}`
+    for closed descendants whose body says so. A list to clear, never a gate."""
+    needles = (initiative_branch(initiative), "Initiative close")
+    hits: list = []
+    try:
+        _run_retry_transient(["git", "-C", repo_path, "fetch", "origin", "main"], runner)
+        out = runner(["git", "-C", repo_path, "grep", "-n", "-I", "-F",
+                      *[a for n in needles for a in ("-e", n)], "origin/main", "--"])
+    except GhError:
+        out = ""  # git grep exits 1 on no match
+    roots = tuple(f"{r}/" for r in all_doc_roots())
+    for raw in out.splitlines():
+        parts = raw.split(":", 3)
+        if len(parts) < 4 or parts[1].startswith(roots):
+            continue
+        hits.append({"path": parts[1], "line": int(parts[2]), "text": parts[3].strip()[:200]})
+    issues = all_issues if all_issues is not None else gh.issue_list()
+    for i in _descendants(issues, initiative):
+        if i.get("state") == "CLOSED" and any(n in (i.get("body") or "") for n in needles):
+            hits.append({"issue": i["number"], "title": i.get("title")})
+    return hits[:_SCAFFOLDING_HITS_CAP]
+
+
+def cmd_close_initiative(gh: GitHub, initiative: int, repo_path: str = ".",
+                         runner: Runner = _default_runner) -> dict:
     """Close the Initiative once every cut Epic is closed and its verification is
-    recorded. Returns `closed`; refusals carry `reason`."""
+    recorded. Returns `closed`; refusals carry `reason`. Closing one that had a branch also
+    returns `scaffolding` (`initiative_scaffolding`)."""
     check = cmd_check_initiative_closeable(gh, initiative)
     if not check["closeable"]:
         return {"initiative": initiative, "closed": False,
@@ -2785,10 +2817,14 @@ def cmd_close_initiative(gh: GitHub, initiative: int) -> dict:
     if missing:
         return {"initiative": initiative, "closed": False, "missing_verification": missing,
                 "reason": f"closing verification incomplete: {'; '.join(missing)}"}
+    extra: dict = {}
+    if (PIPELINE["initiativeProfiles"]
+            and resolve_initiative_profile(gh.issue_epic_info(initiative))["branch"]):
+        extra["scaffolding"] = initiative_scaffolding(gh, initiative, repo_path, runner)
     gh.issue_close(initiative)
     # Also set here so a repo without the `issues: closed` Action still ends correct.
     cmd_mark_issue_closed(gh, initiative)
-    return {"initiative": initiative, "closed": True, "epics": check["epics"]}
+    return {"initiative": initiative, "closed": True, "epics": check["epics"], **extra}
 
 
 def _initiative_branch_refusal(gh: GitHub, initiative: int, action: str) -> tuple:
@@ -2920,7 +2956,9 @@ def cmd_merge_initiative_pr(gh: GitHub, initiative: int, repo_path: str = ".",
         f"<!-- initiative-merged: {initiative} pr:{pr} @ {_utc_now_marker()} -->")
     cleanup = cleanup_unit(gh, initiative, "initiative", repo_path, runner, base="main")
     return _with_warnings({"initiative": initiative, "merged": True, "pr": pr, "branch": branch,
-                           "epics": epics, "evidence": evidence, "cleanup": cleanup}, cleanup)
+                           "epics": epics, "evidence": evidence, "cleanup": cleanup,
+                           "scaffolding": initiative_scaffolding(gh, initiative, repo_path,
+                                                                 runner)}, cleanup)
 
 
 def find_gate_comments_cutoff(pr: dict) -> str:
@@ -11098,7 +11136,9 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("close-initiative",
                         help="Close the Initiative once its Epics are closed and verified")
     p.add_argument("initiative", type=int)
-    p.set_defaults(func=lambda a: cmd_close_initiative(get_work_item_provider(), a.initiative))
+    p.add_argument("--repo-path", default=".", help="The shared main checkout")
+    p.set_defaults(func=lambda a: cmd_close_initiative(get_work_item_provider(), a.initiative,
+                                                       a.repo_path))
     p = sub.add_parser("record-initiative-verification",
                         help="Record an Initiative's closing verification and its outcome")
     p.add_argument("initiative", type=int)

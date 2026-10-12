@@ -104,7 +104,9 @@ closed:
    attestations at the head (`closeSuites`, e.g. `e2e`). Then `merge-initiative-pr
    <initiative>`: on `merged: false` act on `reason` (`evidence`, `behind_base` → re-run
    `open-initiative-pr`, re-attest the new head) and stop until it is green — never merge the
-   PR by hand. Once merged, continue with step 1 (validation runs on `main`).
+   PR by hand. Once merged, clear each `scaffolding` hit it returns (a grep hit on `main`
+   or a closed child that deferred work to "Initiative close": fix it, or file it under the
+   standing backlog Epic), then continue with step 1 (validation runs on `main`).
 1. Delegate `sdlc:initiative-close`: it starts the delivered application and validates
    it against every requirement in the Initiative's `product.md`, and always records
    `record-initiative-verification --outcome met|unmet`.
