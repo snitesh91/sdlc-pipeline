@@ -134,3 +134,49 @@ def test_close_epic_still_reconciles_code_or_an_overlapping_file(incoming, epic_
     monkeypatch.setattr(s, "_refresh_epic_worktree", lambda *a, **k: None)
     result = s.cmd_close_epic(_behind_epic(incoming, epic_side), 9)
     assert calls and result["reconciled"] == 2 and "reconcile_skipped" not in result
+
+
+# --- 5. required workflows include the ones the PR base's own config adds ---------------
+
+_TIJORI_IT = {"workflow": "Tijori IT", "suite": "tijori-it", "prefixes": ["apps/tijori-api/"]}
+
+
+@pytest.fixture
+def base_config(monkeypatch):
+    monkeypatch.setattr(s, "_BASE_WORKFLOWS_CACHE", {})
+    monkeypatch.setattr(s, "_base_config_workflows",
+                        lambda base, runner=None: [_TIJORI_IT] if base == "initiative-6" else [])
+
+
+def test_a_workflow_only_the_base_branch_config_lists_is_required_there(base_config):
+    files = ["apps/tijori-api/src/x.ts"]
+    assert s.missing_required_workflows(files, [], base_ref="initiative-6") == ["Tijori IT"]
+    assert s.uncovered_paths(files, "initiative-6") == []
+
+
+def test_main_reads_only_the_local_config(base_config):
+    """Positive control: a PR into main sees the local entries alone."""
+    files = ["apps/tijori-api/src/x.ts"]
+    assert s.missing_required_workflows(files, [], base_ref="main") == []
+    assert s.uncovered_paths(files, "main") == files
+
+
+def test_a_base_config_never_overrides_a_local_entry(base_config, monkeypatch):
+    monkeypatch.setattr(s, "_base_config_workflows", lambda base, runner=None: [
+        {"workflow": "Backend CI", "suite": "backend", "prefixes": ["elsewhere/"]}])
+    [backend] = [w for w in s.required_workflows("epic-9") if w["workflow"] == "Backend CI"]
+    assert backend["prefixes"] == ("backend/",)
+
+
+def test_base_config_workflows_reads_the_committed_config_on_origin(repo, monkeypatch):
+    import json, os
+    from tests.test_v2_phase_tasks import _push_doc_branch
+    cfg = json.load(open(os.environ["SDLC_CONFIG"]))
+    cfg["requiredWorkflows"].append(_TIJORI_IT)
+    _push_doc_branch(repo, "initiative-6", s.CONFIG_FILENAME, json.dumps(cfg))
+    from tests.test_v2_phase_tasks import _git
+    _git("fetch", "-q", "origin", cwd=repo)
+    monkeypatch.setenv("SDLC_CONFIG", str(repo / s.CONFIG_FILENAME))
+    names = [w["workflow"] for w in s._base_config_workflows("initiative-6")]
+    assert "Tijori IT" in names
+    assert s._base_config_workflows("no-such-branch") == []
