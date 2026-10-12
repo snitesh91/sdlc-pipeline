@@ -59,8 +59,10 @@ sdlc.config.sample.json          config template
    `SDLC_PIPELINE_REF` to the same tag `.claude/settings.json` pins (defaults to `main`).
 5. **Token**: point the config's `tokenPath` at a file holding a classic PAT (`ghp_`), or name an
    env var in `tokenEnv`; fine-grained PATs cannot read check-runs or write the custom fields.
-   The SessionStart hook exports the `tokenEnv` var, else the `tokenPath` file, as
-   `GITHUB_TOKEN` and `GH_TOKEN`, overriding any ambient one, and warns when it is not a `ghp_` token.
+   Locally, an ambient `GH_TOKEN`/`GITHUB_TOKEN` (e.g. per-folder via direnv) is used as is and
+   the hook exports nothing. Otherwise, and always in the cloud, the SessionStart hook exports the
+   `tokenEnv` var, else the `tokenPath` file, as `GITHUB_TOKEN` and `GH_TOKEN`, overriding any
+   ambient one, and warns when it is not a `ghp_` token (no warning locally when `gh` is logged in).
 6. Optional: a repo-specific `<docRoot>/<pipeline.docTemplates>/{product,architecture}.template.md`
    (default `_templates`) overrides the plugin's templates.
 7. Recommended: enable the repo setting **Settings → General → Automatically delete head
@@ -85,7 +87,7 @@ They are stdlib Python, and they fail open on internal errors.
 
 | Hook | Enforces |
 |---|---|
-| `SessionStart` | Exports `$SDLC`, `GITHUB_TOKEN` and `GH_TOKEN` (from `tokenEnv` / `tokenPath`) for every Bash call; warns when no token is available; suggests `rtk init` if `rtk` is absent; flags a session model off the policy's orchestrator model (advisory; may be stale after `/model`); after a compaction, restates this session's run (epic, run-id, units in flight) |
+| `SessionStart` | Exports `$SDLC`, and `GITHUB_TOKEN` and `GH_TOKEN` (from `tokenEnv` / `tokenPath`; locally only when no ambient token is set) for every Bash call; warns when no token is available; suggests `rtk init` if `rtk` is absent; flags a session model off the policy's orchestrator model (advisory; may be stale after `/model`); after a compaction, restates this session's run (epic, run-id, units in flight) |
 | `PreToolUse` (Bash) | Denies hand-run `gh api graphql`, `gh issue create/edit/close/reopen`, `gh pr create/merge/ready/close`, mutating `gh api`, `git worktree add` (except `--detach`), force-push and rebase, naming the `python3 "$SDLC"` command to use instead; limits each `sdlc:<role>` agent to its role's control-plane commands (`post-comment` only with its own `--role`), denies `git stash` and `claude` to every stage agent (one stash stack per repo; sessions are the orchestrator's) and review roles any git write. A main-thread `gh pr create --head <branch>` or `gh pr merge <branch>` naming a non-pipeline branch (an operator-directed PR) is allowed; an operator-directed issue body/label edit goes through `edit-issue`. Only each segment's leading words count. Stage agents are always guarded; the main thread only while its session drives a run (a run-state file written in the last 8 h, stamped by `next-action --run-id`), so hand-run backlog or issue cleanup outside a run is allowed. `guard.mainThread: "always"` guards every main-thread session |
 | `PreToolUse` (Agent) | Sets every `sdlc:*` agent's `model` from `hooks/model_policy.json` (overridable per role by `pipeline.models` / `pipeline.fanout`), whether the main thread or a continuous-mode cycle agent launches it; denies nested stages and fan-out a role may not do or has exhausted; lets the policy's `explore` roles (`development`, `lld`) launch a read-only `Explore` search |
 | `SubagentStart` | Gives each `sdlc:*` agent `$SDLC`, its unit's `docRoot` / `requirementsDir` (per `docRoots`), `docTemplates`, the references path and the `SDLC-RESULT` format |
@@ -107,7 +109,7 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `docRoots` | unset | Per-product doc trees in a repo hosting several products: `[{"name", "match": {"issues": [<root issue>, ...]} or {"label": "<label>"}, "docRoot", "requirementsDir"?}]`. A unit takes the first entry naming it or an ancestor (Task → Epic → Initiative) by number or label, else the top-level `docRoot` / `requirementsDir` (unset = exactly the top-level values, nothing looked up). `doc-root <n>` prints a unit's roots; the SubagentStart hook gives each agent its unit's |
 | `pipeline.docTemplates` | `_templates` | Directory under `docRoot` whose `product.template.md` / `architecture.template.md` override the plugin's |
 | `guard.mainThread` | `run-live` | `run-live`: the Bash guard denies the main thread's hand-run mutations only while its session drives a run; `always`: in every session |
-| `tokenEnv` | unset | Env var holding the PAT; wins over `tokenPath` |
+| `tokenEnv` | unset | Env var holding the PAT; wins over `tokenPath`; locally ignored when `GH_TOKEN`/`GITHUB_TOKEN` is already set |
 | `pipeline.classification.*` | `{}` (sample: `type:initiative` / `type:epic` / `type:task` labels) | The only way an issue is an Initiative, Epic or Task |
 | `pipeline.profiles` | `legacy`, `standing`, `"*"` | Epic behaviour by label: `driven`, `epicLevelPhase`, `childrenNeedArchitectedEpic`, `closes`, `gates.*` |
 | `pipeline.labels.*` | `epic:standing` / `epic:legacy` / `epic:architected` | Epic labels |

@@ -97,6 +97,8 @@ Then Step 4.
   control-plane failure.
 - **Token:** `GH_TOKEN` and `GITHUB_TOKEN` start as a proxy placeholder; the SessionStart hook
   overrides both from `tokenEnv` (e.g. `SDLC_GH_TOKEN`). The proxy decides access either way.
+- **SSH key:** pick it with `core.sshCommand`, never an SSH host alias or `url.<alias>.insteadOf`
+  on `origin` — a rewritten remote breaks cloud launches ("Cloned from seed bundle", 403).
 
 ## Human channel
 

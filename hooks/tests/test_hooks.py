@@ -30,12 +30,20 @@ def plain_repo(tmp_path):
 
 # Hook state (fan-out slots, metrics) never lands in the developer's real plugin data dir.
 DATA_DIR = tempfile.mkdtemp(prefix="sdlc-hook-data-")
+FAKE_GH_DIR = os.path.join(DATA_DIR, "fake-gh")
+os.makedirs(FAKE_GH_DIR, exist_ok=True)
+with open(os.path.join(FAKE_GH_DIR, "gh"), "w") as _f:
+    _f.write('#!/bin/sh\n[ -n "$FAKE_GH_LOGGED_IN" ] && [ "$1 $2" = "auth token" ] && exit 0\nexit 1\n')
+os.chmod(os.path.join(FAKE_GH_DIR, "gh"), 0o755)
 
 
 def run_hook(name, payload, env=None):
     full_env = {k: v for k, v in os.environ.items()
-                if k not in ("GITHUB_TOKEN", "CLAUDE_ENV_FILE", "SDLC_CONFIG", "SDLC_RUNS_DIR")}
+                if k not in ("GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_ENV_FILE", "SDLC_CONFIG",
+                             "SDLC_RUNS_DIR", "SDLC_PLACEMENT", "CLAUDE_CODE_REMOTE")}
     full_env["CLAUDE_PLUGIN_DATA"] = DATA_DIR
+    # A stub `gh` with no stored login, so the host's own gh login never leaks into a hook.
+    full_env["PATH"] = FAKE_GH_DIR + os.pathsep + full_env.get("PATH", "")
     full_env.update(env or {})
     proc = subprocess.run([sys.executable, os.path.join(HOOKS, name)], input=json.dumps(payload),
                           capture_output=True, text=True, env=full_env, timeout=10)
@@ -1657,3 +1665,39 @@ def test_agent_frontmatter_models_match_the_policy():
             head = f.read().split("\n---", 1)[0]
         want = models["arch-review"] if role == "design-review" else models[role]
         assert f"\nmodel: {want}" in head, role
+
+
+# --- SessionStart: ambient token locally ---------------------------------------------------
+
+def _token_start(tmp_path, config, env):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    repo = _git_repo(tmp_path / "r", {"repo": "o/r", **config})
+    env_file = tmp_path / "env.sh"
+    proc = run_hook("session_start.py", {"cwd": repo}, env={"CLAUDE_ENV_FILE": str(env_file), **env})
+    ctx = json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"] if proc.stdout else ""
+    return env_file.read_text(), ctx
+
+
+def test_local_ambient_gh_token_exports_no_token_plumbing(tmp_path):
+    content, ctx = _token_start(tmp_path, {"tokenEnv": "MY_GH_TOKEN"}, {"GH_TOKEN": "ghp_direnv"})
+    assert "GH_TOKEN" not in content and "token" not in ctx.lower()
+
+
+def test_cloud_ambient_gh_token_is_still_overridden_by_token_env(tmp_path):
+    # Positive control: the cloud presets GH_TOKEN to a proxy placeholder.
+    content, _ = _token_start(tmp_path, {"tokenEnv": "MY_GH_TOKEN"},
+                            {"GH_TOKEN": "placeholder", "MY_GH_TOKEN": "ghp_env",
+                             "CLAUDE_CODE_REMOTE": "true"})
+    assert 'export GITHUB_TOKEN="$MY_GH_TOKEN"' in content
+
+
+def test_local_gh_login_silences_the_missing_token_warning(tmp_path):
+    _, ctx = _token_start(tmp_path, {"tokenEnv": "MY_GH_TOKEN"}, {"FAKE_GH_LOGGED_IN": "1"})
+    assert "yield no token" not in ctx
+    _, ctx = _token_start(tmp_path / "b", {}, {"FAKE_GH_LOGGED_IN": "1"})
+    assert "GITHUB_TOKEN is unset" not in ctx
+
+
+def test_local_without_gh_login_still_warns(tmp_path):
+    _, ctx = _token_start(tmp_path, {"tokenEnv": "MY_GH_TOKEN"}, {})
+    assert "yield no token" in ctx
