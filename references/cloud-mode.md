@@ -67,9 +67,10 @@ GitHub; `stopped` for anything else (`abandoned` is the laptop's, "Status and st
 Then Step 4.
 
 - **No local cleanup:** the container, `/tmp` worktrees and stack data included, is discarded
-  when the session ends. Unit cleanup, `prune-stale`, `close-epic --clean-worktree` and stack
-  teardown skip worktree and data removal (`skipped: "cloud"`); never remove them by hand.
-  Branch and Docker cleanup still run.
+  when the session ends. Unit cleanup, `prune-stale` and stack teardown skip worktree and data
+  removal (`skipped: "cloud"`); never remove them by hand. Branch and Docker cleanup still run,
+  and `close-epic --clean-worktree` still cleans the live epic worktree (leftover output would
+  block its next reconcile).
 - **e2e in the cloud:** an e2e-test Task runs its specs when the driven repo's cloud setup
   provides an e2e profile (stack, secrets, test users); it parks `needs-human` only when it
   provides none.

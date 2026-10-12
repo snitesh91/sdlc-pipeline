@@ -2605,8 +2605,6 @@ def clean_epic_worktree(epic: int, repo_path: str = ".",
                           f"by hand), then re-run"}
     if not lines:
         return {"cleaned": False, "path": path, "removed": [], "reason": "already clean"}
-    if cloud_skips_local_cleanup():
-        return {"cleaned": False, "path": path, "removed": [], "skipped": "cloud"}
     out = runner(["git", "-C", path, "clean", "-fd"])
     removed = [l[len("Removing "):] for l in out.splitlines() if l.startswith("Removing ")]
     return {"cleaned": True, "path": path, "removed": removed}

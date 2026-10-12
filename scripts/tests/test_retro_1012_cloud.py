@@ -90,14 +90,15 @@ def test_cloud_prune_stale_skips_worktrees_but_still_prunes_origin(repo, cloud):
     assert result["fetch_pruned"] is True
 
 
-def test_cloud_close_epic_clean_worktree_leaves_the_output(repo, cloud):
+def test_cloud_close_epic_clean_worktree_still_removes_the_output(repo, cloud):
+    # Leftover closing-run output in the live epic worktree can block a later reconcile merge.
     gh, wt = _closeable(repo)
     (wt / "evidence.json").write_text("{}")
 
     result = s.cmd_close_epic(gh, 9, repo_path=str(repo), clean_worktree=True)
 
     assert result["merged"] is True
-    assert result["worktree_clean"]["skipped"] == "cloud" and (wt / "evidence.json").exists()
+    assert result["worktree_clean"]["cleaned"] is True and not (wt / "evidence.json").exists()
 
 
 def test_cloud_close_epic_clean_worktree_still_refuses_tracked_changes(repo, cloud):
