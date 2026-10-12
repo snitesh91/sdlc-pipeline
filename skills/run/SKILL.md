@@ -544,7 +544,8 @@ what) and end with the Initiative's own `none` reason. Above the fold:
 - Any epic `check-epics-closeable` newly notified; any `product_cap` deferral.
 - Every issue `audit-issues` flagged (an Epic with no phase-Tasks included) and whether you repaired it.
 - One cost line: `python3 "$(dirname "$SDLC")/sdlc_metrics.py" report --run <run-id>` →
-  `totals` (est. USD, tokens, tool calls, peak context) for this run's agents.
+  `totals` (est. USD, tokens, tool calls, peak context) for this run's agents. Pass the id
+  `next-action` got, never a regenerated one; a `warning` lists `recent_runs` to pick from.
 
 ## Step 5 — Retrospective (only when the operator asks)
 

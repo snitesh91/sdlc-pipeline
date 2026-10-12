@@ -43,6 +43,10 @@ default`), then re-run the command (composites are idempotent).
 A denied `git push` or `open-dev-pr` never parks a finished unit: run the denied step yourself
 from the main thread (or ask the operator to approve it), then resume the agent for its remaining exit actions. The
 operator can add the allow rules ("Auto-mode allow rules for `development`'s push and PR").
+When the main thread is denied too, park it with `mark-needs-human <n> --reason "..."
+--classifier-denied <step> --run-id "$RUN_ID"`: the worktree is kept, and the next run's
+`next-action` returns it as `resume` (`reason_code: classifier_denied`, `denied_step`). Retry
+`denied_step` first. The run that parked it never resumes it.
 
 A classifier **outage** (no verdict or a classifier error on every state-changing call while
 reads work) is neither a denial nor a stage failure. An agent's `failed` / `blocked` citing
@@ -271,6 +275,15 @@ for a suite with no PR-level CI (a workflow that runs only on push to `main`).
   `satisfied_by_check`. A non-attestable suite is never held here; `merge-pr` gates it.
 - `merge-pr` / `pr-checks` apply the same OR rule per suite; `merge-pr` also refuses on any
   failing or pending check on the PR.
+- **A check carries across a sync merge** (`pipeline.ci.carryChecksAcrossSync`, default
+  `true`): when the head is a sync merge and a required workflow's run on it is pending,
+  cancelled or absent, its pass on the head before the merge counts, provided nothing the
+  merge brought in touches its paths or the pipeline config. A failing run is never
+  overridden. The carried check reads `<workflow> (carried)` with `carried_from`. So after
+  the merge train syncs a PR, cancel the redundant run instead of waiting for it.
+- A standalone fix PR into `main` can skip the full CI run only where the repo opts in: mark
+  that workflow's entry `attestable: true` (optionally `bases`-scoped), and `development`
+  attests the suite it ran locally (`record-local-ci`). The default stays as configured.
 - `merge-pr` accepts `--run-id`: the terminal-unit count is booked under that run rather
   than whatever id last wrote the epic's run-state file (which may be a throwaway probe
   run's). Without it, the state file's current id stands.

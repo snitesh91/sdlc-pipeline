@@ -214,6 +214,7 @@ def test_close_epic_fast_forwards_a_stale_epic_worktree(repo):
     assert result["merged"] is False and result["base"] == "main"
     assert result["epic_worktree"]["behind_before"] == 1
     assert "prepare" not in result          # nothing configured
+    assert "epicClose.prepare is unset" in result["prepare_warning"]
 
 
 def test_close_epic_runs_the_configured_prepare_in_the_epic_worktree(repo, monkeypatch):
@@ -224,6 +225,7 @@ def test_close_epic_runs_the_configured_prepare_in_the_epic_worktree(repo, monke
     result = s.cmd_close_epic(gh, 9, repo_path=str(repo))
 
     assert result["prepare"]["ok"] is True and result["prepare"]["ran"] is True
+    assert "prepare_warning" not in result
     assert (Path(wt) / "prepared.txt").read_text() == "installed\n"
     assert result["epic_worktree"]["behind_before"] == 0
 
@@ -251,6 +253,7 @@ def test_close_epic_without_a_worktree_or_prepare_adds_nothing(repo):
 
     assert result["merged"] is False and result["missing_verification"]
     assert "epic_worktree" not in result and "prepare" not in result
+    assert "prepare_warning" not in result
 
 
 # --- 5. close-epic into initiative-<i> first merges main into it ----------------------
