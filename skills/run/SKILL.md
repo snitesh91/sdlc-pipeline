@@ -66,7 +66,8 @@ task:       development -> [pr-review] -> auto-merge into epic-<n> -> CLOSED
 - **Standing profile** (`epicLevelPhase: false`): technical (RTB) tasks only; no
   phase-Tasks, no epic branch, no human gate. Each child runs only the stages it needs of
   `product -> [product-review] -> architecture -> [arch-review] -> development ->
-  [pr-review] -> CLOSED` ("Routing a standing child") and merges straight to `main`.
+  [pr-review] -> CLOSED` ("Routing a standing child") and merges into its integration base (`main`, or `initiative-<i>` under an initiative
+  branch — `references/epics.md`, "The epic integration branch").
   **Legacy profile** (`driven: false`): skipped entirely, Tasks included.
 - **Every Epic has two standing Tasks** (Integration-test, e2e-test), specified by `lld`,
   running after every functional Task merges — none when its Initiative's profile sets

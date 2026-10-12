@@ -1552,7 +1552,7 @@ def effective_gates(epic_issue: Optional[dict]) -> dict:
 
 def is_epic_standing(issue: dict) -> bool:
     """Standing epic (profile `epicLevelPhase` false): no phase-Tasks; each child runs
-    its own full flow and integrates into `main`."""
+    its own full flow and integrates into its integration base (`integration_base`)."""
     return not resolve_profile(issue)["epicLevelPhase"]
 
 
@@ -6291,11 +6291,12 @@ def _merge_design_pr_of(gh: GitHub, issue: int, repo_path: Optional[str], runner
 
 def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, doc: str,
                    next_stage: str, summary: str, runner: Runner = _default_runner) -> dict:
-    """Open a human-review gate: a new `issue-<n>` -> `main` PR, or -- for a non-standing Epic's
-    architecture phase-Task -- its already-open design PR into `epic-<e>` (no second PR)."""
+    """Open a human-review gate: a new `issue-<n>` PR into its integration base, or -- for a
+    non-standing Epic's architecture phase-Task -- its already-open design PR into `epic-<e>`."""
     stage = doc.rsplit(".", 1)[0]
     epic = design_phase_epic(gh, issue, stage)
-    head, base = issue_branch(issue), "main" if epic is None else epic_branch(epic)
+    head = issue_branch(issue)
+    base = _gate_base(gh, issue) if epic is None else epic_branch(epic)
     doc_path = f"{design_doc_dir(epic, issue, gh)}/{doc}"
     # Cite the pushed head, not a local HEAD: the PR only contains what is on origin.
     repo_path = repo_path or "."
@@ -6921,6 +6922,14 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
     return {**result, "tasks": key_to_number, **published}
 
 
+def _gate_base(gh: GitHub, issue: int) -> str:
+    """Where a non-phase gate PR merges: the unit's `integration_base` (a standing child under
+    an initiative branch); `main`, looking nothing up, while no profile sets `branch`."""
+    if not any(prof.get("branch") for prof in PIPELINE["initiativeProfiles"] or []):
+        return "main"
+    return integration_base(gh, issue)
+
+
 def phase_task_parent(gh: GitHub, issue: int) -> Optional[dict]:
     """`{"number", "kind": "initiative"|"epic"}` when `issue`'s parent makes it a
     phase-Task, else None. Only meaningful on a gate path: under an Initiative or
@@ -6993,9 +7002,10 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
                        f"field verbatim; it is the gate's owning doc-stage, not a target you pick")
     branch = issue_branch(issue)
     parent = phase_task_parent(gh, issue)
-    # The gate merged into `main`, or into its Epic's branch for a phase-Task of a
-    # non-standing Epic (its design PR), so reconcile the issue branch with that.
-    base = epic_branch(parent["number"]) if parent and parent["kind"] == "epic" else "main"
+    # The gate merged into the unit's integration base (its Epic's branch for a phase-Task
+    # of a non-standing Epic), so reconcile the issue branch with that.
+    base = (epic_branch(parent["number"]) if parent and parent["kind"] == "epic"
+            else _gate_base(gh, issue))
     with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
         git_reconcile_branch(ws.path, branch, base=base, runner=runner)
     if parent is not None:

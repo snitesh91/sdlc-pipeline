@@ -332,8 +332,8 @@ as a shortcut, never skipping a check `merge-pr` enforces:
 2. Read each affected PR's real state (`gh pr view <pr> --json state,mergedAt`; in a cloud
    session `gh api repos/<repo>/pulls/<pr> --jq '{state, merged_at}'`); a merged PR needs
    no second merge.
-3. Squash, never a merge commit, in an ephemeral worktree on `origin/<base>` (`epic-<n>` for
-   a Task of a non-standing Epic, else `main`): `git merge --squash origin/issue-<n>`,
+3. Squash, never a merge commit, in an ephemeral worktree on `origin/<base>` (the unit's
+   integration base: `references/epics.md`, "The epic integration branch"): `git merge --squash origin/issue-<n>`,
    `git commit -m "<title> (Closes #<n>)"`, `git push origin <base>`. Never force-push
    `main`; reconcile forward.
 4. Once the API is back: close the PR with the audit-trail comment `merge-pr` would post,

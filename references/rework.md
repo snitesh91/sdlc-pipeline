@@ -72,7 +72,7 @@ The resume message must:
   inventory, measurements, fits-vs-deviates call, overlap enumeration — whichever apply).
 - **Scope the new pass to the delta**, plus a regression check that the delta could not
   have disturbed what was accepted. Prove it: open with `git diff --stat origin/<base>`
-  (the unit's integration base: `epic-<n>` for a child of a non-standing Epic, else `main`)
+  (the unit's integration base: `references/epics.md`, "The epic integration branch")
   showing the change was doc-only.
 - **Re-derive fully when the delta is code**, or when it touches the premise an earlier
   conclusion rested on.

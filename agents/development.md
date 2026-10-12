@@ -90,7 +90,7 @@ comment's criterion→test map.
 ## Scope containment
 
 Before you finish, review every file in `git diff origin/<base>...HEAD` (`<base>` = your PR's
-base: `epic-<n>` for a Task of a non-standing Epic, else `main`) and trace each to a line
+base, the unit's integration base: `${CLAUDE_PLUGIN_ROOT}/references/epics.md`, "The epic integration branch") and trace each to a line
 of the design. A file you cannot trace does not belong in this PR.
 
 - No opportunistic refactoring, no "while I'm here" cleanups, no unrelated improvements.

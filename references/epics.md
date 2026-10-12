@@ -20,7 +20,7 @@ A profile is a label-matched bundle of toggles in `pipeline.profiles`; the first
 | Toggle | Default | Non-default effect |
 |---|---|---|
 | `driven` | `true` | `false` = **legacy**: skip the epic and every child |
-| `epicLevelPhase` | `true` | `false` = **standing**: no phase-Tasks; each child runs its own full per-issue flow into `main` |
+| `epicLevelPhase` | `true` | `false` = **standing**: no phase-Tasks; each child runs its own full per-issue flow into its integration base ("The epic integration branch") |
 | `childrenNeedArchitectedEpic` | `true` | `false` = children dev-lane eligible without `epic:architected` |
 | `closes` | `true` | `false` = never closes, no integration branch |
 | `gates.skipConfidenceThreshold` | `80` (global) | per-profile Gate B skip bar |

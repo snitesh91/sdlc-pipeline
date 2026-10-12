@@ -207,3 +207,20 @@ def test_initiative_scaffolding_is_empty_when_nothing_names_it(repo):
     """Positive control."""
     gh = FakeGh([{"number": 6, "labels": ["type:initiative"]}])
     assert s.initiative_scaffolding(gh, 6, repo_path=str(repo)) == []
+
+
+# --- review: a standing child's gate PR targets its integration base ---------------------
+
+def _gate_pr_base(gh, issue):
+    s.cmd_open_gate(gh, ".", issue, "Gate", "architecture.md", "development", "ok",
+                    runner=lambda argv: "cafe1234\n")
+    return next(pr["baseRefName"] for pr in gh.prs.values() if pr["headRefName"] == f"issue-{issue}")
+
+
+def test_a_standing_childs_gate_under_an_initiative_branch_targets_it(opted_in):
+    assert _gate_pr_base(_standing_tree(), 12) == "initiative-6"
+
+
+def test_a_standing_childs_gate_without_the_opt_in_targets_main(opted_in):
+    """Positive control."""
+    assert _gate_pr_base(_standing_tree(opt_in=False), 12) == "main"
