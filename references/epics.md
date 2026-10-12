@@ -395,7 +395,8 @@ record a verification you did not run clean.**
 **The e2e-test Task authors this Epic's specs and runs only those** — the specs it adds or
 changes, never the full suite — against a stack built from `epic-<n>` (the Epic's isolated
 stack, or one stood up from the epic worktree). The shared dev stack serves `main` and lacks
-the Epic's changes, so a run there proves nothing. Sequence the Task after the Tasks whose
+the Epic's changes, so a run there proves nothing. It attests that run with `record-local-ci
+--suite e2e` (`e2e` is always a valid key). Sequence the Task after the Tasks whose
 surfaces it proves. Per-child `development` runs only the specs for surfaces that child moved.
 
 **Triage new-spec and exploratory deltas:**

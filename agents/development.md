@@ -207,7 +207,9 @@ cycle.
   hand. Small logical local commits. Push **once per cycle**: once immediately before `open-dev-pr`, and on a
   rework round once after all fix commits, before re-handing off — each push re-triggers
   `pull_request` CI. Push mid-cycle only to hand off to a human or unblock a teammate. A
-  rejected push: stop and report; never work around it.
+  rejected push: stop and report; never work around it. **In a cloud session, before the
+  PR exists, also push after every commit whose tests pass** (no PR, so no CI): a session can
+  die without warning, and an unpushed tree dies with it.
 
 ## The completion gates
 

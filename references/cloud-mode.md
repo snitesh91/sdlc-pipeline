@@ -66,6 +66,16 @@ python3 "$SDLC" end-cloud-session <epic> --outcome closed|waiting-human|stopped 
 GitHub; `stopped` for anything else (`abandoned` is the laptop's, "Status and stalls").
 Then Step 4.
 
+- **No local cleanup:** the container, `/tmp` worktrees and stack data included, is discarded
+  when the session ends. Unit cleanup, `prune-stale`, `close-epic --clean-worktree` and stack
+  teardown skip worktree and data removal (`skipped: "cloud"`); never remove them by hand.
+  Branch and Docker cleanup still run.
+- **e2e in the cloud:** an e2e-test Task runs its specs when the driven repo's cloud setup
+  provides an e2e profile (stack, secrets, test users); it parks `needs-human` only when it
+  provides none.
+- **Pushed work survives:** a session can die with no end marker. `development` pushes after
+  every green commit before its PR exists (`agents/development.md`, "Commits and pushes").
+
 ## GitHub access in the cloud
 
 - **The proxy:** a cloud session reaches api.github.com only through Anthropic's GitHub proxy,
@@ -86,8 +96,11 @@ Then Step 4.
 - **Review threads:** `check-gate` thread ids read `ccr:<pr>:<comment-id>`; pass them to
   `resolve-thread` unchanged. A thread id from a local session does not work here.
 - **Branch deletes:** the proxy refuses them. Enable the repo's auto-delete of head branches;
-  a branch left over comes back as a `warnings` line (`references/operations.md`, "Worktree
-  release").
+  then unit cleanup skips the delete silently. Without it, a branch left over comes back as a
+  `warnings` line (`references/operations.md`, "Worktree release").
+- **Draft PRs:** `open-dev-pr` recovers a draft create the proxy answers with no body (adopts
+  the PR by head branch, else creates it plain and drafts it via `ccr/convert_to_draft`). A
+  `draft_warning` means drafting failed: relay it; the PR must be a draft before review.
 - **Hand-run `gh`:** read with `gh api` GETs (`gh api repos/<repo>/issues/<n>`,
   `.../issues/<n>/comments --paginate`, `.../pulls/<pr>`), never `gh issue view` / `gh pr view`.
   Write only through `python3 "$SDLC" <command>`; a reply on a PR is
@@ -97,6 +110,8 @@ Then Step 4.
   control-plane failure.
 - **Token:** `GH_TOKEN` and `GITHUB_TOKEN` start as a proxy placeholder; the SessionStart hook
   overrides both from `tokenEnv` (e.g. `SDLC_GH_TOKEN`). The proxy decides access either way.
+- **SSH key:** pick it with `core.sshCommand`, never an SSH host alias or `url.<alias>.insteadOf`
+  on `origin` — a rewritten remote breaks cloud launches ("Cloned from seed bundle", 403).
 
 ## Human channel
 
@@ -187,7 +202,8 @@ python3 "$SDLC" nudge-cloud-epic <epic>
   `by_status`, `open_prs`, `gates_pending`, `needs_human`, `last_activity` (comments, child
   issue updates, PR updates, in-progress branch heads), `idle_minutes`, `stalled` (live session,
   open Epic, idle ≥ `pipeline.placement.stallMinutes`, default 90), `end_marker`,
-  `nudges_since_activity`, `escalate`. On a cloud-mode Initiative also `launchable`, `waiting`,
+  `nudges_since_activity`, `escalate`. A `stalled` Epic with no end marker may be a dead
+  session: read its run log (session url) before nudging, and end-mark a dead one. On a cloud-mode Initiative also `launchable`, `waiting`,
   `all_closed`, and `attention`.
 - **A stalled Epic:** `nudge-cloud-epic <epic>` sends `claude -p "continue: /sdlc:run <epic>"
   --cloud <session id>` and records it. After two nudges with no activity since it sends nothing
