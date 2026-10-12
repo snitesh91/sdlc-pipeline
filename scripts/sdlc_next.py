@@ -2509,6 +2509,10 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         return {**out, **({"prepare": prepared} if prepared else {})}
 
     behind = gh.branch_behind_by(branch, base=base)
+    skipped = _reconcile_skippable(gh, branch, base, behind) if carry_forward else None
+    if skipped:
+        target["reconcile_skipped"] = skipped
+        behind = 0
     if behind:
         refused = clean_refusal()
         if refused:
@@ -2575,6 +2579,25 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     gh.pr_merge(pr_number)
     return _finish_epic_close(gh, epic, None, pr_number, children, all_issues, repo_path,
                               runner, {**target, **evidence, **cleaned}, base=base)
+
+
+def _reconcile_skippable(gh, branch: str, base: str, behind: int) -> Optional[dict]:
+    """`{behind, files}` when every file `base` gained lies in the evidence carry-forward set
+    and the epic never touched it: a reconcile would only re-stale the closing evidence."""
+    if not behind:
+        return None
+    try:
+        incoming = gh.base_delta_files(branch, base=base)
+        if not incoming or len(incoming) >= COMPARE_FILES_CAP:
+            return None
+        if not all(evidence_carries_forward(p) for p in incoming):
+            return None
+        epic_files = gh.base_delta_files(base, base=branch)
+    except GhError:
+        return None
+    if len(epic_files) >= COMPARE_FILES_CAP or set(incoming) & set(epic_files):
+        return None
+    return {"behind": behind, "files": sorted(incoming)}
 
 
 def _finish_epic_close(gh, epic: int, detail: Optional[dict], pr_number: int, children: list,

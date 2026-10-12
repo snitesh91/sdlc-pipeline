@@ -80,3 +80,57 @@ def test_a_compare_delta_at_its_cap_is_still_treated_as_truncated():
     files = [f"frontend/f{i}.ts" for i in range(300)]
     out = s._epic_suite_evidence(_EpicPrGh(), "epic-9", [], files, None, False)
     assert out["suites"]["backend"] == "missing"
+
+
+# --- 6. close-epic skips a main reconcile that brings only carry-forward files ---------
+
+from tests.test_epic_close_evidence import TESTED, _epic, _marks  # noqa: E402
+
+
+def _behind_epic(incoming, epic_side=("backend/a.ts",)):
+    gh = _epic(_marks())
+    gh.branch_behind_by = lambda branch, base="main": 2
+    gh.base_delta_files = lambda head, base="main": list(
+        incoming if head == "epic-9" else epic_side)
+    gh.pr_create = lambda **kw: 38
+    gh.pr_ready = lambda n: None
+    gh.pr_merge = lambda n, **kw: None
+    gh.pr_files = lambda n: list(epic_side)
+    gh.pr_checks = lambda n: [{"name": "Backend CI", "bucket": "pass", "workflow": "Backend CI"}]
+    return gh
+
+
+def test_close_epic_skips_a_reconcile_that_brings_only_carry_forward_files(monkeypatch):
+    def no_reconcile(*a, **k):
+        raise AssertionError("reconciled")
+    monkeypatch.setattr(s, "git_reconcile_branch", no_reconcile)
+    result = s.cmd_close_epic(_behind_epic(["docs/ops/runner.md"]), 9)
+    assert result["merged"] is True
+    assert result["reconcile_skipped"] == {"behind": 2, "files": ["docs/ops/runner.md"]}
+
+
+class _Ws:
+    path, retained = "/nowhere", None
+
+    def __init__(self, *a, **k):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+@pytest.mark.parametrize("incoming,epic_side", [
+    (["backend/b.ts"], ["backend/a.ts"]),        # incoming code
+    (["docs/x.md"], ["docs/x.md"]),              # the epic touched the same file
+])
+def test_close_epic_still_reconciles_code_or_an_overlapping_file(incoming, epic_side, monkeypatch):
+    """Positive control."""
+    calls = []
+    monkeypatch.setattr(s, "BranchWorkspace", _Ws)
+    monkeypatch.setattr(s, "git_reconcile_branch", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(s, "_refresh_epic_worktree", lambda *a, **k: None)
+    result = s.cmd_close_epic(_behind_epic(incoming, epic_side), 9)
+    assert calls and result["reconciled"] == 2 and "reconcile_skipped" not in result
