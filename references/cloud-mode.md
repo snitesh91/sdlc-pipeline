@@ -95,6 +95,9 @@ Then Step 4.
 - **Branch deletes:** the proxy refuses them. Enable the repo's auto-delete of head branches;
   then unit cleanup skips the delete silently. Without it, a branch left over comes back as a
   `warnings` line (`references/operations.md`, "Worktree release").
+- **Draft PRs:** `open-dev-pr` recovers a draft create the proxy answers with no body (adopts
+  the PR by head branch, else creates it plain and drafts it via `ccr/convert_to_draft`). A
+  `draft_warning` means drafting failed: relay it; the PR must be a draft before review.
 - **Hand-run `gh`:** read with `gh api` GETs (`gh api repos/<repo>/issues/<n>`,
   `.../issues/<n>/comments --paginate`, `.../pulls/<pr>`), never `gh issue view` / `gh pr view`.
   Write only through `python3 "$SDLC" <command>`; a reply on a PR is

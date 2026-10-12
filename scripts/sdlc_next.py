@@ -7052,7 +7052,8 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
     PR on the branch is reused (`created: False`) -- and, when this command's comment for it
     is missing (a PR made by another path, or a create whose response was lost), adopted:
     made a draft, Stage set, comment posted (`adopted: True`). A create that returns no PR
-    number is recovered by looking the PR up by its head branch (`recovered`). A branch with
+    number is recovered by looking the PR up by its head branch (`recovered`), else created
+    plain and then drafted (`draft_fallback`, `draft_warning` when that fails). A branch with
     no commits ahead of its base gets an empty commit first only with `allow_empty`
     (`empty_commit`), else the refusal names the flag. Returns `pr`, `created`."""
     branch = issue_branch(issue)
@@ -7095,6 +7096,13 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
                 raise
             # The create may have landed with its response lost: adopt the PR it made.
             found = gh.pr_list_for_branch(branch)
+            if not found and PR_CREATE_NO_NUMBER in str(e):
+                # The cloud proxy has failed draft creates whole while plain ones pass:
+                # create it plain, then draft it (the review queue reads draft status).
+                n = gh.pr_create(base=base, head=branch, title=title, body=pr_body)
+                extra["draft_fallback"] = f"draft create failed ({str(e)[:200]}); created plain"
+                extra.update(_ensure_draft(gh, {"number": n, "isDraft": False}))
+                return n
             if not found:
                 raise
             extra["recovered"] = f"{str(e)[:300]} -- found PR #{found[0]['number']} on {branch}"

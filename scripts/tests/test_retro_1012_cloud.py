@@ -123,3 +123,38 @@ def test_cloud_parking_keeps_the_units_worktree(cloud):
     calls = []
     out = s._release_unit_worktree(186, base_repo="/repo", runner=lambda argv: calls.append(argv))
     assert out == {"released": False, "skipped": "cloud"} and calls == []
+
+
+# --- open-dev-pr: a draft create the proxy failed whole ---------------------------------
+
+from tests.test_retro_1009_ctl_a import _DevPrGh, _exit_posted  # noqa: E402
+
+
+class _DraftlessGh(_DevPrGh):
+    """A draft create fails with no PR made; a plain create works."""
+
+    def pr_create(self, base, head, title, body, draft=False):
+        if draft:
+            raise s.GhError(f"{s.PR_CREATE_NO_NUMBER}: POST repos/o/r/pulls returned None")
+        return super().pr_create(base, head, title, body, False)
+
+
+def _no_offenders(monkeypatch):
+    monkeypatch.setattr(s, "dev_pr_scope_offenders", lambda *a, **k: {
+        "design_docs": [], "foreign_footprint": []})
+
+
+def test_open_dev_pr_falls_back_to_a_plain_create_then_drafts_it(monkeypatch):
+    _no_offenders(monkeypatch)
+    gh = _DraftlessGh()
+    out = s.cmd_open_dev_pr(gh, 10, "t", "b", "Built it.")
+    assert out["created"] is True and "draft_fallback" in out
+    assert out["converted_to_draft"] is True and gh.prs[out["pr"]]["isDraft"] is True
+    assert gh.issues[10]["stage"] == "pr-review" and len(_exit_posted(gh, out["pr"])) == 1
+
+
+def test_open_dev_pr_fallback_warns_when_drafting_fails(monkeypatch):
+    _no_offenders(monkeypatch)
+    gh = _DraftlessGh(convert_fails=True)
+    out = s.cmd_open_dev_pr(gh, 10, "t", "b", "Built it.")
+    assert "draft_warning" in out and gh.issues[10]["stage"] == "pr-review"
