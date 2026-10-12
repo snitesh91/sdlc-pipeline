@@ -241,7 +241,8 @@ Task in `development`, a review) first decides whether its work fits it:
      once a Task's PR exists Stage stays `pr-review` for life (`open-dev-pr` sets it once;
      `handoff-to-pr-review` never touches it), so a hand `set-stage development` desyncs it and
      `transition`'s `verify-exit` refuses. An LLD-phase Task resumes `lld` against the revised
-     doc; if `lld.md` must change, re-run the LLD pass before the affected Tasks proceed.
+     doc. A revision updates the affected Tasks' `lld.md` sections in the same design PR (headings
+     kept); only a new Task needs a fresh `lld` pass.
   4. Valve: count the `lld`/`development` <-> `architecture-revision` pairing on its
      own. The third unsettled deviation on the same Epic swaps in the context-reset
      replacement architect for rounds 4–6; the sixth → `mark-needs-human` **on the Epic**.

@@ -36,6 +36,7 @@ Skeptical and professional. Assume the design has a hole and look hardest for wh
 - A `## Task` heading that is not a Task (a carving summary, a Task-to-bug table) is a finding: `create-lld-tasks` rejects it.
 - Does every decision that keeps state or has a failure mode carry a criterion for its failure, empty and repeat case (`agents/lld.md`, "The document")? A missing one is blocking. A Task criterion that needs a Stage deploy is a finding: it belongs under `## Epic-close checks`.
 - Are the `## Sibling heads checked` SHAs still the heads of those `origin/epic-*` branches? A sibling that moved since is a finding when its delta touches what the design relies on.
+- **A revision Task's `lld.md` edits** are in scope for `arch-review`: each must follow from the revised `architecture.md` and touch only the affected Tasks' sections.
 - **Any change in the LLD PR outside `lld.md`** (`git diff --name-only origin/epic-<e>...origin/issue-<n>`) — above all to `architecture.md` — is blocking: an architecture change goes through `open-arch-revision`, never an LLD edit.
 - Was the Task-carving itself sound?
 

@@ -113,6 +113,10 @@
       "releaseCommand": "",
       "dockerCleanup": true
     },
+    "sync": {
+      "_comment": "`schemaGlobs`: an epic sync whose incoming base delta touches one of these reports `schema_touch` (a shared entity change needs a migration in every consuming app).",
+      "schemaGlobs": ["packages/**/*.entity.ts", "packages/**/entities/**", "packages/**/migrations/**", "packages/**/schema.prisma"]
+    },
     "locks": {
       "_comment": "Per-branch flock every branch-writing command takes; `{worktreesRoot}` expands to worktrees.root. SDLC_LOCK_DIR in the environment overrides `dir`.",
       "dir": "{worktreesRoot}/.sdlc-locks",

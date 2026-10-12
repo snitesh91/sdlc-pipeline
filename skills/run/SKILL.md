@@ -138,8 +138,8 @@ It runs `architecture` (editing `epic-<n>/architecture.md` in place) → design 
 `arch-review` → merge, like the Architecture-phase Task. Park the reporting unit right away
 with `pause-for-epic-regate <n> --epic <epic-n> [--gate-pr <pr>] --found-by <stage that found it>`
 (`--gate-pr` only once the revision's design PR exists); once the revision closes, resume its
-agent directly — never `set-stage` it. If `lld.md` must change too,
-resume or re-run the LLD pass before the affected Tasks proceed. Escalation (third /
+agent directly — never `set-stage` it. The revision also updates the affected Tasks'
+`lld.md` sections; a new Task's design needs a fresh `lld` pass. Escalation (third /
 sixth deviation, `mark-needs-human` on the Epic): `references/epics.md`, "Architecture
 deviation escalation".
 
@@ -291,7 +291,10 @@ Every result except `skip`/`none`/`stop-at-cap` carries `unit`: `"issue"`, or `"
 - **`epic_sync`** (`--sync-epic`) keeps `epic-<n>` from rotting against `main`. On
   `conflict` (reported once, then `pending` until `main` or the epic head moves) →
   `references/parallelism.md`, "Git-conflict handling"; on `error` → report it (the
-  action still stands). `skipped`/`due: null` need nothing.
+  action still stands). `skipped`/`due: null` need nothing. A non-empty `design_touch`
+  (incoming files the Epic's design names) → judge whether the design still holds, else
+  `open-arch-revision`; a non-empty `schema_touch` → confirm every app using that package has
+  its migration, else route the gap to the owning unit.
 - **Before ending on `none`:** `list-needs-human` (skim each reason; clear a stale one
   with a comment), `check-epics-closeable` (idempotent) and `audit-issues --epic <n>` (`--initiative <n>` on an Initiative)
   (run each flagged issue's `repair` command, filling any `<P>`/`<T>`; never re-create

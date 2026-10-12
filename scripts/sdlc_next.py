@@ -206,6 +206,10 @@ _PIPELINE_DEFAULTS = {
                   "prepare": ""},
     # Priority / Effort `create-issue` sets when no flag names one (fields configured only).
     "issueDefaults": {"priority": "Medium", "effort": "Medium"},
+    # `schemaGlobs`: an epic sync whose incoming base delta touches one of these is reported
+    # `schema_touch` (a shared entity change needs a migration in every consuming app).
+    "sync": {"schemaGlobs": ["packages/**/*.entity.ts", "packages/**/entities/**",
+                             "packages/**/migrations/**", "packages/**/schema.prisma"]},
     # Stage models and fan-out: one home, hooks/model_policy.json (agent_guard enforces it).
     "orchestrator": {"model": (_MODEL_POLICY.get("orchestrator") or {}).get("model", "sonnet")},
     "models": _MODEL_POLICY.get("models", {}),
@@ -248,6 +252,8 @@ _INITIATIVE_PROFILE_DEFAULTS = {
     "closeSuites": [],    # suite keys (any name, e.g. "e2e") `merge-initiative-pr` also needs
                           # a `record-local-ci` attestation for at the initiative PR's head
     "placement": None,    # "cloud"|"local" overrides `pipeline.placement.initiativeEpics`
+    "reviewDepth": "full",  # "light": reviews run single-pass (no fan-out), pr-review skips
+                            # the mutation probe -- for throwaway or feasibility work
 }
 
 
@@ -3546,6 +3552,8 @@ def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: st
                               f"{EPIC_SYNC_EVERY_MERGES} merges since the last sync, "
                               f"{base} unmoved"}
         result = cmd_sync_branch(gh, repo_path, epic, "epic", runner=runner, base=base)
+        if result.get("synced") and main_sha and epic_sha != main_sha:
+            result.update(epic_sync_touches(repo_path, epic, epic_sha, main_sha, runner, gh))
         _run_retry_transient(["git", "-C", repo_path, "fetch", "origin"], runner)
         record = {"main": main_sha, "epic": _origin_sha(repo_path, branch, runner),
                   "terminal": terminal, "at": _utc_now_marker()}
@@ -3556,6 +3564,31 @@ def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: st
         return {**result, "due": due}
     except GhError as e:
         return {"synced": False, "error": str(e)}
+
+
+def epic_sync_touches(repo_path: str, epic: int, epic_sha: str, base_sha: str,
+                      runner: Runner = _default_runner,
+                      gh: Optional[WorkItemProvider] = None) -> dict:
+    """What an epic sync brought in from its base (`epic_sha...base_sha`): `design_touch`, the
+    files the Epic's `architecture.md`/`lld.md` name (the path or a parent dir of 2+ segments);
+    `schema_touch`, the files matching `pipeline.sync.schemaGlobs`. Empty lists when none."""
+    delta = runner(["git", "-C", repo_path, "diff", "--name-only",
+                    f"{epic_sha}...{base_sha}"]).split()
+    docs = ""
+    for name in ("architecture.md", "lld.md"):
+        try:
+            docs += runner(["git", "-C", repo_path, "show", f"{epic_sha}:"
+                            f"{doc_root_for(epic, gh)}/epic-{epic}/{name}"])
+        except GhError:
+            pass
+
+    def named(path):
+        parts = path.split("/")
+        return any("/".join(parts[:i]) in docs for i in range(len(parts), 1, -1))
+
+    globs = PIPELINE["sync"].get("schemaGlobs") or []
+    return {"design_touch": [p for p in delta if docs and named(p)],
+            "schema_touch": [p for p in delta if any(_glob_matches(p, g) for g in globs)]}
 
 
 def sync_initiative_if_due(gh: GitHub, entry: dict, run_id: str, repo_path: str = ".",
@@ -3810,6 +3843,15 @@ def slice_task_subsection(doc_text: str, task_number: int) -> Optional[str]:
         if _task_heading_matches(entry, task_number):
             return doc_text[entry["start"]:entry["end"]].rstrip() + "\n"
     return None
+
+
+def lld_task_headings_dropped(base_text: str, new_text: str) -> list:
+    """Task headings on the epic branch's `lld.md` that a revised copy no longer carries
+    (as `#<n>` or the key), so `lld-section` would stop finding them."""
+    def ids(text):
+        return {f"#{h['number']}" if h["number"] else (h["task_key"] or h["key"])
+                for h in parse_task_headings(text)}
+    return sorted(ids(base_text) - ids(new_text))
 
 
 def cmd_lld_section(repo_path: str, epic: int, task,
@@ -7442,6 +7484,26 @@ def cmd_verify_exit(gh: GitHub, repo_path: Optional[str], issue: int, expect_sta
                     "reason",
                     f"{record_filename} has an unresolved citation -- see "
                     f"result['citations'] for which one and what was cited vs. found.")
+    if epic is not None and expect == "architecture":
+        # A revision Task may also update `lld.md` Task sections; it must keep every heading.
+        lld_path = os.path.join(docs_dir, "lld.md")
+        if os.path.isfile(lld_path):
+            try:
+                base_lld = runner(["git", "-C", repo_path, "show",
+                                   f"origin/{epic_branch(epic)}:{docs_rel}/lld.md"])
+            except GhError:
+                base_lld = None
+            if base_lld is not None:
+                with open(lld_path, "r") as f:
+                    dropped = lld_task_headings_dropped(base_lld, f.read())
+                if dropped:
+                    result["ok"] = False
+                    result["lld_headings_dropped"] = dropped
+                    result.setdefault(
+                        "reason",
+                        f"{docs_rel}/lld.md drops Task heading(s) {', '.join(dropped)} that "
+                        f"origin/{epic_branch(epic)} carries -- a revision edits a Task's "
+                        f"section body only; keep every `## Task` heading as it is.")
     if VERIFY_EXIT_HEAD_CHECK and expect in HEAD_CHECKED_STAGES:
         head = unit_head_problem(issue, repo_path, runner)
         if head is not None:
