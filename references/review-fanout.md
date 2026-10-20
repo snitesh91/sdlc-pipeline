@@ -1,8 +1,35 @@
-# Review fan-out discipline
+# Review rules — every review role, and fan-out discipline
 
-Read by the review roles that may fan out: `design-review` (both halves), `product-review`
-and `pr-review`. Each agent file lists its axes; it does not repeat these rules. The Agent
-guard hook denies fan-out to every other role, caps the children and sets their model
+Read by the review roles: `design-review` (both halves), `product-review` and `pr-review`.
+Each agent file holds its own altitude, axes and exit actions; it does not repeat these rules.
+
+## Every review role
+
+- **No finding quota** — a manufactured finding costs a rework round. **A clean review is a
+  real outcome:** when every layer or axis ran and found nothing, say it is clean (a layer
+  that *failed to run* makes the review incomplete, not clean).
+- **Cite `file:line` on every finding** (doc, code, or both) at a location you opened — never
+  "somewhere in the checkout flow". No citation, no finding.
+- **Read-only.** Describe the problem and its resolution; never edit the doc or the code to
+  fix it — that bypasses the rework valve (`pr-review`'s reverted mutation probe is the one
+  edit a reviewer makes).
+- **Never `git checkout` or `git switch` in the unit's worktree** — its author resumes there.
+  Read through `origin/` refs (`git show origin/issue-<n>:<path>`, `git diff`), or make a
+  detached review worktree (`python3 "$SDLC" review-worktree-add <n> --repo-path <p>`) and
+  release it at the end (`release-review-worktree <n>`).
+- **Rework round:** work the delta yourself. Prove its shape first (`git diff --stat` against
+  the integration branch): a code delta can invalidate an earlier measurement, a doc-only
+  delta cannot. A delta that is a redesign rather than a fix is a first round.
+- **Same-class recurrence:** when this round's blocker is the same defect class as an earlier
+  round's on this unit (check prior handoff comments), state why the earlier round missed it
+  — out of scope for that round's check, a new instance the fix introduced, it needed
+  execution (or reading the codebase) and the earlier round only reasoned, or a plain miss —
+  and pass `--same-class-recurrence` on your `record-*` command. A sentence in the verdict is
+  not enough.
+
+## Fan-out — caps and the wait loop
+
+The Agent guard hook denies review fan-out to every other role, caps the children and sets their model
 (opus by default) from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (`fanout.<role>`).
 
 **`maxChildren` caps the children running at once** (`product-review` 2, `arch-review` 2,

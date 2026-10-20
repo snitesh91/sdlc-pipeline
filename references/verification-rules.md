@@ -1,7 +1,8 @@
 # Verification rules — prove a claim by running it, not by asserting it
 
 Read by `architecture`, `lld`, `development`, `pr-review`, and `design-review` (both
-halves; the completeness-sweep rule governs both `architecture.md` and `lld.md`).
+halves; the completeness-sweep rule governs both `architecture.md` and `lld.md`), and by the
+orchestrator for "Test scope".
 
 ## Compile-checking is not verification
 
@@ -23,6 +24,50 @@ halves; the completeness-sweep rule governs both `architecture.md` and `lld.md`)
   or anything OpenAPI-visible, clear stale output (`rm -rf dist *.tsbuildinfo`) and rebuild
   before the integration/IT tier — a green run over a stale `dist` exercises the old code and
   proves nothing.
+
+## Test scope — which suites run where
+
+The one home of this rule; every other file points here. The orchestrator reads it before it
+writes a `development` or `pr-review` brief.
+
+- **The full integration suite runs once per Epic: the epic PR's CI into `main`** (into
+  `initiative-<i>` under an initiative branch, then the initiative PR's). The same holds for
+  any PR into `main` / `initiative-*` that a required workflow covers (a standing child, a
+  parentless issue): that check is the full run. The pipeline waits for it (`merge-pr`,
+  `close-epic`'s `awaiting_checks`) and no stage runs that suite locally. The one exception is a
+  suite with no PR-level CI (`attestable`, listed in `unattested_suites`): run it once on the PR
+  head and `record-local-ci` it (`references/operations.md`, "Local-CI attestation").
+- **A Task merging into `epic-<n>` runs no integration suite by default.** `development` runs
+  the unit tests for its change and the pre-PR command as configured, with no integration flag.
+- **Two exceptions, and then only scoped specs, never the whole suite:**
+  1. The brief carries `Integration tests: mandatory`. The orchestrator adds that line only
+     when the change is a migration, a raw query, a cross-module change or a new or changed
+     external-API integration, and no required workflow runs the integration suite on the
+     PR. Run the integration specs the change impacts.
+  2. The Task adds or changes integration specs: the Epic's standing Integration-test Task,
+     or a Task whose subsection names its own (under an Initiative with `testTasks: false`).
+     Run those specs, plus any the change impacts.
+- **The standing Integration-test Task** authors the Epic's missing integration specs and
+  runs only the specs it adds or changes, on its branch off `epic-<n>`. **The standing
+  e2e-test Task** runs only the e2e specs it adds or changes, against a stack built from
+  `epic-<n>` (`references/epics.md`, "Epic closing"). A standing Task with no spec to add runs
+  the existing specs its section names instead — still never a whole suite. Nothing in the
+  pipeline runs the full e2e suite: the driven repo runs it outside the pipeline.
+- **`pr-review`** runs targeted specs when a specific finding needs confirming. It never
+  re-runs a suite a required check covers, runs integration specs on a Task only under the two
+  exceptions (scoped the same way), and never bounces a Task for integration or e2e evidence
+  this section does not owe.
+- **A reconcile or sync** (`epic-<n>` ← `main`, a branch's conflict resolution) runs no suite;
+  when the resolution changed code, run only the specs that code touches.
+- **After a failure, re-run only the failing specs** until they pass; never the whole suite
+  to confirm a fix. One clean pass is the evidence: no stability or soak re-runs unless the
+  design names them.
+- **A rework round, a resumed agent or a replacement** re-runs on the new head what this
+  section owes the round, nothing more.
+- **Any run:** a truncating suite only against a database whose effective name ends in
+  `_test` (never a DB-name override copied from an arbitrary Makefile target; otherwise stop
+  and report); a rebuilt `dist` when the diff changes anything compiled ("Compile-checking is
+  not verification").
 
 ## Establish a number by running the thing, not by modelling it
 

@@ -123,7 +123,5 @@ Gate A re-runs every downstream document.
 - Engineering-driven work never reaches this step. It has no Initiative and no
   `product.md`: its scope is written on the Epic, and `architecture` asks clarifying
   questions if needed.
-- **`product` agent:** if your prompt has no scope-alignment answers and the issue is
-  thin, stop and return scoping questions in your final message. Do not invent scope.
 - This step does not replace Gate A. Gate A still reviews the document; this step makes
   sure the document covers the right thing.

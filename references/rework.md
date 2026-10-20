@@ -5,9 +5,8 @@ A deviation from an Epic's approved `architecture.md` has its own path
 
 ## Routing a finding
 
-**Tell the operator first.** On every `rework` outcome, print the blocking findings in chat
-before you route them: one line per finding, with what is wrong, where (`file:line`) and
-the owning stage. "Bounced" alone is not a report.
+Print the blocking findings in chat before you route them (SKILL.md, "After the subagent
+returns").
 
 When a later stage (`arch-review`/`lld-review`, `pr-review`) finds a problem owned by an
 earlier stage, **do not spawn a fresh subagent and do not open a GitHub issue.** Resume
@@ -86,8 +85,9 @@ Each recurring problem gets its own counter per stage pairing (e.g. `arch-review
 
 | Bounce | Action |
 |---|---|
-| 1–3 | Resume the pairing's own tracked agent. |
-| 3rd unresolved | Do **not** park. Retire the incumbent and dispatch a context-reset replacement (below). The counter does not reset; the replacement owns bounces 4–6. |
+| 1–2 | Resume the pairing's own tracked agent. |
+| 3rd unresolved | Do **not** park. Retire the incumbent and dispatch a context-reset replacement (below). The counter does not reset. |
+| 4–5 | Resume the replacement. |
 | 6th unresolved | `python3 "$SDLC" mark-needs-human <n> --reason "..."` — summarize the repeated pattern **and** what the replacement round changed and did not change. Park the issue, return to Step 1. With `pipeline.humanChannel: "session"`, ask the operator first (`references/cloud-mode.md`, "Human channel"). |
 
 - **One replacement per pairing per unit.** Never respawn a second one at bounce 6.
@@ -96,8 +96,8 @@ Each recurring problem gets its own counter per stage pairing (e.g. `arch-review
   `pr-review` <-> `development` (`pr_review_rework_since_last_clean`, reset by every
   clean review), `sync-branch-conflict` <-> `development` (`sync_conflict_count`), and
   the design pairings `product-review` <-> `product`, `arch-review` <-> `architecture`,
-  `lld-review` <-> `lld` (per role under `design_review`). Unmarked pairings (e.g.
-  `testing` <-> `development`) are your own session-scoped count.
+  `lld-review` <-> `lld` (per role under `design_review`). An unmarked pairing (e.g. a gate's
+  feedback rounds, `references/gates.md`) is your own session-scoped count.
 
 ### Context-reset replacement
 

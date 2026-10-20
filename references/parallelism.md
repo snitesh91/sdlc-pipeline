@@ -14,8 +14,9 @@ eligibility.
 - Start every unit with `start-stage <n> --role <role>`, never a bare `claim`.
 - Dispatch all selected units in **one parallel `Agent` call**, one subagent per unit,
   each told its own worktree path. Track one stage agent per active unit.
-- **Hold the waiting yourself.** A subagent cannot wait across turns. When a stage is
-  blocked on a long external job (image build, full suite, stack coming healthy), you run
+- **Hold a wait that outlives the agent's turn.** A subagent waits on its own jobs in-turn
+  (`Monitor`), but nothing re-invokes it after its turn ends. When a stage handed back while
+  a long external job is still running (image build, spec run, stack coming healthy), you run
   the poll (`run_in_background`, generous window) and resume the agent once with the
   result. Prefer the agent launching the job as a detached, daemon-managed container
   that writes its report under a bind mount, never inside an `--rm` container.
@@ -89,18 +90,19 @@ The caps bound agents, not suite runs; the machine's memory/CPU is the real limi
   `pr-review` of a Task whose design needs a running stack, the e2e-test Task, the
   exploratory pass, `initiative-close`). An exhausted Docker VM makes a run unrecordable
   (`Page crashed`, `ENOSPC`, container OOM kills): check `docker system df`, VM disk use
-  (under ~80%) and host free memory; prune build cache and stop stale stacks first. A run
+  (under ~80%) and host free memory; prune the build cache (yours to do, never a stage
+  agent's: `stage-playbooks.md`, "Never prune the host") and stop stale stacks first. A run
   with crash-class failures is an environment failure: fix it and re-run, never record it.
 - Run **at most one suite-heavy stage at a time** machine-wide (a `development` or
-  `pr-review` running the integration or e2e suite), whatever the cap. A light stage
+  `pr-review` running integration or e2e specs on a stack), whatever the cap. A light stage
   (`lld`, a design review not running suites) may run alongside. Hold the second
   suite-heavy stage until the first finishes.
 - A Task whose acceptance criterion is a wall-clock budget holds the Docker VM alone for
   that measurement: quiesce every other Docker-using stage on the machine first, light
   ones included, and hold them until it finishes.
-- Tell suite-running agents: a suite too big to run single-process runs in memory-scoped
-  batches that partition the whole tree (record which batch covered which directories);
-  run the integration suite backgrounded/chunked, never one blocking foreground call.
+- Tell an agent running a whole suite (only one "Test scope" owes locally): a suite too big
+  to run single-process runs in memory-scoped batches that partition the whole tree (record
+  which batch covered which directories), backgrounded, never one blocking foreground call.
 - A resource kill is never a code finding: name which suites did and did not run; never
   report an unrun suite as passing.
 - If runs report starvation rather than defects, lower the caps; never make reviews
@@ -115,13 +117,15 @@ The caps bound agents, not suite runs; the machine's memory/CPU is the real limi
 1. **Inspect the worktree yourself** — commits ahead of `origin`, `git status
    --porcelain`, whether a PR exists. Don't ask the agent.
 2. **Resume the same agent** with `SendMessage`. Tell it what survived (uncommitted,
-   unpushed, untracked) and: **treat nothing as verified; re-run every check.**
+   unpushed, untracked) and: **treat nothing as verified; re-run every check the stage owes**
+   (`verification-rules.md`, "Test scope") on what survived.
 3. **Push rejected → the agent stops and reports.** Overwriting a branch is the
    operator's call, after verifying it is a strict content-superset of what it overwrites.
 
-When dispatching into an unstable session, tell the agent: **commit and push after each
-self-contained step; never batch to the end**; prefer several small `Edit`s over one
-whole-file rewrite; do the cheapest, most certain work first.
+When dispatching into an unstable session, say so in the prompt (the session is unstable):
+the agent then commits after each self-contained step and pushes while no PR exists
+(`agents/development.md`, "Commits and pushes"), prefers several small `Edit`s over one
+whole-file rewrite, and does the cheapest, most certain work first.
 
 **Stopping a fan-out parent does not stop its children.** After `TaskStop`, its axis
 subagents keep running and report to you later under their own task ids. Salvage what
@@ -135,8 +139,8 @@ difference is minutes.
 
 - `sync-branch`/`transition`/`prepare-rework` returns `conflict: true` + `conflicting_files` → rework:
   resume that child's own `development` agent with the files, it resolves in its own
-  worktree, re-run `sync-branch`. Escalation pairing `sync-branch-conflict` ↔
-  `development`, counted by `pairing-counts <n>` (→ `references/rework.md`).
+  worktree, re-run `sync-branch`. It counts toward the `sync-branch-conflict` ↔ `development`
+  valve (`references/rework.md`, "Escalation valve").
 - `base_missing: true` → nothing to reconcile yet; proceed.
 - **Merge-time freshness gate:** `merge-pr` returns `merged: false` + `behind_base` (or
   `transition` a `held`) → `prepare-rework <n>`; satisfy its `suites.needed` (SKILL.md,
@@ -153,10 +157,9 @@ difference is minutes.
   agent: resolve it yourself in the epic worktree, or dispatch a `development` agent for
   that one reconcile — never a child's tracked agent. A clean textual merge is not enough:
   re-check what no file conflict shows (a count or allow-list both sides pinned, specs
-  moved on one side, a footprint the merge widened). Brief that agent to run only the specs
-  the merge touched and, after a failure, only the failing ones; the epic PR's CI into `main`
-  runs the whole suite, so never ask for a full local run (`agents/development.md`, "After a
-  failure, re-run only the failing specs").
+  moved on one side, a footprint the merge widened). Brief that agent per
+  `verification-rules.md`, "Test scope" (a reconcile runs only the specs the resolution
+  touched; never a full local run).
 
 ## Working on a branch
 

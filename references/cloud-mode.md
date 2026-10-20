@@ -41,7 +41,10 @@ python3 "$SDLC" place <n> --where cloud|local [--force] --repo-path <p>
 ```
 
 - Run on an Epic or Initiative; it adds (creating it if missing) or removes the label.
-  Idempotent: an Epic already on that side returns `already: true`.
+  Idempotent: an Epic already on that side returns `already: true`. On a Task of a cloud Epic
+  it adds or removes `localLabel` instead ("Placement rules"), refusing a Task in progress or
+  held by a local worktree unless `--force`; `still_local` says a `localTasks` kind still
+  matches after `--where cloud`.
 - It refuses (`refused: true`, `worktrees`) while a live local worktree holds any unit under
   `<n>` (`epic-<n>`, a child's `issue-<m>`, a detached review/dev tree): work not pushed from
   there is invisible to the other side. Push or release them, then re-run; `--force` only on

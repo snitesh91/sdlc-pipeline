@@ -232,15 +232,17 @@ human gates on product/architecture are separate and unaffected.
   reviewer never merges the diff it reviewed. It does every post-merge write itself (audit
   comments, closing the issue, terminal fields); on an already-merged PR it only finishes
   that bookkeeping (`recovered: true`).
-- **A development PR authors no design doc, and touches no other Task's footprint.**
-  `open-dev-pr` refuses (before opening) a branch diff that edits any Epic design doc under
-  `<docRoot>/epic-*/` (e.g. `lld.md`) or a file listed in another open Task's `## Footprint`
-  of the Epic's `lld.md`; files in the unit's own footprint are fine. `verify-exit` reports
+- **A development PR authors no open Epic's design doc, and touches no other Task's
+  footprint.** `open-dev-pr` refuses (before opening) a branch diff that edits a design doc
+  under `<docRoot>/epic-<n>/` while Epic n is open (e.g. `lld.md`; a closed Epic's correction
+  passes: `references/epics.md`, "A closed Epic's design docs are its as-built record") or a
+  file listed in another open Task's `## Footprint` of the Epic's `lld.md`; files in the
+  unit's own footprint are fine. `verify-exit` reports
   the same offenders on the pr-review handoff (`dev_pr_scope`). A foreign-Footprint path the
   PR body acknowledges under `## Footprint deviations` passes both, returned as
   `acknowledged_deviations` for `pr-review` to adjudicate (`agents/development.md`, gate 6);
-  a design-doc path never does. If the design truly needs to change, escalate an
-  Architecture/LLD revision — do not edit the doc from a development branch.
+  an open Epic's design-doc path never does. If the design truly needs to change, escalate an
+  Architecture revision — do not edit the doc from a development branch.
 - Never delete the per-issue docs folder after merge.
 - `merge-pr` is the only merge gate (branch protection is unavailable — don't look for
   it). It refuses on a non-passing check, a code-touching PR whose required suite has
@@ -256,9 +258,10 @@ required on a PR only when the PR changes a file its entry covers; an empty or d
 requires nothing. **One rule wherever the pipeline checks a suite** (`transition` into
 `pr-review`, `pr-checks`, `merge-pr`, `close-epic`): the suite is satisfied by **a passing
 GHA check for its workflow on the current PR head OR a `record-local-ci` attestation for
-that head**. A suite whose workflow runs on every PR it applies to needs no local run at
-all — mark it `attestable: false` so no stage is ever asked for one. `record-local-ci` is
-for a suite with no PR-level CI (a workflow that runs only on push to `main`).
+that head**. `record-local-ci` is for a suite with no PR-level CI (a workflow that runs only
+on push to `main`); a suite whose workflow runs on every PR it applies to is marked
+`attestable: false` (below), so no stage is ever asked to run it. Which suites a stage runs
+at all: `references/verification-rules.md`, "Test scope".
 
 - Attesting: for each attestable suite it actually ran and passed, `development` runs
   `record-local-ci --pr <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`,
@@ -283,9 +286,6 @@ for a suite with no PR-level CI (a workflow that runs only on push to `main`).
   merge brought in touches its paths or the pipeline config. A failing run is never
   overridden. The carried check reads `<workflow> (carried)` with `carried_from`. So after
   the merge train syncs a PR, cancel the redundant run instead of waiting for it.
-- A standalone fix PR into `main` may carry a local attestation (`record-local-ci`) instead
-  of the workflow's check for any entry left attestable (the default, below); mark an entry
-  `attestable: false` to demand the CI check on every PR it applies to.
 - `merge-pr` accepts `--run-id`: the terminal-unit count is booked under that run rather
   than whatever id last wrote the epic's run-state file (which may be a throwaway probe
   run's). Without it, the state file's current id stands.
@@ -297,8 +297,10 @@ for a suite with no PR-level CI (a workflow that runs only on push to `main`).
   entry to those PR base branches only (omitted = every base) — so an integration suite can be required on PRs into `main` yet
   ignored on child PRs into an epic branch. Optional **`attestable: false`** (default
   `true`): the workflow runs on every PR the entry applies to, so only its passing check
-  satisfies the suite — no stage runs it locally, `record-local-ci` refuses it, and
-  `close-epic` lists it under `awaiting_checks` instead of `unattested_suites`.
+  satisfies the suite — no stage runs it locally for that PR, `record-local-ci` refuses it
+  wherever its workflow covers the PR (on a PR its workflow does not cover, e.g. into
+  `epic-*`, it keeps a run as a record only: `stands_in_for_check: false`), and `close-epic`
+  lists it under `awaiting_checks` instead of `unattested_suites`.
 - A PR into a branch other than `main` also owes the entries that branch's own committed
   config adds (`origin/<base>`); the local config's entry wins on a shared `workflow` name.
 

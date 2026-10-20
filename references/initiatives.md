@@ -20,7 +20,7 @@ Epics..."`.
 ## Cutting Epics from an approved Initiative
 
 Do this yourself, not via a subagent: read the Product-Roadmap Task's approved
-`docs/sdlc/issue-<n>/product.md` and cut it into Epics:
+`<docRoot>/issue-<n>/product.md` and cut it into Epics:
 
 - **Each Epic must be independently mergeable to `main` and independently shippable**
   (into `initiative-<i>` under an initiative branch). An Epic that only makes sense once a

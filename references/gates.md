@@ -144,9 +144,9 @@ never a resumed one; a gate can sit open for days. Its prompt carries the issue'
 body/comments, the doc's current content, every unresolved thread's text with its
 anchored diff hunk, and every plain PR comment after the cutoff marker. The doc and the PR
 depend on the issue: an Epic's Architecture-phase/revision Task's feedback is on its **design
-PR** `issue-<n>` → `epic-<e>` and the doc is `docs/sdlc/epic-<e>/architecture.md`; a
+PR** `issue-<n>` → `epic-<e>` and the doc is `<docRoot>/epic-<e>/architecture.md`; a
 Product-Roadmap Task's or standing child's is on its gate PR `issue-<n>` → `main` and the doc
-is `docs/sdlc/issue-<n>/<doc>.md`. Either way the fix lands on `origin/issue-<n>`, which
+is `<docRoot>/issue-<n>/<doc>.md`. Either way the fix lands on `origin/issue-<n>`, which
 updates the open PR (no new PR). Instruct the agent to:
 
 1. Revise the gated doc for each piece of feedback from either channel, or state in its reply
@@ -248,6 +248,5 @@ On a **clean `product-review`** (Gate A) or **clean `arch-review`** (Gate B):
   gate PR or require re-approval. Exception: a deviation from an Epic's design runs a
   fresh Gate B on an Architecture revision Task (`references/epics.md`, "Architecture
   deviation escalation").
-- Never `--delete-branch` when merging a standing child's or parentless issue's gate PR,
-  or a design PR. Never delete `epic-<n>` while its Epic is open (`close-epic`'s merge is the
-  one deletion).
+- Branch deletion on a gate or design PR: "Opening a gate", **Merging**; `epic-<n>`:
+  `references/epics.md`, "The epic integration branch".
