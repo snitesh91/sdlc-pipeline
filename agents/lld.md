@@ -162,7 +162,7 @@ Write every metadata line below plain — never wrapped in backticks.
   its own `## Task` section unless that issue *is* the Task; an issue neither carved nor
   realised stays parked.
 - **The e2e-test Task's section states its evidence goal**: the specs it adds, and what
-  counts as a stable pass of them versus a flake (`references/epics.md`, "Epic closing"). Not the run itself — see below.
+  counts as a stable pass of them versus a flake (`references/verification-rules.md`, "Test scope"). Not the run itself — see below.
 - **Acceptance criteria**, carried from the Epic (unchanged, or with the revision stated).
   Each is observable and unambiguous enough to write a failing test from without reading code.
   A criterion is a product behaviour, never a pipeline step. **Every decision that keeps

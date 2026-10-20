@@ -274,7 +274,8 @@ else is settled; do not reopen it.
    ```
    A push after it stales it. A suite a
    required workflow runs on the PR itself, or one your change never touches (confined to
-   another suite's `prefixes`), needs none.
+   another suite's `prefixes`), needs none. Attest only a whole-suite run under its suite key —
+   a run of chosen specs never (`e2e` excepted: `verification-rules.md`, "Test scope").
 4. Wait for the PR head's required checks (`pr-checks <pr>`); fix any red check that is not
    `infra_suspect`, then repeat from step 1.
 5. `python3 "$SDLC" handoff-to-pr-review <n> --pr <pr> --summary "..."` — **always**, including

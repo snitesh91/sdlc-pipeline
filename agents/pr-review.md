@@ -250,14 +250,18 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
   `merge-pr` after your record. Use `pr-checks` only for the pending/failed/missing
   distinction.
 - **`pr-checks` status `missing-checks`** → never poll it; its `hint` names the cause
-  (`references/operations.md`, "Local-CI attestation").
+  (`references/operations.md`, "Local-CI attestation"), read against
+  `verification-rules.md`, "Test scope".
   - **A suite the config requires a local attestation for, unattested for this head** (the
     common case, not a defect — `development` skipped `record-local-ci`, or a rework push
-    staled it) → re-run the suite on the current head, then
+    staled it; only a suite whose workflow does not run on this PR — an integration suite owed
+    on a Task PR into `epic-<n>` is the config defect below) → re-run the suite on the current
+    head, then
     `python3 "$SDLC" record-local-ci --pr <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`,
     and re-check. Never escalate this to a human.
   - **A genuine config defect** (another required workflow renamed out of step with the
-    config's `requiredWorkflows`, disabled, or `paths:`-mismatched) → stop with outcome
+    config's `requiredWorkflows`, disabled, or `paths:`-mismatched, or an integration entry
+    missing `bases: ["main", "initiative-*"]`) → stop with outcome
     `needs-human`, BLOCKER `required workflow reported no check: <names>`; the orchestrator
     runs `mark-needs-human` — *unless* the PR's own diff touches `.github/workflows/**`: then
     report REWORK naming the missing workflows.

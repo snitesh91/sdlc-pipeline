@@ -67,7 +67,8 @@ An explicit allow rule resolves before the classifier. Add to the driven repo's
 
 ## Auto-mode allow rule for the `pr-review` mutation probe
 
-The probe edits a file under the review worktree (`<worktrees.root>/<reviewPrefix><n>/`,
+The probe (the `Edit` tool; the edit guard denies a review role any edit outside its
+`<worktrees.root>/<reviewPrefix><n>/` tree) edits a file under the review worktree (`<worktrees.root>/<reviewPrefix><n>/`,
 default `/tmp/sdlc-review-<n>/`). Outside the project directory, so the auto-mode classifier
 may deny it; an explicit allow rule resolves before the classifier. Add to the driven repo's
 `.claude/settings.json` (path rules are `Edit(...)` only — `Write`/`MultiEdit` rules are never
@@ -309,8 +310,10 @@ is set, `pr-checks` returns a `hint` field naming the causes in likelihood order
 `merge-pr`'s refusal carries the same hint):
 
 - The workflow does not run on this PR (e.g. main-only) and its suite is not attested for
-  the current head (the usual case, not a defect) → `development` re-runs the suite and
-  `record-local-ci` for that head.
+  the current head → `development` runs the suite and `record-local-ci` for that head — only
+  where "Test scope" owes that run (`references/verification-rules.md`). An integration suite
+  owed on a Task PR into `epic-<n>` is a config defect instead: its entry lacks
+  `bases: ["main", "initiative-*"]`; fix the config, never run it.
 - The workflow file is not on the PR branch (added on the base after the branch was cut)
   → run `sync-branch` and push so it can run.
 - A still-required GHA workflow never reported (renamed out of step with

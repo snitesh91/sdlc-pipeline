@@ -334,9 +334,11 @@ the operator to close.
    `evidence_breaks` (why a suite's child chain failed: the child PR or direct commit that
    breaks it).
 2. Run the exploratory pass against the reconciled tree and record it. Also run each suite in
-   `unattested_suites` (attestable suites only) with a fresh `sdlc:development` agent and a
-   run-only brief (fix nothing, report); never a suite in `awaiting_checks` — the epic PR's CI
-   runs it.
+   `unattested_suites` whose workflow does not run on the epic PR (one that runs only on push
+   to `main`) with a fresh `sdlc:development` agent and a run-only brief (fix nothing,
+   report). A suite whose workflow does run on the epic PR — every one in `awaiting_checks`,
+   and any `unattested_suites` entry left attestable — waits for that check: never run it
+   locally (`references/verification-rules.md`, "Test scope").
 3. Second call: refuses on missing or stale evidence (`missing_verification`) or a required
    suite still `missing` (`checks: missing-checks`); otherwise merges `epic-<n>` to `main`.
    A failed, pending or never-started GitHub Actions run never blocks this merge by itself —
