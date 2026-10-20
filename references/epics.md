@@ -237,7 +237,10 @@ Task in `development`, a review) first decides whether its work fits it:
      `pause-for-epic-regate <n> --epic <epic-n> [--gate-pr <pr>] --found-by <stage>`
      (`--gate-pr` only once the revision's design PR exists); the `--blocks` edge holds it
      until the revision closes. Then resume its agent directly (a replacement per
-     `references/rework.md` if it is gone) — **no `set-stage`**: the pause keeps Stage, and
+     `references/rework.md` if it is gone) — **no `set-stage`, no `claim`**: the unit stays
+     parked `todo` while the resumed agent works (`post-comment` accepts that), and
+     `transition`'s review start re-claims it (`reclaimed: true`), so the reviewer's
+     `post-comment` passes. Also **no `set-stage`** because the pause keeps Stage, and
      once a Task's PR exists Stage stays `pr-review` for life (`open-dev-pr` sets it once;
      `handoff-to-pr-review` never touches it), so a hand `set-stage development` desyncs it and
      `transition`'s `verify-exit` refuses. An LLD-phase Task resumes `lld` against the revised
@@ -428,6 +431,13 @@ ask `development` to edit `epic-<n>/architecture.md` or `lld.md`, and never rout
 to `pr-review` as a design check. A fix that lands on `epic-<n>` after the tested head
 is judged by "Evidence carry-forward" above: `close-epic`'s `evidence` field says what still
 stands and what must be re-run and re-recorded.
+
+**A closed Epic's design docs are its as-built record, and a correction to them routes
+through `development`.** A standing child (or any unit) whose fix is doc drift in a closed
+Epic's `epic-<n>/architecture.md` / `lld.md` (the code answers 422, the doc says 400; a
+"Superseded by" note) edits it on its own branch, and `open-dev-pr` accepts the diff: its
+design-doc refusal covers only Epics still open. An open Epic's docs change only through its
+phase-Tasks or an Architecture revision, never a development diff.
 
 **Pass `--clean-worktree` on the `close-epic` call after the closing run.** The exploratory
 pass and the `unattested_suites` runs leave untracked output in the epic worktree (evidence

@@ -22,6 +22,9 @@ class _Gh:
     def pr_files(self, n):
         return self.changed
 
+    def issue_view(self, n):
+        return {"comments": []}
+
     def pr_checks(self, n):
         return self.checks
 

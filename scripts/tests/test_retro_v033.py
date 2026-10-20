@@ -122,6 +122,9 @@ class _StaleGh:
     def pr_checks(self, n):
         return []
 
+    def issue_view(self, n):
+        return {"comments": []}
+
     def files_since(self, sha, branch):
         return self.delta_by_sha.get(sha, [])
 

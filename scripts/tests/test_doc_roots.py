@@ -124,7 +124,8 @@ def test_single_doc_root_config_is_unchanged(single_root, capsys):
     assert s.design_doc_dir(None, 5) == f"{root}/issue-5"
     assert s.design_doc_dir(7, 8) == f"{root}/epic-7"
     doc = f"{root}/epic-7/lld.md"
-    offenders = s.dev_pr_scope_offenders(object(), 8, [doc], repo_path="/repo",
+    open_epic = type("Gh", (), {"issue_list": lambda self: [{"number": 7, "state": "OPEN"}]})()
+    offenders = s.dev_pr_scope_offenders(open_epic, 8, [doc], repo_path="/repo",
                                          runner=ScriptedRunner({}))
     assert offenders["design_docs"] == [doc]
 

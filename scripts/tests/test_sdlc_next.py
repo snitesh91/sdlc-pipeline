@@ -725,7 +725,7 @@ def test_epic_legacy_skips_entirely_even_over_crash_recovery():
 def test_check_epics_closeable_posts_checklist_flags_open_dependents_and_assigns_human():
     from sdlc_next import GitHub, cmd_check_epics_closeable, _BLOCKING_QUERY, HUMAN_ASSIGNEE, REPO
     from tests.test_sdlc_next import ScriptedRunner
-    epic = _epic(94)
+    epic = _epic(94, labels=["epic:architected"])
     child_a = _issue(10, parent=94, state="CLOSED")
     child_b = _issue(11, parent=94, state="CLOSED")
     issues = [epic, child_a, child_b]
@@ -773,7 +773,7 @@ def test_check_epics_closeable_flags_an_epic_doc_that_never_reached_the_epic_bra
     """The closing checklist verifies epic docs on `epic-<n>` and flags any that are missing."""
     from sdlc_next import GitHub, cmd_check_epics_closeable, _BLOCKING_QUERY, HUMAN_ASSIGNEE, REPO
     from tests.test_sdlc_next import ScriptedRunner
-    issues = [_epic(94), _issue(10, parent=94, state="CLOSED")]
+    issues = [_epic(94, labels=["epic:architected"]), _issue(10, parent=94, state="CLOSED")]
     responses = {tuple(_list_argv()): _list_response(issues)}
     responses[("gh", "issue", "view", "94", "--repo", REPO,
                "--json", "number,title,labels,body,state,comments")] = json.dumps({"comments": []})
@@ -807,7 +807,7 @@ def test_check_epics_closeable_skips_standing_epic_and_already_notified_epic():
     standing_epic = _epic(95, labels=["epic:standing"])
     standing_child = _issue(50, parent=95, state="CLOSED")
 
-    notified_epic = _epic(96)
+    notified_epic = _epic(96, labels=["epic:architected"])
     notified_child = _issue(60, parent=96, state="CLOSED")
 
     issues = [standing_epic, standing_child, notified_epic, notified_child]
@@ -957,6 +957,7 @@ def test_start_comment_posts_marker_with_no_label_mutation():
          "--body", "🚧 Picking this up — arch-review stage starting."): "",
         **dict([_epic_check(9)]),  # arch-review surfaces the profile's skip threshold
     })
+    runner.prefix_responses[("gh", "issue", "view", "9")] = '{"comments": []}'
     gh = GitHub(runner=runner)
     assert cmd_start_comment(gh, 9, "arch-review") == {
         "issue": 9, "started": "arch-review", "skip_confidence_threshold": 80}
@@ -2235,7 +2236,9 @@ def test_non_architected_epic_holds_its_stageless_tasks():
     # Before epic:architected, a Stage-less child waits on merge-lld-doc: not delegated or staged.
     from sdlc_next import GitHub, decide_next_action
     epic_92 = _epic(92, priority="Urgent")
-    issues = [epic_92, _issue(101, parent=92)]
+    phase = [_issue(n, parent=92, state="CLOSED") for n in (98, 99)]
+    phase[0]["title"], phase[1]["title"] = "Architecture phase", "LLD phase"
+    issues = [epic_92, *phase, _issue(101, parent=92)]
     runner = ScriptedRunner({tuple(_list_argv()): _list_response(issues)})
     gh = GitHub(runner=runner)
     assert decide_next_action(gh, 92) == {"action": "none", "epic": 92}
@@ -6171,12 +6174,12 @@ class _ListGh:
 def _audit_tree():
     return _ListGh([
         _full(1, issue_type="Initiative", labels=["type:initiative"], status=None),
-        _full(2, issue_type="Epic", labels=["type:epic"], parent=1, status=None),
+        _full(2, issue_type="Epic", labels=["type:epic", "epic:architected"], parent=1, status=None),
         _full(3, issue_type="Task", labels=["type:task"], parent=2),
         _issue(4, labels=["type:task"], parent=2),
         _full(5, issue_type="Task"),
         _issue(6, state="CLOSED"),
-        _full(7, issue_type="Epic", labels=["type:epic"], status=None),
+        _full(7, issue_type="Epic", labels=["type:epic", "epic:architected"], status=None),
         _full(8, labels=["type:task"], parent=7),
         _full(10, issue_type="Feature"),
         _issue(11, parent=10),

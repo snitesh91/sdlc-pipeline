@@ -237,7 +237,10 @@ included.
 6. **Sweep every numbered task-local decision in the design**, in order: quote the code that
    realises it and write `conform` or `deviate`. A `deviate` row states what you did instead
    and why, and goes in the PR description as an explicit delta — **you author no design doc,
-   so never edit `<docRoot>/epic-*/**` (`lld.md` / `architecture.md`) to record it**. A path
+   so never edit an open Epic's `<docRoot>/epic-*/**` (`lld.md` / `architecture.md`) to
+   record it**. The one exception: a unit whose issue asks for a correction to a **closed**
+   Epic's docs (as-built drift, a "Superseded by" note) makes it, and `open-dev-pr` passes
+   it. A path
    in another Task's `## Footprint` that your change inherently needs (a side effect, not a
    sibling's work): acknowledge it in the PR body as a bullet under `## Footprint deviations`,
    `` - `path` — why ``, so `open-dev-pr` passes it and `pr-review` adjudicates it; work that
