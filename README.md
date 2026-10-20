@@ -128,7 +128,9 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `pipeline.initiativeProfiles[].placement` | unset | `cloud` / `local`: overrides `pipeline.placement.initiativeEpics` for the Initiatives that profile matches |
 | `pipeline.prePr.command` | `""` | Pre-PR check `development` runs green in its worktree, with `PRE_PR_BASE=origin/<PR base>` exported, before `open-dev-pr` (`agents/development.md`) |
 | `pipeline.retro.parkIssue` | unset | Open issue `park-finding` parks retro findings on (`references/retro.md`); issues labelled `pipeline.labels.retro` (`sdlc:retro`) are never pipeline work |
-| `pipeline.placement.stallMinutes` | 90 | A live cloud Epic with no GitHub activity this long is `stalled` in `cloud-status` |
+| `pipeline.placement.stallMinutes` | 90 | A live cloud Epic idle this long (since its session's heartbeat, `cloud-heartbeat`, or its last GitHub activity) is `stalled` in `cloud-status`; a session asking the operator never is |
+| `pipeline.placement.localLabel` | `sdlc:local` | Label (`place <task> --where local`) that keeps one Task of a cloud Epic on the laptop: the cloud session skips it, a laptop `/sdlc:run <epic>` drives only such Tasks |
+| `pipeline.placement.localTasks` | `[]` | Task kinds local with no label: `e2e-test`, `integration-test` (by title) or `label:<name>`; a cloud session ends `waiting-local` once only these remain |
 | `pipeline.placement.softOverlapPaths` | `[]` | fnmatch globs (e.g. a migrations index, a docs table) dropped from Epic footprints before `launch-cloud-epic`'s overlap check: overlap confined to them never holds a launch |
 | `pipeline.humanChannel` | `github` | Where the operator answers: `github` (needs-human, gate PRs) or `session` (the orchestrator asks with `AskUserQuestion` and records the answer; `references/cloud-mode.md`, "Human channel") |
 | `pipeline.orchestrator.model` | `hooks/model_policy.json` (`sonnet`) | Model `sdlc-run` starts the orchestrator on, and the one the session-start hook expects; a family (`opus`) or a full model id |
@@ -163,7 +165,9 @@ python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<proj
   `cut-phase-tasks` for the next runnable Epic that has none and `run-epic` to drive it, one Epic
   at a time under one run id and one `maxTasksPerRun` cap (`--skip-epic` parks a stalled one).
   With `pipeline.placement.initiativeEpics: cloud` it instead launches each runnable Epic in
-  its own claude.ai cloud session (`launch-cloud-epic`, watched with `cloud-status`).
+  its own claude.ai cloud session (`launch-cloud-epic`, watched with `cloud-status`). A session
+  records what it waits on when it ends, and the laptop relaunches it once that clears;
+  `record-cloud-session` registers one started by hand.
   `merge-gate --operator-confirmed` merges a gate PR, only when the operator says to.
 - **Engineering-driven**: a bare Epic with its scope in the body starts at architecture.
 - Each non-standing Epic owns a branch `epic-<n>`, created eagerly, and **every child branches

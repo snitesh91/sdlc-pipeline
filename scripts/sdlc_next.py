@@ -9841,8 +9841,6 @@ def session_waits(gh, session: Optional[dict], by_number: dict,
     Tasks) clears once cloud work reappears under `epic` or no local Task is left open."""
     ended = (session or {}).get("ended") or {}
     waits = ended.get("waits") or []
-    if not waits:
-        return None
     if ended.get("outcome") == "waiting-local" and epic is not None:
         issues = list(by_number.values())
         pending = local_task_numbers(epic, issues)
@@ -9852,6 +9850,8 @@ def session_waits(gh, session: Optional[dict], by_number: dict,
         held = bool(pending) and not remote
         return {"outcome": "waiting-local", "waits": waits, "pending": pending if held else [],
                 "resolved": not held}
+    if not waits:
+        return None
     ended_at = _parse_ts(ended.get("at"))
     pending = []
     for w in waits:
@@ -9966,11 +9966,12 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
         session = sessions.get(n)
         waits = session_waits(gh, session, by_number, epic=n) if session else None
         if reason is None and waits and not waits["resolved"] and not relaunch:
-            reason = (f"its cloud session ended ({waits['outcome']}) waiting on "
-                      f"{', '.join(f'#{w}' for w in waits['pending'])} -- it relaunches once "
-                      f"that clears (`--relaunch` to start one now)")
-            if waits["outcome"] == "waiting-local":
-                reason += f"; a laptop `/sdlc:run {n}` drives the local Tasks"
+            on = ', '.join(f'#{w}' for w in waits['pending'])
+            reason = (f"waiting on its local Tasks ({on}) -- a laptop `/sdlc:run {n}` drives "
+                      f"them; it relaunches once cloud work reappears"
+                      if waits["outcome"] == "waiting-local" else
+                      f"its cloud session ended ({waits['outcome']}) waiting on {on} -- it "
+                      f"relaunches once that clears (`--relaunch` to start one now)")
         elif reason is None and session and session["ended"] and not waits and not relaunch:
             ended_at = _parse_ts(session["ended"].get("at"))
             if open_prs is None:

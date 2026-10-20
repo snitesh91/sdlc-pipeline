@@ -168,3 +168,33 @@ def test_a_waiting_local_epic_is_not_relaunched_while_only_local_tasks_remain():
     gh.issues[5]["state"] = "CLOSED"
     gh.issues[6] = {**gh.issues[5], "number": 6, "state": "OPEN", "labels": ["type:task"]}
     assert _survey(gh)["launchable"] == [2]
+
+
+# --- waiting-local rides the recorded-waits path (session_waits) --------------------------
+
+def test_waiting_local_records_the_epics_local_tasks_as_its_waits():
+    from tests.test_cloud_epics import _initiative, _launched
+    gh = _initiative({"number": 2, "comments": [_launched()]},
+                     extra=[{"number": 5, "labels": ["type:task", LOCAL], "parent": 2},
+                            {"number": 6, "labels": ["type:task"], "parent": 2,
+                             "state": "CLOSED"}])
+    out = s.cmd_end_cloud_session(gh, 2, "waiting-local")
+    assert out["waits"] == [5] and " waits=5 -->" in gh.comments_on(2)[-1]
+
+
+def test_waiting_local_waits_clear_only_when_cloud_work_reappears():
+    from tests.test_cloud_epics import _initiative, _launched
+    gh = _initiative({"number": 2, "comments": [_launched()]},
+                     extra=[{"number": 5, "labels": ["type:task", LOCAL], "parent": 2}])
+    s.cmd_end_cloud_session(gh, 2, "waiting-local")
+    session = s.latest_cloud_session([{"body": b} for b in gh.comments_on(2)])
+    by_number = {i["number"]: i for i in gh.issue_list()}
+    held = s.session_waits(gh, session, by_number, epic=2)
+    assert held["resolved"] is False and held["pending"] == [5]
+    # New activity on the local Task alone does not clear it ...
+    gh.issues[5]["comments"] = [{"body": "laptop progress", "createdAt": "2099-01-01T00:00:00Z"}]
+    assert s.session_waits(gh, session, by_number, epic=2)["resolved"] is False
+    # ... a new cloud Task does (positive control).
+    gh.issues[6] = {**gh.issues[5], "number": 6, "labels": ["type:task"], "comments": []}
+    by_number = {i["number"]: i for i in gh.issue_list()}
+    assert s.session_waits(gh, session, by_number, epic=2)["resolved"] is True
