@@ -432,6 +432,7 @@ instead of grepping and reading inline.
 |---|---|
 | `done` / `clean` | The next step per the agent file's routing; `transition` (below) before the next stage. A `pr-review` `clean` → you run `merge-pr <pr> --issue <n> --run-id "$RUN_ID"` (behind-base refusal: `references/parallelism.md`, "Git-conflict handling") |
 | `rework` | Print the blocking findings in chat first, one line each: what, where (`file:line`), owning stage. Never just "bounced". Then route them (`references/rework.md`) |
+| `blocked` with `"fanout": "unavailable"` | A review agent with no `Agent` tool (cloud) handed its fan-out to you: launch one agent per listed axis from its brief files, save the replies, resume the reviewer (`references/review-fanout.md`, "The orchestrator fans out for you") |
 | `blocked` | Clear the named blocker: resume the stage that owns the question, `open-arch-revision` for a design that does not fit, `mark-blocked` for a cross-issue dependency |
 | `needs-human` | `pipeline.humanChannel: "session"`: ask in session, record the answer, resume the stage (`references/cloud-mode.md`, "Human channel"); `"github"`: `mark-needs-human <n> --reason "..."`, park, Step 1 |
 | `failed` | Inspect the worktree and result yourself, then resume the agent |

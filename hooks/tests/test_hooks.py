@@ -1807,3 +1807,14 @@ def test_a_cloud_container_placed_local_still_overrides_the_placeholder(tmp_path
 def test_local_without_gh_login_still_warns(tmp_path):
     _, ctx = _token_start(tmp_path, {"tokenEnv": "MY_GH_TOKEN"}, {})
     assert "yield no token" in ctx
+
+
+def test_a_fanout_handoff_result_is_a_valid_sdlc_result():
+    """A reviewer with no Agent tool hands its fan-out to the orchestrator
+    (review-fanout.md, "The orchestrator fans out for you"); SubagentStop must accept it."""
+    sys.path.insert(0, HOOKS)
+    from _common import sdlc_result
+    line = ('SDLC-RESULT: {"issue": 7, "stage": "lld-review", "outcome": "blocked", '
+            '"fanout": "unavailable", "axes": ["completeness", "flows"]}')
+    result, problem = sdlc_result(line)
+    assert problem is None and result["axes"] == ["completeness", "flows"]
