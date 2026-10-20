@@ -1,6 +1,7 @@
 """PreToolUse(Agent|Task): every sdlc agent runs at its policy model, and review fan-out is capped.
 
-A stage agent gets `models.<role>`; a child launched by an `sdlc:<parent>` agent gets
+A stage agent gets `models.<role>`; a child launched by an `sdlc:<parent>` agent (a review
+axis, or a development worker when `pipeline.fanout.development` allows it) gets
 `fanout.<parent>` and is denied when that parent may not fan out, is out of slots, or the
 child is itself a stage. An `explore` role's read-only Explore search passes untouched.
 Policy: `_common.model_policy`.
@@ -15,6 +16,7 @@ from _common import (agent_transcript, emit, first_prompt, load_json, model_poli
 
 DESIGN_REVIEW = "design-review"
 DESIGN_REVIEW_ROLES = ("arch-review", "lld-review")
+WORKER_ROLES = ("development",)
 SLOT_TTL_S = 2 * 86400
 RETRY_HINT = ("re-run this launch when any holder reports; work an axis yourself only when no "
               "holder is left to wait for")
@@ -181,13 +183,16 @@ def main() -> int:
                        f"{parent} fan-out policy.")
     fanout = policy["fanout"].get(parent) or {}
     suffix = f" ({warning})" if warning else ""
-    if fanout.get("allowed") and light_review(
+    if fanout.get("allowed") and parent not in WORKER_ROLES and light_review(
             load_json(config), prompt_header(first_prompt(parent_transcript(data)))):
         deny(f"{parent} runs single-pass under a reviewDepth: light Initiative; work the axes "
              f"yourself.")
         return 0
     if not fanout.get("allowed"):
-        if parent in policy["fanout"]:
+        if parent in WORKER_ROLES:
+            deny(f"{parent} may launch only the read-only Explore agent unless "
+                 f"pipeline.fanout.{parent} allows parallel workers; do the rest yourself.")
+        elif parent in policy["fanout"]:
             deny(f"{parent} reviews in a single pass; work the axes yourself.{suffix}")
         elif parent in policy["explore"]:
             deny(f"{parent} may launch only the read-only Explore agent; do the rest yourself.")

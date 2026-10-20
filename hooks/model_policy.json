@@ -13,11 +13,13 @@
     "exploratory": "sonnet",
     "initiative-close": "opus"
   },
-  "explore": ["development", "lld"],
+  "explore": ["development", "lld", "architecture", "product"],
   "fanout": {
     "product-review": {"allowed": true, "maxChildren": 2, "model": "opus", "axisModels": {}},
     "arch-review": {"allowed": true, "maxChildren": 2, "model": "opus", "axisModels": {}},
     "lld-review": {"allowed": true, "maxChildren": 4, "model": "opus", "axisModels": {}},
-    "pr-review": {"allowed": true, "maxChildren": 3, "model": "opus", "axisModels": {}}
+    "pr-review": {"allowed": true, "maxChildren": 3, "model": "opus", "axisModels": {}},
+    "development": {"allowed": false, "maxChildren": 0, "model": "sonnet", "axisModels": {},
+                    "_comment": "Parallel implementation workers (references/stage-playbooks.md, \"Parallel development workers\"). Off by default; a driven repo turns it on with pipeline.fanout.development, e.g. {\"allowed\": true, \"maxChildren\": 3, \"model\": \"sonnet\"}."}
   }
 }

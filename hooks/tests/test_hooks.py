@@ -1050,10 +1050,47 @@ def test_agent_guard_sets_stage_models_for_a_non_sdlc_parent(tmp_path, sdlc_repo
 
 
 def test_agent_guard_lets_explore_roles_launch_explore_only(tmp_path, sdlc_repo):
-    for role in ("development", "lld"):
+    for role in ("development", "lld", "architecture", "product"):
         assert launch(sdlc_repo, tmp_path, "Explore", model="sonnet", parent=("p1", f"sdlc:{role}")) is None
     out = launch(sdlc_repo, tmp_path, "Explore", model="sonnet", parent=("p1", "sdlc:exploratory"))
     assert out["permissionDecision"] == "deny" and "no subagents" in out["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("role", ["architecture", "product"])
+def test_agent_guard_denies_research_roles_a_non_explore_child(tmp_path, sdlc_repo, role):
+    out = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=("p1", f"sdlc:{role}"))
+    assert out["permissionDecision"] == "deny" and "only the read-only Explore" in \
+        out["permissionDecisionReason"]
+
+
+def test_agent_guard_development_workers_off_by_default(tmp_path, sdlc_repo):
+    out = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet",
+                 parent=("p1", "sdlc:development"))
+    assert out["permissionDecision"] == "deny" and "pipeline.fanout.development" in \
+        out["permissionDecisionReason"]
+
+
+def test_agent_guard_development_workers_capped_when_config_allows(tmp_path):
+    repo = _policy_repo(tmp_path, {"fanout": {"development": {
+        "allowed": True, "maxChildren": 2, "model": "sonnet"}}})
+    parent = ("dev1", "sdlc:development")
+    for i in range(2):
+        assert forced_model(launch(repo, tmp_path, "general-purpose", model="opus", parent=parent,
+                                   prompt=f"AXIS: files-{i}\nImplement")) == "sonnet"
+    out = launch(repo, tmp_path, "general-purpose", model="opus", parent=parent)
+    assert out["permissionDecision"] == "deny" and "at most 2" in out["permissionDecisionReason"]
+    # Explore stays free of the worker cap.
+    assert launch(repo, tmp_path, "Explore", model="sonnet", parent=parent) is None
+
+
+def test_agent_guard_development_workers_ignore_light_review(tmp_path):
+    """reviewDepth: light narrows review fan-out only, never development workers."""
+    repo = _policy_repo(tmp_path, {"fanout": {"development": {
+        "allowed": True, "maxChildren": 1, "model": "sonnet"}}})
+    _parent_transcript(tmp_path, "dev2", "ROLE: development ISSUE: 5 EPIC: 3\nBuild")
+    out = launch(repo, tmp_path, "general-purpose", model="opus", parent=("dev2", "sdlc:development"),
+                 env=_light_runs(tmp_path, "light"))
+    assert forced_model(out) == "sonnet"
 
 
 def test_agent_guard_enforces_max_children(tmp_path, sdlc_repo):
