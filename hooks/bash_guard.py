@@ -105,6 +105,10 @@ REASONS = {
              "stack, so a parallel agent's `stash pop` can take your work or you theirs. For a "
              "mutation check copy the file to .sdlc-scratch/ and restore it, or commit and "
              "revert.",
+    "docker-prune": "A host-wide `docker ... prune` is blocked for stage agents: concurrent "
+                    "units' stacks and anonymous IT volumes share the host. Tear down only your "
+                    "own: `docker compose -p <your unit prefix> down -v`, or a prune with "
+                    "`--filter label=sdlc.issue=<n>`.",
     "review-git-write": "Review roles are read-only on the branch: describe the fix in your "
                         "review; the owning stage applies it.",
     "claude-session": "Starting or messaging Claude sessions (`claude`, `claude --cloud`) is the "
@@ -318,6 +322,13 @@ def _flag_value(words: list, flag: str):
     return None
 
 
+def _unit_scoped_prune(words: list) -> bool:
+    """A prune narrowed to one unit's containers by its `sdlc.issue=<n>` label."""
+    filters = [words[i + 1] for i, w in enumerate(words[:-1]) if w == "--filter"]
+    filters += [w.split("=", 1)[1] for w in words if w.startswith("--filter=")]
+    return any(f.startswith("label=sdlc.issue=") and f != "label=sdlc.issue=" for f in filters)
+
+
 def check_role(words: list, role: str):
     """A stage agent's limits: its role's control-plane commands; reviewers never write git."""
     if words[0] == "claude":
@@ -329,6 +340,8 @@ def check_role(words: list, role: str):
         return "orchestrator-only"
     if words[0] == "git" and _git_sub(words[1:])[0] == "stash":
         return "stash"
+    if words[0] == "docker" and "prune" in words[1:4] and not _unit_scoped_prune(words):
+        return "docker-prune"
     if cmd == "post-comment" and _flag_value(words, "--role") not in POST_COMMENT_AS.get(
             role, {role}):
         return "post-comment-role"

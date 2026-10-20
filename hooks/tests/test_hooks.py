@@ -349,6 +349,21 @@ def test_stage_agents_never_stash(sdlc_repo, agent, command):
     assert "stash stack" in guard(command, sdlc_repo, agent)
 
 
+@pytest.mark.parametrize("agent", ["sdlc:development", "sdlc:pr-review"])
+@pytest.mark.parametrize("command", ["docker volume prune -f", "docker system prune -af --volumes",
+                                     "docker image prune -a", "docker container prune --filter until=1h"])
+def test_stage_agents_never_prune_the_host(sdlc_repo, agent, command):
+    # 2026-10-19: a pr-review agent ran `docker volume prune -f` beside 10 live dev units.
+    assert "host-wide" in (guard(command, sdlc_repo, agent) or "")
+
+
+@pytest.mark.parametrize("command", ["docker volume prune -f --filter label=sdlc.issue=12",
+                                     "docker compose -p sdlc-dev-12 down -v",
+                                     "docker ps --filter label=sdlc.issue=12"])
+def test_stage_agents_may_clean_their_own_unit(sdlc_repo, command):
+    assert guard(command, sdlc_repo, "sdlc:pr-review") is None
+
+
 def test_an_unknown_session_stays_guarded(sdlc_repo):
     assert "sdlc guard: " in guard("gh pr merge 3", sdlc_repo)
 

@@ -214,6 +214,10 @@ a pipeline problem in your handoff.
   your worktree's basename followed by `-`/`_` (e.g. compose `-p sdlc-dev-<n>`, container
   `sdlc-dev-<n>-api`) — and tear your stack down before your handback. When the unit
   closes, `cleanup_unit` removes anything left with that prefix.
+- **Never prune the host.** No `docker system|volume|image|container|network|builder prune`
+  without `--filter label=sdlc.issue=<n>`: concurrent units' stacks and anonymous IT volumes
+  live on the same host. Teardown targets your own prefix only (`docker compose -p <prefix>
+  down -v`). The Bash guard denies an unscoped prune.
 
 ## Rework and blockers — what it means for you
 
