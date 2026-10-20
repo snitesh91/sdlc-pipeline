@@ -11,10 +11,8 @@ to cover). The guard seats each launch in a slot and
 frees it when that child reports. **Wait-and-dispatch loop:** a launch denied at the cap
 carries `retry_after: {waiting_on: [holders], hint}` — it is not final. Wait for any holder
 to report, re-launch the denied axis, repeat until every axis ran. Work an axis yourself only
-when no holder is left to wait for (or there is no `Agent` tool) — the completeness lens is
-never dropped. **`reviewDepth: light`** on the unit's Initiative profile (`references/operations.md`)
-denies all fan-out: work every axis yourself, in one pass. **No `Agent` tool** (seen in cloud sessions; the harness drops it — the agent file and hooks grant it): say so in the review comment and
-work every axis yourself, in sequence; never report a fan-out that did not run. A parent whose `ROLE:` header the guard cannot read gets the stricter of the
+when no holder is left to wait for — the completeness lens is never dropped. **`reviewDepth: light`** on the unit's Initiative profile (`references/operations.md`)
+denies all fan-out: work every axis yourself, in one pass. **No `Agent` tool** (seen in cloud sessions; the harness drops it — the agent file and hooks grant it) when the input is over the fan-out bar: hand the fan-out to the orchestrator ("The orchestrator fans out for you"). Never go serial silently, and never report a fan-out that did not run. A parent whose `ROLE:` header the guard cannot read gets the stricter of the
 two caps and a warning, never an uncapped run.
 
 ## Review fan-out discipline — every review stage that dispatches subagents
@@ -33,6 +31,27 @@ These rules apply whatever a stage calls its axes or layers:
   (`<worktree>/.sdlc-scratch/review-<n>/<axis>.md`), never once at the end. Resuming a pass that died
   mid-way (a rate limit, a crash), read those files first and re-dispatch only the axes
   with none; a persisted candidate is still verified before it becomes a finding.
+
+## The orchestrator fans out for you — when you have no `Agent` tool
+
+A first-round review over the fan-out bar ("When each review stage fans out") with no `Agent`
+tool does not review serially and does not post a verdict yet:
+
+1. **You:** pick the axes as usual. Write one brief per axis to
+   `<worktree>/.sdlc-scratch/review-<n>/briefs/<axis>.md` (the doc or diff, the worktree, the
+   axis brief, the verify and positive-control rules your agent file gives children). Then
+   hand back with outcome `blocked`, `"fanout": "unavailable"` and
+   `"axes": ["<axis>", ...]` in your `SDLC-RESULT`. Post nothing else.
+2. **Orchestrator:** launch one `general-purpose` agent per axis, all in one message, each
+   prompt starting `AXIS: <axis>` followed by its brief file's contents, at the role's fan-out
+   model (`show-config` → `fanout.<role>.model`), at most `maxChildren` at once. Save each reply
+   to `<worktree>/.sdlc-scratch/review-<n>/<axis>.md` as it lands. Then resume the same review
+   agent with `SendMessage`: "axis replies are in `.sdlc-scratch/review-<n>/`".
+3. **You, resumed:** read the axis files, verify every candidate yourself (the rules above),
+   form the verdict, post it and run your exit actions. The handoff comment states the axis
+   coverage as `fanout: orchestrator`.
+
+On a rework round, or below the bar, review in one pass as usual: no hand-off is owed.
 
 ## A fan-out child's reply is terse too — same contract, one layer down
 

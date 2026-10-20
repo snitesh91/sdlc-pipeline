@@ -153,7 +153,10 @@ difference is minutes.
   agent: resolve it yourself in the epic worktree, or dispatch a `development` agent for
   that one reconcile — never a child's tracked agent. A clean textual merge is not enough:
   re-check what no file conflict shows (a count or allow-list both sides pinned, specs
-  moved on one side, a footprint the merge widened).
+  moved on one side, a footprint the merge widened). Brief that agent to run only the specs
+  the merge touched and, after a failure, only the failing ones; the epic PR's CI into `main`
+  runs the whole suite, so never ask for a full local run (`agents/development.md`, "After a
+  failure, re-run only the failing specs").
 
 ## Working on a branch
 

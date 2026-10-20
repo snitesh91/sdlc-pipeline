@@ -349,6 +349,21 @@ def test_stage_agents_never_stash(sdlc_repo, agent, command):
     assert "stash stack" in guard(command, sdlc_repo, agent)
 
 
+@pytest.mark.parametrize("agent", ["sdlc:development", "sdlc:pr-review"])
+@pytest.mark.parametrize("command", ["docker volume prune -f", "docker system prune -af --volumes",
+                                     "docker image prune -a", "docker container prune --filter until=1h"])
+def test_stage_agents_never_prune_the_host(sdlc_repo, agent, command):
+    # 2026-10-19: a pr-review agent ran `docker volume prune -f` beside 10 live dev units.
+    assert "host-wide" in (guard(command, sdlc_repo, agent) or "")
+
+
+@pytest.mark.parametrize("command", ["docker volume prune -f --filter label=sdlc.issue=12",
+                                     "docker compose -p sdlc-dev-12 down -v",
+                                     "docker ps --filter label=sdlc.issue=12"])
+def test_stage_agents_may_clean_their_own_unit(sdlc_repo, command):
+    assert guard(command, sdlc_repo, "sdlc:pr-review") is None
+
+
 def test_an_unknown_session_stays_guarded(sdlc_repo):
     assert "sdlc guard: " in guard("gh pr merge 3", sdlc_repo)
 
@@ -1050,10 +1065,47 @@ def test_agent_guard_sets_stage_models_for_a_non_sdlc_parent(tmp_path, sdlc_repo
 
 
 def test_agent_guard_lets_explore_roles_launch_explore_only(tmp_path, sdlc_repo):
-    for role in ("development", "lld"):
+    for role in ("development", "lld", "architecture", "product"):
         assert launch(sdlc_repo, tmp_path, "Explore", model="sonnet", parent=("p1", f"sdlc:{role}")) is None
     out = launch(sdlc_repo, tmp_path, "Explore", model="sonnet", parent=("p1", "sdlc:exploratory"))
     assert out["permissionDecision"] == "deny" and "no subagents" in out["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("role", ["architecture", "product"])
+def test_agent_guard_denies_research_roles_a_non_explore_child(tmp_path, sdlc_repo, role):
+    out = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet", parent=("p1", f"sdlc:{role}"))
+    assert out["permissionDecision"] == "deny" and "only the read-only Explore" in \
+        out["permissionDecisionReason"]
+
+
+def test_agent_guard_development_workers_off_by_default(tmp_path, sdlc_repo):
+    out = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet",
+                 parent=("p1", "sdlc:development"))
+    assert out["permissionDecision"] == "deny" and "pipeline.fanout.development" in \
+        out["permissionDecisionReason"]
+
+
+def test_agent_guard_development_workers_capped_when_config_allows(tmp_path):
+    repo = _policy_repo(tmp_path, {"fanout": {"development": {
+        "allowed": True, "maxChildren": 2, "model": "sonnet"}}})
+    parent = ("dev1", "sdlc:development")
+    for i in range(2):
+        assert forced_model(launch(repo, tmp_path, "general-purpose", model="opus", parent=parent,
+                                   prompt=f"AXIS: files-{i}\nImplement")) == "sonnet"
+    out = launch(repo, tmp_path, "general-purpose", model="opus", parent=parent)
+    assert out["permissionDecision"] == "deny" and "at most 2" in out["permissionDecisionReason"]
+    # Explore stays free of the worker cap.
+    assert launch(repo, tmp_path, "Explore", model="sonnet", parent=parent) is None
+
+
+def test_agent_guard_development_workers_ignore_light_review(tmp_path):
+    """reviewDepth: light narrows review fan-out only, never development workers."""
+    repo = _policy_repo(tmp_path, {"fanout": {"development": {
+        "allowed": True, "maxChildren": 1, "model": "sonnet"}}})
+    _parent_transcript(tmp_path, "dev2", "ROLE: development ISSUE: 5 EPIC: 3\nBuild")
+    out = launch(repo, tmp_path, "general-purpose", model="opus", parent=("dev2", "sdlc:development"),
+                 env=_light_runs(tmp_path, "light"))
+    assert forced_model(out) == "sonnet"
 
 
 def test_agent_guard_enforces_max_children(tmp_path, sdlc_repo):
@@ -1755,3 +1807,14 @@ def test_a_cloud_container_placed_local_still_overrides_the_placeholder(tmp_path
 def test_local_without_gh_login_still_warns(tmp_path):
     _, ctx = _token_start(tmp_path, {"tokenEnv": "MY_GH_TOKEN"}, {})
     assert "yield no token" in ctx
+
+
+def test_a_fanout_handoff_result_is_a_valid_sdlc_result():
+    """A reviewer with no Agent tool hands its fan-out to the orchestrator
+    (review-fanout.md, "The orchestrator fans out for you"); SubagentStop must accept it."""
+    sys.path.insert(0, HOOKS)
+    from _common import sdlc_result
+    line = ('SDLC-RESULT: {"issue": 7, "stage": "lld-review", "outcome": "blocked", '
+            '"fanout": "unavailable", "axes": ["completeness", "flows"]}')
+    result, problem = sdlc_result(line)
+    assert problem is None and result["axes"] == ["completeness", "flows"]

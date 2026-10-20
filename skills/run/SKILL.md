@@ -150,7 +150,7 @@ Run from the driven repo's root; everything project-specific is in its `sdlc-pip
 
 - **SessionStart** exports `$SDLC` (the control plane) and `GITHUB_TOKEN` (from the config's `tokenEnv` var, else `tokenPath`, overriding any ambient one — locally only when no ambient token is set). If it reports the token missing, get it from the operator first; relay its optional `rtk init` hint once, never block on it. After a compaction it restates the run you were driving; on an off-policy session model it hints at a restart with `sdlc-run <n>` — advisory (may be stale after `/model`): mention it once, never stop on it.
 - **PreToolUse (Bash)** denies hand-run GitHub mutations, GraphQL, `git worktree add` (except `--detach`), force-push and rebase, and limits each stage agent to its role's commands (and denies it `git stash` and `claude`). An operator-directed PR outside the pipeline passes on the main thread when it names a non-pipeline branch: `gh pr create --head <branch> ...`, `gh pr merge <branch>`. An operator-directed issue title/body/label edit: `edit-issue` (Building blocks). A denial names the `python3 "$SDLC"` command to run instead — run it; never work around the guard. The main thread is guarded only while its session drives a run (a run-state file written by `next-action --run-id` within `guard.mainThreadFreshnessHours`, default 8; `guard.mainThread: "always"` guards every session) — an unguarded call logs one stderr line, so a run without `--run-id` is visible, never silent.
-- **PreToolUse (Agent)** sets every `sdlc:*` agent's `model` from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (config `pipeline.models` / `pipeline.fanout` override it), caps review fan-out, and lets only its `explore` roles launch a read-only `Explore` search. It denies an `sdlc:design-review` prompt lacking the header when the two review roles' models differ.
+- **PreToolUse (Agent)** sets every `sdlc:*` agent's `model` from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (config `pipeline.models` / `pipeline.fanout` override it), caps review fan-out and `development`'s optional parallel workers, and lets only its `explore` roles (`development`, `lld`, `architecture`, `product`) launch a read-only `Explore` search. It denies an `sdlc:design-review` prompt lacking the header when the two review roles' models differ.
 - **SubagentStart** gives each `sdlc:*` agent `$SDLC`, its unit's `docRoot` / `requirementsDir` (per-product `docRoots`), `docTemplates`, its Initiative profile when one is configured (standing test Tasks off, initiative branch), the references path and the `SDLC-RESULT` format.
 - **SubagentStop** keeps an `sdlc:*` agent running until its final message ends with an `SDLC-RESULT` line (`product`/`architecture`/`lld` finishing `done` also need a successful `post-comment` this round). It and **SessionEnd** record each agent's tokens, cost, tool calls and peak context (README, "Metrics"). Never record metrics yourself.
 
@@ -393,6 +393,8 @@ The agent must *have* (not necessarily be pasted):
 6. Any command that can outlast the default tool timeout needs `run_in_background` or
    an explicit ≥600s outer timeout. A `development` or run-only agent that backgrounds a
    suite: brief it to stay alive until the suite's exit marker and not hand back early.
+   Never brief a full-suite run where the PR's CI runs that suite; after a failure, brief
+   a re-run of the failing specs only.
 7. Prior art only you can read (a claude.ai artifact, a Claude Docs doc): export it to
    `<worktree>/.sdlc-scratch/prior-art/` and name each file in the prompt.
 
@@ -430,6 +432,7 @@ instead of grepping and reading inline.
 |---|---|
 | `done` / `clean` | The next step per the agent file's routing; `transition` (below) before the next stage. A `pr-review` `clean` → you run `merge-pr <pr> --issue <n> --run-id "$RUN_ID"` (behind-base refusal: `references/parallelism.md`, "Git-conflict handling") |
 | `rework` | Print the blocking findings in chat first, one line each: what, where (`file:line`), owning stage. Never just "bounced". Then route them (`references/rework.md`) |
+| `blocked` with `"fanout": "unavailable"` | A review agent with no `Agent` tool (cloud) handed its fan-out to you: launch one agent per listed axis from its brief files, save the replies, resume the reviewer (`references/review-fanout.md`, "The orchestrator fans out for you") |
 | `blocked` | Clear the named blocker: resume the stage that owns the question, `open-arch-revision` for a design that does not fit, `mark-blocked` for a cross-issue dependency |
 | `needs-human` | `pipeline.humanChannel: "session"`: ask in session, record the answer, resume the stage (`references/cloud-mode.md`, "Human channel"); `"github"`: `mark-needs-human <n> --reason "..."`, park, Step 1 |
 | `failed` | Inspect the worktree and result yourself, then resume the agent |

@@ -129,6 +129,15 @@ cycle.
 - **Delegate broad search.** A cross-file sweep ("where is X", "what calls Y", mapping a
   directory) goes to a read-only `Explore` subagent; act on its conclusion. `Read` directly
   only a file you already know you need.
+- **Parallel workers — only when the config allows them.** `show-config` →
+  `fanout.development` with `allowed: true` lets you launch up to `maxChildren`
+  `general-purpose` workers at once (the Agent guard enforces the cap and the model; off by
+  default, so without it you work alone). Use them only for independent slices of a large
+  change. Rules: each worker gets a **disjoint file set** you name in its prompt (start it
+  `AXIS: <slice>`), works in your worktree, and never commits, pushes, syncs or runs a
+  suite; **you are the one integrator**: review each worker's diff, run the gates and
+  suites, commit and push. Two workers never edit the same file; a slice that needs a
+  file another owns goes back to you.
 - **Host is macOS zsh.** Quote globs so zsh does not expand them (`grep -F "x" 'src/**'`);
   there is no BSD `sed -i` in-place — use the `Edit` tool, never a `python`/`sed` patch
   script. Read with `offset`/`limit`, not whole files; send sweeps to `Explore`. Filter a
@@ -157,8 +166,12 @@ cycle.
   across suites your diff never touched is environmental until proven otherwise; check your
   invocation against the workflow's first.
 - **One clean pass is the evidence.** Stop at the first clean run of the suite the design
-  requires; no stability, soak or load re-runs unless the design names them. Diagnose a
-  failure with the narrowest re-run (the failing spec), not the suite. Keep the stack up
+  requires; no stability, soak or load re-runs unless the design names them.
+- **After a failure, re-run only the failing specs.** Fix, then re-run just the spec files
+  that failed until they pass; never re-run the whole suite to confirm a fix to one or two
+  specs. Run a whole suite **at most once** per round, and **not at all** where the PR's CI
+  runs it (an epic PR into `main`, any PR into `main` / `initiative-*` under a required
+  workflow) — that check is the full run. A reconcile or sync is no exception. Keep the stack up
   between runs — no teardown or DB reset per run unless the reset is what you test; provision
   fixtures and profiles once, before the first run.
 - **Integration tests run only against a test database.** Before starting any truncating or
