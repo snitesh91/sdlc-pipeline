@@ -116,10 +116,15 @@ def test_local_task_kinds_from_config(local_kinds, kind, title, labels, local):
     assert bool(s.task_local_reason(issue)) is local
 
 
-def test_an_unknown_local_task_kind_is_an_error(local_kinds):
-    local_kinds("phone")
-    with pytest.raises(s.GhError, match="localTasks entry 'phone'"):
-        s.task_local_reason({"number": 10, "title": "x", "labels": []})
+def test_an_unknown_local_task_kind_is_reported_not_raised(local_kinds):
+    local_kinds("phone", "e2e-test", "label:")
+    assert s.task_local_reason({"number": 10, "title": "x", "labels": []}) is None
+    errors = s.local_tasks_config_errors()
+    assert len(errors) == 2 and "'phone'" in errors[0] and "'label:'" in errors[1]
+    assert s.cmd_show_config(runner=lambda argv: "")["config_errors"] == errors
+    # Positive control: a valid list reports nothing.
+    local_kinds("e2e-test", "label:needs-phone")
+    assert s.local_tasks_config_errors() == []
 
 
 def test_a_configured_kind_makes_the_e2e_task_local_without_a_label(cloud, local_kinds):
@@ -144,12 +149,44 @@ def test_list_parallel_ready_skips_local_tasks_in_the_cloud(cloud, monkeypatch):
 
 def test_place_a_task_local_and_back(local_kinds):
     gh = _epic({"number": 10, "title": "E2E tests"})
-    out = s.cmd_place(gh, 10, "local")
+    out = s.cmd_place(gh, 10, "local", runner=_trees())
     assert out["label_added"] and out["placed"] == "local" and LOCAL in gh.issues[10]["labels"]
-    assert s.cmd_place(gh, 10, "local")["already"] is True
+    assert s.cmd_place(gh, 10, "local", runner=_trees())["already"] is True
     local_kinds("e2e-test")
-    back = s.cmd_place(gh, 10, "cloud")
+    back = s.cmd_place(gh, 10, "cloud", runner=_trees())
     assert back["label_removed"] and back["still_local"] == "e2e-test"
+
+
+def _trees(*branches):
+    lines = ["worktree /repo", "branch refs/heads/main", ""]
+    for b in branches:
+        lines += [f"worktree /tmp/sdlc-dev-{b.split('-')[-1]}", f"branch refs/heads/{b}", ""]
+    return lambda argv: "\n".join(lines)
+
+
+def test_place_refuses_to_move_a_claimed_task_either_way():
+    gh = _epic({"number": 10, "status": "in-progress"})
+    out = s.cmd_place(gh, 10, "local", runner=_trees())
+    assert out["refused"] is True and out["in_progress"] is True
+    assert LOCAL not in gh.issues[10]["labels"]
+    gh.issues[10]["labels"].append(LOCAL)
+    back = s.cmd_place(gh, 10, "cloud", runner=_trees())
+    assert back["refused"] is True and LOCAL in gh.issues[10]["labels"]
+    # --force overrides.
+    assert s.cmd_place(gh, 10, "cloud", force=True, runner=_trees())["label_removed"] is True
+
+
+def test_place_refuses_a_task_a_local_worktree_holds():
+    gh = _epic({"number": 10, "labels": ["type:task", LOCAL], "status": "todo"})
+    out = s.cmd_place(gh, 10, "cloud", runner=_trees("issue-10"))
+    assert out["refused"] is True and out["worktrees"] == ["/tmp/sdlc-dev-10"]
+    # Positive control: another Task's worktree does not hold this one.
+    assert s.cmd_place(gh, 10, "cloud", runner=_trees("issue-11"))["label_removed"] is True
+
+
+def test_place_an_already_placed_claimed_task_is_a_noop():
+    gh = _epic({"number": 10, "labels": ["type:task", LOCAL], "status": "in-progress"})
+    assert s.cmd_place(gh, 10, "local", runner=_trees())["already"] is True
 
 
 def test_end_cloud_session_accepts_waiting_local():
@@ -197,4 +234,37 @@ def test_waiting_local_waits_clear_only_when_cloud_work_reappears():
     # ... a new cloud Task does (positive control).
     gh.issues[6] = {**gh.issues[5], "number": 6, "labels": ["type:task"], "comments": []}
     by_number = {i["number"]: i for i in gh.issue_list()}
+    assert s.session_waits(gh, session, by_number, epic=2)["resolved"] is True
+
+
+def test_waiting_local_relaunches_to_close_once_the_local_tasks_are_done():
+    """The cloud session, relaunched, closes the Epic: the laptop never does it."""
+    from tests.test_cloud_epics import _ago, _ended, _initiative, _launched, _survey
+    gh = _initiative({"number": 2, "comments": [
+                          _launched(minutes=300),
+                          _ended(minutes=200, outcome="waiting-local")
+                          .replace(" -->", " waits=5 -->")]},
+                     extra=[{"number": 5, "labels": ["type:task", LOCAL], "parent": 2,
+                             "updated": _ago(10)}])
+    assert _survey(gh)["launchable"] == []
+    gh.issues[5]["state"] = "CLOSED"
+    survey = _survey(gh)
+    assert survey["launchable"] == [2] and survey["relaunch"] == [2]
+
+
+def test_a_cloud_task_blocked_only_by_local_tasks_keeps_the_wait():
+    from tests.test_cloud_epics import _initiative, _launched
+    gh = _initiative({"number": 2, "comments": [_launched()]},
+                     extra=[{"number": 5, "labels": ["type:task", LOCAL], "parent": 2},
+                            {"number": 7, "labels": ["type:task"], "parent": 2},
+                            {"number": 8, "labels": ["type:task"], "parent": 2,
+                             "state": "CLOSED"}])
+    gh.blocked = {7: [5]}
+    s.cmd_end_cloud_session(gh, 2, "waiting-local")
+    session = s.latest_cloud_session([{"body": b} for b in gh.comments_on(2)])
+    by_number = {i["number"]: i for i in gh.issue_list()}
+    assert s.session_waits(gh, session, by_number, epic=2)["resolved"] is False
+    # Positive control: a cloud Task also blocked by something non-local is cloud work.
+    gh.issues[8]["state"] = "OPEN"
+    gh.blocked = {7: [5, 8]}
     assert s.session_waits(gh, session, by_number, epic=2)["resolved"] is True

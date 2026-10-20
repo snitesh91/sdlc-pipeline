@@ -351,13 +351,20 @@ def test_stage_agents_never_stash(sdlc_repo, agent, command):
 
 @pytest.mark.parametrize("agent", ["sdlc:development", "sdlc:pr-review"])
 @pytest.mark.parametrize("command", ["docker volume prune -f", "docker system prune -af --volumes",
-                                     "docker image prune -a", "docker container prune --filter until=1h"])
+                                     "docker image prune -a", "docker container prune --filter until=1h",
+                                     "docker --context default system prune -af",
+                                     "docker -H unix:///x volume prune -f",
+                                     "docker --context=default --log-level debug builder prune -af",
+                                     "docker -D network prune -f"])
 def test_stage_agents_never_prune_the_host(sdlc_repo, agent, command):
     # 2026-10-19: a pr-review agent ran `docker volume prune -f` beside 10 live dev units.
     assert "host-wide" in (guard(command, sdlc_repo, agent) or "")
 
 
 @pytest.mark.parametrize("command", ["docker volume prune -f --filter label=sdlc.issue=12",
+                                     "docker --context default system prune -af "
+                                     "--filter label=sdlc.issue=12",
+                                     "docker run --rm alpine echo prune",
                                      "docker compose -p sdlc-dev-12 down -v",
                                      "docker ps --filter label=sdlc.issue=12"])
 def test_stage_agents_may_clean_their_own_unit(sdlc_repo, command):
@@ -779,6 +786,7 @@ def test_subagent_stop_hook_active_allows(tmp_path, sdlc_repo):
 
 def test_subagent_stop_ignores_other_agents(tmp_path, sdlc_repo):
     assert stop(tmp_path, sdlc_repo, "no result", agent_type="general-purpose").returncode == 0
+    assert stop(tmp_path, sdlc_repo, "no result", agent_type="sdlc:dev-worker").returncode == 0
 
 
 def test_subagent_stop_noop_outside_sdlc_repo(tmp_path, plain_repo):
@@ -1090,9 +1098,9 @@ def test_agent_guard_development_workers_capped_when_config_allows(tmp_path):
         "allowed": True, "maxChildren": 2, "model": "sonnet"}}})
     parent = ("dev1", "sdlc:development")
     for i in range(2):
-        assert forced_model(launch(repo, tmp_path, "general-purpose", model="opus", parent=parent,
+        assert forced_model(launch(repo, tmp_path, "sdlc:dev-worker", model="opus", parent=parent,
                                    prompt=f"AXIS: files-{i}\nImplement")) == "sonnet"
-    out = launch(repo, tmp_path, "general-purpose", model="opus", parent=parent)
+    out = launch(repo, tmp_path, "sdlc:dev-worker", model="opus", parent=parent)
     assert out["permissionDecision"] == "deny" and "at most 2" in out["permissionDecisionReason"]
     # Explore stays free of the worker cap.
     assert launch(repo, tmp_path, "Explore", model="sonnet", parent=parent) is None
@@ -1103,9 +1111,44 @@ def test_agent_guard_development_workers_ignore_light_review(tmp_path):
     repo = _policy_repo(tmp_path, {"fanout": {"development": {
         "allowed": True, "maxChildren": 1, "model": "sonnet"}}})
     _parent_transcript(tmp_path, "dev2", "ROLE: development ISSUE: 5 EPIC: 3\nBuild")
-    out = launch(repo, tmp_path, "general-purpose", model="opus", parent=("dev2", "sdlc:development"),
+    out = launch(repo, tmp_path, "sdlc:dev-worker", model="opus", parent=("dev2", "sdlc:development"),
                  env=_light_runs(tmp_path, "light"))
     assert forced_model(out) == "sonnet"
+
+
+def test_agent_guard_development_workers_must_be_dev_workers(tmp_path):
+    """A general-purpose worker would run under no Bash guard role (push, orchestrator commands)."""
+    repo = _policy_repo(tmp_path, {"fanout": {"development": {
+        "allowed": True, "maxChildren": 2, "model": "sonnet"}}})
+    out = launch(repo, tmp_path, "general-purpose", model="sonnet", parent=("dev3", "sdlc:development"))
+    assert out["permissionDecision"] == "deny" and "sdlc:dev-worker" in out["permissionDecisionReason"]
+    # Positive control: the dedicated type passes.
+    assert forced_model(launch(repo, tmp_path, "sdlc:dev-worker", model="opus",
+                               parent=("dev3", "sdlc:development"))) == "sonnet"
+
+
+def test_agent_guard_dev_worker_only_from_development(tmp_path, sdlc_repo):
+    out = launch(sdlc_repo, tmp_path, "sdlc:dev-worker", model="sonnet")
+    assert out["permissionDecision"] == "deny" and "only by an sdlc:development" in \
+        out["permissionDecisionReason"]
+    out = launch(sdlc_repo, tmp_path, "sdlc:dev-worker", model="sonnet", parent=("r1", "sdlc:pr-review"))
+    assert out["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize("command", ["git commit -am x", "git push origin issue-5",
+                                     "git checkout -b x", "git switch main", "git reset --hard",
+                                     "git worktree add /tmp/x", "git rebase origin/main",
+                                     'python3 "$SDLC" open-dev-pr 5 --title t',
+                                     'python3 "$SDLC" handoff-to-pr-review 5',
+                                     "claude --cloud hi", "docker --context x system prune -af"])
+def test_dev_worker_bash_limits(sdlc_repo, command):
+    assert guard(command, sdlc_repo, "sdlc:dev-worker") is not None
+
+
+@pytest.mark.parametrize("command", ["git status", "git diff", "git log -3", "ls src",
+                                     'python3 "$SDLC" lld-section --epic 3 --task 5'])
+def test_dev_worker_may_read(sdlc_repo, command):
+    assert guard(command, sdlc_repo, "sdlc:dev-worker") is None
 
 
 def test_agent_guard_enforces_max_children(tmp_path, sdlc_repo):
@@ -1711,7 +1754,8 @@ def test_skill_frontmatter_sets_no_model():
 
 def test_agent_frontmatter_models_match_the_policy():
     with open(os.path.join(HOOKS, "model_policy.json")) as f:
-        models = json.load(f)["models"]
+        policy = json.load(f)
+    models = {**policy["models"], "dev-worker": policy["fanout"]["development"]["model"]}
     agents = os.path.join(os.path.dirname(HOOKS), "agents")
     for name in os.listdir(agents):
         role = name[:-len(".md")]

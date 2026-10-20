@@ -17,6 +17,8 @@ from _common import (agent_transcript, emit, first_prompt, load_json, model_poli
 DESIGN_REVIEW = "design-review"
 DESIGN_REVIEW_ROLES = ("arch-review", "lld-review")
 WORKER_ROLES = ("development",)
+# The one agent type a worker role launches as a parallel worker (its own Bash guard role).
+WORKER_AGENT = "dev-worker"
 SLOT_TTL_S = 2 * 86400
 RETRY_HINT = ("re-run this launch when any holder reports; work an axis yourself only when no "
               "holder is left to wait for")
@@ -158,6 +160,10 @@ def main() -> int:
     if not parent:
         if not child:
             return 0
+        if child == WORKER_AGENT:
+            deny("sdlc:dev-worker is launched only by an sdlc:development agent; the "
+                 "orchestrator delegates the stage to sdlc:development.")
+            return 0
         role = child
         if child == DESIGN_REVIEW:
             role = design_review_role(header.get("role"), policy["models"])
@@ -167,11 +173,17 @@ def main() -> int:
                 return 0
         set_model(tool_input, policy["models"].get(role))
         return 0
-    if child:
+    worker = parent in WORKER_ROLES and child == WORKER_AGENT
+    if child and not worker:
         deny(f"a stage agent never launches another stage (sdlc:{child}); report it in your "
              "SDLC-RESULT/handoff and the orchestrator runs it.")
         return 0
     if tool_input.get("subagent_type") == "Explore" and parent in policy["explore"]:
+        return 0
+    if parent in WORKER_ROLES and not worker and (policy["fanout"].get(parent) or {}).get(
+            "allowed"):
+        deny(f"{parent}'s parallel workers run as subagent_type sdlc:{WORKER_AGENT} (its own "
+             f"guard: no commit, push or control-plane command); relaunch with that type.")
         return 0
     warning = ""
     if parent == DESIGN_REVIEW:

@@ -179,6 +179,7 @@
       "cloudLabel": "sdlc:cloud",
       "initiativeEpics": "local",
       "stallMinutes": 90,
+      "askingStallFactor": 6,
       "softOverlapPaths": [],
       "localLabel": "sdlc:local",
       "localTasks": []

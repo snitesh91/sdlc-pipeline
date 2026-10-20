@@ -127,6 +127,40 @@ def test_a_waiting_human_session_relaunches_on_a_github_answer():
     assert _survey(gh, candidates=[2])["launchable"] == [2]
 
 
+def _gate_tree(pr):
+    gh = _waiting_human_tree(child_status="awaiting-human-review", child_comments=[
+        {"body": "<!-- gate-pr: architecture:40 -->", "createdAt": _ago(250)}])
+    gh.issues[5]["updated"] = _ago(250)
+    gh.prs[40] = {"number": 40, **pr}
+    return gh
+
+
+def test_a_waiting_human_gate_clears_when_the_operator_merges_the_gate_pr():
+    # humanChannel github: merging the gate PR is the approval; status and thread stay put.
+    gh = _gate_tree({"state": "MERGED", "mergedAt": _ago(30), "updatedAt": _ago(30)})
+    assert _survey(gh, candidates=[2])["launchable"] == [2]
+
+
+def test_a_waiting_human_gate_clears_on_pr_activity_after_the_end():
+    gh = _gate_tree({"state": "OPEN", "mergedAt": None, "updatedAt": _ago(30)})
+    assert _survey(gh, candidates=[2])["launchable"] == [2]
+
+
+def test_a_waiting_human_gate_pr_untouched_since_the_end_still_waits():
+    gh = _gate_tree({"state": "OPEN", "mergedAt": None, "updatedAt": _ago(250)})
+    survey = _survey(gh, candidates=[2])
+    assert survey["launchable"] == [] and "waiting on #5" in survey["waiting"][0]["reason"]
+
+
+def test_a_waiting_human_epic_itself_clears_on_an_answer():
+    gh = _initiative({"number": 2, "status": "needs-human", "comments": [
+                          _launched(minutes=300),
+                          _ended(minutes=200).replace(" -->", " waits=2 -->")]})
+    assert _survey(gh, candidates=[2])["launchable"] == []
+    gh.issues[2]["comments"].append({"body": "close it as is", "createdAt": _ago(30)})
+    assert _survey(gh, candidates=[2])["launchable"] == [2]
+
+
 @pytest.mark.parametrize("status", ["todo", "feedback-received", "in-progress"])
 def test_a_waiting_human_session_relaunches_once_its_unit_left_the_parked_statuses(status):
     assert _survey(_waiting_human_tree(child_status=status), candidates=[2])["launchable"] == [2]
@@ -251,11 +285,29 @@ def test_an_old_heartbeat_still_stalls():
     assert _status(gh)["epics"][0]["stalled"] is True
 
 
-def test_a_session_asking_the_operator_never_stalls():
+def test_a_session_asking_the_operator_does_not_stall_at_the_normal_bound():
     gh = _hb_tree()
     s.cmd_cloud_heartbeat(gh, 2, state="asking", now=NOW - timedelta(minutes=150))
     row = _status(gh)["epics"][0]
     assert row["asking"] is True and row["stalled"] is False
+
+
+def test_a_session_asking_too_long_still_stalls_and_escalates():
+    # 90 min x 6 = 540: a session that died mid-question frees its slot eventually.
+    gh = _edit_initiative({"number": 2, "labels": ["type:epic", CLOUD],
+                           "comments": [_launched(minutes=700)]},
+                          extra=[{"number": 5, "labels": ["type:task"], "parent": 2,
+                                  "updated": _ago(650)}])
+    s.cmd_cloud_heartbeat(gh, 2, state="asking", now=NOW - timedelta(minutes=600))
+    row = _status(gh)["epics"][0]
+    assert row["asking"] is True and row["stalled"] is True
+    # Control: the same session asking for 500 minutes is still within the bound.
+    gh2 = _edit_initiative({"number": 2, "labels": ["type:epic", CLOUD],
+                            "comments": [_launched(minutes=700)]},
+                           extra=[{"number": 5, "labels": ["type:task"], "parent": 2,
+                                   "updated": _ago(650)}])
+    s.cmd_cloud_heartbeat(gh2, 2, state="asking", now=NOW - timedelta(minutes=500))
+    assert _status(gh2)["epics"][0]["stalled"] is False
 
 
 def test_heartbeat_quietly_runs_only_in_the_cloud_and_never_raises(monkeypatch):

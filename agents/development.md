@@ -131,7 +131,9 @@ cycle.
   only a file you already know you need.
 - **Parallel workers — only when the config allows them.** `show-config` →
   `fanout.development` with `allowed: true` lets you launch up to `maxChildren`
-  `general-purpose` workers at once (the Agent guard enforces the cap and the model; off by
+  `sdlc:dev-worker` workers at once (`subagent_type: sdlc:dev-worker`, the only type the Agent
+  guard lets you launch as a worker; it enforces the cap and the model, and the Bash guard keeps
+  a worker off git writes and control-plane commands; off by
   default, so without it you work alone). Use them only for independent slices of a large
   change. Rules: each worker gets a **disjoint file set** you name in its prompt (start it
   `AXIS: <slice>`), works in your worktree, and never commits, pushes, syncs or runs a

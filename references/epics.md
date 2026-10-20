@@ -324,6 +324,10 @@ children are **all** closed and assigns the operator. It auto-verifies children 
 no open dependents (native `blocking`), and both `architecture.md` and `lld.md` on
 `epic-<n>` (`docs_missing_from_epic_branch` — a doc left only on a phase-Task branch
 never reaches `main`; merge its design PR). Remaining items: closing verification, then the merge.
+An Epic with every child closed but no phase-Tasks and no `epic:architected` (only closed
+superseded children, or one that predates phase-Tasks) is not notified: it is listed in
+`needs_phase_tasks` — `cut-phase-tasks` it, or, for finished pre-phase-Task work, report it to
+the operator to close.
 
 **`close-epic <n>` is two calls; every refusal is a structured exit-0 result.**
 
@@ -410,7 +414,8 @@ the Epic's changes, so a run there proves nothing. It attests that run with `rec
 surfaces it proves. Per-child `development` runs only the specs for surfaces that child moved.
 On a cloud Epic whose cloud setup has no e2e profile, the e2e-test Task is a local Task
 (`pipeline.placement.localTasks: ["e2e-test"]`, `references/cloud-mode.md`, "Placement rules"):
-the laptop runs it and closes the Epic once the cloud session ends `waiting-local`.
+the laptop runs it after the cloud session ends `waiting-local`; once it closes, the laptop
+relaunches the Epic's cloud session (`relaunch_ready`), which closes the Epic.
 
 **Triage new-spec and exploratory deltas:**
 

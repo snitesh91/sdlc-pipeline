@@ -83,7 +83,7 @@ python3 "$SDLC" end-cloud-session <epic> --outcome <outcome> [--waits-on <n> ...
 | `closed` | the Epic merged | — |
 | `waiting-human` | a gate or `needs-human` is parked for the operator | default: the Epic's open units at needs-human / an open gate |
 | `waiting-epic` | only another Epic's merge or close unblocks it (a close held for it, a dependency) | required: that Epic |
-| `waiting-local` | `none` says `waiting_local`: only local Tasks remain; a laptop `/sdlc:run <epic>` drives them and may close the Epic | default: the Epic's open local Tasks |
+| `waiting-local` | `none` says `waiting_local`: only local Tasks remain; a laptop `/sdlc:run <epic>` drives them; once they close, the Epic is `relaunch_ready` and its relaunched cloud session closes it | default: the Epic's open local Tasks |
 | `stopped` | the operator stopped it, or anything else | — |
 | `abandoned` | the laptop's only, for a dead session ("Status and stalls") | — |
 
@@ -190,9 +190,11 @@ cloud session instead of driving it.
   `## Footprint` in the Epic's body; an unknown one cannot be shown disjoint from a known
   one; paths matching `pipeline.placement.softOverlapPaths` never count as overlap), within
   `parallelism.cloudSessions` (default 3) live sessions repo-wide. An Epic whose last
-  session ended relaunches by itself once what it recorded clears (`waits=`): a waited Epic
-  closed; a waited unit closed, left needs-human / awaiting review, or got a comment after the
-  end (the operator's answer on GitHub). Until then it waits, whatever other activity happens.
+  session ended relaunches by itself once what it recorded clears (`waits=`): under
+  `waiting-epic`, the waited Epic closed; otherwise a waited unit (the Epic itself included)
+  closed, left needs-human / awaiting review, got a comment after the end (the operator's
+  answer on GitHub), or its gate/design PR merged (a gate approved by merging) or saw a
+  review, comment or push since. Until then it waits, whatever other activity happens.
   An end marker with no waits (older sessions) waits for new GitHub activity instead.
   `--relaunch` overrides both. A relaunch needs no flag: `survey.relaunch` lists them.
 - **Overlap override (operator only):** `launch-cloud-epic <epic> --allow-overlap` skips both
@@ -241,8 +243,9 @@ python3 "$SDLC" nudge-cloud-epic <epic>
 - **`cloud-status`** gives, per cloud Epic: `session` (url), state, children `by_stage` /
   `by_status`, `open_prs`, `gates_pending`, `needs_human`, `last_activity` (comments, child
   issue updates, PR updates, in-progress branch heads, and the session's `heartbeat`),
-  `idle_minutes`, `stalled` (live session, open Epic, not `asking`, idle ≥
-  `pipeline.placement.stallMinutes`, default 90), `end_marker`, `nudges_since_activity`,
+  `idle_minutes`, `stalled` (live session, open Epic, idle ≥
+  `pipeline.placement.stallMinutes`, default 90; an `asking` session only at that ×
+  `askingStallFactor`, default 6, so a session that died mid-question still frees its slot), `end_marker`, `nudges_since_activity`,
   `escalate`, `waits` and `relaunch_ready` (an ended session whose recorded wait cleared:
   `launch-cloud-epic <epic>`, no flag; it also sets `attention`). A `stalled` Epic with no end marker may be a dead
   session: read its run log (session url) before nudging, and end-mark a dead one. On a cloud-mode Initiative also `launchable`, `waiting`,

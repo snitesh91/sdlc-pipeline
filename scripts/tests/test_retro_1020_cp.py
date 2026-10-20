@@ -49,7 +49,8 @@ def test_epic_with_only_closed_superseded_children_is_not_closeable():
     """Regression (#2987): closed not-planned children made the Epic read as closeable."""
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
     gh.path_on_ref = lambda path, ref="main": True
-    assert s.cmd_check_epics_closeable(gh)["closeable_epics"] == []
+    out = s.cmd_check_epics_closeable(gh)
+    assert out["closeable_epics"] == [] and out["needs_phase_tasks"] == [9]
     assert gh.comments_on(9) == []
 
 

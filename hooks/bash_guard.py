@@ -67,6 +67,12 @@ ROLE_COMMANDS = {
     "initiative-close": {"record-initiative-verification"},
 }
 REVIEW_ROLES = {"product-review", "design-review", "pr-review"}
+# A development worker (`sdlc:dev-worker`) edits files in its integrator's worktree only: no git
+# write that moves history or branches (`dev-worker` has no control-plane commands either).
+WORKER_ROLE = "dev-worker"
+WORKER_GIT_DENIED = {"commit", "push", "merge", "rebase", "reset", "checkout", "switch",
+                     "branch", "worktree", "cherry-pick", "revert", "am", "tag", "pull",
+                     "fetch", "clean", "restore"}
 # Agent role -> the `post-comment --role` values it may pass (default: its own role).
 POST_COMMENT_AS = {"design-review": {"arch-review", "lld-review"}}
 CONTROL_PLANE_REFS = {"$SDLC", "${SDLC}"}
@@ -109,6 +115,8 @@ REASONS = {
                     "units' stacks and anonymous IT volumes share the host. Tear down only your "
                     "own: `docker compose -p <your unit prefix> down -v`, or a prune with "
                     "`--filter label=sdlc.issue=<n>`.",
+    "worker-git-write": "A development worker never commits, pushes, syncs or changes branches: "
+                        "edit your named files and hand back; the development agent integrates.",
     "review-git-write": "Review roles are read-only on the branch: describe the fix in your "
                         "review; the owning stage applies it.",
     "claude-session": "Starting or messaging Claude sessions (`claude`, `claude --cloud`) is the "
@@ -322,6 +330,30 @@ def _flag_value(words: list, flag: str):
     return None
 
 
+# docker's global options that take a value (`docker --context x system prune`): skipped
+# before reading the subcommand, so they cannot push `prune` out of view.
+_DOCKER_VALUE_OPTS = {"-c", "--context", "-H", "--host", "--config", "-l", "--log-level",
+                      "--tlscacert", "--tlscert", "--tlskey"}
+
+
+def _docker_prune(words: list) -> bool:
+    """Whether a `docker` command is a prune (`docker [global opts] <obj> prune`, `docker
+    [global opts] <obj> <sub> prune` is not a docker form, so the first two subcommand words)."""
+    rest, i = words[1:], 0
+    subs = []
+    while i < len(rest) and len(subs) < 2:
+        w = rest[i]
+        if not subs and w in _DOCKER_VALUE_OPTS:
+            i += 2
+            continue
+        if w.startswith("-"):
+            i += 1
+            continue
+        subs.append(w)
+        i += 1
+    return "prune" in subs
+
+
 def _unit_scoped_prune(words: list) -> bool:
     """A prune narrowed to one unit's containers by its `sdlc.issue=<n>` label."""
     filters = [words[i + 1] for i, w in enumerate(words[:-1]) if w == "--filter"]
@@ -340,7 +372,7 @@ def check_role(words: list, role: str):
         return "orchestrator-only"
     if words[0] == "git" and _git_sub(words[1:])[0] == "stash":
         return "stash"
-    if words[0] == "docker" and "prune" in words[1:4] and not _unit_scoped_prune(words):
+    if words[0] == "docker" and _docker_prune(words) and not _unit_scoped_prune(words):
         return "docker-prune"
     if cmd == "post-comment" and _flag_value(words, "--role") not in POST_COMMENT_AS.get(
             role, {role}):
@@ -351,6 +383,8 @@ def check_role(words: list, role: str):
             return "gh-comment"
         if pos[:2] == ["run", "rerun"]:
             return "run-rerun"
+    if role == WORKER_ROLE and words[0] == "git" and _git_sub(words[1:])[0] in WORKER_GIT_DENIED:
+        return "worker-git-write"
     if role in REVIEW_ROLES and words[0] == "git":
         sub, rest = _git_sub(words[1:])
         if (sub in ("commit", "push", "merge") or (sub == "reset" and "--hard" in rest)
