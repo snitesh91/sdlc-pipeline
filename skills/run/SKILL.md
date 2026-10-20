@@ -210,8 +210,10 @@ Epic, to be picked; link with `create-issue --parent`.
 
 ## Placement
 
-A cloud session drives only cloud-placed Epics, a local session only the rest; one Epic is
-never driven from both. A `placement_mismatch` error: stop, relay its `hint`, start
+A cloud session drives only cloud-placed Epics, a local session only the rest; one unit is
+never driven from both. The exception is a cloud Epic's local Tasks (`localLabel` /
+`pipeline.placement.localTasks`): the laptop drives only those, the cloud session the rest,
+ending `waiting-local` once only they remain. A `placement_mismatch` error: stop, relay its `hint`, start
 nothing (`references/cloud-mode.md`). A cloud Epic run posts `end-cloud-session` before it
 ends (`references/cloud-mode.md`, "A cloud run").
 

@@ -9,12 +9,20 @@ side owns it.
 - **The label:** `pipeline.placement.cloudLabel` (default `sdlc:cloud`).
 - **An Epic is cloud-placed** when it or its parent Initiative carries the label; every other
   Epic is local. A Task belongs to its Epic; an Initiative and its Product-Roadmap Task read
-  the Initiative's own label. A label on a Task is ignored.
+  the Initiative's own label. The cloud label on a Task is ignored.
+- **A local Task of a cloud Epic** runs on the laptop while its Epic stays in the cloud: it
+  carries `pipeline.placement.localLabel` (default `sdlc:local`; `place <task> --where local`
+  adds it, `--where cloud` removes it), or matches `pipeline.placement.localTasks` (`e2e-test`,
+  `integration-test` by title, or `label:<name>`; default none). Use it for work only the laptop
+  can run: e2e without a cloud e2e profile, Stage checks, a real phone.
 - **The session's placement:** env `SDLC_PLACEMENT` (`cloud` | `local`; any other value is an
   error) wins; else a truthy `CLAUDE_CODE_REMOTE` (`true` / `1`) means cloud; else local.
   `show-config` → `session_placement` reports it and the signal that decided it.
 - **Guarded commands:** `next-action`, `start-stage`, `list-parallel-ready`,
-  `list-design-ready`, `list-ready-for-review` refuse a unit placed on the other side.
+  `list-design-ready`, `list-ready-for-review` refuse a unit placed on the other side. On a
+  cloud Epic, a cloud session skips its local Tasks (`none` lists them as `local_tasks`), and a
+  laptop session drives only them (`placement_scope: "local-tasks"`, no Epic-level step) instead
+  of being refused; `start-stage` keeps each side off the other's Tasks.
 - **An Initiative run on the laptop** skips its cloud-placed Epics (`none` `reason`: "placed
   in the cloud"); a cloud-placed Initiative runs only in the cloud.
 
@@ -59,11 +67,13 @@ operator in session ("Human channel"); with `"github"` it ends once `next-action
 marker:
 
 ```bash
-python3 "$SDLC" end-cloud-session <epic> --outcome closed|waiting-human|stopped [--note "<one line>"]
+python3 "$SDLC" end-cloud-session <epic> --outcome closed|waiting-human|waiting-local|stopped [--note "<one line>"]
 ```
 
 `closed` once the Epic merged; `waiting-human` when a gate or `needs-human` is parked on
-GitHub; `stopped` for anything else (`abandoned` is the laptop's, "Status and stalls").
+GitHub; `waiting-local` when `none` says `waiting_local` (only local Tasks remain: a laptop
+`/sdlc:run <epic>` drives them and closes the Epic, and `launch-cloud-epic` holds the relaunch
+until cloud work reappears); `stopped` for anything else (`abandoned` is the laptop's, "Status and stalls").
 Then Step 4.
 
 - **No local cleanup:** the container, `/tmp` worktrees and stack data included, is discarded
@@ -72,8 +82,9 @@ Then Step 4.
   and `close-epic --clean-worktree` still cleans the live epic worktree (leftover output would
   block its next reconcile).
 - **e2e in the cloud:** an e2e-test Task runs its specs when the driven repo's cloud setup
-  provides an e2e profile (stack, secrets, test users); it parks `needs-human` only when it
-  provides none.
+  provides an e2e profile (stack, secrets, test users). When it provides none, make the Task
+  local (`localTasks: ["e2e-test"]`, or `place <task> --where local`) rather than parking
+  `needs-human`.
 - **Pushed work survives:** a session can die with no end marker. `development` pushes after
   every green commit before its PR exists (`agents/development.md`, "Commits and pushes").
 

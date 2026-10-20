@@ -405,6 +405,9 @@ stack, or one stood up from the epic worktree). The shared dev stack serves `mai
 the Epic's changes, so a run there proves nothing. It attests that run with `record-local-ci
 --suite e2e` (`e2e` is always a valid key). Sequence the Task after the Tasks whose
 surfaces it proves. Per-child `development` runs only the specs for surfaces that child moved.
+On a cloud Epic whose cloud setup has no e2e profile, the e2e-test Task is a local Task
+(`pipeline.placement.localTasks: ["e2e-test"]`, `references/cloud-mode.md`, "Placement rules"):
+the laptop runs it and closes the Epic once the cloud session ends `waiting-local`.
 
 **Triage new-spec and exploratory deltas:**
 
