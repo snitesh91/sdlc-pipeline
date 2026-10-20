@@ -157,8 +157,12 @@ cycle.
   across suites your diff never touched is environmental until proven otherwise; check your
   invocation against the workflow's first.
 - **One clean pass is the evidence.** Stop at the first clean run of the suite the design
-  requires; no stability, soak or load re-runs unless the design names them. Diagnose a
-  failure with the narrowest re-run (the failing spec), not the suite. Keep the stack up
+  requires; no stability, soak or load re-runs unless the design names them.
+- **After a failure, re-run only the failing specs.** Fix, then re-run just the spec files
+  that failed until they pass; never re-run the whole suite to confirm a fix to one or two
+  specs. Run a whole suite **at most once** per round, and **not at all** where the PR's CI
+  runs it (an epic PR into `main`, any PR into `main` / `initiative-*` under a required
+  workflow) — that check is the full run. A reconcile or sync is no exception. Keep the stack up
   between runs — no teardown or DB reset per run unless the reset is what you test; provision
   fixtures and profiles once, before the first run.
 - **Integration tests run only against a test database.** Before starting any truncating or

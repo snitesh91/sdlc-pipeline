@@ -393,6 +393,8 @@ The agent must *have* (not necessarily be pasted):
 6. Any command that can outlast the default tool timeout needs `run_in_background` or
    an explicit ≥600s outer timeout. A `development` or run-only agent that backgrounds a
    suite: brief it to stay alive until the suite's exit marker and not hand back early.
+   Never brief a full-suite run where the PR's CI runs that suite; after a failure, brief
+   a re-run of the failing specs only.
 7. Prior art only you can read (a claude.ai artifact, a Claude Docs doc): export it to
    `<worktree>/.sdlc-scratch/prior-art/` and name each file in the prompt.
 
