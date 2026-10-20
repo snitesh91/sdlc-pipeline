@@ -212,10 +212,12 @@ Epic, to be picked; link with `create-issue --parent`.
 
 A cloud session drives only cloud-placed Epics, a local session only the rest; one unit is
 never driven from both. The exception is a cloud Epic's local Tasks (`localLabel` /
-`pipeline.placement.localTasks`): the laptop drives only those, the cloud session the rest,
-ending `waiting-local` once only they remain. A `placement_mismatch` error: stop, relay its `hint`, start
-nothing (`references/cloud-mode.md`). A cloud Epic run posts `end-cloud-session` before it
-ends (`references/cloud-mode.md`, "A cloud run").
+`pipeline.placement.localTasks`): the laptop drives only those, the cloud session the rest.
+A `placement_mismatch` error: stop, relay its `hint`, start nothing
+(`references/cloud-mode.md`). A cloud run never ends on a wait it can ask about in session: it
+parks that unit, asks, and keeps working the rest. It ends only when nothing else can move,
+posting `end-cloud-session` with what it waits on (`waiting-local` once only local Tasks
+remain), so the laptop relaunches it once that clears (`references/cloud-mode.md`, "A cloud run").
 
 ## Config can move under you
 
