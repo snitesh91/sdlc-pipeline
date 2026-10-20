@@ -173,8 +173,11 @@ _PIPELINE_DEFAULTS = {
     # cloud Epic with no GitHub activity this long is `stalled` in `cloud-status`.
     # `softOverlapPaths`: fnmatch globs (e.g. a migrations index, a docs table) whose shared
     # edits are small to merge at epic close -- footprint overlap there never holds a launch.
+    # `localLabel`: on a Task of a cloud-placed Epic, keeps that one Task on the laptop (the
+    # Epic stays in the cloud). `localTasks`: Tasks local with no label -- "e2e-test" /
+    # "integration-test" (the standing Tasks, by title) or "label:<name>" (any Task carrying it).
     "placement": {"cloudLabel": "sdlc:cloud", "initiativeEpics": "local", "stallMinutes": 90,
-                  "softOverlapPaths": []},
+                  "softOverlapPaths": [], "localLabel": "sdlc:local", "localTasks": []},
     # `command`: run by `development` in its worktree, green before `open-dev-pr`
     # (agents/development.md); "" = none.
     "prePr": {"command": ""},
@@ -1863,6 +1866,8 @@ def unit_placement(number: int, lookup: Callable[[int], Optional[dict]]) -> dict
         if anchor is None and kind in ("epic", "initiative"):
             anchor = n
         if anchor is not None and has_label(info, label):
+            if n != number and task_local_reason(lookup(number)):
+                return {"placement": "local", "epic": anchor, "task_local": True}
             return {"placement": "cloud", "epic": anchor, "label_on": n}
         parent = (info.get("parent") or {}).get("number")
         if kind == "initiative" or not parent:
@@ -1897,16 +1902,83 @@ def check_placement(number: int, lookup: Callable[[int], Optional[dict]]) -> dic
         on = "" if holder == epic else f" on #{holder}"
         hint = (f"#{epic} is placed in the cloud (label `{label}`{on}): only a cloud session "
                 f"drives it. Leave it to that session; to take it back, `place {holder} --where "
-                f"local` once no cloud session is driving it.")
+                f"local` once no cloud session is driving it. To keep one Task of it on the "
+                f"laptop instead, `place <task> --where local`; a laptop run then drives only "
+                f"those Tasks.")
     else:
-        hint = (f"#{epic} is placed local (no `{label}` label): only a local session drives it. "
-                f"Hand it over from the laptop with `place {epic} --where cloud` first.")
+        hint = ((f"#{number} is a local Task of cloud Epic #{epic} (`{local_label()}` label or "
+                 f"`pipeline.placement.localTasks`): only a laptop session drives it. Leave it; "
+                 f"the cloud session ends `waiting-local` once only local Tasks remain.")
+                if unit.get("task_local") else
+                (f"#{epic} is placed local (no `{label}` label): only a local session drives it. "
+                 f"Hand it over from the laptop with `place {epic} --where cloud` first."))
     hint += (f" Session placement came from {session['signal']}; set SDLC_PLACEMENT=cloud|local "
              f"only if that is wrong.")
     raise PlacementMismatch({"error": "placement_mismatch",
                              "session_placement": session["placement"],
                              "signal": session["signal"],
                              "unit_placement": unit["placement"], "epic": epic, "hint": hint})
+
+
+_LOCAL_TASK_KINDS = {
+    "e2e-test": re.compile(r"\s*(?:standing\s+)?e2e[\s_-]*tests?(?:\s+task)?\s*$", re.I),
+    "integration-test": re.compile(
+        r"\s*(?:standing\s+)?integration[\s_-]*tests?(?:\s+task)?\s*$", re.I),
+}
+
+
+def local_label() -> str:
+    return PIPELINE["placement"].get("localLabel") or "sdlc:local"
+
+
+def task_local_reason(issue: Optional[dict]) -> Optional[str]:
+    """Why a Task (never an Epic/Initiative) runs on the laptop while its Epic is in the
+    cloud: `label` (`localLabel`), a `localTasks` kind, or `label:<name>`; else None."""
+    if not issue or classify_unit_from_issue(issue) in ("epic", "initiative"):
+        return None
+    if has_label(issue, local_label()):
+        return "label"
+    title = issue.get("title") or ""
+    for entry in PIPELINE["placement"].get("localTasks") or []:
+        entry = str(entry)
+        if entry.startswith("label:"):
+            if has_label(issue, entry[len("label:"):]):
+                return entry
+        elif entry in _LOCAL_TASK_KINDS and _LOCAL_TASK_KINDS[entry].match(title):
+            return entry
+        elif entry not in _LOCAL_TASK_KINDS:
+            raise GhError(f"pipeline.placement.localTasks entry {entry!r} is neither "
+                          f"{' / '.join(sorted(_LOCAL_TASK_KINDS))} nor label:<name>")
+    return None
+
+
+def placement_scope(number: int, lookup: Callable[[int], Optional[dict]],
+                    issues: list) -> Optional[str]:
+    """Which children of Epic/Initiative `number` this session may drive: None (all), "cloud"
+    (a cloud session: every child except local Tasks) or "local-tasks" (a laptop session on a
+    cloud Epic that has open local Tasks: only those). Raises `PlacementMismatch` otherwise."""
+    try:
+        session = check_placement(number, lookup)
+    except PlacementMismatch as exc:
+        if exc.payload["session_placement"] == "local" and local_task_numbers(number, issues):
+            return "local-tasks"
+        raise
+    return "cloud" if (session or {}).get("placement") == "cloud" else None
+
+
+def local_task_numbers(epic: int, issues: list) -> list:
+    """Open Task children of `epic` that run local (`task_local_reason`)."""
+    return sorted(i["number"] for i in issues if i["state"] == "OPEN"
+                  and (i.get("parent") or {}).get("number") == epic and not is_epic(i)
+                  and task_local_reason(i))
+
+
+def in_scope(issue: dict, scope: Optional[str]) -> bool:
+    """Whether a child is this session's to drive under `placement_scope`'s `scope`."""
+    if scope is None:
+        return True
+    local = bool(task_local_reason(issue))
+    return local if scope == "local-tasks" else not local
 
 
 def _issue_info_lookup(gh: WorkItemProvider) -> Callable[[int], Optional[dict]]:
@@ -3520,8 +3592,10 @@ def _merged_design_action(gh: GitHub, issue: dict, epic: int) -> Optional[dict]:
 def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                        skip_epics: Optional[list] = None, repo_path: str = ".",
                        runner: Runner = _default_runner,
-                       all_issues: Optional[list] = None) -> dict:
-    """Pick the next action among the named Epic's/Initiative's open non-Epic children: `skip` |
+                       all_issues: Optional[list] = None, scope: Optional[str] = None) -> dict:
+    """`scope` (`placement_scope`) limits the children: "cloud" skips local Tasks (listed as
+    `local_tasks` on a `none`), "local-tasks" drives only them and no Epic-level step.
+    Pick the next action among the named Epic's/Initiative's open non-Epic children: `skip` |
     `resume` | `pass-gate` | `finish-lld` | `address-gate-feedback` | `route` | `delegate` |
     `stop-at-cap` | `none`; an Initiative with no such child walks its open Epics: `cut-phase-tasks`
     | `run-epic` (`skip_epics` parks stalled ones). Raises GhError when `epic` is neither.
@@ -3545,6 +3619,8 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                           "its children; skipping entirely."}
     children = [i for i in all_issues if i["state"] == "OPEN"
                 and i.get("parent") and i["parent"]["number"] == epic and not is_epic(i)]
+    other_side = sorted(i["number"] for i in children if not in_scope(i, scope))
+    children = [i for i in children if in_scope(i, scope)]
     # A profile whose Gate A auto-passes never fills the human queue, so it is uncapped.
     product_headroom = (product_wip_headroom(all_issues)
                         if effective_gates(epic_issue)["requiresHumanGateA"] else None)
@@ -3604,6 +3680,23 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                               f"unit's state is already persisted -- start a new run (a "
                               f"fresh --run-id) to carry on with a small context."}
         result = with_lane({"action": "none", "epic": epic})
+        if scope == "cloud" and other_side:
+            result["local_tasks"] = other_side
+            if not children:
+                result["waiting_local"] = True
+                result["reason"] = (
+                    f"only local Tasks remain ({', '.join(f'#{n}' for n in other_side)}) -- "
+                    f"end this session with `end-cloud-session {epic} --outcome waiting-local`; "
+                    f"a laptop `/sdlc:run {epic}` drives them and closes the Epic")
+        elif scope == "local-tasks":
+            result["local_tasks_only"] = True
+            result["cloud_children"] = other_side
+            if not children:
+                result["reason"] = (f"every local Task of cloud Epic #{epic} is done -- "
+                                    + (f"the cloud session drives the rest "
+                                       f"({', '.join(f'#{n}' for n in other_side)})"
+                                       if other_side else "close the Epic from here"))
+            return result
         if unstaged:
             result["unstaged"] = unstaged
             result["unstaged_reason"] = (
@@ -3721,6 +3814,8 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
         return with_lane({"action": "delegate", "issue": issue["number"], "unit": "issue",
                           "stage": stage})
 
+    if scope == "local-tasks":
+        return none_result()  # Epic-level steps (cut, launch, Initiative loop) are the cloud's
     if (is_initiative(epic_issue) and epic_issue["state"] == "OPEN" and not deferred_by_run_cap
             and initiative_epics_placement(epic_issue) == "cloud"
             and session_placement()["placement"] == "local"):
@@ -3967,14 +4062,14 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     repo_path = getattr(args, "repo_path", None) or "."
     issues = gh.issue_list()
     by_number = {i["number"]: i for i in issues}
-    check_placement(args.epic, by_number.get)
+    scope = placement_scope(args.epic, by_number.get, issues)
     version = plugin_version_guard(gh, args.epic, by_number, repo_path=repo_path)
     drift = config_drift(args.epic, run_id)
     epic_sync = (sync_epic_if_due(gh, args.epic, run_id, repo_path, issues=issues)
                  if getattr(args, "sync_epic", False) else None)
     result = decide_next_action(gh, args.epic, run_id=run_id,
                                 skip_epics=getattr(args, "skip_epic", None),
-                                repo_path=repo_path, all_issues=issues)
+                                repo_path=repo_path, all_issues=issues, scope=scope)
     # Read liveness before note_in_flight re-stamps this run onto the unit.
     liveness = (_resume_liveness(gh, args.epic, result["issue"])
                 if result.get("action") == "resume" else {})
@@ -3988,6 +4083,7 @@ def cmd_next_action(gh: GitHub, args) -> dict:
         except GhError:
             forget_initiative_hint(result["issue"])
     return {**result, **liveness, **version,
+            **({"placement_scope": scope} if scope else {}),
             "cap_enforced": bool(run_id) and MAX_TASKS_PER_RUN > 0,
             **({"epic_sync": epic_sync} if epic_sync is not None else {}),
             **({"config_changed": drift} if drift else {})}
@@ -3999,8 +4095,8 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
     Read-only. Returns `ready_for_review`, `count`, `eligible_total`, `skipped`."""
     limit = PR_REVIEW_PARALLELISM if limit is None else limit
     all_issues = gh.issue_list()
-    check_placement(epic, {i["number"]: i for i in all_issues}.get)
-    open_issues = [i for i in all_issues if i["state"] == "OPEN"]
+    scope = placement_scope(epic, {i["number"]: i for i in all_issues}.get, all_issues)
+    open_issues = [i for i in all_issues if i["state"] == "OPEN" and in_scope(i, scope)]
 
     ready, skipped = [], []
     at_review_entry = [i for i in open_issues if not is_epic(i)
@@ -5345,7 +5441,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
     if epic_issue is None or not is_epic(epic_issue):
         raise GhError(f"#{epic} is not an epic (pipeline.classification does not call it "
                        f"\"epic\") -- pass the epic's own issue number, not a child issue's")
-    check_placement(epic, by_number.get)
+    scope = placement_scope(epic, by_number.get, all_issues)
     cap_state = run_cap_state(epic, run_id)
     cap_enforced = bool(run_id) and MAX_TASKS_PER_RUN > 0
     base = {"parallel_ready": [], "count": 0, "eligible_total": 0, "active_count": 0,
@@ -5369,7 +5465,7 @@ def cmd_list_parallel_ready(gh: GitHub, repo_path: str, epic: int, limit: Option
                                  f"are not eligible for the implementation lane"}
     open_issues = [i for i in all_issues if i["state"] == "OPEN"]
     children = [i for i in open_issues if not is_epic(i) and i.get("parent")
-                and i["parent"]["number"] == epic]
+                and i["parent"]["number"] == epic and in_scope(i, scope)]
 
     _fetch_origin(repo_path, runner)
     lane = dev_lane_slots(gh, repo_path, epic, all_issues, runner=runner, cap=limit)
@@ -5442,7 +5538,7 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
     if epic_issue is None or not is_epic(epic_issue):
         raise GhError(f"#{epic} is not an epic (pipeline.classification does not call it "
                        f"\"epic\") -- pass the epic's own issue number, not a child issue's")
-    check_placement(epic, by_number.get)
+    scope = placement_scope(epic, by_number.get, all_issues)
     # An auto-passing Gate A never queues on the human, so it is exempt from the WIP cap.
     product_headroom = (product_wip_headroom(all_issues)
                         if effective_gates(epic_issue)["requiresHumanGateA"] else None)
@@ -5458,7 +5554,7 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
                                  f"time by next-action, not fanned out across children"}
     open_issues = [i for i in all_issues if i["state"] == "OPEN"]
     children = [i for i in open_issues if not is_epic(i) and i.get("parent")
-                and i["parent"]["number"] == epic]
+                and i["parent"]["number"] == epic and in_scope(i, scope)]
 
     _fetch_origin(repo_path, runner)
     active_branches = active_worktree_branches(repo_path, runner=runner)
@@ -9033,6 +9129,34 @@ def _placement_units(number: int, issues: list) -> set:
     return units
 
 
+def _place_task(gh: WorkItemProvider, issue: dict, where: str) -> dict:
+    """`place <task>`: `local` adds `localLabel` (the Task runs on the laptop while its Epic
+    stays in the cloud), `cloud` removes it. A `localTasks` match stays local regardless."""
+    number, label = issue["number"], local_label()
+    own = has_label(issue, label)
+    if where == "cloud" and not own:
+        raise GhError(f"#{number} is a Task, not an Epic or Initiative -- a Task is never "
+                      f"placed in the cloud on its own; place its Epic (`place <epic> --where "
+                      f"cloud`). `place <task> --where local` keeps one Task on the laptop")
+    result = {"issue": number, "task": True, "label": label,
+              "label_added": False, "label_removed": False}
+    if where == "local" and not own:
+        gh.ensure_label(label)
+        gh.issue_edit(number, add_labels=[label])
+        result["label_added"] = True
+    elif where == "cloud" and own:
+        gh.issue_edit(number, remove_labels=[label])
+        result["label_removed"] = True
+    else:
+        result["already"] = True
+    others = [{"name": n} for n in label_names(issue) if n != label]
+    reason = "label" if where == "local" else task_local_reason({**issue, "labels": others})
+    result["placed"] = "local" if reason else "with-epic"
+    if where == "cloud" and reason:
+        result["still_local"] = reason
+    return result
+
+
 def cmd_place(gh: WorkItemProvider, number: int, where: str, force: bool = False,
               repo_path: str = ".", runner: Runner = _default_runner) -> dict:
     """Place Epic/Initiative `number` in the cloud (add the cloud label, creating it) or
@@ -9044,9 +9168,13 @@ def cmd_place(gh: WorkItemProvider, number: int, where: str, force: bool = False
     issues = gh.issue_list()
     by_number = {i["number"]: i for i in issues}
     issue = by_number.get(number)
+    if issue is not None and classify_unit_from_issue(issue) not in ("epic", "initiative") \
+            and issue.get("parent"):
+        return _place_task(gh, issue, where)
     if issue is None or classify_unit_from_issue(issue) not in ("epic", "initiative"):
         raise GhError(f"#{number} is not an Epic or Initiative -- placement is set on the "
-                      f"Epic or its Initiative; pass that number")
+                      f"Epic or its Initiative (or, `local` only, on a Task of a cloud Epic); "
+                      f"pass that number")
     own = has_label(issue, label)
     parent = by_number.get((issue.get("parent") or {}).get("number"))
     inherited = (parent is not None and is_initiative(parent) and has_label(parent, label))
@@ -9436,7 +9564,8 @@ def cmd_request_gate_changes(gh: WorkItemProvider, issue: int, feedback: str) ->
 
 # --- Initiative -> cloud Epics ------------------------------------------------------------
 
-CLOUD_SESSION_OUTCOMES = ("closed", "waiting-human", "stopped", "abandoned")
+# `waiting-local`: only local Tasks (`placement_scope`) remain; a laptop run takes them.
+CLOUD_SESSION_OUTCOMES = ("closed", "waiting-human", "waiting-local", "stopped", "abandoned")
 _CLOUD_SESSION_MARKER = re.compile(r"<!--\s*sdlc:cloud-session\s+([^>]*?)\s*-->")
 _CLOUD_SESSION_END_MARKER = re.compile(r"<!--\s*sdlc:cloud-session-end\s+([^>]*?)\s*-->")
 _CLOUD_NUDGE_MARKER = re.compile(r"<!--\s*sdlc:cloud-session-nudge\s+([^>]*?)\s*-->")
@@ -9761,6 +9890,15 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
             if blockers:
                 reason = f"blocked by {', '.join(f'#{b}' for b in blockers)}"
         session = sessions.get(n)
+        if (reason is None and session and session["ended"] and not relaunch
+                and session["ended"].get("outcome") == "waiting-local"):
+            pending = local_task_numbers(n, all_issues)
+            remote = [i["number"] for i in all_issues if i["state"] == "OPEN"
+                      and (i.get("parent") or {}).get("number") == n and not is_epic(i)
+                      and i["number"] not in pending]
+            if pending and not remote:
+                reason = (f"waiting on its local Tasks ({', '.join(f'#{t}' for t in pending)}) "
+                          f"-- a laptop `/sdlc:run {n}` drives them")
         if reason is None and session and session["ended"] and not relaunch:
             ended_at = _parse_ts(session["ended"].get("at"))
             if open_prs is None:
@@ -11839,7 +11977,8 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_reparent_issue(get_work_item_provider(), a.issue,
                                                       a.parent, a.reason))
     p = sub.add_parser("place",
-                        help="Place an Epic/Initiative in the cloud or local (the cloud label)")
+                        help="Place an Epic/Initiative in the cloud or local (the cloud label), or "
+                             "keep one Task of a cloud Epic local (the local label)")
     p.add_argument("number", type=int, help="The Epic or Initiative")
     p.add_argument("--where", required=True, choices=list(PLACEMENTS))
     p.add_argument("--force", action="store_true",
