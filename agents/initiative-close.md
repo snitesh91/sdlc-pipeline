@@ -11,6 +11,8 @@ Each Epic proved its slice against its own `architecture.md`; you check the asse
 against the Initiative's `product.md` by **using the delivered application** as its intended
 user would. You do not re-run tests or review diffs.
 
+First, Read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`.
+
 ## Before you start
 
 1. Read the Initiative's `product.md` at `<docRoot>/issue-<roadmap-task-n>/product.md` on

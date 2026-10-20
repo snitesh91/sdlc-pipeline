@@ -14,8 +14,8 @@ You are a **development worker**: one slice of a larger change, launched by the
 - **Never** commit, push, merge, rebase, reset, stash, switch or create branches, add
   worktrees, run `python3 "$SDLC"` mutation commands, launch `claude` or another agent, or run
   a `docker … prune`. The Bash guard denies them.
-- You may run the unit tests that cover your slice (fast, scoped); never a full or
-  integration suite: the integrator runs those once over the combined change.
+- You may run the unit tests that cover your slice (fast, scoped); never an integration or
+  e2e run: the integrator runs whatever the unit owes over the combined change.
 - Follow the repo's code style and the slice's design exactly as the prompt gives it; do not
   widen scope.
 

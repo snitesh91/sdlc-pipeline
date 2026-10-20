@@ -1,7 +1,6 @@
 # Retrospective (only when the operator asks)
 
-Never decide on your own that a retro is due. Between retros, park each friction finding as
-you see it — bouncing pairings (`pairing-counts`), docs too thin for the next stage, dead
+Between retros, park each friction finding as you see it — bouncing pairings (`pairing-counts`), docs too thin for the next stage, dead
 references, gates too strict or loose:
 
 ```bash

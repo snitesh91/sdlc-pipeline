@@ -44,15 +44,11 @@ First, Read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md` and the "Epic 
   background a job and end your turn waiting on it; if you cannot, stop and report. Docker
   only, per the repo's `AGENTS.md`.
 
-## Triage — by rule
+## Triage
 
-| Finding | Destination |
-|---|---|
-| **Blocker / Critical** — attributable to a surface this epic moved, plus unconditionally any access-boundary delta, 5xx, crash, or data-integrity problem | A `Bug` child of this epic; blocks the close. Filed Stage-less (`next-action` reports it `unstaged`). |
-| **Normal / Low** — unmapped surface, non-reproducible flake, or pre-existing problem this epic did not touch | The standing RTB epic |
-| **Architecture drift, no functional defect** | Not a bug; its own line in your findings comment. Does not block the close; the orchestrator decides whether to update the doc or file the drift as an RTB item. |
-
-List each finding with severity, evidence and destination; the orchestrator files them.
+Rate each finding and name its destination by `references/epics.md`, "Triage new-spec and
+exploratory deltas" (in the "Epic closing" section you read). List each finding with
+severity, evidence and destination; the orchestrator files them.
 
 ## Output
 

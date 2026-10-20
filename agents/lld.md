@@ -102,12 +102,14 @@ effort; never below a shippable slice). In addition:
   (`references/epics.md`, "`lld` specifies the Tasks"), specified like functional Tasks:
   each `Depends on:` every functional Task whose surfaces it proves, owns the integration /
   e2e coverage unit tests cannot, and carries its own `## Footprint` (the test trees it
-  adds to). An Epic with no `e2e-test` Task gets no new e2e specs. The e2e-test Task authors
-  specs and runs only those; the full suite runs outside the pipeline.
+  adds to). An Epic with no `e2e-test` Task gets no new e2e specs. Each standing Task authors
+  specs and runs only those (`references/verification-rules.md`, "Test scope"): the epic PR's
+  CI runs the whole integration suite, and the full e2e suite runs outside the pipeline.
   Its section names the suites in scope, the specs it adds or extends, and the evidence
   goal — never how the suite runs ("A Task section holds design, never pipeline
   mechanics"). One with no spec to add says why existing coverage already proves every
-  functional Task's surface; its deliverable is then the run evidence alone.
+  functional Task's surface and names those existing specs; its deliverable is then a run of
+  them alone.
 - A Task that only makes sense after another's design settles is a dependency: sequence it
   with a `Depends on: <KEY>` line. A split whose footprints still overlap produces the
   collision this document exists to prevent.
@@ -160,7 +162,7 @@ Write every metadata line below plain — never wrapped in backticks.
   its own `## Task` section unless that issue *is* the Task; an issue neither carved nor
   realised stays parked.
 - **The e2e-test Task's section states its evidence goal**: the specs it adds, and what
-  counts as a stable pass of them versus a flake (`references/epics.md`, "Epic closing"). Not the run itself — see below.
+  counts as a stable pass of them versus a flake (`references/verification-rules.md`, "Test scope"). Not the run itself — see below.
 - **Acceptance criteria**, carried from the Epic (unchanged, or with the revision stated).
   Each is observable and unambiguous enough to write a failing test from without reading code.
   A criterion is a product behaviour, never a pipeline step. **Every decision that keeps

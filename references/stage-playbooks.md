@@ -6,7 +6,7 @@ Every stage subagent Reads this file first. Rules that bind only some roles live
 |---|---|
 | `references/design-doc-rules.md` | `product`, `product-review`, `architecture`, `design-review` (its `arch-review` half) |
 | `references/verification-rules.md` | `architecture`, `lld`, `development`, `pr-review`, `design-review` |
-| `references/review-fanout.md` | `design-review` |
+| `references/review-fanout.md` | `design-review`, `product-review`, `pr-review` |
 
 A role not listed for a file does not read it. Your prompt gives your doc path and worktree.
 Repo-specific commands (lint/build/test, host vs container, suite names, memory flags,
@@ -102,9 +102,9 @@ Run this as a mechanical pass before every handoff:
 
 Nothing re-invokes a subagent after its turn ends. Finish everything in-turn.
 
-- Run long commands (integration suite, container/image build, e2e suite) with
-  `run_in_background` and wait on them in-turn with the Monitor tool. Foreground
-  `sleep` is blocked.
+- Run long commands (a spec run, container/image build) with `run_in_background` and wait
+  on them in-turn with the Monitor tool; an agent without `Monitor` (`exploratory`,
+  `initiative-close`) uses blocking calls instead. Foreground `sleep` is blocked.
 - **Your final message declares exactly one terminal state** — the `SDLC-RESULT`
   outcome below. A final message whose last act
   is waiting ("I'll pick this up when the run lands", "monitoring for completion") is a
@@ -233,7 +233,8 @@ orchestrator (`references/rework.md`). What applies to you:
   If it is right, fix the whole class, not just the listed instance: a same-class repeat
   bounce escalates. If it is wrong, say so and show the evidence. Never agree
   performatively or comply silently.
-- **A rework round runs at full rigour:** no skipped suite, no shortened document check.
+- **A rework round runs at full rigour:** every check the round owes (`verification-rules.md`,
+  "Test scope"), on the new head; no shortened document check.
 
 ## Stage exit actions live in the agent files
 

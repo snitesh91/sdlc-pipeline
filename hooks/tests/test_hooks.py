@@ -1863,3 +1863,57 @@ def test_a_fanout_handoff_result_is_a_valid_sdlc_result():
             '"fanout": "unavailable", "axes": ["completeness", "flows"]}')
     result, problem = sdlc_result(line)
     assert problem is None and result["axes"] == ["completeness", "flows"]
+
+
+# --- edit_guard: a review role edits only inside its detached review worktree ---------------
+
+def edit_guard(path, cwd, agent_type=None, tool="Edit", root=None):
+    payload = {"tool_name": tool, "tool_input": {"file_path": path}, "tool_use_id": "t1",
+               "cwd": cwd}
+    if agent_type:
+        payload.update(agent_id="a1", agent_type=agent_type)
+    proc = run_hook("edit_guard.py", payload)
+    assert proc.returncode == 0, proc.stderr
+    if not proc.stdout.strip():
+        return None
+    out = json.loads(proc.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+    return out["permissionDecisionReason"]
+
+
+@pytest.fixture
+def review_repo(tmp_path):
+    root = tmp_path / "wt"
+    root.mkdir()
+    repo = _git_repo(tmp_path / "driven", {"repo": "o/r", "docRoot": "docs/sdlc",
+                                            "pipeline": {"worktrees": {"root": str(root)}}})
+    return repo, root
+
+
+@pytest.mark.parametrize("tool", ["Edit", "Write", "MultiEdit"])
+def test_edit_guard_allows_a_reviewer_inside_its_review_worktree(review_repo, tool):
+    repo, root = review_repo
+    path = str(root / "sdlc-review-12" / "src" / "guard.ts")
+    assert edit_guard(path, repo, "sdlc:pr-review", tool=tool) is None
+
+
+@pytest.mark.parametrize("where", ["dev", "main", "prefix-dir", "sibling"])
+def test_edit_guard_denies_a_reviewer_elsewhere(review_repo, where):
+    repo, root = review_repo
+    path = {"dev": str(root / "sdlc-dev-12" / "src" / "guard.ts"),
+            "main": os.path.join(repo, "src", "guard.ts"),
+            "prefix-dir": str(root / "sdlc-review-12"),
+            "sibling": str(root / "sdlc-review-12" / ".." / "sdlc-dev-12" / "a.ts")}[where]
+    for role in ("sdlc:pr-review", "sdlc:design-review", "sdlc:product-review"):
+        reason = edit_guard(path, repo, role)
+        assert reason and "review worktree" in reason
+
+
+@pytest.mark.parametrize("agent", [None, "sdlc:development", "sdlc:architecture", "general-purpose"])
+def test_edit_guard_leaves_other_roles_alone(review_repo, agent):
+    repo, root = review_repo
+    assert edit_guard(os.path.join(repo, "src", "x.ts"), repo, agent) is None
+
+
+def test_edit_guard_is_a_no_op_outside_a_driven_repo(plain_repo):
+    assert edit_guard(os.path.join(plain_repo, "x.ts"), plain_repo, "sdlc:pr-review") is None

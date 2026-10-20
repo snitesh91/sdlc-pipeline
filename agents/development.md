@@ -18,10 +18,15 @@ orchestrator named.
 
 | Unit | Your design | Your test obligation |
 |---|---|---|
-| **Normal functional Task** (child of a non-standing Epic) | Only your own `## Task #<n>` subsection: `python3 "$SDLC" lld-section --epic <parent-n> --task <n> --repo-path <worktree>`. Never read the whole `epic-<n>/lld.md`. Read the Epic's `architecture.md` only where your subsection points you at a specific part. | **Unit tests only.** No integration or e2e tests, no integration suite run — deferred by design to the Epic's standing Integration-test and e2e-test Tasks. Not a gap. Where the Initiative turns those off (`testTasks: false`), write the integration/e2e coverage your subsection names, nothing more. Your prompt's `Integration tests: mandatory` line overrides this: also run, locally, the integration specs your change impacts. |
-| **Standing Integration-test Task** of an Epic | Same `lld-section` call. | Run the full integration suite once every functional Task has merged; write the missing coverage; fix every failure found. Every integration rule below applies in full. |
-| **Standing e2e-test Task** of an Epic | Same `lld-section` call. | **Author** the Epic's missing e2e specs. Run **only the specs you add or change**, never the full suite, against a stack built from `epic-<n>` (`references/epics.md`, "Epic closing"); fix every failure they show. Every e2e rule below applies to those specs. |
-| **Standing-epic child** | Your own `<docRoot>/issue-<n>/architecture.md` (with its `product.md`), in full; routed past both, the issue body. Recommend `"next": "merge"` only for a trivially low-risk diff (`stage-playbooks.md`, "The handback is terse"). | No Integration-test Task behind you: every integration rule below applies in full. |
+| **Normal functional Task** (child of a non-standing Epic) | Only your own `## Task #<n>` subsection: `python3 "$SDLC" lld-section --epic <parent-n> --task <n> --repo-path <worktree>`. Never read the whole `epic-<n>/lld.md`. Read the Epic's `architecture.md` only where your subsection points you at a specific part. | **Unit tests only.** Integration and e2e coverage belong to the Epic's standing test Tasks — not a gap. Where the Initiative turns those off (`testTasks: false`), write the integration/e2e coverage your subsection names, nothing more. |
+| **Standing Integration-test Task** of an Epic | Same `lld-section` call. | **Author** the Epic's missing integration specs; fix every failure they show. |
+| **Standing e2e-test Task** of an Epic | Same `lld-section` call. | **Author** the Epic's missing e2e specs, run against a stack built from `epic-<n>` (`references/epics.md`, "Epic closing"); fix every failure they show. |
+| **Standing-epic child** | Your own `<docRoot>/issue-<n>/architecture.md` (with its `product.md`), in full; routed past both, the issue body. Recommend `"next": "merge"` only for a trivially low-risk diff (`stage-playbooks.md`, "The handback is terse"). | No standing test Task behind you: write the integration/e2e coverage your design names. |
+
+**Which suites you run, and how much of them**, is `verification-rules.md`, "Test scope" — for
+every unit above. In short: no integration suite on a Task into `epic-<n>` unless your prompt
+says `Integration tests: mandatory` or you add integration specs, and then only the specs
+concerned; the PR CI into `main` runs the whole suite.
 
 ## Working discipline — for the whole stage
 
@@ -136,9 +141,9 @@ cycle.
   a worker off git writes and control-plane commands; off by
   default, so without it you work alone). Use them only for independent slices of a large
   change. Rules: each worker gets a **disjoint file set** you name in its prompt (start it
-  `AXIS: <slice>`), works in your worktree, and never commits, pushes, syncs or runs a
-  suite; **you are the one integrator**: review each worker's diff, run the gates and
-  suites, commit and push. Two workers never edit the same file; a slice that needs a
+  `AXIS: <slice>`) and works in your worktree (`agents/dev-worker.md` is its contract); **you
+  are the one integrator**: review each worker's diff, run the gates and the specs "Test
+  scope" owes, commit and push. Two workers never edit the same file; a slice that needs a
   file another owns goes back to you.
 - **Host is macOS zsh.** Quote globs so zsh does not expand them (`grep -F "x" 'src/**'`);
   there is no BSD `sed -i` in-place — use the `Edit` tool, never a `python`/`sed` patch
@@ -150,59 +155,35 @@ cycle.
 
 - Use the repo's own lint/build/test commands from its `CLAUDE.md`/`AGENTS.md`, in the
   environment it mandates — inside its container when it says so, never the host equivalent.
-- **Run locally the tests relevant to the change** — the unit/spec files for the code you
-  touched. A suite a required workflow runs on your PR is gated by that check; do not re-run
-  it whole locally. Run and attest a whole suite only where the config requires a local
-  attestation → `references/operations.md`, "Local-CI attestation".
+- **Run what "Test scope" owes, nothing more** (`verification-rules.md`): the unit/spec files
+  for the code you touched, and integration or e2e specs only under its exceptions, scoped to
+  the specs concerned. If you believe a Task cannot be validated without a whole suite, say so
+  in your handoff and stop; never run it.
 - **Pre-PR check.** When `show-config` → `pipeline.prePr.command` is set, run it from your
   worktree root with `PRE_PR_BASE=origin/<base>` exported (e.g. `origin/epic-12`), after the
-  completion gates and before the push that precedes `open-dev-pr`, on every round. Fix and
-  re-run until it exits 0; it picks the checks from the changed paths, so never substitute
-  your own. Its run goes in the handoff's Commands table.
-- **Integration tests run locally only when your prompt says `Integration tests: mandatory`**
-  (or your unit's row above makes the suite yours).
+  completion gates and before the push that precedes `open-dev-pr`, on every round. Run it as
+  configured — never add its integration option (e.g. `--it`) unless "Test scope" owes those
+  specs. Fix and re-run until it exits 0; it picks the checks from the changed paths, so never
+  substitute your own. Its run goes in the handoff's Commands table.
 - **Redirect every suite run to a file** as you go; an attestation or your handoff table
   quotes it.
 - **Copy an attested suite's invocation from its workflow file**, flags included — the
   config's `requiredWorkflows[].files` names it. Open it before the run. A cascade of failures
   across suites your diff never touched is environmental until proven otherwise; check your
   invocation against the workflow's first.
-- **One clean pass is the evidence.** Stop at the first clean run of the suite the design
-  requires; no stability, soak or load re-runs unless the design names them.
-- **After a failure, re-run only the failing specs.** Fix, then re-run just the spec files
-  that failed until they pass; never re-run the whole suite to confirm a fix to one or two
-  specs. Run a whole suite **at most once** per round, and **not at all** where the PR's CI
-  runs it (an epic PR into `main`, any PR into `main` / `initiative-*` under a required
-  workflow) — that check is the full run. A reconcile or sync is no exception. Keep the stack up
-  between runs — no teardown or DB reset per run unless the reset is what you test; provision
-  fixtures and profiles once, before the first run.
-- **Integration tests run only against a test database.** Before starting any truncating or
-  table-cleaning suite, confirm the *effective* DB name ends in `_test`. Never copy a DB-name
-  override from an arbitrary Makefile target to make a suite run. If the effective DB is not a
-  `_test` one, stop and report; do not run.
-- A command that can outlast the tool timeout (a full integration or e2e run): start it with
-  `run_in_background`, its output going to a log that ends with a sentinel line
-  (`…; echo SUITE_EXIT=$? >> <log>`), and wait on the sentinel with `Monitor` in-turn. The process
-  outlives a forced handback: on a resume, poll the log for the sentinel — never re-launch
-  while one is live; kill it by PID first if you must abandon it. Else an explicit ≥600s timeout.
-- **Never run the full e2e suite** — over an hour, exceeds a tool call's timeout, contends
-  for shared ports and Docker stacks. The driven repo runs it outside the pipeline; the
-  standing e2e-test Task runs only the specs it adds or changes.
-  If you believe a normal task cannot be validated without it, say so in your handoff and stop.
-- **When the integration suite is yours** (not a normal functional Task): a new integration
-  spec the LLD mandates is written and run together with the specs its change impacts — the
-  whole IT suite runs only as this Task's final backstop, never per edit. On a large
-  multi-file refactor, finish the coherent change set before running it, then fix failures in
-  one pass. The standing Integration-test Task may scope an intermediate run before its final
-  full pass:
-  - With workspace packages and a Turborepo DAG, scope to affected packages
-    (`turbo run test --filter='...[<base-ref>]'`). Raw cross-table SQL is invisible to that
-    graph, so the final full run stays the backstop.
-  - A package filter does not narrow a package whose integration command is one flat run over
-    its whole test tree. Where tests mirror sources (`test/<domain>/` beside
-    `src/modules/<domain>/`), pass the matching `test/<domain>` paths to the runner's own path
-    filter. A diff touching shared code (`src/common`, a migration, anything cross-domain) runs
-    the package's full integration suite.
+- **Keep the stack up between runs** — no teardown or DB reset per run unless the reset is what
+  you test; provision fixtures and profiles once, before the first run. On a large multi-file
+  change, finish the coherent change set before running its specs, then fix failures in one
+  pass.
+- **Scoping a spec run:** with workspace packages and a Turborepo DAG, filter to affected
+  packages (`turbo run test --filter='...[<base-ref>]'`); where a package's integration command
+  is one flat run over its whole test tree, pass the matching `test/<domain>` paths to the
+  runner's own path filter instead.
+- A command that can outlast the tool timeout: start it with `run_in_background`, its output
+  going to a log that ends with a sentinel line (`…; echo SUITE_EXIT=$? >> <log>`), and wait on
+  the sentinel with `Monitor` in-turn. The process outlives a forced handback: on a resume, poll
+  the log for the sentinel — never re-launch while one is live; kill it by PID first if you must
+  abandon it. Else an explicit ≥600s timeout.
 - **An e2e spec you add tears down what it creates** (books, users, uploads) in `afterAll` or a
   fixture with teardown, so a later spec's list or count assertion never sees it. A shared
   helper that leaks records is fixed in the helper, not per spec.
@@ -222,8 +203,9 @@ cycle.
   hand. Small logical local commits. Push **once per cycle**: once immediately before `open-dev-pr`, and on a
   rework round once after all fix commits, before re-handing off — each push re-triggers
   `pull_request` CI. Push mid-cycle only to hand off to a human or unblock a teammate. A
-  rejected push: stop and report; never work around it. **In a cloud session, before the
-  PR exists, also push after every commit whose tests pass** (no PR, so no CI): a session can
+  rejected push: stop and report; never work around it. **In a cloud session, or when your
+  prompt says the session is unstable, before the PR exists, also push after every commit
+  whose tests pass** (no PR, so no CI): a session can
   die without warning, and an unpushed tree dies with it.
 
 ## The completion gates
@@ -251,21 +233,16 @@ included.
    diff — or whose code is wired into no entrypoint — is not done.
 6. **Sweep every numbered task-local decision in the design**, in order: quote the code that
    realises it and write `conform` or `deviate`. A `deviate` row states what you did instead
-   and why, and goes in the PR description as an explicit delta — **you author no design doc,
-   so never edit an open Epic's `<docRoot>/epic-*/**` (`lld.md` / `architecture.md`) to
-   record it**. The one exception: a unit whose issue asks for a correction to a **closed**
-   Epic's docs (as-built drift, a "Superseded by" note) makes it, and `open-dev-pr` passes
-   it. A path
+   and why, and goes in the PR description as an explicit delta — **never in an open Epic's
+   `<docRoot>/epic-*/` docs** (a closed Epic's correction only when your issue asks for it:
+   `references/epics.md`, "A closed Epic's design docs are its as-built record"). A path
    in another Task's `## Footprint` that your change inherently needs (a side effect, not a
    sibling's work): acknowledge it in the PR body as a bullet under `## Footprint deviations`,
    `` - `path` — why ``, so `open-dev-pr` passes it and `pr-review` adjudicates it; work that
    belongs to a sibling Task → stop with `blocked` / `needs-human` instead. Silent deviation is
    the defect; widening a decision while fixing something else is how it ships.
-7. **A build you cite is a real build** → `references/verification-rules.md`, "Compile-checking
-   is not verification". When the diff changes a DTO, a route, or anything OpenAPI-visible,
-   clear stale build output (`rm -rf dist *.tsbuildinfo`, then rebuild) **before** the
-   integration/IT tier — those tests run against compiled `dist`, so a green run on a stale
-   build proves nothing.
+7. **A build you cite is a real build**, and any integration run follows a rebuilt `dist` →
+   `references/verification-rules.md`, "Compile-checking is not verification".
 8. **Test gates from "How to write the tests"** — criterion→test map complete with
    discriminating assertions, a failure/repeat-case test per criterion, family controls run,
    guards mutation-checked, tree clean.
@@ -297,7 +274,8 @@ else is settled; do not reopen it.
    ```
    A push after it stales it. A suite a
    required workflow runs on the PR itself, or one your change never touches (confined to
-   another suite's `prefixes`), needs none.
+   another suite's `prefixes`), needs none. Attest only a whole-suite run under its suite key —
+   a run of chosen specs never (`e2e` excepted: `verification-rules.md`, "Test scope").
 4. Wait for the PR head's required checks (`pr-checks <pr>`); fix any red check that is not
    `infra_suspect`, then repeat from step 1.
 5. `python3 "$SDLC" handoff-to-pr-review <n> --pr <pr> --summary "..."` — **always**, including

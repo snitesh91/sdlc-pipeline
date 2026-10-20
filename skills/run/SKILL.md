@@ -26,7 +26,7 @@ handoff loop is live at once — never that anything decides on its own.
 | `${CLAUDE_PLUGIN_ROOT}/references/rework.md` | A review finding, a reported ambiguity, a possible valve trip, a replacement agent's resume message |
 | `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md` | Delegating any stage. Every stage agent Reads it (rules binding every role) |
 | `${CLAUDE_PLUGIN_ROOT}/references/design-doc-rules.md` | `product.md`/`architecture.md` content; scope alignment. Read by `product`, `product-review`, `architecture`, `design-review` |
-| `${CLAUDE_PLUGIN_ROOT}/references/verification-rules.md` | Proving a claim by running it. Read by `architecture`, `lld`, `development`, `pr-review`, `design-review` |
+| `${CLAUDE_PLUGIN_ROOT}/references/verification-rules.md` | Writing a `development` or `pr-review` brief, or briefing a reconcile ("Test scope": which suites run where — the full integration suite only as the epic PR's CI). Read by `architecture`, `lld`, `development`, `pr-review`, `design-review` |
 | `${CLAUDE_PLUGIN_ROOT}/references/review-fanout.md` | Review fan-out. Read by `design-review` |
 | `${CLAUDE_PLUGIN_ROOT}/references/epics.md` | Profiles, phase-Tasks, footprints, deviation, epic close, board status |
 | `${CLAUDE_PLUGIN_ROOT}/references/operations.md` | Token/repo access, issue fields, auto-merge, local-CI attestation, auto-mode denials |
@@ -71,10 +71,12 @@ task:       development -> [pr-review] -> auto-merge into epic-<n> -> CLOSED
   **Legacy profile** (`driven: false`): skipped entirely, Tasks included.
 - **Every Epic has two standing Tasks** (Integration-test, e2e-test), specified by `lld`,
   running after every functional Task merges — none when its Initiative's profile sets
-  `testTasks: false` (`initiative-profile <n>`). The e2e-test Task **authors** the Epic's new
-  specs and runs only those, against a stack built from `epic-<n>`.
-- **The pipeline never runs the full e2e suite** — not at epic close, not in a Task. The
-  driven repo runs it outside the pipeline (e.g. nightly). Epic close needs
+  `testTasks: false` (`initiative-profile <n>`). Each **authors** the Epic's new specs and
+  runs only those.
+- **Test scope** (`references/verification-rules.md`, "Test scope"): a Task into `epic-<n>`
+  runs no integration suite unless its brief says `Integration tests: mandatory` or it adds
+  integration specs, and then only the specs concerned. The whole integration suite runs once,
+  as the epic PR's CI into `main`; the pipeline never runs the full e2e suite. Epic close needs
   the exploratory pass, and `close-epic`'s `unattested_suites` / `awaiting_checks` name the
   suite evidence still owed (`references/epics.md`, "Epic closing").
 - **`product-review` follows every `product`** unless a standing child is routed past it:
@@ -151,6 +153,7 @@ Run from the driven repo's root; everything project-specific is in its `sdlc-pip
 - **SessionStart** exports `$SDLC` (the control plane) and `GITHUB_TOKEN` (from the config's `tokenEnv` var, else `tokenPath`, overriding any ambient one — locally only when no ambient token is set). If it reports the token missing, get it from the operator first; relay its optional `rtk init` hint once, never block on it. After a compaction it restates the run you were driving; on an off-policy session model it hints at a restart with `sdlc-run <n>` — advisory (may be stale after `/model`): mention it once, never stop on it.
 - **PreToolUse (Bash)** denies hand-run GitHub mutations, GraphQL, `git worktree add` (except `--detach`), force-push and rebase, and limits each stage agent to its role's commands (and denies it `git stash` and `claude`). An operator-directed PR outside the pipeline passes on the main thread when it names a non-pipeline branch: `gh pr create --head <branch> ...`, `gh pr merge <branch>`. An operator-directed issue title/body/label edit: `edit-issue` (Building blocks). A denial names the `python3 "$SDLC"` command to run instead — run it; never work around the guard. The main thread is guarded only while its session drives a run (a run-state file written by `next-action --run-id` within `guard.mainThreadFreshnessHours`, default 8; `guard.mainThread: "always"` guards every session) — an unguarded call logs one stderr line, so a run without `--run-id` is visible, never silent.
 - **PreToolUse (Agent)** sets every `sdlc:*` agent's `model` from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (config `pipeline.models` / `pipeline.fanout` override it), caps review fan-out and `development`'s optional parallel workers (only as `sdlc:dev-worker`, never launched by you), and lets only its `explore` roles (`development`, `lld`, `architecture`, `product`) launch a read-only `Explore` search. It denies an `sdlc:design-review` prompt lacking the header when the two review roles' models differ.
+- **PreToolUse (Edit/Write)** lets a review role edit only inside its own detached review worktree (`pr-review`'s mutation probe).
 - **SubagentStart** gives each `sdlc:*` agent `$SDLC`, its unit's `docRoot` / `requirementsDir` (per-product `docRoots`), `docTemplates`, its Initiative profile when one is configured (standing test Tasks off, initiative branch), the references path and the `SDLC-RESULT` format.
 - **SubagentStop** keeps an `sdlc:*` agent running until its final message ends with an `SDLC-RESULT` line (`product`/`architecture`/`lld` finishing `done` also need a successful `post-comment` this round). It and **SessionEnd** record each agent's tokens, cost, tool calls and peak context (README, "Metrics"). Never record metrics yourself.
 
@@ -175,7 +178,7 @@ failure; every result carries `remaining_steps`.
 | `advance-standing <n> --from none\|product\|product-review\|architecture\|arch-review --to product\|architecture\|development --reason "<one line>" [--repo-path <p>]` | Skip a standing child ahead ("Routing a standing child"): `transition --expect-stage <from>` (none at pickup; a review verifies as the stage it followed) → `route` → `start-stage --role <to>` → `routed`, `path`, `claimed`, `failed_step` (route's refusal is its `reason`) |
 | `skip-pr-review <n> --pr <pr> --reason "<one line>" --run-id <id>` | Merge a standing child's PR without `pr-review`: `verify-exit --expect-stage pr-review --pr` → `route --to merge` (refused after a `pr-review` bounce) → `merge-pr` → `merged`, `failed_step` (a `merge-pr` `behind_base` → `prepare-rework`, then re-run) |
 | `finish-gate-feedback <n> --expect-stage product\|architecture --repo-path <the unit's worktree>` | After a gate-feedback agent's `done`: `transition`, then `mark-feedback-addressed` only on `ready` → `ready`, `pipeline_status`, `failed_step` |
-| `prepare-rework <n> [--unit epic] [--repo-path <p>]` | Before resuming a rework or run-only agent, or after a `behind_base` / `held`: `worktree-add` (reuse, or re-create a released tree from origin) → `sync-branch` → `path`, post-sync `head`, `conflict` + `conflicting_files`, `pr`, `suites` (`needed`: each suite the new head still lacks, with its `check` — `pending` = wait for CI, `missing` = no PR-level CI: resume `development` to re-run it and `record-local-ci`; `carried`, `passed_by_check`) |
+| `prepare-rework <n> [--unit epic] [--repo-path <p>]` | Before resuming a rework or run-only agent, or after a `behind_base` / `held`: `worktree-add` (reuse, or re-create a released tree from origin) → `sync-branch` → `path`, post-sync `head`, `conflict` + `conflicting_files`, `pr`, `suites` (`needed`: each suite the new head still lacks, with its `check` — `pending` = wait for CI, `missing` = no PR-level CI: resume `development` to run it and `record-local-ci` — but on a Task PR into `epic-<n>` an integration suite here means its entry lacks `bases`: fix the config, never run it (`references/verification-rules.md`, "Test scope"); `carried`, `passed_by_check`) |
 | `cut-phase-tasks <epic> [--arch-body TEXT] [--lld-body TEXT] --repo-path <p>` | `epic-<n>` + its worktree, create + stage both phase-Tasks, LLD blocked by Architecture, Architecture worktree off `epic-<n>`; idempotent → `architecture_task`, `lld_task` |
 | `finish-lld <lld-task-n> --epic <e> --repo-path <p>` | `merge-design-pr` → `create-lld-tasks` → `merge-lld-doc` → `close-issue` → `completed_steps`, `failed_step`, per-step results. Safe to re-run from the top after any failure; never hand-run its `remaining_steps` |
 | `open-arch-revision <epic> --title TEXT --body TEXT [--blocks N ...] --repo-path <p>` | `epic-<n>` worktree + `create-issue` + `set-stage architecture` + worktree off `epic-<n>` + `add-blocked-by` per `--blocks` unit → `revision_task` |
@@ -383,12 +386,10 @@ The agent must *have* (not necessarily be pasted):
 4. The worktree: "Work in `<worktree-path>` (`<worktrees.root>/<devPrefix><n>`, default
    `/tmp/sdlc-dev-<n>`) — use absolute paths, or a standalone `cd` there; never chain
    `cd <path> && …` compounds (they trip the macOS sandbox permission prompt). Never touch
-   the main checkout for anything on this unit." For `development` add: small local commits,
-   one push before `open-dev-pr`; if a push is rejected, stop and report; and, when the run
-   has a test-env helper script, name it (it must not rebuild network/PG/volumes by hand).
-   Add `Integration tests: mandatory` when no required workflow runs the integration suite
-   on its PR and the change needs it before review (a migration, a raw query, a
-   cross-module or external-API integration); this line is the record of that decision.
+   the main checkout for anything on this unit." For `development` add the run's test-env
+   helper script, when it has one. Add `Integration tests: mandatory` only on the criteria in
+   `references/verification-rules.md`, "Test scope"; this line is the record of that decision,
+   and nothing else in a brief asks for an integration run.
    **For `pr-review`** give the repo root, not a worktree: the agent makes its own detached
    one with `review-worktree-add` and releases it at the end (`agents/pr-review.md`), never
    reviewing in the unit's development worktree.
@@ -397,8 +398,7 @@ The agent must *have* (not necessarily be pasted):
 6. Any command that can outlast the default tool timeout needs `run_in_background` or
    an explicit ≥600s outer timeout. A `development` or run-only agent that backgrounds a
    suite: brief it to stay alive until the suite's exit marker and not hand back early.
-   Never brief a full-suite run where the PR's CI runs that suite; after a failure, brief
-   a re-run of the failing specs only.
+   What it runs is "Test scope"'s: never brief a whole-suite run it does not owe.
 7. Prior art only you can read (a claude.ai artifact, a Claude Docs doc): export it to
    `<worktree>/.sdlc-scratch/prior-art/` and name each file in the prompt.
 

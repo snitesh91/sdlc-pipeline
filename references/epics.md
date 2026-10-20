@@ -54,19 +54,12 @@ Task:                    development -> [pr-review] -> auto-merge into epic-<n> 
 3. When `architecture` or `lld` returns, `transition` raises the **design PR**
    `issue-<n>` → `epic-<n>`; `arch-review`/`lld-review` review on it. A review whose doc
    changed after it was recorded is `review_stale`: re-run the review on the new head.
-4. The **pipeline merges the design PR** on `lld-review` clean always, on `arch-review`
-   clean only above the profile's skip threshold or where Gate B is waived (`skip-gate` /
-   `waive-gate`, which also close the Task) — otherwise `open-gate` gates that same PR and the
-   human merges it into `epic-<n>` (`references/gates.md`).
-5. After a clean `lld-review` (no human gate):
-   ```bash
-   python3 "$SDLC" finish-lld <lld-task-n> --epic <epic-n> --repo-path <p>
-   ```
-   It stops at the first failed step (`failed_step`, `completed_steps`; `behind_base` →
-   `sync-branch <lld-task-n>`); every step is idempotent — fix the cause and re-run it. Never
-   run its steps by hand.
-6. Close a phase-Task with `close-issue`, **never `mark-issue-closed`** — that only sets
-   terminal fields after a close and leaves the issue open, Stage-less, handed out again.
+4. The design PR's merge (`skip-gate` / `waive-gate` / the human at Gate B / `finish-lld`) and
+   the phase-Task's close (`close-issue`, **never `mark-issue-closed`** — that only sets
+   terminal fields and leaves the issue open, Stage-less, handed out again): SKILL.md,
+   "Cutting an Epic's phase-Tasks". `finish-lld` stops at its first failed step
+   (`failed_step`, `completed_steps`; `behind_base` → `sync-branch <lld-task-n>`); every step
+   is idempotent — fix the cause and re-run it, never its steps by hand.
 
 `finish-lld` ends the design phase: every Task the doc carved moves to `development`
 (unclaimed) and the Epic gets `epic:architected`. A child it did not advance is reported in
@@ -116,7 +109,7 @@ closed sub-issues, or rotate a standing epic before it fills (e.g. `RTB-2`), the
 
 ## Doc layout at the epic level
 
-- Paths: `docs/sdlc/epic-<n>/architecture.md` and `.../lld.md` — the one path every command
+- Paths: `<docRoot>/epic-<n>/architecture.md` and `.../lld.md` — the one path every command
   reads, authored directly there on the phase-Tasks' `issue-<n>` branches and merged into
   `epic-<n>` by their design PRs. Standing children and Product-Roadmap Tasks
   keep `issue-<n>/`. Altitude rules: `references/design-doc-rules.md`. An Epic has no
@@ -152,8 +145,9 @@ closed sub-issues, or rotate a standing epic before it fills (e.g. `RTB-2`), the
   pre-existing issue unless that issue *is* the Task as carved.
 - **Every Epic carries two standing Tasks, Integration-test and e2e-test**, specified like
   functional Tasks; they run after the functional Tasks merge and own the coverage unit
-  tests don't. The e2e-test Task authors specs only: it runs the specs it adds or changes,
-  never the full suite ("Epic closing"). **Except** under an Initiative with `testTasks:
+  tests don't. Each authors specs and runs only the specs it adds or changes; the whole
+  integration suite runs as the epic PR's CI (`references/verification-rules.md`, "Test
+  scope"). **Except** under an Initiative with `testTasks:
   false` ("Initiative branch"): `lld` carves neither and `create-lld-tasks` skips a section
   titled as one (`skipped_sections`).
 - **`Priority:` / `Effort:`** lines are optional per Task (`agents/lld.md`, "The
@@ -247,8 +241,9 @@ Task in `development`, a review) first decides whether its work fits it:
      doc. A revision updates the affected Tasks' `lld.md` sections in the same design PR (headings
      kept); only a new Task needs a fresh `lld` pass.
   4. Valve: count the `lld`/`development` <-> `architecture-revision` pairing on its
-     own. The third unsettled deviation on the same Epic swaps in the context-reset
-     replacement architect for rounds 4–6; the sixth → `mark-needs-human` **on the Epic**.
+     own, at `pipeline.escalation`'s thresholds (default 3 / 6): the third unsettled deviation
+     on the same Epic swaps in the context-reset replacement architect; the sixth →
+     `mark-needs-human` **on the Epic**.
 
 All other rework follows `references/rework.md`.
 
@@ -299,13 +294,8 @@ and in a repo without `initiativeProfiles`, its Epics close into `main` exactly 
   (`evidence.suites`: `deferred_to_initiative`); every other suite and the exploratory pass
   are owed as before. The deferred suites run once, on the initiative PR.
 - **`testTasks: false`**: no Integration-test / e2e-test Task (above).
-- **Into `main`, once, after every cut Epic closed** (`references/initiatives.md`, "Closing an Initiative"):
-  `open-initiative-pr <i>` syncs the branch with `main` and opens (or reuses) the PR
-  `initiative-<i>` → `main`, returning the `evidence` owed; the operator's final runs land
-  as passing checks or `record-local-ci --pr <pr>` attestations at its head (every required
-  workflow the PR touches, deferred ones included, plus each `closeSuites` key such as
-  `e2e`); `merge-initiative-pr <i>` merges only when that evidence is complete and the branch
-  is not behind `main` (refusals are exit 0 with `reason`, `evidence`), then deletes the branch.
+- **Into `main`, once, after every cut Epic closed:** `open-initiative-pr` /
+  `merge-initiative-pr` (`references/initiatives.md`, "Closing an Initiative", step 0).
   `check-initiative-closeable` / `close-initiative` refuse until it has landed, and a later
   Epic closing into a re-created branch un-lands it (a new PR is owed).
 - **Label removed mid-flight:** whatever the Initiative's labels now say, `check-initiative-closeable`
@@ -343,8 +333,12 @@ the operator to close.
    `not_required` | `missing`), with `carried_forward_files` (the delta it judged safe) and
    `evidence_breaks` (why a suite's child chain failed: the child PR or direct commit that
    breaks it).
-2. Run the exploratory pass against the reconciled tree and record it. Also run
-   every suite in `unattested_suites`.
+2. Run the exploratory pass against the reconciled tree and record it. Also run each suite in
+   `unattested_suites` whose workflow does not run on the epic PR (one that runs only on push
+   to `main`) with a fresh `sdlc:development` agent and a run-only brief (fix nothing,
+   report). A suite whose workflow does run on the epic PR — every one in `awaiting_checks`,
+   and any `unattested_suites` entry left attestable — waits for that check: never run it
+   locally (`references/verification-rules.md`, "Test scope").
 3. Second call: refuses on missing or stale evidence (`missing_verification`) or a required
    suite still `missing` (`checks: missing-checks`); otherwise merges `epic-<n>` to `main`.
    A failed, pending or never-started GitHub Actions run never blocks this merge by itself —
@@ -389,8 +383,7 @@ run the install, then resume it. The pass also runs `lld.md`'s `## Epic-close ch
 never runs the full e2e suite** — at close or in any Task; the driven repo runs it outside
 the pipeline (e.g. nightly on its staging environment) and files what fails there.
 `close-epic` never asks for it. `record-epic-verification --kind e2e` is still accepted
-(informational, never gates). Run every suite in `unattested_suites` with a
-fresh `sdlc:development` agent and a run-only brief (fix nothing, report). **You** record the
+(informational, never gates). **You** record the
 exploratory half with `record-epic-verification <n> --kind exploratory --summary "..."
 --repo-path <the epic worktree the pass ran in>` (it stamps that worktree's HEAD —
 `sha_source`, `behind_origin`, `origin_sha`; `--sha` names an earlier tested head; the summary
@@ -406,29 +399,24 @@ record a verification you did not run clean.**
 - the exploratory pass could not be obtained. With no record `close-epic` refuses —
   report the epic as close-ready pending it, and stop. Never fabricate the record.
 
-**The e2e-test Task authors this Epic's specs and runs only those** — the specs it adds or
-changes, never the full suite — against a stack built from `epic-<n>` (the Epic's isolated
+**The e2e-test Task's specs run against a stack built from `epic-<n>`** (the Epic's isolated
 stack, or one stood up from the epic worktree). The shared dev stack serves `main` and lacks
 the Epic's changes, so a run there proves nothing. It attests that run with `record-local-ci
 --suite e2e` (`e2e` is always a valid key). Sequence the Task after the Tasks whose
-surfaces it proves. Per-child `development` runs only the specs for surfaces that child moved.
-On a cloud Epic whose cloud setup has no e2e profile, the e2e-test Task is a local Task
-(`pipeline.placement.localTasks: ["e2e-test"]`, `references/cloud-mode.md`, "Placement rules"):
-the laptop runs it after the cloud session ends `waiting-local`; once it closes, the laptop
-relaunches the Epic's cloud session (`relaunch_ready`), which closes the Epic.
+surfaces it proves. On a cloud Epic with no cloud e2e profile it is a local Task
+(`references/cloud-mode.md`, "A cloud run").
 
 **Triage new-spec and exploratory deltas:**
 
 - **Blocker / Critical** — a stable, re-confirmed delta on a spec for a surface this epic
-  moved, plus **any** access-boundary delta or 5xx/crash → file against **the epic**; it
-  blocks close. Route the `unstaged` child by hand (`set-stage <n> --stage development`,
-  or an Architecture revision Task if the fix doesn't fit the design).
+  moved, plus **any** access-boundary delta, 5xx, crash or data-integrity problem → a `Bug`
+  child of **the epic** (Stage-less, so `unstaged`); it blocks close. Route it by hand
+  (`set-stage <n> --stage development`, or an Architecture revision Task if the fix doesn't
+  fit the design).
 - **Normal / Low** — unmapped surface, non-reproducible flake, or a pre-existing failure
   cluster with unchanged membership → file against the standing backlog epic.
-
-The e2e-test Task's `## Task` subsection names the specs it adds and what counts as a
-stable pass of them (its evidence goal — one zero-retry run is not stability); how the suite runs is
-`development`'s, never the LLD's (`agents/lld.md`, "The document").
+- **Architecture drift with no functional defect** — not a bug and never blocks the close;
+  you decide whether to correct the doc or file the drift on the standing backlog epic.
 
 **Close-blocker lane — only with operator authorisation.** A Blocker/Critical fix that
 passes the *fits* test ("Architecture deviation escalation") may skip `lld` and go

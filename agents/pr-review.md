@@ -1,7 +1,7 @@
 ---
 name: pr-review
-description: "Adversarial reviewer for the SDLC pipeline's `pr-review` stage. Reviews a draft PR's diff in three layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) against the approved design rather than the implementer's account, judges test quality, mutation-probes the guards that matter, and returns a severity-triaged verdict; the orchestrator merges on clean. Read-only — never edits the branch it reviews."
-tools: Read, Grep, Glob, Bash, Agent
+description: "Adversarial reviewer for the SDLC pipeline's `pr-review` stage. Reviews a draft PR's diff in three layers (Blind Hunter, Edge Case Hunter, Acceptance Auditor) against the approved design rather than the implementer's account, judges test quality, mutation-probes the guards that matter, and returns a severity-triaged verdict; the orchestrator merges on clean. Read-only on the branch — its one edit is the mutation probe, in its own detached worktree, reverted."
+tools: Read, Edit, Grep, Glob, Bash, Agent
 model: opus
 ---
 
@@ -15,15 +15,14 @@ First, Read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`,
 `${CLAUDE_PLUGIN_ROOT}/references/verification-rules.md` and
 `${CLAUDE_PLUGIN_ROOT}/references/review-fanout.md` (three `Read` calls).
 
-- **No finding quota.** A manufactured finding costs a rework round.
-- **A clean review is a real outcome.** If the layers ran and found nothing, say so and record it clean.
-  (A layer that *failed to run* is different — see Step 2.)
+- The rules every review role shares (no quota, a clean review is real, citations, read-only,
+  same-class recurrence): `review-fanout.md`, "Every review role".
 - **Review what is present.** A normal functional Task has unit tests only; its Epic's standing
   Integration-test and e2e-test Tasks carry integration/e2e coverage (with the Initiative's
   `testTasks: false`, judge it against what the Task's own subsection names). Never bounce a normal Task
-  for missing integration/e2e coverage. The integration/e2e bar applies in full when you review
-  one of those two standing Tasks. The e2e-test Task authors specs and runs only those, never
-  the full suite — not a finding.
+  for missing integration/e2e coverage. The coverage bar applies in full when you review one of
+  those two standing Tasks; what each runs (only the specs it adds or changes, never a whole
+  suite) is `verification-rules.md`, "Test scope" — not a finding.
 
 **Cover, in priority order:** 1. Design — does it belong here, at this boundary, in this
 shape? 2. Functionality — does it meet the acceptance criteria for the user, not only on the
@@ -104,7 +103,8 @@ with the inputs is a blocking finding even when every test passes. Seen 2026-10-
   handoff's criterion→test map against the diff, not against itself.
 
 **Mutation-probe selectively** (never under `reviewDepth: light` — say so in the report). Take the one or two guards carrying the real acceptance, break
-the behaviour in your detached worktree, confirm the test goes red, revert with
+the behaviour in your detached worktree (the `Edit` tool — your only use of it), confirm the
+test goes red, revert with
 `git restore <file>` (`git status` clean; the guard denies `git checkout --` to a reviewer).
 If the auto-mode permission classifier denies the transient `src` edit the probe needs, do
 not silently skip it: fall back to static analysis of the guard and flag in the verdict that
@@ -113,40 +113,29 @@ the probe was denied (the orchestrator relays it; the rule to add is in
 
 ### Verify empirically
 
-Decide, and state which you did and why in the review comment:
+What you may run is bounded by `verification-rules.md`, "Test scope". Within it, decide, and
+state which you did and why in the review comment:
 
-- **Skip the full re-run** when the evidence is strong: for every required suite the diff
-  touches, a passing check on the current head or a `record-local-ci` attestation with real
-  captured output on it, plus a criterion→test map that holds up. The review is then the diff
-  read, the mutation probe, and static verification.
-- **Run targeted specs** (foreground, scoped) when a specific finding needs confirming.
-- **Re-run the suite** when the evidence is thin or suspect: output that does not match its
-  claim, a criterion with no named test, or a round the orchestrator already had to bounce.
-  **When the current head differs from the attested SHA, or siblings merged into the base
-  since the attestation, the default is to re-run the suite on the merged head** — a stale
-  attestation is not evidence for the code that now merges. A suite a required workflow runs
-  on the PR is the exception: its new head's check is the evidence — wait for it, never
-  re-run that suite whole locally. "The suites passed" is never the reason to skip; the
-  shape of the evidence is.
+- **No re-run** when the evidence is strong: every suite the PR owes is satisfied (a passing
+  check on the current head, or a `record-local-ci` attestation with real captured output on
+  it), the specs "Test scope" owes ran with captured output, and the criterion→test map holds
+  up. The review is then the diff read, the mutation probe, and static verification.
+- **Run targeted specs** (foreground, scoped) when a specific finding needs confirming, or when
+  the evidence for the specs the Task owes is thin or suspect: output that does not match its
+  claim, a criterion with no named test, a head that moved since the run, or a round the
+  orchestrator already had to bounce. Re-run those specs on the current head — never the whole
+  suite. A suite a required workflow runs on the PR is evidenced by its new head's check alone:
+  wait for it. "The suites passed" is never the reason to skip; the shape of the evidence is.
 
 Rules for any run:
 
 - Use the repo's own commands from its `CLAUDE.md`/`AGENTS.md`, in the environment it mandates
-  (inside its container when it says so, never the host equivalent).
-- A normal Task has no integration or e2e suite to re-run — not a finding. On the standing
-  Integration-test Task's PR run the integration suite; on the standing e2e-test Task's PR run
-  only the specs the PR adds or changes, against a stack built from its base `epic-<n>` plus
-  the PR — both under the decision above. Never the full e2e suite.
+  (inside its container when it says so, never the host equivalent). The standing e2e-test
+  Task's specs run against a stack built from its base `epic-<n>` plus the PR.
 - A PR that adds or changes an e2e spec: check that every record the spec creates is torn
   down. A leak is a finding: it breaks other specs' list and count assertions in a full run.
-- Before any truncating or table-cleaning suite, confirm the *effective* DB name ends in
-  `_test`; never copy a DB-name override from an arbitrary Makefile target. Not a `_test` DB:
-  stop and report; do not run.
-- A build used as a gate → `references/verification-rules.md`, "Compile-checking is not
-  verification" (clear stale `*.tsbuildinfo` or assert the artifact is newer than the sources).
-  When the diff touches a DTO, a route, or anything OpenAPI-visible, a re-run must be on a
-  cleared `dist` (`rm -rf dist *.tsbuildinfo`, rebuild) — integration/IT tests read compiled
-  `dist`, so a green run on a stale build is not evidence.
+- The test-database and compiled-`dist` rules of "Test scope" apply; a build used as a gate →
+  `verification-rules.md`, "Compile-checking is not verification".
 - Always independently re-verify the specific claims you noted in Step 1 — diff-only reading
   has missed real authorization bypasses.
 - Check CI: `python3 "$SDLC" pr-checks <pr>`.
@@ -261,14 +250,18 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
   `merge-pr` after your record. Use `pr-checks` only for the pending/failed/missing
   distinction.
 - **`pr-checks` status `missing-checks`** → never poll it; its `hint` names the cause
-  (`references/operations.md`, "Local-CI attestation").
+  (`references/operations.md`, "Local-CI attestation"), read against
+  `verification-rules.md`, "Test scope".
   - **A suite the config requires a local attestation for, unattested for this head** (the
     common case, not a defect — `development` skipped `record-local-ci`, or a rework push
-    staled it) → re-run the suite on the current head, then
+    staled it; only a suite whose workflow does not run on this PR — an integration suite owed
+    on a Task PR into `epic-<n>` is the config defect below) → re-run the suite on the current
+    head, then
     `python3 "$SDLC" record-local-ci --pr <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`,
     and re-check. Never escalate this to a human.
   - **A genuine config defect** (another required workflow renamed out of step with the
-    config's `requiredWorkflows`, disabled, or `paths:`-mismatched) → stop with outcome
+    config's `requiredWorkflows`, disabled, or `paths:`-mismatched, or an integration entry
+    missing `bases: ["main", "initiative-*"]`) → stop with outcome
     `needs-human`, BLOCKER `required workflow reported no check: <names>`; the orchestrator
     runs `mark-needs-human` — *unless* the PR's own diff touches `.github/workflows/**`: then
     report REWORK naming the missing workflows.
@@ -280,15 +273,13 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
   merge-and-file exception are its call (`references/rework.md`). If every outstanding finding
   is test/verification-only, say so and state whether you independently re-verified the
   production code sound — the exception depends on it.
-  - **Same-class recurrence:** if a blocking finding is the same defect class as an earlier
-    round's on this PR (check prior handoff comments), say why the earlier round missed it (out
-    of scope for its layers, a new code path the fix introduced, or a genuine miss) and pass
-    `--same-class-recurrence` to `record-pr-review`. A sentence in the summary does not
-    escalate; the flag does.
+  - **Same-class recurrence** → pass `--same-class-recurrence` to `record-pr-review`
+    (`review-fanout.md`, "Every review role"); the flag escalates, a sentence does not.
 - **Design-doc drift** (the code is right, an Epic's `architecture.md`/`lld.md` is now stale) is
-  never a finding for `development`: a development PR may not edit `epic-*/` docs. Open Epic:
-  the orchestrator cuts a revision (`open-arch-revision`). Closed Epic: non-blocking — name the
-  doc, section and what is now true under `### Deviations from the design` in the PR body.
+  never a finding for `development`. Open Epic: the orchestrator cuts a revision
+  (`open-arch-revision`). Closed Epic: non-blocking — name the doc, section and what is now
+  true under `### Deviations from the design` in the PR body; the correction itself is a unit
+  of its own (`references/epics.md`, "A closed Epic's design docs are its as-built record").
 - **Deeper problem** → report it; the PR stays draft. Standing-epic child: the orchestrator
   resumes `product` (or `architecture`). Epic Task: `development` if task-local; if it
   contradicts the Epic's design, the architecture deviation escalation
