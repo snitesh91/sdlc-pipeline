@@ -53,18 +53,32 @@ python3 "$SDLC" place <n> --where cloud|local [--force] --repo-path <p>
 
 A cloud session drives its one Epic (or Initiative) through the normal Steps 1–4 loop until
 the Epic closes — through `close-epic` when `pipeline.epicClose.auto` allows. It never uses
-continuous mode or `ScheduleWakeup`: with `pipeline.humanChannel: "session"` it waits on the
-operator in session ("Human channel"); with `"github"` it ends once `next-action` returns
-`none`, reporting what is parked on GitHub. Before it ends, an Epic's cloud run posts its end
-marker:
+continuous mode or `ScheduleWakeup`.
+
+- **A wait never ends the session while other work can move.** A `needs-human` handback, a
+  valve trip or a design gate below the skip bar parks that unit only: dispatch every other
+  runnable unit, then ask in session ("Human channel"; a gate: `references/gates.md`,
+  "Deciding a gate in session"), and carry on with the answer. Before a question, `cloud-heartbeat
+  <epic> --state asking`; the next `start-stage` / `transition` stamps it back to `working`.
+- **It ends only when nothing else can move** (`next-action` returns `none` and every open
+  question is answered or deferred to GitHub), or the operator says stop. With `"github"` it
+  ends at the first `none`, reporting what is parked on GitHub.
+
+Before it ends, an Epic's cloud run posts its end marker, naming what it waits on:
 
 ```bash
-python3 "$SDLC" end-cloud-session <epic> --outcome closed|waiting-human|stopped [--note "<one line>"]
+python3 "$SDLC" end-cloud-session <epic> --outcome <outcome> [--waits-on <n> ...] [--note "<one line>"]
 ```
 
-`closed` once the Epic merged; `waiting-human` when a gate or `needs-human` is parked on
-GitHub; `stopped` for anything else (`abandoned` is the laptop's, "Status and stalls").
-Then Step 4.
+| Outcome | When | `--waits-on` |
+|---|---|---|
+| `closed` | the Epic merged | — |
+| `waiting-human` | a gate or `needs-human` is parked for the operator | default: the Epic's open units at needs-human / an open gate |
+| `waiting-epic` | only another Epic's merge or close unblocks it (a close held for it, a dependency) | required: that Epic |
+| `stopped` | the operator stopped it, or anything else | — |
+
+(`abandoned` is the laptop's, "Status and stalls".) The recorded wait drives the relaunch
+("Initiative → cloud Epics", "Launchable"). Then Step 4.
 
 - **No local cleanup:** the container, `/tmp` worktrees and stack data included, is discarded
   when the session ends. Unit cleanup, `prune-stale` and stack teardown skip worktree and data
@@ -163,8 +177,18 @@ cloud session instead of driving it.
   disjoint from every live cloud Epic's (the union of its `lld.md` Tasks' footprints, else a
   `## Footprint` in the Epic's body; an unknown one cannot be shown disjoint from a known
   one; paths matching `pipeline.placement.softOverlapPaths` never count as overlap), within
-  `parallelism.cloudSessions` (default 3) live sessions repo-wide. An Epic whose
-  last session ended waits for new GitHub activity on it (`--relaunch` overrides).
+  `parallelism.cloudSessions` (default 3) live sessions repo-wide. An Epic whose last
+  session ended relaunches by itself once what it recorded clears (`waits=`): a waited Epic
+  closed; a waited unit closed, left needs-human / awaiting review, or got a comment after the
+  end (the operator's answer on GitHub). Until then it waits, whatever other activity happens.
+  An end marker with no waits (older sessions) waits for new GitHub activity instead.
+  `--relaunch` overrides both. A relaunch needs no flag: `survey.relaunch` lists them.
+- **Overlap override (operator only):** `launch-cloud-epic <epic> --allow-overlap` skips both
+  footprint checks; the marker records `overlap=1` and the comment says so. The cap still holds.
+  Use it only on the operator's word.
+- **A session started by hand** (`claude --cloud`, the claude.ai UI): register it with
+  `record-cloud-session <epic> --session <url|session_…>` (adds the cloud label, posts the launch
+  marker with `manual=1`), so `cloud-status`, the cap and the stall checks see it.
 - **Idempotent:** an Epic with a live session marker is never relaunched (`already_running`).
   `ok: false` with `output_tail` means the CLI printed no session id: the marker records
   `id=unknown`; relay the tail to the operator.
@@ -185,9 +209,12 @@ cloud session instead of driving it.
 
 On the Epic's issue, written only by these commands:
 
-- `<!-- sdlc:cloud-session id=<session_…> url=<url> launched=<iso> -->` — `launch-cloud-epic`.
+- `<!-- sdlc:cloud-session id=<session_…> url=<url> launched=<iso> [overlap=1] [manual=1]
+  [heartbeat=<iso> state=working|asking] -->` — `launch-cloud-epic` / `record-cloud-session`;
+  the session itself rewrites `heartbeat` / `state` in place (`cloud-heartbeat`; `start-stage`
+  and `transition` stamp it in a cloud session, at most every 5 minutes, never failing the step).
 - `<!-- sdlc:cloud-session-nudge id=… n=<k> at=<iso> -->` — `nudge-cloud-epic`.
-- `<!-- sdlc:cloud-session-end id=… outcome=<outcome> ended=<iso> -->` — `end-cloud-session`.
+- `<!-- sdlc:cloud-session-end id=… outcome=<outcome> ended=<iso> [waits=<n>,…] -->` — `end-cloud-session`.
 
 A session is live from its launch marker until an end marker. These comments never count as
 activity.
@@ -201,9 +228,11 @@ python3 "$SDLC" nudge-cloud-epic <epic>
 
 - **`cloud-status`** gives, per cloud Epic: `session` (url), state, children `by_stage` /
   `by_status`, `open_prs`, `gates_pending`, `needs_human`, `last_activity` (comments, child
-  issue updates, PR updates, in-progress branch heads), `idle_minutes`, `stalled` (live session,
-  open Epic, idle ≥ `pipeline.placement.stallMinutes`, default 90), `end_marker`,
-  `nudges_since_activity`, `escalate`. A `stalled` Epic with no end marker may be a dead
+  issue updates, PR updates, in-progress branch heads, and the session's `heartbeat`),
+  `idle_minutes`, `stalled` (live session, open Epic, not `asking`, idle ≥
+  `pipeline.placement.stallMinutes`, default 90), `end_marker`, `nudges_since_activity`,
+  `escalate`, `waits` and `relaunch_ready` (an ended session whose recorded wait cleared:
+  `launch-cloud-epic <epic>`, no flag; it also sets `attention`). A `stalled` Epic with no end marker may be a dead
   session: read its run log (session url) before nudging, and end-mark a dead one. On a cloud-mode Initiative also `launchable`, `waiting`,
   `all_closed`, and `attention`.
 - **A stalled Epic:** `nudge-cloud-epic <epic>` sends `claude -p "continue: /sdlc:run <epic>"

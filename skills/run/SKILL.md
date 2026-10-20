@@ -212,8 +212,10 @@ Epic, to be picked; link with `create-issue --parent`.
 
 A cloud session drives only cloud-placed Epics, a local session only the rest; one Epic is
 never driven from both. A `placement_mismatch` error: stop, relay its `hint`, start
-nothing (`references/cloud-mode.md`). A cloud Epic run posts `end-cloud-session` before it
-ends (`references/cloud-mode.md`, "A cloud run").
+nothing (`references/cloud-mode.md`). A cloud run never ends on a wait it can ask about in
+session: it parks that unit, asks, and keeps working the rest. It ends only when nothing else
+can move, posting `end-cloud-session` with what it waits on, so the laptop relaunches it once
+that clears (`references/cloud-mode.md`, "A cloud run").
 
 ## Config can move under you
 
