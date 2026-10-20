@@ -783,6 +783,12 @@ class GitHub:
             argv += ["-f", f"{name}={value}"]
         return json.loads(self._run(argv))["data"]
 
+    def issue_comment_edit(self, comment: dict, body: str):
+        """Replace the body of `comment` (an `issue_view` comment)."""
+        self.graphql("mutation($id: ID!, $body: String!) { updateIssueComment(input: "
+                     "{id: $id, body: $body}) { issueComment { id } } }",
+                     id=comment["id"], body=body)
+
 
 # The Claude Code cloud proxy appends this to every text it writes to GitHub.
 _PROXY_FOOTER_RE = re.compile(
@@ -1128,7 +1134,8 @@ class GitHubRest(GitHub):
         return index
 
     def _comments(self, number: int) -> list:
-        return [{"id": c.get("node_id"), "author": {"login": (c.get("user") or {}).get("login")},
+        return [{"id": c.get("node_id"), "databaseId": c.get("id"),
+                 "author": {"login": (c.get("user") or {}).get("login")},
                  "body": strip_proxy_footer(c.get("body")) or "",
                  "createdAt": c.get("created_at"), "url": c.get("html_url")}
                 for c in self._api_items(f"repos/{self.repo}/issues/{number}/comments"
@@ -1246,6 +1253,12 @@ class GitHubRest(GitHub):
     def issue_comment(self, number: int, body: str):
         self._api(f"repos/{self.repo}/issues/{number}/comments", "-f", f"body={body}",
                   method="POST")
+
+    def issue_comment_edit(self, comment: dict, body: str):
+        if not comment.get("databaseId"):
+            raise GhError("the comment has no REST id to edit")
+        self._api(f"repos/{self.repo}/issues/comments/{comment['databaseId']}",
+                  "-f", f"body={body}", method="PATCH")
 
     def issue_close(self, number: int, reason: str = "completed"):
         self._api(f"repos/{self.repo}/issues/{number}", "-f", "state=closed",
@@ -9388,7 +9401,10 @@ def cmd_request_gate_changes(gh: WorkItemProvider, issue: int, feedback: str) ->
 
 # --- Initiative -> cloud Epics ------------------------------------------------------------
 
-CLOUD_SESSION_OUTCOMES = ("closed", "waiting-human", "stopped", "abandoned")
+CLOUD_SESSION_OUTCOMES = ("closed", "waiting-human", "waiting-epic", "stopped", "abandoned")
+# A live session's heartbeat (its launch marker's `heartbeat=`) is rewritten at most this often.
+HEARTBEAT_MIN_SECONDS = 300
+HEARTBEAT_STATES = ("working", "asking")
 _CLOUD_SESSION_MARKER = re.compile(r"<!--\s*sdlc:cloud-session\s+([^>]*?)\s*-->")
 _CLOUD_SESSION_END_MARKER = re.compile(r"<!--\s*sdlc:cloud-session-end\s+([^>]*?)\s*-->")
 _CLOUD_NUDGE_MARKER = re.compile(r"<!--\s*sdlc:cloud-session-nudge\s+([^>]*?)\s*-->")
@@ -9524,8 +9540,11 @@ def parse_cloud_launch(text: str) -> dict:
 
 def cloud_sessions(comments: list) -> list:
     """Cloud sessions recorded on an Epic, oldest first: `{id, url, launched, ended, nudges}`
-    (`ended`: `{outcome, at}` or None; `nudges`: their timestamps). An end or nudge marker
-    belongs to the latest session with its id, else the latest session."""
+    plus, from the launch marker, `heartbeat` / `state` (the session's own liveness stamp) and
+    the `overlap` / `manual` flags.
+    `ended`: `{outcome, at, waits}` or None (`waits`: the issues it parked on); `nudges`: their
+    timestamps. An end or nudge marker belongs to the latest session with its id, else the
+    latest session."""
     sessions: list = []
 
     def owner(attrs: dict) -> Optional[dict]:
@@ -9538,6 +9557,8 @@ def cloud_sessions(comments: list) -> list:
             a = dict(_MARKER_ATTR.findall(m.group(1)))
             sessions.append({"id": a.get("id"), "url": a.get("url"),
                              "launched": a.get("launched") or c.get("createdAt"),
+                             "heartbeat": a.get("heartbeat"), "state": a.get("state"),
+                             "overlap": a.get("overlap") == "1", "manual": a.get("manual") == "1",
                              "ended": None, "nudges": []})
         for m in _CLOUD_SESSION_END_MARKER.finditer(body):
             a = dict(_MARKER_ATTR.findall(m.group(1)))
@@ -9546,7 +9567,9 @@ def cloud_sessions(comments: list) -> list:
                 target = {"id": a.get("id"), "url": None, "launched": None, "ended": None,
                           "nudges": []}
                 sessions.append(target)
-            target["ended"] = {"outcome": a.get("outcome"), "at": a.get("ended") or c.get("createdAt")}
+            waits = [int(x) for x in (a.get("waits") or "").split(",") if x.strip().isdigit()]
+            target["ended"] = {"outcome": a.get("outcome"),
+                               "at": a.get("ended") or c.get("createdAt"), "waits": waits}
         for m in _CLOUD_NUDGE_MARKER.finditer(body):
             a = dict(_MARKER_ATTR.findall(m.group(1)))
             target = owner(a)
@@ -9625,9 +9648,45 @@ def _cloud_placed(issue: dict, by_number: dict) -> bool:
                                            and has_label(parent, label))
 
 
+# Pipeline statuses that park a unit on the operator; a recorded wait clears once it leaves them.
+# (`feedback-received` is not one: the operator answered and the unit is actionable again.)
+_OPERATOR_PARKED_STATUSES = ("needs-human", "awaiting-human-review")
+
+
+def session_waits(gh, session: Optional[dict], by_number: dict) -> Optional[dict]:
+    """For an ended session that recorded what it parked on (`waits=`), whether that cleared:
+    `{"outcome", "waits", "pending", "resolved"}`; None when it recorded nothing. A waited Epic
+    (`waiting-epic`) clears when it closes; any other waited issue when it closes, leaves the
+    operator-parked statuses (needs-human, a pending gate), or gets a comment after the end
+    (the operator's answer on GitHub)."""
+    ended = (session or {}).get("ended") or {}
+    waits = ended.get("waits") or []
+    if not waits:
+        return None
+    ended_at = _parse_ts(ended.get("at"))
+    pending = []
+    for w in waits:
+        issue = by_number.get(w)
+        if issue is None or issue.get("state") == "CLOSED":
+            continue
+        if ended.get("outcome") == "waiting-epic" or is_epic(issue):
+            pending.append(w)
+            continue
+        if pipeline_status(issue) not in _OPERATOR_PARKED_STATUSES:
+            continue
+        answered = any((_parse_ts(c.get("createdAt")) or ended_at) > ended_at
+                       for c in gh.issue_view(w).get("comments", [])
+                       if ended_at and not _is_cloud_marker_comment(c.get("body") or ""))
+        if not answered:
+            pending.append(w)
+    return {"outcome": ended.get("outcome"), "waits": waits, "pending": pending,
+            "resolved": not pending}
+
+
 def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = ".",
                       runner: Runner = _default_runner, relaunch: bool = False,
-                      comments: Optional[dict] = None, open_prs: Optional[list] = None) -> dict:
+                      comments: Optional[dict] = None, open_prs: Optional[list] = None,
+                      allow_overlap: bool = False) -> dict:
     """Which of `candidates` (Epic numbers) may get a cloud session now. `running`: open Epics,
     repo-wide, whose latest session has no end marker; they hold the `parallelism.cloudSessions`
     slots. A candidate is `launchable` when it is open, not legacy, not running, not blocked by
@@ -9635,8 +9694,11 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
     and its footprint is disjoint from the running and already-chosen Epics' (unverifiable when
     theirs is known and its own is not) and from every cloud Epic whose work is not on its base
     yet (`settled_overlap`; `needs_base_sync`). Footprint entries matching
-    `placement.softOverlapPaths` never collide. Every other open candidate is in `waiting`
-    with a reason."""
+    `placement.softOverlapPaths` never collide; `allow_overlap` (the operator's override) skips
+    both footprint checks. An Epic whose last session recorded its waits (`session_waits`) is
+    launchable once they cleared and waits on them until then, GitHub activity or not; one that
+    recorded none waits for new GitHub activity. Launchable Epics with an ended session are also
+    in `relaunch`. Every other open candidate is in `waiting` with a reason."""
     by_number = {i["number"]: i for i in all_issues}
     comments = {} if comments is None else comments
 
@@ -9713,7 +9775,12 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
             if blockers:
                 reason = f"blocked by {', '.join(f'#{b}' for b in blockers)}"
         session = sessions.get(n)
-        if reason is None and session and session["ended"] and not relaunch:
+        waits = session_waits(gh, session, by_number) if session else None
+        if reason is None and waits and not waits["resolved"] and not relaunch:
+            reason = (f"its cloud session ended ({waits['outcome']}) waiting on "
+                      f"{', '.join(f'#{w}' for w in waits['pending'])} -- it relaunches once "
+                      f"that clears (`--relaunch` to start one now)")
+        elif reason is None and session and session["ended"] and not waits and not relaunch:
             ended_at = _parse_ts(session["ended"].get("at"))
             if open_prs is None:
                 open_prs = gh.open_prs()
@@ -9725,7 +9792,7 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
                           f"start another")
         if reason is None and len(running) + len(launchable) >= cap:
             reason = f"cloud session cap reached ({len(running) + len(launchable)}/{cap})"
-        if reason is None:
+        if reason is None and not allow_overlap:
             others = [(m, fp) for m in [*running, *launchable]
                       for fp in [footprint_of(m)] if fp is not None]
             if others:
@@ -9733,7 +9800,7 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
                 if hit:
                     reason = hit
         sync = None
-        if reason is None:
+        if reason is None and not allow_overlap:
             sync = settled_overlap(n)
             reason = (sync or {}).get("reason")
         if reason:
@@ -9744,7 +9811,8 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
             launchable.append(n)
     result = {"cap": cap, "free": max(0, cap - len(running)),
               "running": [{"epic": n, "session": sessions[n]} for n in running],
-              "launchable": launchable, "waiting": waiting}
+              "launchable": launchable, "waiting": waiting,
+              "relaunch": [n for n in launchable if (sessions.get(n) or {}).get("ended")]}
     if warnings:
         result["warnings"] = warnings
     return result
@@ -9800,11 +9868,13 @@ def _cloud_epics_reason(survey: dict, cut_epics: list) -> str:
 
 def cmd_launch_cloud_epic(gh: GitHub, epic: int, repo_path: str = ".", relaunch: bool = False,
                           runner: Runner = _default_runner,
-                          claude: Callable[[list], str] = _pty_claude_runner) -> dict:
+                          claude: Callable[[list], str] = _pty_claude_runner,
+                          allow_overlap: bool = False) -> dict:
     """Place `epic` in the cloud and start `claude --cloud "/sdlc:run <epic>"`, recording a
     session marker on it. Idempotent: an Epic whose latest session has no end marker is never
     relaunched (`already_running`). Refuses (exit 0) an Epic `cloud_epic_survey` would not
-    launch, and on `place`'s refusal."""
+    launch, and on `place`'s refusal. `allow_overlap` (operator only) skips the footprint
+    checks and says so in the marker (`overlap=1`); the cap still holds."""
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
     issue = by_number.get(epic)
@@ -9818,7 +9888,7 @@ def cmd_launch_cloud_epic(gh: GitHub, epic: int, repo_path: str = ".", relaunch:
     if session and not session["ended"]:
         return {**result, "already_running": True, "session": session}
     survey = cloud_epic_survey(gh, all_issues, [epic], repo_path=repo_path, runner=runner,
-                               relaunch=relaunch, comments=comments)
+                               relaunch=relaunch, comments=comments, allow_overlap=allow_overlap)
     if epic not in survey["launchable"]:
         wait = next((w for w in survey["waiting"] if w["epic"] == epic), {})
         return {**result, "refused": True, "reason": wait.get("reason", "not launchable"),
@@ -9835,13 +9905,20 @@ def cmd_launch_cloud_epic(gh: GitHub, epic: int, repo_path: str = ".", relaunch:
         output = e.output
     parsed = parse_cloud_launch(output)
     sid, url = parsed["id"] or "unknown", parsed["url"] or "unknown"
+    overlap = (" Launched with `--allow-overlap` (operator): its footprint was not checked "
+               "against the other cloud Epics'." if allow_overlap else "")
     gh.issue_comment(epic,
         f"☁️ Cloud session launched for this Epic: {parsed['url'] or 'its URL was not reported'}"
         f".\n\nIt drives the Epic until it closes, asking the operator in session, then posts "
-        f"an end marker. From the laptop: `cloud-status {epic}`.\n\n"
-        f"<!-- sdlc:cloud-session id={sid} url={url} launched={_iso(_utc_now())} -->")
+        f"an end marker. From the laptop: `cloud-status {epic}`.{overlap}\n\n"
+        f"<!-- sdlc:cloud-session id={sid} url={url} launched={_iso(_utc_now())}"
+        f"{' overlap=1' if allow_overlap else ''} -->")
     out = {**result, "launched": True, "session": {"id": parsed["id"], "url": parsed["url"]},
            "place": placed}
+    if session and session["ended"]:
+        out["relaunched"] = True
+    if allow_overlap:
+        out["allow_overlap"] = True
     if parsed["url_derived"]:
         out["url_derived"] = True
     if not parsed["id"]:
@@ -9874,12 +9951,16 @@ def _epic_cloud_status(gh, epic: int, by_number: dict, all_issues: list, comment
     needs_human = [k["number"] for k in [issue, *open_kids] if pipeline_status(k) == "needs-human"]
     last = epic_last_activity(gh, epic, all_issues, comments, open_prs)
     launched = _parse_ts((session or {}).get("launched"))
-    last = max((t for t in (last, launched) if t is not None), default=None)
+    heartbeat = _parse_ts((session or {}).get("heartbeat"))
+    last = max((t for t in (last, launched, heartbeat) if t is not None), default=None)
     is_open = issue["state"] == "OPEN"
     live = bool(session) and not session["ended"]
     idle = round((now - last).total_seconds() / 60, 1) if last else None
     stall_minutes = PIPELINE["placement"].get("stallMinutes", 90)
-    stalled = is_open and live and idle is not None and idle >= stall_minutes
+    # A session asking the operator in session is waiting on them, not stalled.
+    asking = live and (session or {}).get("state") == "asking"
+    stalled = is_open and live and not asking and idle is not None and idle >= stall_minutes
+    waits = session_waits(gh, session, by_number) if session and session["ended"] else None
     nudges = [t for t in (session or {}).get("nudges", [])
               if last is None or (_parse_ts(t) or now) > last]
     return {"epic": epic, "title": issue.get("title"), "state": issue["state"],
@@ -9888,8 +9969,11 @@ def _epic_cloud_status(gh, epic: int, by_number: dict, all_issues: list, comment
                          "by_stage": by_stage, "by_status": by_status},
             "open_prs": prs, "gates_pending": gates, "needs_human": needs_human,
             "last_activity": _iso(last) if last else None, "idle_minutes": idle,
+            "heartbeat": (session or {}).get("heartbeat"), "asking": asking,
             "stalled": stalled, "nudges_since_activity": len(nudges),
-            "escalate": stalled and len(nudges) >= NUDGES_BEFORE_ESCALATION}
+            "escalate": stalled and len(nudges) >= NUDGES_BEFORE_ESCALATION,
+            "waits": waits,
+            "relaunch_ready": bool(is_open and waits and waits["resolved"])}
 
 
 def cmd_cloud_status(gh, number: int, repo_path: str = ".", runner: Runner = _default_runner,
@@ -9915,7 +9999,7 @@ def cmd_cloud_status(gh, number: int, repo_path: str = ".", runner: Runner = _de
               "now": _iso(now), "stall_minutes": PIPELINE["placement"].get("stallMinutes", 90),
               "epics": rows,
               "not_in_cloud": [e["number"] for e in epics if e not in tracked]}
-    attention = any(r["stalled"] for r in rows)
+    attention = any(r["stalled"] or r["relaunch_ready"] for r in rows)
     if is_initiative(issue):
         result["all_closed"] = bool(epics) and all(e["state"] == "CLOSED" for e in epics)
         attention = attention or result["all_closed"]
@@ -9974,22 +10058,127 @@ def cmd_nudge_cloud_epic(gh, epic: int, force: bool = False,
 
 
 def cmd_end_cloud_session(gh: WorkItemProvider, epic: int, outcome: str,
-                          note: Optional[str] = None) -> dict:
+                          note: Optional[str] = None, waits_on: Optional[list] = None) -> dict:
     """Post the end marker for the Epic's latest cloud session (id `unknown` when none was
-    launched through `launch-cloud-epic`). Idempotent on an already-ended session."""
+    launched through `launch-cloud-epic`). Idempotent on an already-ended session. The marker
+    records what the session waits on (`waits=`), so the laptop relaunches it once that clears
+    (`session_waits`): `waiting-epic` needs `waits_on` (the Epics it waits for); `waiting-human`
+    takes `waits_on` or defaults to the Epic's open units parked on the operator (needs-human,
+    an open gate)."""
     if outcome not in CLOUD_SESSION_OUTCOMES:
         raise GhError(f"--outcome must be one of {', '.join(CLOUD_SESSION_OUTCOMES)}")
     if not is_epic(gh.issue_epic_info(epic)):
         raise GhError(f"#{epic} is not an Epic")
+    waits = sorted({int(w) for w in (waits_on or [])})
+    if outcome == "waiting-epic":
+        if not waits:
+            raise GhError("--outcome waiting-epic needs --waits-on <epic> (the Epic it waits for)")
+        for w in waits:
+            if not is_epic(gh.issue_epic_info(w)):
+                raise GhError(f"--waits-on #{w} is not an Epic")
     session = latest_cloud_session(gh.issue_view(epic).get("comments", []))
     if session and session["ended"]:
         return {"epic": epic, "already_ended": True, "session": session}
+    if outcome == "waiting-human" and not waits:
+        all_issues = gh.issue_list()
+        epic_node = next((i for i in all_issues if i["number"] == epic), None)
+        waits = sorted(i["number"] for i in [epic_node, *_descendants(all_issues, epic)]
+                       if i and i["state"] == "OPEN"
+                       and pipeline_status(i) in _OPERATOR_PARKED_STATUSES)
     sid = (session or {}).get("id") or "unknown"
     text = f" {note.strip()}" if note and note.strip() else ""
+    on = f" Waits on {', '.join(f'#{w}' for w in waits)}." if waits else ""
     gh.issue_comment(epic,
-        f"☁️ Cloud session ended — outcome `{outcome}`.{text}\n\n"
-        f"<!-- sdlc:cloud-session-end id={sid} outcome={outcome} ended={_iso(_utc_now())} -->")
-    return {"epic": epic, "ended": True, "id": sid, "outcome": outcome}
+        f"☁️ Cloud session ended — outcome `{outcome}`.{text}{on}\n\n"
+        f"<!-- sdlc:cloud-session-end id={sid} outcome={outcome} ended={_iso(_utc_now())}"
+        f"{' waits=' + ','.join(map(str, waits)) if waits else ''} -->")
+    return {"epic": epic, "ended": True, "id": sid, "outcome": outcome,
+            **({"waits": waits} if waits else {})}
+
+
+def cmd_record_cloud_session(gh: WorkItemProvider, epic: int, session: str,
+                             note: Optional[str] = None) -> dict:
+    """Register a cloud session the operator started by hand (`claude --cloud`, the claude.ai
+    UI) on `epic`: the cloud label if missing, then the launch marker (`manual=1`), so
+    `cloud-status`, the cap and the stall checks see it. `session` is its url or `session_...`
+    id. Refuses (exit 0) while another session is live on the Epic; the same id is a no-op."""
+    if not is_epic(gh.issue_epic_info(epic)):
+        raise GhError(f"#{epic} is not an Epic")
+    parsed = parse_cloud_launch(session)
+    if not parsed["id"]:
+        raise GhError(f"--session {session!r} names no session_... id or claude.ai/code url")
+    view = gh.issue_view(epic)
+    latest = latest_cloud_session(view.get("comments", []))
+    if latest and not latest["ended"]:
+        if latest["id"] == parsed["id"]:
+            return {"epic": epic, "recorded": False, "already_recorded": True, "session": latest}
+        return {"epic": epic, "recorded": False, "refused": True, "session": latest,
+                "reason": f"session {latest['id']} is still live on #{epic}: end-mark it "
+                          f"(`end-cloud-session {epic} --outcome stopped`) before recording another"}
+    labelled = cloud_label() in [(l.get("name") if isinstance(l, dict) else l)
+                                 for l in view.get("labels", [])]
+    if not labelled:
+        gh.ensure_label(cloud_label())
+        gh.issue_edit(epic, add_labels=[cloud_label()])
+    text = f" {note.strip()}" if note and note.strip() else ""
+    gh.issue_comment(epic,
+        f"☁️ Cloud session recorded for this Epic (started by hand): {parsed['url']}.{text}\n\n"
+        f"<!-- sdlc:cloud-session id={parsed['id']} url={parsed['url']} "
+        f"launched={_iso(_utc_now())} manual=1 -->")
+    return {"epic": epic, "recorded": True, "session": {"id": parsed["id"], "url": parsed["url"]},
+            "labelled": not labelled}
+
+
+def _live_session_comment(comments: list) -> Optional[dict]:
+    """The comment holding the latest session's launch marker while that session is live."""
+    session = latest_cloud_session(comments)
+    if not session or session["ended"]:
+        return None
+    for c in reversed(comments):
+        for m in _CLOUD_SESSION_MARKER.finditer(c.get("body") or ""):
+            if dict(_MARKER_ATTR.findall(m.group(1))).get("id") == session["id"]:
+                return c
+    return None
+
+
+def cmd_cloud_heartbeat(gh: WorkItemProvider, epic: int, state: str = "working",
+                        now: Optional[datetime] = None, force: bool = False) -> dict:
+    """Stamp `heartbeat=<now> state=<state>` into the live session's launch marker (an edit of
+    that comment, never a new one); `cloud-status` judges a stall from it. `asking` marks a
+    session waiting on the operator's in-session answer (never `stalled`). The same state is
+    re-stamped at most every `HEARTBEAT_MIN_SECONDS` unless `force`."""
+    if state not in HEARTBEAT_STATES:
+        raise GhError(f"--state must be one of {', '.join(HEARTBEAT_STATES)}")
+    now = now or _utc_now()
+    comments = gh.issue_view(epic).get("comments", [])
+    comment = _live_session_comment(comments)
+    if comment is None:
+        return {"epic": epic, "stamped": False, "reason": "no live cloud session on this Epic"}
+    body = comment.get("body") or ""
+    m = list(_CLOUD_SESSION_MARKER.finditer(body))[-1]
+    attrs = dict(_MARKER_ATTR.findall(m.group(1)))
+    last = _parse_ts(attrs.get("heartbeat"))
+    if (not force and attrs.get("state") == state and last is not None
+            and (now - last).total_seconds() < HEARTBEAT_MIN_SECONDS):
+        return {"epic": epic, "stamped": False, "reason": "stamped recently", "heartbeat": attrs["heartbeat"]}
+    attrs.update(heartbeat=_iso(now), state=state)
+    marker = "<!-- sdlc:cloud-session " + " ".join(f"{k}={v}" for k, v in attrs.items()) + " -->"
+    gh.issue_comment_edit(comment, body[:m.start()] + marker + body[m.end():])
+    return {"epic": epic, "stamped": True, "heartbeat": attrs["heartbeat"], "state": state}
+
+
+def cloud_heartbeat_quietly(gh, number: int) -> Optional[str]:
+    """In a cloud session, `cloud-heartbeat` the Epic `number` belongs to; never raises.
+    Returns a warning line on failure, else None."""
+    try:
+        if session_placement()["placement"] != "cloud":
+            return None
+        epic = unit_placement(number, _issue_info_lookup(gh)).get("epic")
+        if epic:
+            cmd_cloud_heartbeat(gh, epic)
+    except Exception as e:  # liveness bookkeeping must never fail a stage step
+        return f"cloud heartbeat failed: {_first_line(str(e))}"
+    return None
 
 
 def cmd_detach_epic(gh: GitHub, epic: int, reason: Optional[str] = None) -> dict:
@@ -10986,6 +11175,10 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
         except GhError as e:
             roots["initiative_profile_error"] = str(e)
             forget_initiative_hint(number)
+    if claim:
+        hb = cloud_heartbeat_quietly(gh, number)
+        if hb:
+            roots["heartbeat_warning"] = hb
     return seq.report(issue=number, role=role, path=(worktree or {}).get("path"),
                       claimed=bool(claim), **roots)
 
@@ -11025,6 +11218,9 @@ def cmd_transition(gh: GitHub, issue: int, expect_stage: str, pr: Optional[int] 
         extra["skip_confidence_threshold"] = (
             (seq.steps.get("start-comment") or {}).get("skip_confidence_threshold")
             or _profile_for_issue(gh, issue)["gates"]["skipConfidenceThreshold"])
+    hb = cloud_heartbeat_quietly(gh, issue)
+    if hb:
+        extra["heartbeat_warning"] = hb
     return seq.report(failed_key="stopped_at", issue=issue, expect_stage=expect_stage,
                       verified_stage=verify_stage, ready=not seq.stopped, **extra)
 
@@ -11153,6 +11349,7 @@ COMMENT_CAPS = {
     "skip-pr-review": ("reason", ROUTE_REASON_CAP),
     "close-issue": ("reason", HANDOFF_CAP),
     "end-cloud-session": ("note", ROUTE_REASON_CAP),
+    "record-cloud-session": ("note", ROUTE_REASON_CAP),
     "comment": ("body", HANDOFF_CAP),
     "detach-epic": ("reason", HANDOFF_CAP),
     "reparent-issue": ("reason", HANDOFF_CAP),
@@ -11859,11 +12056,28 @@ def main(argv: Optional[list] = None) -> int:
                         help="Place an Epic in the cloud and start its claude --cloud session")
     p.add_argument("epic", type=int)
     p.add_argument("--relaunch", action="store_true",
-                    help="Launch even though its last session ended with no activity since")
+                    help="Launch even though its last session's wait has not cleared")
+    p.add_argument("--allow-overlap", action="store_true",
+                    help="Operator only: skip the footprint-overlap checks (recorded in the marker)")
     p.add_argument("--repo-path", default=".",
                     help="Repo whose worktrees `place` checks and whose origin holds footprints")
     p.set_defaults(func=lambda a: cmd_launch_cloud_epic(get_work_item_provider(), a.epic,
-                                                        a.repo_path, a.relaunch))
+                                                        a.repo_path, a.relaunch,
+                                                        allow_overlap=a.allow_overlap))
+    p = sub.add_parser("record-cloud-session",
+                        help="Register a cloud session started by hand on an Epic")
+    p.add_argument("epic", type=int)
+    p.add_argument("--session", required=True, help="Its claude.ai/code url or session_... id")
+    p.add_argument("--note", default=None, help="One line for the operator")
+    p.set_defaults(func=lambda a: cmd_record_cloud_session(get_work_item_provider(), a.epic,
+                                                           a.session, a.note))
+    p = sub.add_parser("cloud-heartbeat",
+                        help="Stamp the live cloud session's heartbeat on its Epic")
+    p.add_argument("epic", type=int)
+    p.add_argument("--state", default="working", choices=list(HEARTBEAT_STATES),
+                    help="asking: waiting on the operator's in-session answer (never stalled)")
+    p.set_defaults(func=lambda a: cmd_cloud_heartbeat(get_work_item_provider(), a.epic,
+                                                      a.state, force=True))
     p = sub.add_parser("cloud-status",
                         help="Read-only state of an Initiative's (or one Epic's) cloud sessions")
     p.add_argument("number", type=int, help="The Initiative or Epic")
@@ -11881,8 +12095,11 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("epic", type=int)
     p.add_argument("--outcome", required=True, choices=list(CLOUD_SESSION_OUTCOMES))
     p.add_argument("--note", default=None, help="One line for the operator")
+    p.add_argument("--waits-on", type=int, nargs="+", default=None,
+                    help="What it waits on: the Epic(s) for waiting-epic; for waiting-human the "
+                         "parked units (default: the Epic's needs-human / gate-pending units)")
     p.set_defaults(func=lambda a: cmd_end_cloud_session(get_work_item_provider(), a.epic,
-                                                        a.outcome, a.note))
+                                                        a.outcome, a.note, a.waits_on))
     args = parser.parse_args(argv)
     refusal = comment_cap_refusal(args)
     if refusal:
