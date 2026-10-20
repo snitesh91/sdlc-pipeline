@@ -187,6 +187,12 @@ Write every metadata line below plain — never wrapped in backticks.
   Task's edits invalidate — e.g. `shared-boot-members.generated.json`,
   `module-scope-state.generated.json`, OpenAPI goldens, the frontend `api-schema.d.ts`
   regeneration after backend merges — and assign each to an owning Task.
+- **No open Epic's design doc in a Footprint.** A Task's footprint never lists a path under
+  `<docRoot>/epic-<n>/` while Epic n is open — this Epic's docs included. `open-dev-pr`
+  refuses that diff. Put the edit in architecture work instead: name it in your handoff so the
+  orchestrator cuts an Architecture revision phase-Task (`open-arch-revision`), which edits the
+  doc on its own design PR. A CLOSED Epic's record (a "Superseded by" note, a correction) may
+  ride a Task's footprint: `open-dev-pr` accepts `epic-<n>/` once Epic n is closed.
 
 A Task needing no decisions beyond `architecture.md` still gets a short subsection saying so,
 with its footprint.

@@ -86,6 +86,14 @@ mutation probes), and state layer coverage in the report.
   implemented, code contradicting a stated constraint. Adjudicate each path the PR body lists under
   `## Footprint deviations`: a legitimate inherent side effect passes; scope creep is blocking.
 
+**Derived data needs a semantic check, not only a reproduction.** When the Task produces
+data from other data (a report, an aggregate, mutation or coverage results, a migration
+backfill, a generated manifest), proving the output reproduces byte for byte is not enough.
+Check what the raw inputs mean (which fields can be empty, which keys can collide) and sample
+the output for plausibility: a mostly-empty field, a duplicate key, or a count that disagrees
+with the inputs is a blocking finding even when every test passes. Seen 2026-10-18: 250 of
+255 Survived mutants had empty `coveredBy` and colliding keys passed two clean reviews.
+
 **Test quality is your call.** Nobody else judges `development`'s tests.
 
 - **Behaviour, not implementation.** Assertions on a mock's own return value or a private call

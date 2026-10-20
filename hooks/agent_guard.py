@@ -1,6 +1,7 @@
 """PreToolUse(Agent|Task): every sdlc agent runs at its policy model, and review fan-out is capped.
 
-A stage agent gets `models.<role>`; a child launched by an `sdlc:<parent>` agent gets
+A stage agent gets `models.<role>`; a child launched by an `sdlc:<parent>` agent (a review
+axis, or a development worker when `pipeline.fanout.development` allows it) gets
 `fanout.<parent>` and is denied when that parent may not fan out, is out of slots, or the
 child is itself a stage. An `explore` role's read-only Explore search passes untouched.
 Policy: `_common.model_policy`.
@@ -15,6 +16,9 @@ from _common import (agent_transcript, emit, first_prompt, load_json, model_poli
 
 DESIGN_REVIEW = "design-review"
 DESIGN_REVIEW_ROLES = ("arch-review", "lld-review")
+WORKER_ROLES = ("development",)
+# The one agent type a worker role launches as a parallel worker (its own Bash guard role).
+WORKER_AGENT = "dev-worker"
 SLOT_TTL_S = 2 * 86400
 RETRY_HINT = ("re-run this launch when any holder reports; work an axis yourself only when no "
               "holder is left to wait for")
@@ -156,6 +160,10 @@ def main() -> int:
     if not parent:
         if not child:
             return 0
+        if child == WORKER_AGENT:
+            deny("sdlc:dev-worker is launched only by an sdlc:development agent; the "
+                 "orchestrator delegates the stage to sdlc:development.")
+            return 0
         role = child
         if child == DESIGN_REVIEW:
             role = design_review_role(header.get("role"), policy["models"])
@@ -165,11 +173,17 @@ def main() -> int:
                 return 0
         set_model(tool_input, policy["models"].get(role))
         return 0
-    if child:
+    worker = parent in WORKER_ROLES and child == WORKER_AGENT
+    if child and not worker:
         deny(f"a stage agent never launches another stage (sdlc:{child}); report it in your "
              "SDLC-RESULT/handoff and the orchestrator runs it.")
         return 0
     if tool_input.get("subagent_type") == "Explore" and parent in policy["explore"]:
+        return 0
+    if parent in WORKER_ROLES and not worker and (policy["fanout"].get(parent) or {}).get(
+            "allowed"):
+        deny(f"{parent}'s parallel workers run as subagent_type sdlc:{WORKER_AGENT} (its own "
+             f"guard: no commit, push or control-plane command); relaunch with that type.")
         return 0
     warning = ""
     if parent == DESIGN_REVIEW:
@@ -181,13 +195,16 @@ def main() -> int:
                        f"{parent} fan-out policy.")
     fanout = policy["fanout"].get(parent) or {}
     suffix = f" ({warning})" if warning else ""
-    if fanout.get("allowed") and light_review(
+    if fanout.get("allowed") and parent not in WORKER_ROLES and light_review(
             load_json(config), prompt_header(first_prompt(parent_transcript(data)))):
         deny(f"{parent} runs single-pass under a reviewDepth: light Initiative; work the axes "
              f"yourself.")
         return 0
     if not fanout.get("allowed"):
-        if parent in policy["fanout"]:
+        if parent in WORKER_ROLES:
+            deny(f"{parent} may launch only the read-only Explore agent unless "
+                 f"pipeline.fanout.{parent} allows parallel workers; do the rest yourself.")
+        elif parent in policy["fanout"]:
             deny(f"{parent} reviews in a single pass; work the axes yourself.{suffix}")
         elif parent in policy["explore"]:
             deny(f"{parent} may launch only the read-only Explore agent; do the rest yourself.")

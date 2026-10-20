@@ -412,6 +412,7 @@ def test_check_epics_closeable_surfaces_a_v2_epic_and_checks_its_own_docs():
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"},
                   {"number": 11, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
     on_branch = {(f"{DOC}/epic-9/architecture.md", "epic-9")}
+    gh.issues[9]["labels"].append("epic:architected")  # its design phase is done
     gh.path_on_ref = lambda path, ref="main": (path, ref) in on_branch
 
     result = s.cmd_check_epics_closeable(gh)
@@ -424,7 +425,10 @@ def test_check_epics_closeable_surfaces_a_v2_epic_and_checks_its_own_docs():
 # --- an Epic's Tasks wait for its lld.md ------------------------------------
 
 def test_next_action_never_hands_out_an_unstaged_task_before_the_v2_epic_is_architected():
-    gh = _v2_tree({"number": 11, "labels": ["type:task"], "parent": 9, "state": "CLOSED"},
+    gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED",
+                   "title": "Architecture phase"},
+                  {"number": 11, "labels": ["type:task"], "parent": 9, "state": "CLOSED",
+                   "title": "LLD phase"},
                   {"number": 13, "labels": ["type:task"], "parent": 9})
 
     result = s.decide_next_action(gh, 9)
@@ -520,6 +524,7 @@ def test_merge_lld_doc_cites_the_epic_branch_commit_and_a_rerun_is_not_merged(re
 def test_check_epics_closeable_checklist_counts_closed_children_not_merged():
     """The closing checklist counts children as closed, not merged."""
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
+    gh.issues[9]["labels"].append("epic:architected")  # its design phase is done
     gh.path_on_ref = lambda path, ref="main": True
 
     s.cmd_check_epics_closeable(gh)

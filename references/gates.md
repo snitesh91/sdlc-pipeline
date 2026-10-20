@@ -101,6 +101,13 @@ unit is dispatched), ask the operator with `AskUserQuestion`: the gate PR's url,
 
 The operator's choice is the approval; never pick one for them.
 
+**In a cloud session** this is how a design gate below the skip bar is decided: ask with the
+approved doc's summary (the Step 3 chat summary) and the design PR url, then `approve-gate` or
+`request-gate-changes` on the answer. Never end the session on an open gate while other units
+can move; run `cloud-heartbeat <epic> --state asking` before the question so the laptop does
+not count the wait as a stall. An unanswered gate is parked only at the end, as a
+`waiting-human` end marker naming it.
+
 ## Checking a gate
 
 `next-action`'s `pass-gate` / `address-gate-feedback` outcomes already compute this. To

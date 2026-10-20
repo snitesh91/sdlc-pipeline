@@ -145,7 +145,8 @@ def main() -> int:
     text = data.get("last_assistant_message")
     role = sdlc_role(data.get("agent_type"))
     path = data.get("agent_transcript_path") or ""
-    checked = role and not data.get("stop_hook_active")
+    # A development worker hands its summary to its integrator, not an SDLC-RESULT.
+    checked = role and role != "dev-worker" and not data.get("stop_hook_active")
     if checked:
         if not isinstance(text, str):
             text = last_assistant_text(path) if path else None

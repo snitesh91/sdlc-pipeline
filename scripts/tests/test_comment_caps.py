@@ -33,6 +33,8 @@ ARGV = {
     "detach-epic": ["detach-epic", "9", "--reason", "{text}"],
     "reparent-issue": ["reparent-issue", "9", "--parent", "8", "--reason", "{text}"],
     "end-cloud-session": ["end-cloud-session", "9", "--outcome", "closed", "--note", "{text}"],
+    "record-cloud-session": ["record-cloud-session", "9", "--session", "session_01AAAAAA",
+                             "--note", "{text}"],
 }
 
 

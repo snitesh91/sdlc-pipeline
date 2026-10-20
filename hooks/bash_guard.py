@@ -67,6 +67,13 @@ ROLE_COMMANDS = {
     "initiative-close": {"record-initiative-verification"},
 }
 REVIEW_ROLES = {"product-review", "design-review", "pr-review"}
+# A development worker (`sdlc:dev-worker`) edits files in its integrator's worktree only: no git
+# write that moves history or branches (`dev-worker` has no control-plane commands either).
+WORKER_ROLE = "dev-worker"
+WORKER_GIT_DENIED = {"commit", "push", "merge", "rebase", "reset", "checkout", "switch",
+                     "branch", "worktree", "cherry-pick", "revert", "am", "tag", "pull",
+                     "fetch", "clean", "restore", "update-ref", "commit-tree",
+                     "symbolic-ref", "replace", "notes", "filter-branch"}
 # Agent role -> the `post-comment --role` values it may pass (default: its own role).
 POST_COMMENT_AS = {"design-review": {"arch-review", "lld-review"}}
 CONTROL_PLANE_REFS = {"$SDLC", "${SDLC}"}
@@ -81,7 +88,7 @@ REASONS = {
     "graphql": f"Hand-run GraphQL is blocked: the control plane owns GitHub reads and writes. Use {SDLC} <command> (next-action, check-gate, pr-checks, resolve-thread, audit-issues, ...).",
     "api-mutation": f"Hand-run GitHub REST mutations are blocked. Use the {SDLC} command that owns the change (set-stage, create-issue, mark-blocked, open-gate, ...).",
     "issue create": f"Use {SDLC} create-issue --parent <n> --title ... --body ... --type T [--priority P] [--effort E] (orchestrator only; stage agents report it in their handoff).",
-    "issue edit": f"Issue fields are control-plane-owned: use {SDLC} edit-issue <n> [--body-file F] [--add-label L] [--remove-label L], {SDLC} set-stage / add-blocked-by / mark-blocked, or {SDLC} place <n> --where cloud|local for the placement label. Stage agents report the change in their handoff instead.",
+    "issue edit": f"Issue fields are control-plane-owned: use {SDLC} edit-issue <n> [--title T] [--body-file F] [--add-label L] [--remove-label L], {SDLC} set-stage / add-blocked-by / mark-blocked, or {SDLC} place <n> --where cloud|local for the placement label. Stage agents report the change in their handoff instead.",
     "issue close": f"Use {SDLC} close-issue <n> [--repo-path <p>] (orchestrator only).",
     "issue reopen": "Reopening an issue is the operator's call; report it (stage agents: outcome needs-human).",
     "pr create": f"Use {SDLC} open-dev-pr (development), {SDLC} open-design-pr, {SDLC} open-gate or {SDLC} open-initiative-pr (orchestrator). An operator-directed PR outside the pipeline (main thread only) names its non-pipeline branch explicitly: gh pr create --head <branch> ...",
@@ -105,6 +112,12 @@ REASONS = {
              "stack, so a parallel agent's `stash pop` can take your work or you theirs. For a "
              "mutation check copy the file to .sdlc-scratch/ and restore it, or commit and "
              "revert.",
+    "docker-prune": "A host-wide `docker ... prune` is blocked for stage agents: concurrent "
+                    "units' stacks and anonymous IT volumes share the host. Tear down only your "
+                    "own: `docker compose -p <your unit prefix> down -v`, or a prune with "
+                    "`--filter label=sdlc.issue=<n>`.",
+    "worker-git-write": "A development worker never commits, pushes, syncs or changes branches: "
+                        "edit your named files and hand back; the development agent integrates.",
     "review-git-write": "Review roles are read-only on the branch: describe the fix in your "
                         "review; the owning stage applies it.",
     "claude-session": "Starting or messaging Claude sessions (`claude`, `claude --cloud`) is the "
@@ -318,6 +331,37 @@ def _flag_value(words: list, flag: str):
     return None
 
 
+# docker's global options that take a value (`docker --context x system prune`): skipped
+# before reading the subcommand, so they cannot push `prune` out of view.
+_DOCKER_VALUE_OPTS = {"-c", "--context", "-H", "--host", "--config", "-l", "--log-level",
+                      "--tlscacert", "--tlscert", "--tlskey"}
+
+
+def _docker_prune(words: list) -> bool:
+    """Whether a `docker` command is a prune (`docker [global opts] <obj> prune`, `docker
+    [global opts] <obj> <sub> prune` is not a docker form, so the first two subcommand words)."""
+    rest, i = words[1:], 0
+    subs = []
+    while i < len(rest) and len(subs) < 2:
+        w = rest[i]
+        if not subs and w in _DOCKER_VALUE_OPTS:
+            i += 2
+            continue
+        if w.startswith("-"):
+            i += 1
+            continue
+        subs.append(w)
+        i += 1
+    return "prune" in subs
+
+
+def _unit_scoped_prune(words: list) -> bool:
+    """A prune narrowed to one unit's containers by its `sdlc.issue=<n>` label."""
+    filters = [words[i + 1] for i, w in enumerate(words[:-1]) if w == "--filter"]
+    filters += [w.split("=", 1)[1] for w in words if w.startswith("--filter=")]
+    return any(f.startswith("label=sdlc.issue=") and f != "label=sdlc.issue=" for f in filters)
+
+
 def check_role(words: list, role: str):
     """A stage agent's limits: its role's control-plane commands; reviewers never write git."""
     if words[0] == "claude":
@@ -329,6 +373,8 @@ def check_role(words: list, role: str):
         return "orchestrator-only"
     if words[0] == "git" and _git_sub(words[1:])[0] == "stash":
         return "stash"
+    if words[0] == "docker" and _docker_prune(words) and not _unit_scoped_prune(words):
+        return "docker-prune"
     if cmd == "post-comment" and _flag_value(words, "--role") not in POST_COMMENT_AS.get(
             role, {role}):
         return "post-comment-role"
@@ -338,6 +384,8 @@ def check_role(words: list, role: str):
             return "gh-comment"
         if pos[:2] == ["run", "rerun"]:
             return "run-rerun"
+    if role == WORKER_ROLE and words[0] == "git" and _git_sub(words[1:])[0] in WORKER_GIT_DENIED:
+        return "worker-git-write"
     if role in REVIEW_ROLES and words[0] == "git":
         sub, rest = _git_sub(words[1:])
         if (sub in ("commit", "push", "merge") or (sub == "reset" and "--hard" in rest)
