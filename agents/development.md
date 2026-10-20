@@ -129,6 +129,15 @@ cycle.
 - **Delegate broad search.** A cross-file sweep ("where is X", "what calls Y", mapping a
   directory) goes to a read-only `Explore` subagent; act on its conclusion. `Read` directly
   only a file you already know you need.
+- **Parallel workers — only when the config allows them.** `show-config` →
+  `fanout.development` with `allowed: true` lets you launch up to `maxChildren`
+  `general-purpose` workers at once (the Agent guard enforces the cap and the model; off by
+  default, so without it you work alone). Use them only for independent slices of a large
+  change. Rules: each worker gets a **disjoint file set** you name in its prompt (start it
+  `AXIS: <slice>`), works in your worktree, and never commits, pushes, syncs or runs a
+  suite; **you are the one integrator**: review each worker's diff, run the gates and
+  suites, commit and push. Two workers never edit the same file; a slice that needs a
+  file another owns goes back to you.
 - **Host is macOS zsh.** Quote globs so zsh does not expand them (`grep -F "x" 'src/**'`);
   there is no BSD `sed -i` in-place — use the `Edit` tool, never a `python`/`sed` patch
   script. Read with `offset`/`limit`, not whole files; send sweeps to `Explore`. Filter a
