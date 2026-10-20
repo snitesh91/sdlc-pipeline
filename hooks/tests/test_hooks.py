@@ -186,7 +186,7 @@ def test_guard_reason_names_control_plane_command(sdlc_repo):
     assert "open-design-pr" in guard("gh pr create --base x", sdlc_repo)
     assert "create-issue" in guard("gh issue create -t x", sdlc_repo)
     assert "set-stage" in guard("gh issue edit 5 --add-label bug", sdlc_repo)
-    assert 'python3 "$SDLC" edit-issue <n> [--body-file F] [--add-label L] [--remove-label L]' \
+    assert 'python3 "$SDLC" edit-issue <n> [--title T] [--body-file F] [--add-label L] [--remove-label L]' \
         in guard("gh issue edit 5 --body-file b.md", sdlc_repo)
     assert "place <n> --where" in guard("gh issue edit 5 --add-label sdlc:cloud", sdlc_repo)
     assert "resolve-thread" in guard("gh api graphql -f query='mutation { resolveReviewThread }'", sdlc_repo)

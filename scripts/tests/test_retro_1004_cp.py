@@ -239,10 +239,12 @@ def test_cli_wires_edit_issue(monkeypatch, capsys):
     seen = []
     monkeypatch.setenv("GITHUB_TOKEN", "x")
     monkeypatch.setattr(s, "get_work_item_provider", lambda: "GH")
-    monkeypatch.setattr(s, "cmd_edit_issue", lambda gh, *a: seen.append((gh, a)) or {})
+    monkeypatch.setattr(s, "cmd_edit_issue", lambda gh, *a, **k: seen.append((gh, a, k)) or {})
     assert s.main(["edit-issue", "5", "--body-file", "/f", "--add-label", "a",
                    "--add-label", "b", "--remove-label", "c"]) == 0
-    assert seen == [("GH", (5, "/f", ["a", "b"], ["c"]))]
+    assert s.main(["edit-issue", "5", "--title", "New name"]) == 0
+    assert seen == [("GH", (5, "/f", ["a", "b"], ["c"]), {"title": None}),
+                    ("GH", (5, None, [], []), {"title": "New name"})]
 
 
 # ---- 5: handoff-to-pr-review refuses while a required check is red ----

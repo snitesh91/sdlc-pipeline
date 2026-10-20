@@ -405,6 +405,7 @@ class WorkItemProvider(Protocol):
     def issue_comment(self, number: int, body: str) -> None: ...
     def issue_close(self, number: int, reason: str = "completed") -> None: ...
     def issue_set_body(self, number: int, body: str) -> None: ...
+    def issue_set_title(self, number: int, title: str) -> None: ...
     def blocked_by(self, number: int) -> list: ...
     def add_blocked_by(self, issue_number: int, blocking_number: int) -> None: ...
     def remove_blocked_by(self, issue_number: int, blocking_number: int) -> None: ...
@@ -580,6 +581,9 @@ class GitHub:
 
     def issue_set_body(self, number: int, body: str):
         self._run(["gh", "issue", "edit", str(number), "--repo", self.repo, "--body", body])
+
+    def issue_set_title(self, number: int, title: str):
+        self._run(["gh", "issue", "edit", str(number), "--repo", self.repo, "--title", title])
 
     def auto_deletes_head_branches(self) -> bool:
         """The repo's `delete_branch_on_merge` (False when unreadable); cached per process."""
@@ -1253,6 +1257,9 @@ class GitHubRest(GitHub):
 
     def issue_set_body(self, number: int, body: str):
         self._api(f"repos/{self.repo}/issues/{number}", "-f", f"body={body}", method="PATCH")
+
+    def issue_set_title(self, number: int, title: str):
+        self._api(f"repos/{self.repo}/issues/{number}", "-f", f"title={title}", method="PATCH")
 
     def ensure_label(self, label: str):
         """No-op: adding a missing label to an issue or PR creates it."""
@@ -3435,14 +3442,15 @@ PHASE_TASK_TITLES = {"architecture": "Architecture phase", "lld": "LLD phase"}
 
 
 def epic_lacks_phase_tasks(all_issues: list, epic: int) -> bool:
-    """Whether a non-standing Epic still needs `cut-phase-tasks`: it has no non-Epic child,
-    or only one of its two phase-Tasks (a half-made cut). By issueType and titles, never labels."""
-    kids = [i for i in all_issues if (i.get("parent") or {}).get("number") == epic
-            and not is_epic(i)]
-    if not kids:
-        return True
-    titles = {k["title"] for k in kids}
-    return (PHASE_TASK_TITLES["architecture"] in titles) != (PHASE_TASK_TITLES["lld"] in titles)
+    """Whether a non-standing Epic still needs `cut-phase-tasks`: it lacks either of its two
+    phase-Tasks, found by exact title, and is not `epic:architected`. Any other child -- a
+    pre-filed or reparented Task, a closed superseded issue -- never stands in for them."""
+    by_number = {i["number"]: i for i in all_issues}
+    if epic in by_number and is_epic_architected(by_number[epic]):
+        return False
+    titles = {i["title"] for i in all_issues
+              if (i.get("parent") or {}).get("number") == epic and not is_epic(i)}
+    return not (PHASE_TASK_TITLES["architecture"] in titles and PHASE_TASK_TITLES["lld"] in titles)
 
 
 def _epic_wait_reason(gh: GitHub, epic_issue: dict) -> Optional[str]:
@@ -4234,10 +4242,21 @@ def footprint_overlaps(a: list, b: list) -> bool:
 DEV_PR_SCOPE_RULE = ("development authors no design doc; record deviations in the PR description")
 
 
+def _design_doc_epic(path: str, design_prefix: tuple) -> Optional[int]:
+    """The Epic number `n` of a `<docRoot>/epic-<n>/...` path, else None."""
+    for prefix in design_prefix:
+        if path.startswith(prefix):
+            m = re.match(r"(\d+)/", path[len(prefix):])
+            return int(m.group(1)) if m else None
+    return None
+
+
 def dev_pr_scope_offenders(gh: WorkItemProvider, issue: int, changed_files: list,
                            repo_path: str = ".", runner: Runner = _default_runner) -> dict:
     """Paths a `development` branch/PR must not touch: any Epic design doc under
-    `<docRoot>/epic-*/` of any configured doc root (e.g. lld.md), and any file listed in
+    `<docRoot>/epic-*/` of any configured doc root (e.g. lld.md) whose Epic is still open (a
+    closed Epic's docs are its as-built record: a correction to them, e.g. a standing child's
+    doc-drift fix, has no other route and is allowed), and any file listed in
     ANOTHER open Task's `## Footprint` of the same Epic's lld.md that is not in this unit's
     OWN footprint. Returns
     `{"design_docs": [...], "foreign_footprint": [...]}` (both sorted, deduped); the
@@ -4246,6 +4265,10 @@ def dev_pr_scope_offenders(gh: WorkItemProvider, issue: int, changed_files: list
     # Every product's Epic design docs: a development branch authors none of them.
     design_prefix = tuple(f"{root}/epic-" for root in all_doc_roots())
     design_docs = sorted({p for p in changed_files if p.startswith(design_prefix)})
+    if design_docs:
+        states = {i["number"]: i["state"] for i in gh.issue_list()}
+        design_docs = [p for p in design_docs
+                       if states.get(_design_doc_epic(p, design_prefix)) != "CLOSED"]
     foreign: set = set()
     # Only the foreign-footprint arm needs the Epic lld.md; skip it (and its API calls) when the
     # diff has no non-design-doc paths to check.
@@ -5945,6 +5968,16 @@ def cmd_route(gh: GitHub, issue: int, to: str, reason: str,
     return {"issue": issue, "routed": True, "from": frm, "to": to, "skipped": skipped}
 
 
+def _reclaim_after_regate(gh: GitHub, issue: int) -> dict:
+    """A unit parked `todo` by `pause-for-epic-regate` and resumed by message (never re-claimed)
+    is claimed again (`in-progress`) as its review starts: the start comment ends the parked
+    state, and the reviewer's `post-comment` needs the claim. `{"reclaimed": True}` or `{}`."""
+    if not parked_for_epic_regate(gh, issue):
+        return {}
+    gh.set_pipeline_status_field(issue, "in-progress")
+    return {"reclaimed": True}
+
+
 def cmd_start_comment(gh: GitHub, issue: int, role: str) -> dict:
     """Post the start comment with no field mutation, for roles with no Stage of their own.
 
@@ -5978,15 +6011,17 @@ def cmd_start_comment(gh: GitHub, issue: int, role: str) -> dict:
                                    f"re-run this, or re-run the suite and `record-local-ci` on "
                                    f"the post-sync head.")}
             carried, by_check = status["carried"], status["passed_by_check"]
+        reclaimed = _reclaim_after_regate(gh, issue)
         _post_start_comment(gh, issue, role)
-        result = {"issue": issue, "started": role}
+        result = {"issue": issue, "started": role, **reclaimed}
         if carried:
             result["carried_attestation_forward"] = carried
         if by_check:
             result["satisfied_by_check"] = by_check
         return result
+    reclaimed = _reclaim_after_regate(gh, issue)
     _post_start_comment(gh, issue, role)
-    result = {"issue": issue, "started": role}
+    result = {"issue": issue, "started": role, **reclaimed}
     if role == "arch-review":
         result["skip_confidence_threshold"] = (
             _profile_for_issue(gh, issue)["gates"]["skipConfidenceThreshold"])
@@ -6846,8 +6881,8 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
         m = _TASK_KEY_MARKER.search(child.get("body") or "")
         if m:
             key_to_number.setdefault(m.group(1), child["number"])
-    _wire_numbered_task_edges(gh, doc, numbered, key_to_number, all_issues, result)
     if not pending:
+        _wire_numbered_task_edges(gh, doc, numbered, key_to_number, all_issues, result)
         return {**result, "committed": None, "pushed": False, "tasks": {},
                 "reason": ("every `## Task` heading already carries an issue number -- "
                            "nothing to create. A re-run after a completed pass lands here, "
@@ -6889,6 +6924,8 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
         else:
             result["reused"].append({"key": key, "issue": number, "title": title})
         key_to_number[key] = number
+    # After the creates, so a numbered Task's edge onto a key added in this pass resolves now.
+    _wire_numbered_task_edges(gh, doc, numbered, key_to_number, all_issues, result)
     for h in pending:
         issue_number = key_to_number[h["key"]]
         for dep_key in parse_task_depends_on(doc[h["line_end"]:h["end"]]):
@@ -8515,8 +8552,13 @@ def _release_unit_worktree(issue: int, base_repo: str = ".",
 def cmd_mark_blocked(gh: GitHub, issue: int, dep: int, repo_path: str = ".") -> dict:
     """Add a native blockedBy edge on `dep`, reset Pipeline Status to `todo` (so the
     parked unit doesn't read as a crashed in-progress run) and release its worktree and
-    docker stack."""
-    gh.add_blocked_by(issue, dep)
+    docker stack. Idempotent on the edge: one already set (by `add-blocked-by`) is kept."""
+    try:
+        gh.add_blocked_by(issue, dep)
+    except GhError as e:
+        # GitHub's 422 for an edge that already exists (e.g. set by `add-blocked-by`).
+        if "already been taken" not in str(e):
+            raise
     gh.set_pipeline_status_field(issue, "todo")
     gh.issue_comment(issue, f"⏸️ Blocked — waiting on #{dep} to merge.")
     return {"issue": issue, "status": "blocked", "on": dep,
@@ -9196,12 +9238,15 @@ def live_runs_holding(issue: int) -> list:
 
 
 def cmd_edit_issue(gh: WorkItemProvider, issue: int, body_file: Optional[str] = None,
-                   add_labels: list = (), remove_labels: list = ()) -> dict:
-    """Operator-directed edit of `issue`'s body and labels. Refuses (exit 0) a pipeline-owned
-    label and an issue a live run has in flight."""
+                   add_labels: list = (), remove_labels: list = (),
+                   title: Optional[str] = None) -> dict:
+    """Operator-directed edit of `issue`'s title, body and labels. Refuses (exit 0) a
+    pipeline-owned label and an issue a live run has in flight."""
     add_labels, remove_labels = list(add_labels or ()), list(remove_labels or ())
-    if body_file is None and not add_labels and not remove_labels:
-        raise GhError("pass --body-file, --add-label or --remove-label")
+    if title is not None and not title.strip():
+        raise GhError("--title is empty -- an issue title is never blanked here")
+    if body_file is None and title is None and not add_labels and not remove_labels:
+        raise GhError("pass --title, --body-file, --add-label or --remove-label")
     result = {"issue": issue, "edited": [], "refused": False, "reason": None}
     owned = [l for l in add_labels + remove_labels if pipeline_owned_label(l)]
     if owned:
@@ -9222,6 +9267,9 @@ def cmd_edit_issue(gh: WorkItemProvider, issue: int, body_file: Optional[str] = 
             raise GhError(f"--body-file must be a readable file holding the issue body: {exc}")
         if not body.strip():
             raise GhError("the body file is empty -- an issue body is never blanked here")
+    if title is not None:
+        gh.issue_set_title(issue, title.strip())
+        result["edited"].append("title")
     if body is not None:
         gh.issue_set_body(issue, body)
         result["edited"].append("body")
@@ -10378,6 +10426,9 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
     for epic in open_epics:
         children = [i for i in all_issues if i.get("parent") and i["parent"]["number"] == epic["number"]]
         if not children or any(c["state"] != "CLOSED" for c in children):
+            continue
+        # Closed superseded children are not a finished Epic: it still owes its phase-Tasks.
+        if epic_lacks_phase_tasks(all_issues, epic["number"]):
             continue
         detail = gh.issue_view(epic["number"])
         already_posted = any(_EPIC_CLOSEABLE_MARKER in c.get("body", "") for c in detail.get("comments", []))
@@ -11820,15 +11871,16 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--by", type=int, required=True, help="The successor park issue")
     p.set_defaults(func=lambda a: cmd_supersede_park_issue(GitHubRest(), a.issue, a.by))
-    p = sub.add_parser("edit-issue", help="Operator-directed edit of an issue's body/labels "
+    p = sub.add_parser("edit-issue", help="Operator-directed edit of an issue's title/body/labels "
                                            "(refuses pipeline-owned labels and in-flight units)")
     p.add_argument("issue", type=int)
+    p.add_argument("--title", default=None, help="The new issue title (e.g. a rescoped Task)")
     p.add_argument("--body-file", default=None, help="File holding the new issue body")
     p.add_argument("--add-label", action="append", default=[], help="Label to add (repeatable)")
     p.add_argument("--remove-label", action="append", default=[],
                    help="Label to remove (repeatable)")
     p.set_defaults(func=lambda a: cmd_edit_issue(get_work_item_provider(), a.issue, a.body_file,
-                                                 a.add_label, a.remove_label))
+                                                 a.add_label, a.remove_label, title=a.title))
     # --- human channel (pipeline.humanChannel: session) ---
     p = sub.add_parser("record-operator-answer",
                         help="Record an operator's in-session answer on the unit it settles")

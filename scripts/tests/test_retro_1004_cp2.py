@@ -112,7 +112,8 @@ def test_prepare_rework_hints_the_unit(per_product, tmp_path, monkeypatch):
 
 def _closeable(epic_labels):
     return FakeGh([{"number": 1326, "labels": ["type:initiative"]},
-                   {"number": 1755, "parent": 1326, "labels": ["type:epic", *epic_labels]},
+                   {"number": 1755, "parent": 1326,
+                    "labels": ["type:epic", "epic:architected", *epic_labels]},
                    {"number": 1756, "parent": 1755, "labels": ["type:task"],
                     "state": "CLOSED"}])
 
