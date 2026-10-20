@@ -141,6 +141,13 @@ def test_a_waiting_human_gate_clears_when_the_operator_merges_the_gate_pr():
     assert _survey(gh, candidates=[2])["launchable"] == [2]
 
 
+def test_a_waiting_human_gate_pr_merged_before_the_end_still_waits():
+    # A gate passed earlier is no answer to a later needs-human: no relaunch loop.
+    gh = _gate_tree({"state": "MERGED", "mergedAt": _ago(250), "updatedAt": _ago(250)})
+    survey = _survey(gh, candidates=[2])
+    assert survey["launchable"] == [] and "waiting on #5" in survey["waiting"][0]["reason"]
+
+
 def test_a_waiting_human_gate_clears_on_pr_activity_after_the_end():
     gh = _gate_tree({"state": "OPEN", "mergedAt": None, "updatedAt": _ago(30)})
     assert _survey(gh, candidates=[2])["launchable"] == [2]

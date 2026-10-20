@@ -1140,7 +1140,8 @@ def test_agent_guard_dev_worker_only_from_development(tmp_path, sdlc_repo):
                                      "git worktree add /tmp/x", "git rebase origin/main",
                                      'python3 "$SDLC" open-dev-pr 5 --title t',
                                      'python3 "$SDLC" handoff-to-pr-review 5',
-                                     "claude --cloud hi", "docker --context x system prune -af"])
+                                     "claude --cloud hi", "docker --context x system prune -af",
+                                     "git update-ref refs/heads/main HEAD", "git commit-tree HEAD^{tree}"])
 def test_dev_worker_bash_limits(sdlc_repo, command):
     assert guard(command, sdlc_repo, "sdlc:dev-worker") is not None
 

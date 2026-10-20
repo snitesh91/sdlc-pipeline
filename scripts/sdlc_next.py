@@ -9885,8 +9885,11 @@ def _gate_pr_answered(gh, comments: list, ended_at: Optional[datetime]) -> bool:
             view = gh.pr_view(pr, "state,mergedAt,updatedAt")
         except GhError:
             continue
-        if view.get("state") == "MERGED" or view.get("mergedAt"):
+        merged = _parse_ts(view.get("mergedAt"))
+        if view.get("state") == "MERGED" and (not ended_at or not merged or merged > ended_at):
             return True
+        if merged and ended_at and merged <= ended_at:
+            continue  # merged before the session ended: not an answer to this wait
         updated = _parse_ts(view.get("updatedAt"))
         if ended_at and updated and updated > ended_at:
             return True

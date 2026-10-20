@@ -72,7 +72,8 @@ REVIEW_ROLES = {"product-review", "design-review", "pr-review"}
 WORKER_ROLE = "dev-worker"
 WORKER_GIT_DENIED = {"commit", "push", "merge", "rebase", "reset", "checkout", "switch",
                      "branch", "worktree", "cherry-pick", "revert", "am", "tag", "pull",
-                     "fetch", "clean", "restore"}
+                     "fetch", "clean", "restore", "update-ref", "commit-tree",
+                     "symbolic-ref", "replace", "notes", "filter-branch"}
 # Agent role -> the `post-comment --role` values it may pass (default: its own role).
 POST_COMMENT_AS = {"design-review": {"arch-review", "lld-review"}}
 CONTROL_PLANE_REFS = {"$SDLC", "${SDLC}"}
