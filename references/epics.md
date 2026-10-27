@@ -152,6 +152,11 @@ closed sub-issues, or rotate a standing epic before it fills (e.g. `RTB-2`), the
   titled as one (`skipped_sections`).
 - **`Priority:` / `Effort:`** lines are optional per Task (`agents/lld.md`, "The
   document"); `create-lld-tasks` sets them, else `pipeline.issueDefaults`.
+- **`Placement: local — <reason>`** marks a Task a cloud session cannot run: its criteria
+  need hosts the cloud network denies (Android SDK, `dl.google.com`, Maven), a real phone
+  or Stage. On a cloud-placed Epic, after `finish-lld`, run `place <task> --where local`
+  for each such Task before it is picked (`references/cloud-mode.md`, "Placement rules").
+  The `lld` handoff lists them.
 - A Task must carry its own Footprint and real `blockedBy` edges — `list-parallel-ready`
   orders from those, never from prose. Only a *cross-epic* dependency uses `mark-blocked`.
 
@@ -244,6 +249,25 @@ Task in `development`, a review) first decides whether its work fits it:
      own, at `pipeline.escalation`'s thresholds (default 3 / 6): the third unsettled deviation
      on the same Epic swaps in the context-reset replacement architect; the sixth →
      `mark-needs-human` **on the Epic**.
+
+### LLD correction — drift that does not change the design
+
+A unit (often `pr-review`) can find an `lld.md` statement that is wrong while the design
+holds: a stale path, a false claim about existing code, a section the merged code already
+contradicts. The fix is a doc edit, not a deviation.
+
+- Cut it as a revision Task with no `--blocks`:
+  `open-arch-revision <epic-n> --title "LLD correction: <what>" --body "<the drift, the
+  section, the unit that found it>" --repo-path <p>` (the command prefixes
+  `Architecture revision: `).
+- Its `architecture` agent edits only the named `lld.md` section(s), in place, and leaves
+  `architecture.md` unchanged. It keeps every `## Task` heading.
+- `arch-review` runs on the design PR as usual; a clean review merges it (`skip-gate` /
+  `waive-gate`, else the human at Gate B).
+- Do not park the reporting unit: its PR merges on its own merits. Park it with
+  `pause-for-epic-regate` only when its own work depends on the corrected text.
+- A drift that changes a decision in `architecture.md` is a deviation (above), not a
+  correction.
 
 All other rework follows `references/rework.md`.
 

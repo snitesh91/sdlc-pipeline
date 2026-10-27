@@ -14,7 +14,10 @@ side owns it.
   carries `pipeline.placement.localLabel` (default `sdlc:local`; `place <task> --where local`
   adds it, `--where cloud` removes it), or matches `pipeline.placement.localTasks` (`e2e-test`,
   `integration-test` by title, or `label:<name>`; default none). Use it for work only the laptop
-  can run: e2e without a cloud e2e profile, Stage checks, a real phone.
+  can run: e2e without a cloud e2e profile, Stage checks, a real phone, or a build that needs
+  hosts the cloud network denies (Android SDK, `dl.google.com`, Maven). `lld` marks such a
+  Task `Placement: local`; place it local right after `finish-lld`, before it is picked
+  (`references/epics.md`, "`lld` specifies the Tasks").
 - **The session's placement:** env `SDLC_PLACEMENT` (`cloud` | `local`; any other value is an
   error) wins; else a truthy `CLAUDE_CODE_REMOTE` (`true` / `1`) means cloud; else local.
   `show-config` → `session_placement` reports it and the signal that decided it.

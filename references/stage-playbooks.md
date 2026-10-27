@@ -1,253 +1,125 @@
-# Stage playbooks — rules that bind every stage
+# Stage playbooks: rules for every stage
 
-Every stage subagent Reads this file first. Rules that bind only some roles live in:
+Every stage agent reads this file first. Rules for some roles only live in:
 
 | File | Read by |
 |---|---|
-| `references/design-doc-rules.md` | `product`, `product-review`, `architecture`, `design-review` (its `arch-review` half) |
-| `references/verification-rules.md` | `architecture`, `lld`, `development`, `pr-review`, `design-review` |
+| `references/design-doc-rules.md` | `product`, `product-review`, `architecture`, `design-review` (`arch-review`) |
+| `references/verification-rules.md` | `lld`, `development`, `pr-review`, `design-review`; `architecture` on demand |
 | `references/review-fanout.md` | `design-review`, `product-review`, `pr-review` |
 
-A role not listed for a file does not read it. Your prompt gives your doc path and worktree.
-Repo-specific commands (lint/build/test, host vs container, suite names, memory flags,
-ports) live in the driven repo's `CLAUDE.md` and `AGENTS.md` — "the repo's own commands"
-means there.
+The driven repo's `CLAUDE.md` and `AGENTS.md` hold its own commands (lint, build, test, containers, ports).
 
-- A SubagentStart hook gives you `$SDLC` (the control plane: `python3 "$SDLC" <cmd>`), the
-  plugin root that `references/…` and `templates/…` are under, and `<docRoot>` /
-  `<requirements-dir>` — your unit's own when the repo sets per-product `docRoots`; when the
-  hook says it could not resolve yours, run `python3 "$SDLC" doc-root <n>` and use that.
-- **The control plane owns every GitHub mutation, GraphQL call, worktree, force-push and
-  rebase.** A Bash guard hook denies hand-run ones and names the command to use instead. It
-  also limits you to your role's commands (review roles: no git writes); anything else is
-  the orchestrator's — report it in your handoff.
-- **Scratch goes only under `<worktree>/.sdlc-scratch/`** — logs, captured output,
-  comment bodies, probe files; never `/tmp` or elsewhere. Git ignores it, and it is removed
-  with the worktree.
+- The SubagentStart hook gives you `$SDLC`, the plugin root, `<docRoot>` and `<requirements-dir>`. If it cannot resolve your docRoot, run `python3 "$SDLC" doc-root <n>`.
+- The control plane owns every GitHub mutation, GraphQL call, worktree, force-push and rebase. The Bash guard denies hand-run ones and names the command to use. It also limits you to your role's commands. Report anything outside your role in your handoff.
+- Put scratch files only under `<worktree>/.sdlc-scratch/`. Never use `/tmp`.
 
-## Per-issue docs (the source of record)
+## Style
 
-A design stage's docs are committed on its branch `issue-<n>` at **one path**: a
-non-standing Epic's architecture/lld phase-Task writes `<docRoot>/epic-<n>/<doc>` (a revision
-edits `architecture.md` in place; the design PR merges it into `epic-<n>` —
-`references/epics.md`, "Doc layout at the epic level"); every other issue writes
-`<docRoot>/issue-<n>/<doc>`, which reaches `main` with its gate or squash-merge. Your prompt
-names the exact path.
+Write docs, comments and handoffs in STE-lite: one instruction or fact per sentence, active voice, present tense, one term per concept, no filler. Keep the handoff and report terse: no preamble, no recap.
 
-**Exactly three filenames exist:**
+## Per-issue docs
 
-| File | Written by | Required? |
-|---|---|---|
-| `product.md` | `product` — an Initiative's Product-Roadmap Task, or a standing-epic child | Yes, except a standing child routed past `product`. **Never for an Epic's Task** — its requirements are the Initiative's `product.md` (or the Epic's issue body, engineering-driven) — except an approved amendment (`references/initiatives.md`, "Amending an approved `product.md`"). |
-| `architecture.md` | `architecture` — an Epic's Architecture-phase (or revision) Task, or a standing-epic child | Yes, except a standing child routed past `architecture` |
-| `lld.md` | `lld` — an Epic's LLD-phase Task only | Always; one `## Task` subsection per Task the Epic will run |
+A design stage commits its doc on branch `issue-<n>` at one path. An Epic's architecture or lld phase-Task writes `<docRoot>/epic-<e>/<doc>`. Every other issue writes `<docRoot>/issue-<n>/<doc>`. Your prompt names the path.
 
-- `development`, `arch-review`/`lld-review` and `pr-review` write no doc file. Review
-  findings live in the issue comment thread. `development`'s record is the **PR
-  description** (what was built and why); its evidence is the PR's required checks and
-  any `record-local-ci` attestation the config requires, pinned to a head SHA
-  (`references/operations.md`, "Local-CI attestation"). Never commit self-reported
-  pass/fail numbers.
-- Any other file under your doc directory is a defect. If you think a fourth doc is
-  needed, say so in your handoff; do not create it.
-- Write each doc so the next stage can work from it alone, without the comment history.
-  A doc may hold your working checklist; never use alternate filenames.
-- Edit a doc under `<docRoot>` only with the `Edit`/`Write` tools — never `python`, `sed`,
-  `awk`, `cat <<EOF` or `echo >` through `Bash`, not even for a "mechanical" change. A tool
-  edit is an exact, reviewable diff of what you meant; a script silently clobbers text it
-  did not match.
-- Every `## Task` subsection of an Epic's `lld.md`, and a standing child's
-  `architecture.md`, carries a `## Footprint` section in the exact parseable shape from
-  `references/epics.md`, "How to size the Tasks": backticked paths, one per bullet.
+| File | Written by |
+|---|---|
+| `product.md` | `product`: an Initiative's Product-Roadmap Task or a standing child. Never an Epic's Task, except an approved amendment (`references/initiatives.md`, "Amending an approved `product.md`") |
+| `architecture.md` | `architecture`: an Epic's Architecture-phase or revision Task, or a standing child |
+| `lld.md` | `lld`: an Epic's LLD-phase Task. One `## Task` section per Task |
 
-## Citation discipline — every stage, without exception
+- No other file goes in your doc directory. Propose a fourth doc in your handoff; do not create it.
+- `development` and the review roles write no doc. `development`'s record is the PR description. Its evidence is the PR's checks and any `record-local-ci` attestation. Never commit self-reported pass/fail numbers.
+- Write each doc so the next stage works from it alone.
+- Edit a doc only with `Edit`/`Write`. Never edit a doc through `Bash` (`sed`, `python`, heredoc).
+- Each `lld.md` Task section and a standing child's `architecture.md` carry a `## Footprint` in the shape from `references/epics.md`, "How to size the Tasks".
 
-- **Anchor to something stable:** a section heading (`"### Shared files"`), an exact
-  quoted test title, or a grep-anchored quote. A line number is at most a hint next to
-  the anchor, never the anchor.
-- **In a document that ships** (runbook, HLD, anything under the repo's doc/ops trees),
-  use the grep-anchored quote alone, with no line number. Line numbers are fine as
-  hints in working evidence (an evidence log, a review comment).
-- **Never cite a file you did not open in this session.** Not from the issue body, a
-  prior stage's doc, or memory. Issue-body line numbers are usually stale.
-- **Resolving a doc from a branch:** `git fetch origin` first, then confirm the ref is
-  reachable with `git merge-base --is-ancestor <sha> origin/<branch>`. An unreachable
-  SHA means a superseded draft. State which ref you resolved and how.
-- **To see what a commit changed**, use `git show <sha> --stat` or three-dot
-  `git diff origin/<base>...<branch>` (`<base>` = `epic-<n>` for a child of a non-standing
-  Epic, else `main`). Never use a two-dot range: it attributes merged base commits to the
-  branch.
-- **A stale citation in a doc about to merge is a real finding**, not a nit.
-- **When `sync-branch` pulls a sibling's work onto a branch whose docs cite that
-  sibling's files, re-check those citations before the PR merges.** Nothing re-checks
-  them after a merge.
+## Citation discipline
 
-### Attribution is falsifiable — run the check, do not recall it
+- Anchor a citation to a heading, an exact test title or a grep-able quote. A line number is only a hint. In a shipped doc, use the quote alone.
+- Cite only files you opened in this session.
+- Before you resolve a doc from a branch, run `git fetch origin`. State the ref you used.
+- See a branch's changes with `git diff origin/<base>...<branch>` (three dots). `<base>` is `epic-<e>` for a child of a non-standing Epic, else `main`.
+- A stale citation in a doc about to merge is a real finding.
+- After `sync-branch` brings in a sibling's files that your doc cites, re-check those citations.
 
-Run this as a mechanical pass before every handoff:
+### Attribution is falsifiable
 
-- **Every quoted string must be reproducible**: `grep -F "<the quoted words>" <cited file>`
-  must hit. If it doesn't, fix or delete the quote. Keep quotes short enough to survive
-  reflowing.
-- **The delegation prompt is not a citable source.** A constraint that reached you only
-  through your prompt goes in the document's own voice, unquoted and unattributed.
-- **A fenced block presented as command output must be bytes you captured.** Redirect
-  to a file and paste from it, or cite the `record-local-ci` attestation. Prose saying
-  what a command showed is fine.
-- **Generate every "untouched" / "unchanged" / "out of scope" claim from the diff**
-  (`git diff --name-only origin/<base>...HEAD`) when you write the sentence, and
-  re-check it before handoff.
+Run this check before every handoff:
 
-## Subagents finish in one turn — never park awaiting a wake
+- `grep -F "<quote>" <file>` hits for every quote. Fix or delete a quote that misses.
+- Never cite your delegation prompt. Write a constraint from it in the doc's own voice.
+- A block shown as command output is captured bytes. Prose about output is fine.
+- Generate every "untouched" or "out of scope" claim from `git diff --name-only origin/<base>...HEAD`.
 
-Nothing re-invokes a subagent after its turn ends. Finish everything in-turn.
+## Subagents finish in one turn
 
-- Run long commands (a spec run, container/image build) with `run_in_background` and wait
-  on them in-turn with the Monitor tool; an agent without `Monitor` (`exploratory`,
-  `initiative-close`) uses blocking calls instead. Foreground `sleep` is blocked.
-- **Your final message declares exactly one terminal state** — the `SDLC-RESULT`
-  outcome below. A final message whose last act
-  is waiting ("I'll pick this up when the run lands", "monitoring for completion") is a
-  stall, however much work came before it. If you cannot wait in-turn, say so and name
-  what you need; that is a terminal state.
-- **Orchestrator:** check every returning agent's final message for this shape before
-  acting on it. An agent that declared waiting has not finished, and its issue is not at
-  the stage its handoff implies. Re-message it with the result it was waiting for.
+Nothing wakes you after your turn ends.
 
-### The handback is terse — the detail already shipped
+- Run a long command with `run_in_background` and wait for it with Monitor. An agent without Monitor uses blocking calls.
+- Your final message declares exactly one terminal outcome. A final message that waits ("I'll check when it lands") is a stall.
 
-Your final message to the orchestrator is for routing. The evidence already lives in
-the PR description, issue comment, or committed doc. Send these fields and nothing else:
+### The handback is terse
 
-- **HEAD / PR:** the head SHA, and the PR number if one exists.
-- **BLOCKER:** one line, only for `blocked` / `needs-human` / `failed` — the named
-  blocker, the exact question, or the failed command.
-- **QUESTIONS** (`needs-human` only): up to 4 lines `Q: <question> — options: <a> | <b> | …`,
-  each answerable on its own. You never ask the operator yourself: the orchestrator asks
-  them (in session or on GitHub) and resumes you with the answers.
-- **DETAIL:** a link to the PR description or issue comment that holds the evidence.
-  Send the link, not the evidence.
-- **Last line, always:** `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "<outcome>"}`
-  — `<n>` your unit's number, `<stage>` your role (`product`, `arch-review`, …).
-- **Standing-epic child only, optional:** when you judge the default next stage
-  unnecessary, add `"next": "<stage>"` (a later stage, or `merge` to skip `pr-review`) and
-  `"why": "<≤ 120 chars>"` — e.g. `"next": "development", "why": "no new interface"`. A
-  recommendation; the orchestrator decides.
+Your final message is for routing. The evidence is already in the PR, comment or doc. Send only:
+
+- **HEAD / PR:** head SHA, PR number if any.
+- **BLOCKER:** one line, for `blocked` / `needs-human` / `failed` only.
+- **QUESTIONS** (`needs-human` only): up to 4 lines `Q: <question> — options: <a> | <b>`. The orchestrator asks the operator and resumes you.
+- **CONCERN** (`done-with-concerns` only): one line.
+- **DETAIL:** the link that holds the evidence.
+- **Last line:** `SDLC-RESULT: {"issue": <n>, "stage": "<role>", "outcome": "<outcome>"}`.
+- **Standing child, optional:** `"next": "<later stage or merge>"`, `"why": "<≤ 120 chars>"`. The orchestrator decides.
 
 | `outcome` | Meaning |
 |---|---|
-| `done` | An authoring stage finished and ran its exit actions; on a gate-feedback round, the feedback is addressed and pushed (the orchestrator then runs `mark-feedback-addressed`) |
-| `clean` / `rework` | A review's verdict (CONDITIONAL ACCEPT → `clean`) |
-| `blocked` | Cannot finish without something named outside your stage: a genuine ambiguity an earlier stage owns, a design that does not fit, a dependency, a rejected push |
-| `needs-human` | Stopped for a decision only the operator can make (an escalation, a scope question) |
+| `done` | An authoring stage finished its exit actions (a gate-feedback round included) |
+| `done-with-concerns` | `development` finished, with one stated doubt for `pr-review` to check first |
+| `clean` / `rework` | A review verdict (CONDITIONAL ACCEPT is `clean`) |
+| `blocked` | You need something outside your stage: an ambiguity, a design that does not fit, a dependency, a rejected push |
+| `needs-human` | Only the operator can decide |
 | `failed` | A command or exit action failed and you could not recover |
 
-A SubagentStop hook refuses your stop until the last message carries a valid line.
-
-No command tables, logs, restated diff, or "what I checked and found fine" inventory.
-**Orchestrator:** a handback that inlines evidence is a finding. Ask for a terse re-send
-before acting, then route on the fields.
-
-A fan-out child reporting to its parent reviewer follows the same contract, capped at
-1,200 characters (`references/review-fanout.md`, "A fan-out child's reply is terse too").
+The SubagentStop hook refuses a stop without a valid last line. A fan-out child replies to its parent under the same contract, capped at 1,200 characters (`references/review-fanout.md`).
 
 ## Commenting discipline
 
-Comments are the human's visibility record and the crash-resume point. They are not the
-source of record: that is the committed docs, the commits, and the issue body for durable
-requirements. Keep comments to a pointer plus a summary.
+Comments are the visibility log and resume point. Docs and commits are the record.
 
-- **The start comment** (`🚧 Picking this up — <role> stage starting.`) is posted by the
-  orchestrator's commands before you start — never by you, never hand-typed.
-- Comment per milestone, not per step. Post at least one comment per stage (the
-  handoff) and at most one per genuine milestone.
-- Link to the doc; don't paste it. Give a few sentences plus the doc path and commit SHA.
-- The stage's last comment carries real information, not just a marker.
-- A fresh session must be able to tell from comments plus docs where a crashed run
-  stopped.
+- The orchestrator posts the start comment. Never post it yourself.
+- Post one comment per milestone. Post at least the handoff.
+- Link the doc; do not paste it.
 
 ### Posting a handoff comment
 
-`product`, `architecture`, `lld` and the review roles (`product-review`, `arch-review`,
-`lld-review`, `pr-review`) post theirs with
-`python3 "$SDLC" post-comment <n> --role <your role> --body-file <file>` — write the text to a
-file first. It is the only way these roles comment; post again every round (rework and
-gate-feedback included) — the stop hook refuses a `done` finish until you have. A review role
-then runs its `record-*` command too. `development` uses `handoff-to-pr-review` instead.
+`product`, `architecture`, `lld` and the review roles post with `python3 "$SDLC" post-comment <n> --role <role> --body-file <file>`. Write a new body file each round (`.sdlc-scratch/comment-round-<k>.md`). Post every round. A review role then runs its `record-*` command. `development` uses `handoff-to-pr-review`.
 
 ### Comment size is a contract
 
-- **Stage handoff comment: ≤ 2,000 characters.** Say what changed, where the doc/commit
-  is, and the delta since the last round.
-- **Evidence-carrying comment** (a review role's `post-comment`, `development`'s handoff, a
-  `record-*-review` `--summary`):
-  **≤ 6,000 characters.** Findings first, each as
-  one heading plus at most three lines (what, why it matters, the fix — described, not
-  applied). Non-blocking findings get one line each; the verdict gets one line. Put
-  command output and quotes in a `<details>` block trimmed to the lines that prove the
-  point (≤ 15 lines per block). Keep the Scope/Verification section to ≤ 3 lines: what
-  you read and ran.
-- Don't restate the document, the diff, or the previous round. If you have more to say
-  than the cap allows, you have found a class: state it once, give two exemplars and the
-  sweep that finds the rest. Cut the "what I checked and found fine" inventory first.
-- The control plane refuses an over-cap `--summary` / `--reason` / `--reply` / `post-comment`
-  body; check any other comment you post yourself with `wc -c`.
+- Stage handoff comment: at most 2,000 characters. Say what changed, where, and the delta since the last round.
+- Evidence comment (review `post-comment`, `development` handoff, `record-*` `--summary`): at most 6,000 characters. Findings first: one heading and at most three lines each. Put output in a `<details>` block of at most 15 lines.
+- Many similar findings are a class: state it once, give two examples and the sweep.
+- The control plane refuses an over-cap body. Check other comments with `wc -c`.
+- Commands post every hidden marker. Never type one.
 
-Every hidden marker (`stage-transition`, `role-comment`, review outcomes) is posted by the
-command that posts your comment — never hand-type one.
-
-If a stage changes pipeline files the driven repo tracks (its `sdlc-pipeline.config.json`,
-the gate workflow), commit that with the related code. Never edit the plugin itself; flag
-a pipeline problem in your handoff.
+If you change pipeline files the repo tracks (its config, the gate workflow), commit them with the related code. Never edit the plugin; flag a pipeline problem in your handoff.
 
 ## Secrets and containers
 
-- **Never print the environment** (`env`, `printenv`, `set`, `process.env`, a debugger's
-  env dump): transcripts persist. Print variable **names only**, never values.
-- To see which credentials a profile configures, list names with a pattern that allows
-  digits (`E2E_*` keys): `sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' .env.<profile>
-  .secrets.<profile>`. Never read or echo a value to prove it is set.
-- **Stop only containers you started.** Label every container you start
-  `sdlc.issue=<n>`; check `docker ps` before any `docker stop`/`kill`, and never touch
-  an unlabelled container or another issue's — it is a concurrent Task's evidence.
-- **Name every compose project, container and volume you create with your unit prefix** —
-  your worktree's basename followed by `-`/`_` (e.g. compose `-p sdlc-dev-<n>`, container
-  `sdlc-dev-<n>-api`) — and tear your stack down before your handback. When the unit
-  closes, `cleanup_unit` removes anything left with that prefix.
-- **Never prune the host.** No `docker system|volume|image|container|network|builder prune`
-  without `--filter label=sdlc.issue=<n>`: concurrent units' stacks and anonymous IT volumes
-  live on the same host. Teardown targets your own prefix only (`docker compose -p <prefix>
-  down -v`). The Bash guard denies an unscoped prune.
+- Never print the environment. Print variable names only, never values.
+- Label every container you start `sdlc.issue=<n>`. Name compose projects, containers and volumes with your worktree basename as prefix. Tear your stack down before your handback.
+- Stop only containers you started. Check `docker ps` first.
+- Never prune the host. A `docker ... prune` needs `--filter label=sdlc.issue=<n>`.
 
-## Rework and blockers — what it means for you
+## Rework and blockers
 
-Routing, resume messages, replacements and the escalation valve belong to the
-orchestrator (`references/rework.md`). What applies to you:
+The orchestrator owns routing (`references/rework.md`). For you:
 
-- **Genuine ambiguity:** stop and put the specific question in your final message
-  (outcome `blocked`; `needs-human` when only the operator can answer). Never guess.
-  Stopping this way is a terminal state, not a failure.
-- **Nothing spins off a separate ticket.** The owning stage fixes every pre-merge
-  problem inline. You will be resumed with the finding, not replaced.
-- **When you are resumed with a review finding, verify it against the real code first.**
-  If it is right, fix the whole class, not just the listed instance: a same-class repeat
-  bounce escalates. If it is wrong, say so and show the evidence. Never agree
-  performatively or comply silently.
-- **A rework round runs at full rigour:** every check the round owes (`verification-rules.md`,
-  "Test scope"), on the new head; no shortened document check.
+- On a genuine ambiguity, stop and put the question in your final message (`blocked`, or `needs-human` when only the operator can answer). Never guess.
+- Nothing spins off a separate ticket. The owning stage fixes it.
+- On a resumed finding, check it against the real code first. If it holds, fix the whole class. If it is wrong, show the evidence.
+- A rework round runs every check it owes on the new head (`verification-rules.md`, "Test scope").
 
 ## Stage exit actions live in the agent files
 
-| Stage | Its exit actions |
-|---|---|
-| `product` | `agents/product.md` |
-| `product-review` | `agents/product-review.md` |
-| `architecture` | `agents/architecture.md` |
-| `arch-review`, `lld-review` | `agents/design-review.md` |
-| `lld` | `agents/lld.md` |
-| `development` | `agents/development.md` |
-| `pr-review` | `agents/pr-review.md` |
-
-Worktree paths use the `pipeline.worktrees` defaults: `<root>/<epicPrefix><n>` →
-`/tmp/sdlc-epic-<n>`, `<root>/<devPrefix><n>` → `/tmp/sdlc-dev-<n>`
-(`references/parallelism.md`).
+Each `agents/<role>.md` holds its own exit actions. Worktree defaults: `/tmp/sdlc-epic-<n>`, `/tmp/sdlc-dev-<n>` (`references/parallelism.md`).
