@@ -74,9 +74,9 @@ operator with `AskUserQuestion`: the gate PR url, the doc, your `--summary`, and
 
 Never pick an option for the operator.
 
-A cloud session decides every design gate below the skip bar this way. Run `cloud-heartbeat
-<epic> --state asking` before the question. Park an unanswered gate only at the session's end,
-in a `waiting-human` end marker.
+A cloud session decides every design gate below the skip bar this way
+(`references/cloud-mode.md`, "A cloud run"). It parks an unanswered gate only at the session's
+end, in a `waiting-human` end marker.
 
 ## Checking a gate
 

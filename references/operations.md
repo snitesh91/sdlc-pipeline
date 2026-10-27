@@ -39,7 +39,7 @@ The probe edits a file in the review worktree (default `/tmp/sdlc-review-<n>/`),
 { "permissions": { "allow": ["Edit(//tmp/sdlc-review-*/**)"] } }
 ```
 
-Revert the probe with `git restore <file>`. The Bash guard denies a review role `git checkout -- <file>`, commit, push, merge and reset.
+Revert the probe with `git restore <file>`. The Bash guard denies a review role `git checkout` (a branch or `-- <file>`), `git switch`, `git reset`, commit, push and merge.
 
 ## Issue taxonomy
 

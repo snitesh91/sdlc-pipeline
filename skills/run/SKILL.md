@@ -106,38 +106,31 @@ Detail: `references/epics.md`, "How a non-standing Epic runs".
 
 ### Architecture deviation — a revision phase-Task
 
-When a unit reports that the approved `architecture.md` does not fit:
+When a unit reports that the approved `architecture.md` does not fit, cut a revision and park
+the unit (`references/epics.md`, "Architecture deviation escalation"):
 
 ```bash
 python3 "$SDLC" open-arch-revision <epic-n> --title "Architecture revision: <deviation>" \
   --body "<the deviation, and the unit that found it>" --blocks <affected-n> ... --repo-path <p>
+python3 "$SDLC" pause-for-epic-regate <n> --epic <epic-n> [--gate-pr <pr>] --found-by <stage>
 ```
-
-It runs like the Architecture-phase Task and also updates the affected `lld.md` sections. Park
-the reporting unit with `pause-for-epic-regate <n> --epic <epic-n> [--gate-pr <pr>] --found-by <stage>`
-(`--gate-pr` once the design PR exists). After the revision closes, resume that agent directly;
-never `set-stage` it. Escalation: `references/epics.md`, "Architecture deviation escalation".
 
 ## Hooks — enforced for you
 
-Run from the driven repo's root; `sdlc-pipeline.config.json` holds everything project-specific.
+Run from the driven repo's root. What each hook does: `README.md`, "Hooks". You act on three:
 
-- **SessionStart** exports `$SDLC` and `GITHUB_TOKEN`. If the token is missing, get it from the
-  operator. Its `rtk init` and model hints are advisory: mention once, never stop.
-- **PreToolUse (Bash)** denies hand-run GitHub mutations, GraphQL, non-`--detach` worktree adds,
-  force-push and rebase, and limits each stage agent to its role's commands. A denial names the
-  command to run instead: run it. Operator-directed work outside the pipeline: `gh pr create --head <branch>`,
-  `gh pr merge <branch>`, `edit-issue`. The main thread is guarded only while it drives a run
-  (a fresh run-state file from `next-action --run-id`; `guard.mainThread: "always"` guards every session).
-- **PreToolUse (Agent)** sets each `sdlc:*` agent's model and caps fan-out. Launch
-  `sdlc:dev-worker` only from a `"fanout": "unavailable"` hand-back, each prompt starting `AXIS: <slice> ISSUE: <n>`.
-- **SubagentStop** keeps an agent running until it ends with `SDLC-RESULT`. It and SessionEnd
-  record metrics; never record them yourself.
+- **A Bash denial names the command to run instead: run it.** Operator-directed work outside the
+  pipeline passes: `gh pr create --head <branch>`, `gh pr merge <branch>`, `edit-issue`. A missing
+  token at session start: get it from the operator (`references/operations.md`, "Repo access").
+- **Launch `sdlc:dev-worker` only from a `"fanout": "unavailable"` hand-back**, each prompt
+  starting `AXIS: <slice> ISSUE: <n>`.
+- **An agent runs until it ends with `SDLC-RESULT`.** The hooks record metrics; never record them yourself.
 
 ## Deterministic control plane
 
 Every GitHub read and mutation, and every fetch/checkout/merge/push, goes through
-`python3 "$SDLC" <command>`; never hand-run `gh`/GraphQL/git. Each command prints one JSON
+`python3 "$SDLC" <command>`. Never hand-run a GitHub mutation or GraphQL. Hand-run git only where
+a reference names it (conflict resolution, break-glass). Each command prints one JSON
 object. **Exit 0** = a valid result, refusals included. **Exit 1** = failure: stop and report;
 never retry by hand. Classifier denial: `references/operations.md`, "Auto-mode classifier denies
 a composite". Run `merge-pr`, `finish-lld`, `start-stage`, `close-epic`, `cut-phase-tasks` and
@@ -147,7 +140,7 @@ a composite". Run `merge-pr`, `finish-lld`, `start-stage`, `close-epic`, `cut-ph
 
 | Command | Does → returns |
 |---|---|
-| `start-stage <n> --role <role> --run-id <id> [--unit epic] [--base <ref>]` | `worktree-add` → `claim`. Refuses `development` with an open PR (`check-claimable`: resume its agent) and at the run cap (`run-cap`, `stop_at_cap: true`) |
+| `start-stage <n> --role <role> --run-id <id> [--unit epic] [--base <ref>]` | `worktree-add` → `claim`. Refuses `development` on a unit with an open PR (exit 0: `refused`, `reason`, `pr`; resume its agent, see the `resume` row) and at the run cap (`run-cap`, `stop_at_cap: true`) |
 | `transition <n> --expect-stage <s> [--pr <pr>] [--repo-path <p>] [--base <ref>]` | `verify-exit` → `sync-branch` → `open-design-pr` (phase-Task) → `start-comment` (review role) → `ready`, `stopped_at`, `handoff_marker_present`, `conflict`, design `pr`, `held` (no suite evidence — `references/operations.md`, "Local-CI attestation"), `skip_confidence_threshold` |
 | `advance-standing <n> --from none\|product\|product-review\|architecture\|arch-review --to product\|architecture\|development --reason "<one line>" [--repo-path <p>]` | `transition` → `route` → `start-stage` → `routed`, `path`, `claimed`, `failed_step`, `reason` |
 | `skip-pr-review <n> --pr <pr> --reason "<one line>" --run-id <id>` | `verify-exit` → `route --to merge` (refused after a `pr-review` bounce) → `merge-pr` → `merged`, `failed_step` (`behind_base` → `prepare-rework`, re-run) |
@@ -220,7 +213,7 @@ python3 "$SDLC" next-action <epic> --run-id "$RUN_ID" --sync-epic
 
 | `action` | What to do |
 |---|---|
-| `resume` | A session died mid-stage: resume at `stage` from comments and committed docs (Step 3). If you drive that unit now, skip it and survey again. On `likely_live`, launch nothing; ask the operator |
+| `resume` | A session died mid-stage. If you drive that unit now, skip it and survey again. On `likely_live`, launch nothing; ask the operator. Else, with an open PR: `prepare-rework <n>`, then dispatch per `references/rework.md`, "Replacing an agent that cannot be resumed"; never `start-stage`. Without one: resume at `stage` from comments and committed docs (Step 3) |
 | `route` | Fresh standing child: `advance-standing <n> --from none --to <stage>` ("Routing a standing child"; Step 2's scope alignment first for `product`) |
 | `delegate` | Step 2, then Step 3 |
 | `pass-gate` | `references/gates.md`, "Passing a gate"; pass `issue`/`gate_pr`/`stage` verbatim |
@@ -233,7 +226,7 @@ python3 "$SDLC" next-action <epic> --run-id "$RUN_ID" --sync-epic
 | `none` | Route `unstaged` children, run the end checks, then Step 4 |
 | `skip` | Legacy Epic: quote `reason`, then Step 4 |
 
-- **Concurrent runs:** run `list-parallel-ready` after every `merge-pr` and `finish-lld`.
+- **With `devLane` > 1:** run `list-parallel-ready` after every `merge-pr` and `finish-lld`.
 - **`product_cap`** on `none`: product work was deferred; report it.
 - **A `blockedBy` edge** usually constrains `development` onward only. Start a standing child's
   design stages anyway.
@@ -289,9 +282,12 @@ Give the agent (by `gh` command for anything large; in the cloud a `gh api` GET)
 
 Never restate the agent file's rules. Template (`EPIC` is the Initiative/Epic you are driving):
 
-> ROLE: `<role>` ISSUE: `<n>` EPIC: `<epic>`
-> Unit: #`<n>` — `<title>`. Worktree: `<path>`. Doc you own: `<doc-path>`.
-> The 2–3 unit-specific facts. For `arch-review`: `Skip threshold: <N>` (`skip_confidence_threshold`).
+> ROLE: <role> ISSUE: <n> EPIC: <epic>
+> Unit: #<n> — <title>. Worktree: <path>. Doc you own: <doc-path>.
+> The 2–3 unit-specific facts.
+
+Write the first line plain, with no backticks: the hooks parse it. SubagentStart adds
+`arch-review`'s `Skip threshold`.
 
 Note each agent's ID per role for resume-based rework (session only; drop it at the unit's
 stopping point). Send findings back with `SendMessage` yourself, never via a relay fork. Send
@@ -310,7 +306,7 @@ Its last line is `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "<o
 | `blocked` + `"fanout": "unavailable"`, review role | Launch one agent per axis from its briefs, resume the reviewer (`references/review-fanout.md`, "The orchestrator fans out for you") |
 | `blocked` + `"fanout": "unavailable"`, `development` | One `sdlc:dev-worker` per `slices` entry (≤ `maxChildren`), then resume `development` (`references/parallelism.md`, "Development fan-out from briefs") |
 | `blocked` | Clear the named blocker: resume the stage that owns the question, `open-arch-revision` for a design that does not fit, `mark-blocked` for a cross-issue dependency |
-| `needs-human` | `humanChannel: "session"`: ask, resume. `"github"`: `mark-needs-human <n> --reason "..."`, park |
+| `needs-human` | `references/cloud-mode.md`, "Human channel" (`"github"`: `mark-needs-human <n> --reason "..."`, park) |
 | `failed` | Inspect the worktree yourself, then resume the agent |
 
 **Verify, don't trust:**
@@ -325,12 +321,13 @@ python3 "$SDLC" transition <n> --expect-stage <s> [--pr <pr>] --repo-path <the u
 - Proceed only on `ready: true`. `handoff_marker_present: false` → resume `development` to post
   its marker. `conflict` → "Git-conflict handling". A failed `verify-exit` → fix the missed exit action.
 - Before resuming a rework or run-only agent, and on `behind_base` or `held`: `prepare-rework <n>`.
-  Never sync under a live agent. `pass-gate`/`skip-gate`/`waive-gate` reconcile internally; no sync after them.
+  An agent that handed back is not live until you resume it; never sync while one runs.
+  `pass-gate`/`skip-gate`/`waive-gate` reconcile internally; no sync after them.
 - Give a phase-Task's review agent the design PR (`steps.open-design-pr.pr`).
 - Summarise the approved `architecture.md` after a clean `arch-review`, and `product.md` before Gate A.
   Never summarise `lld.md`.
-- A mutation probe denied by the classifier: relay it (`references/operations.md`, "Auto-mode
-  allow rule for the `pr-review` mutation probe"); it is not a clean signal.
+- A classifier-denied mutation probe is not a clean signal: `references/operations.md`, "Auto-mode
+  allow rule for the `pr-review` mutation probe".
 - A review with a verdict but no exit action: run `record-pr-review` from it yourself and tear its
   stack down. Re-run the stage only when the report has no verdict.
 - Confirm the stage left an issue comment.

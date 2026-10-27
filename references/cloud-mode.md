@@ -136,7 +136,7 @@ laptop Initiative run keeps the Initiative's own work and gives each Epic its ow
   (default 3). An ended Epic relaunches once its recorded `waits=` clears: the waited Epic
   closed (`waiting-epic`), or a waited unit closed, changed state, got a comment, or had its
   gate PR merged, reviewed or pushed. An end marker with no waits waits for new GitHub activity.
-  `--relaunch` overrides; `survey.relaunch` lists ready ones.
+  `--relaunch` overrides; `next-action`'s `cloud.relaunch` lists ready ones.
 - **`--allow-overlap`** skips the footprint checks (marker `overlap=1`). Operator's word only.
 - **A session started by hand:** `record-cloud-session <epic> --session <url|session_…>` (adds the cloud label, posts the launch marker with `manual=1`).
 - **Idempotent:** a live session is never relaunched (`already_running`). `ok: false` with

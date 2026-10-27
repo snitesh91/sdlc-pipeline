@@ -36,9 +36,8 @@ LLD-phase Task:          lld -> design PR -> lld-review -> finish-lld (merge PR,
 Task:                    development -> [pr-review] -> auto-merge into epic-<n> -> CLOSED
 ```
 
-1. **Cut the phase-Tasks yourself** when `next-action` returns `cut-phase-tasks`:
-   `cut-phase-tasks <epic-n> [--arch-body TEXT] [--lld-body TEXT] --repo-path <p>`
-   (idempotent; LLD is blocked by Architecture).
+1. **Cut the phase-Tasks yourself** on `cut-phase-tasks` (SKILL.md, "Cutting an Epic's
+   phase-Tasks"). LLD is blocked by Architecture.
 2. **Every child branches from `origin/epic-<n>`**, phase-Tasks included. A phase-Task writes
    `<docRoot>/epic-<n>/architecture.md` or `lld.md` on its `issue-<n>` branch.
 3. `transition` opens the **design PR** `issue-<n>` → `epic-<n>`, and the review runs on it. A
@@ -57,7 +56,7 @@ Architecture revision.
 
 ### Where a new issue starts (`default_stage`)
 
-Stage options: `Product`, `Architecture`, `Development`, `Testing`, `PR Review`, `LLD`.
+Stage options: `Product`, `Architecture`, `Development`, `PR Review`, `LLD`.
 
 - An Initiative's child (Product-Roadmap Task) or a parentless issue starts at `product`.
 - A standing epic's child gets no Stage: `next-action` returns `route` (SKILL.md, "Routing a
@@ -108,9 +107,8 @@ drives an unlinked issue. Unlink closed sub-issues, or rotate a standing epic be
   Tasks and run only the specs they add (`references/verification-rules.md`, "Test scope").
   None under `testTasks: false` ("Initiative branch").
 - **`Priority:` / `Effort:`** are optional, else `pipeline.issueDefaults`.
-- **`Placement: local — <reason>`** marks a Task the cloud cannot run (denied hosts such as
-  Android SDK or Maven, a real phone, Stage). `create-lld-tasks` adds the local label
-  (`references/cloud-mode.md`, "Placement rules").
+- **`Placement: local — <reason>`** for a Task the cloud cannot run (`references/cloud-mode.md`,
+  "Placement rules").
 - Ordering comes from Footprints and `blockedBy` edges, never prose. Use `mark-blocked` only
   for a cross-epic dependency.
 
@@ -264,7 +262,7 @@ close-ready pending it; never fabricate the record).
 stack, and attest with `record-local-ci --suite e2e`. On a cloud Epic with no cloud e2e
 profile it is a local Task (`references/cloud-mode.md`, "A cloud run").
 
-**Triage new-spec and exploratory deltas:**
+### Triage new-spec and exploratory deltas
 
 - **Blocker / Critical** (a re-confirmed failure on a surface this epic moved, or **any**
   access-boundary failure, 5xx, crash or data-integrity problem): a `Bug` child of **the
@@ -274,13 +272,18 @@ profile it is a local Task (`references/cloud-mode.md`, "A cloud run").
 - **Architecture drift with no defect:** never blocks close. Correct the doc or file it on the
   backlog epic.
 
-**Close-blocker lane, only with operator authorisation.** A Blocker/Critical fix that fits the
+### Close-blocker lane
+
+Only with operator authorisation. A Blocker/Critical fix that fits the
 design may skip `lld`: `set-stage <n> --stage development`. A design gap goes through
 `open-arch-revision`; never ask `development` to edit an open Epic's docs.
 
-**A closed Epic's design docs are its as-built record, and a correction to them routes
-through `development`.** `open-dev-pr` accepts that diff. An open Epic's docs change only
+### A closed Epic's design docs are its as-built record
+
+A correction to them routes through `development`; `open-dev-pr` accepts that diff. An open Epic's docs change only
 through its phase-Tasks or a revision.
+
+### Finishing the close
 
 **Pass `--clean-worktree` on the `close-epic` call after the closing run.** It discards
 untracked output before a reconcile or the merge, and refuses on a tracked change

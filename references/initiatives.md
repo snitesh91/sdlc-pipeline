@@ -57,8 +57,8 @@ approval again (an in-session approval counts: `approve-gate --by-operator-sessi
 `next-action <initiative>` walks open cut Epics, lowest number first, skipping blocked and
 legacy ones. It returns `none` only when nothing is left.
 
-- **`cut-phase-tasks`** (`epic`): run `cut-phase-tasks <epic> --repo-path <p>` (SKILL.md,
-  "Cutting an Epic's phase-Tasks"), then call `next-action <initiative>` again.
+- **`cut-phase-tasks`** (`epic`): SKILL.md, "Cutting an Epic's phase-Tasks"; then call
+  `next-action <initiative>` again.
 - **`run-epic`** (`epic`): run that Epic's SKILL.md Step 1–3 loop inline (`next-action <epic>
   --run-id "$RUN_ID" --sync-epic` through its `none`, `check-epics-closeable` / `close-epic`
   and its Step 4 facts), then return to `next-action <initiative>`. **Use one `--run-id` for

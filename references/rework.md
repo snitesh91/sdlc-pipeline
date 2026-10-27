@@ -7,7 +7,8 @@ A deviation from an Epic's approved `architecture.md` has its own path
 
 Print the blocking findings in chat before you route them. When a later stage finds a
 problem an earlier stage owns, resume the owning agent (`SendMessage` to its tracked ID) with
-the finding. Never spawn a fresh agent. Never open a GitHub issue for it.
+the finding. Never spawn a fresh agent. Never open a GitHub issue for it. Gate feedback is the
+exception: it gets a fresh agent (`references/gates.md`, "Addressing gate feedback").
 
 - **Genuine ambiguity** → resume the stage that owns the question (`product` for requirements,
   `architecture`/`lld` for design). Then resume the blocked agent with the answer.
@@ -16,8 +17,6 @@ the finding. Never spawn a fresh agent. Never open a GitHub issue for it.
 - **A deeper problem** (wrong requirement, scope conflict) → resume `product` (or
   `architecture`). It revises the docs, records an accepted limitation, or returns
   `needs-human`; then `mark-needs-human` and park.
-- **`done-with-concerns`** from `development` → `transition` as for `done`. Put the concern
-  line first in the `pr-review` brief: `Concern from development: <line>. Check it first.`
 
 ## Where a finding this unit will not fix goes
 
