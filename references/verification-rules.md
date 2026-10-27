@@ -1,7 +1,8 @@
 # Verification rules — prove a claim by running it
 
-Read by `architecture`, `lld`, `development`, `pr-review` and `design-review`, and by the
-orchestrator for "Test scope".
+`lld` reads it in full. `development`, `pr-review` and `design-review` read "Test scope" before
+a suite run, and another section only where their file cites it. `architecture` reads it on
+demand; the orchestrator reads "Test scope" before a brief.
 
 ## Compile-checking is not verification
 

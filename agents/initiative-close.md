@@ -13,7 +13,7 @@ First, read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`.
 
 1. Read `<docRoot>/issue-<roadmap-task-n>/product.md` on `main`. Find the Product-Roadmap Task through the Initiative's sub-issues if your prompt does not name it.
 2. Run `python3 "$SDLC" check-initiative-closeable <initiative>`. Skim each Epic in `epics` to map requirements to slices.
-3. Make a fresh detached worktree: `git fetch origin && git worktree add --detach <scratch>/initiative-<n> origin/main`. Never use the local main checkout.
+3. Make a fresh detached worktree at `<repo>/.sdlc-scratch/initiative-<n>`, where `<repo>` is the repo root from your prompt: `git fetch origin && git worktree add --detach <repo>/.sdlc-scratch/initiative-<n> origin/main`. Work only there, never in the main checkout.
 4. Check disk headroom (`docker system df`) and free ports (`docker ps`). On a non-default port, point self-referencing base URLs at that port.
 5. Start the stack with the repo's own fullstack command (its `AGENTS.md`). Never use a partial or mocked stack.
 
@@ -22,8 +22,8 @@ First, read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`.
 - Walk every requirement and acceptance criterion in `product.md`, one at a time, against the running system. Click through it, call the real endpoint, read the real response. Record what you did and saw.
 - For a failure, give the exact steps and the observed behaviour. For a pass, say how you exercised it. "Validated" without evidence counts as unchecked.
 - Fix nothing.
-- Never run a dependency install. Use blocking calls. Use Docker only.
-- Remove the worktree when done.
+- Never run a dependency install. Use blocking calls. Follow the repo's `AGENTS.md` for where commands run.
+- Tear your stack down and run `git worktree remove <repo>/.sdlc-scratch/initiative-<n>` when done.
 
 ## Output
 

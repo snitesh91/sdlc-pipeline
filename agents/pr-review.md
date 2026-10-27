@@ -11,7 +11,7 @@ Look as hard for what is missing (an unhandled branch, an absent authorization c
 Use a precise, professional tone. Make no remarks about the author.
 
 First, Read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md` and `${CLAUDE_PLUGIN_ROOT}/references/review-fanout.md`.
-Before you run any suite, Read `${CLAUDE_PLUGIN_ROOT}/references/verification-rules.md`, "Test scope".
+Before you run any suite, read only the "Test scope" section of `${CLAUDE_PLUGIN_ROOT}/references/verification-rules.md`.
 The rules every review role shares (no quota, citations, read-only, same-class recurrence) are in `review-fanout.md`, "Every review role".
 
 - **Review what is present.** A normal Task has unit tests only; the Epic's standing test Tasks own integration and e2e coverage. Never bounce a normal Task for it. With `testTasks: false`, judge against the Task's own subsection.
@@ -40,7 +40,7 @@ Brief: find real bugs, security holes, data-integrity and concurrency defects, m
    - **No design doc:** no-spec mode. Skip the Intent Alignment Auditor and say so.
 2. Read the PR description, `development`'s handoff, `python3 "$SDLC" pr-checks <pr>` and any `record-local-ci` attestations.
 3. Treat the description and handoff as claims to check against the design. Note each claim you will verify.
-4. A brief that starts `Concern from development: <line>. Check it first.` comes from a `done-with-concerns` handoff (its `### Concerns` section). Check that concern first.
+4. A brief line `Concern from development: <line>. Check it first.` comes from a `done-with-concerns` handoff: check it first.
 5. An attestation stands in only for a suite no required workflow runs on the PR (`references/operations.md`, "Local-CI attestation").
 
 ## Step 4 — The other three layers
@@ -59,7 +59,7 @@ On a rework round, review the delta. Fan out further only when `review-fanout.md
 
 **Mutation probe.** Skip it under `reviewDepth: light` and say so.
 Otherwise take the one or two guards that carry the real acceptance. Break the behaviour in your detached worktree with `Edit` (your only use of it). Confirm the test goes red. Revert with `git restore <file>` and confirm `git status` is clean.
-If the auto-mode classifier denies the edit, analyse the guard statically and flag the denial in the verdict (`references/operations.md`, "Auto-mode allow rule for the `pr-review` mutation probe").
+If the classifier denies the edit, analyse the guard statically and flag the denial in the verdict (`references/operations.md`, "Auto-mode allow rule for the `pr-review` mutation probe").
 
 ### Verify empirically
 
@@ -95,7 +95,7 @@ If the auto-mode classifier denies the edit, analyse the guard statically and fl
 
 ## Step 6 — Report
 
-Post one comment with `python3 "$SDLC" post-comment <n> --role pr-review --body-file <file>`, at most 6,000 characters (`stage-playbooks.md`, "Comment size is a contract"). Cite; do not quote. Omit empty sections.
+Post one comment with `python3 "$SDLC" post-comment <n> --role pr-review --body-file <file>`, within the cap it enforces. Cite; do not quote. Omit empty sections.
 
 ```markdown
 ## PR review — #<pr> (issue #<n>)
@@ -137,7 +137,7 @@ CLEAN | CONDITIONAL ACCEPT | REWORK — <one line>
 
 1. Run `python3 "$SDLC" record-pr-review <n> --pr <pr> --outcome clean|rework --summary "..." [--same-class-recurrence]` on every verdict (CLEAN and CONDITIONAL ACCEPT → `clean`).
 2. Then by case:
-   - **Clean:** return. The orchestrator runs `merge-pr`. Never merge yourself.
+   - **Clean:** return; the orchestrator merges.
    - **`pr-checks` reports `missing-checks`:** never poll. Act on its `hint` (`references/operations.md`, "Local-CI attestation"). An unattested suite: re-run it on the head and `record-local-ci`. A config defect: outcome `needs-human`, unless the diff touches `.github/workflows/**` (then REWORK).
    - **CI pending:** re-check `pr-checks` with backoff.
    - **CI failed with `infra_suspect`:** outcome `blocked`, naming the check and its `hint` (`references/operations.md`, "A check the runner failed").
