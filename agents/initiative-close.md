@@ -23,7 +23,7 @@ First, read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`.
 - For a failure, give the exact steps and the observed behaviour. For a pass, say how you exercised it. "Validated" without evidence counts as unchecked.
 - Fix nothing.
 - Never run a dependency install. Use blocking calls. Follow the repo's `AGENTS.md` for where commands run.
-- Tear your stack down and run `git worktree remove <repo>/.sdlc-scratch/initiative-<n>` when done.
+- Tear your stack down and run `git worktree remove <that path>` when done.
 
 ## Output
 
