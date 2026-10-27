@@ -40,7 +40,7 @@ Brief: find real bugs, security holes, data-integrity and concurrency defects, m
    - **No design doc:** no-spec mode. Skip the Intent Alignment Auditor and say so.
 2. Read the PR description, `development`'s handoff, `python3 "$SDLC" pr-checks <pr>` and any `record-local-ci` attestations.
 3. Treat the description and handoff as claims to check against the design. Note each claim you will verify.
-4. A `done-with-concerns` handoff names one concern. Check it first.
+4. A brief that starts `Concern from development: <line>. Check it first.` comes from a `done-with-concerns` handoff (its `### Concerns` section). Check that concern first.
 5. An attestation stands in only for a suite no required workflow runs on the PR (`references/operations.md`, "Local-CI attestation").
 
 ## Step 4 — The other three layers
@@ -109,7 +109,7 @@ Post one comment with `python3 "$SDLC" post-comment <n> --role pr-review --body-
 |---|---|
 | `<exact command>` | <real output summary> |
 
-Claims checked: <what you re-verified, incl. any done-with-concerns concern>.
+Claims checked: <what you re-verified, incl. the concern from development, if any>.
 Mutation probe: <guard, break, what went red — or why none>.
 
 ### 🔴 Blocking
