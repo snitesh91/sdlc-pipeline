@@ -21,7 +21,7 @@ handoff loop is live at once — never that anything decides on its own.
 
 | File | Read it when |
 |---|---|
-| `${CLAUDE_PLUGIN_ROOT}/references/parallelism.md` | Running more than one unit at once; dispatching a stack-building stage (machine preflight); a git conflict; an agent dying mid-stage; worktree/branch mechanics |
+| `${CLAUDE_PLUGIN_ROOT}/references/parallelism.md` | Running more than one unit at once; dispatching a stack-building stage (machine preflight); a git conflict; an agent dying mid-stage; worktree/branch mechanics; a `development` fan-out hand-back |
 | `${CLAUDE_PLUGIN_ROOT}/references/gates.md` | Opening, checking, passing, skipping a gate; gate feedback; deciding a gate in session |
 | `${CLAUDE_PLUGIN_ROOT}/references/rework.md` | A review finding, a reported ambiguity, a possible valve trip, a replacement agent's resume message |
 | `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md` | Delegating any stage. Every stage agent Reads it (rules binding every role) |
@@ -365,7 +365,7 @@ only via the retro, with a dated reason in `references/history.md`.
 **Where rules live.** A rule binding every stage lives in `references/stage-playbooks.md`;
 a rule binding some roles lives in the narrower reference those roles' agent files name;
 a rule binding one stage (incl. its exit actions) lives in its `agents/<role>.md`. No
-role loads another skill.
+role loads another skill, except `development` loading a UI skill on a UI Task.
 
 ### The delegation prompt
 
@@ -383,29 +383,19 @@ The agent must *have* (not necessarily be pasted):
    not to read the whole `epic-<parent>/lld.md`.
 3. For `lld`: the Epic's `architecture.md` is the design source of truth; the
    fits-vs-deviates call is its first move.
-4. The worktree: "Work in `<worktree-path>` (`<worktrees.root>/<devPrefix><n>`, default
-   `/tmp/sdlc-dev-<n>`) — use absolute paths, or a standalone `cd` there; never chain
-   `cd <path> && …` compounds (they trip the macOS sandbox permission prompt). Never touch
-   the main checkout for anything on this unit." For `development` add the run's test-env
-   helper script, when it has one. Add `Integration tests: mandatory` only on the criteria in
-   `references/verification-rules.md`, "Test scope"; this line is the record of that decision,
-   and nothing else in a brief asks for an integration run.
-   **For `pr-review`** give the repo root, not a worktree: the agent makes its own detached
-   one with `review-worktree-add` and releases it at the end (`agents/pr-review.md`), never
-   reviewing in the unit's development worktree.
+4. The worktree: "Work in `<worktree-path>` (default `/tmp/sdlc-dev-<n>`). Use absolute
+   paths or a standalone `cd`; never chain `cd <path> && …`. Never touch the main checkout."
+   For `development`, add the run's test-env helper, when it has one, and
+   `Integration tests: mandatory` only on the criteria in `verification-rules.md`, "Test
+   scope". **For `pr-review`** give the repo root: it makes its own detached review worktree.
 5. For any review computing a diff: `git fetch origin` first and diff against `origin/`
    refs, never a local branch.
-6. Any command that can outlast the default tool timeout needs `run_in_background` or
-   an explicit ≥600s outer timeout. A `development` or run-only agent that backgrounds a
-   suite: brief it to stay alive until the suite's exit marker and not hand back early.
-   What it runs is "Test scope"'s: never brief a whole-suite run it does not owe.
+6. Never brief a whole-suite run that "Test scope" does not owe.
 7. Prior art only you can read (a claude.ai artifact, a Claude Docs doc): export it to
    `<worktree>/.sdlc-scratch/prior-art/` and name each file in the prompt.
 
 **Keep the prompt minimal.** Never restate rules the agent reads from its own agent file
-and `references/stage-playbooks.md` — it pays twice and invites the agent to cite your
-prompt as a source (`references/stage-playbooks.md`, "Attribution is
-falsifiable"). The first line is the header the hooks parse (`EPIC` is the Initiative/Epic
+and `references/stage-playbooks.md`. The first line is the header the hooks parse (`EPIC` is the Initiative/Epic
 you are driving). Template:
 
 > ROLE: `<role>` ISSUE: `<n>` EPIC: `<epic>`
@@ -420,10 +410,8 @@ against its role for this unit (session-scoped, never written to GitHub). Send a
 finding back with `SendMessage` **yourself**, never via a relay fork. Discard the
 mapping once the unit reaches a stopping point.
 
-**Keep your own context lean** — it is re-read every turn for the whole run. To search
-or read across the codebase yourself (resolving an ambiguity, reconciling a conflict,
-locating something), dispatch a read-only `Explore` subagent and act on its conclusion
-instead of grepping and reading inline.
+**Keep your own context lean.** Send a cross-file search to a read-only `Explore`
+subagent and act on its conclusion.
 
 ### After the subagent returns
 
@@ -435,8 +423,10 @@ instead of grepping and reading inline.
 | `outcome` | Do |
 |---|---|
 | `done` / `clean` | The next step per the agent file's routing; `transition` (below) before the next stage. A `pr-review` `clean` → you run `merge-pr <pr> --issue <n> --run-id "$RUN_ID"` (behind-base refusal: `references/parallelism.md`, "Git-conflict handling") |
+| `done-with-concerns` (`development` only) | Treat as `done`. Start the `pr-review` brief with `Concern from development: <the result's concern>. Check it first.` |
 | `rework` | Print the blocking findings in chat first, one line each: what, where (`file:line`), owning stage. Never just "bounced". Then route them (`references/rework.md`) |
 | `blocked` with `"fanout": "unavailable"` | A review agent with no `Agent` tool (cloud) handed its fan-out to you: launch one agent per listed axis from its brief files, save the replies, resume the reviewer (`references/review-fanout.md`, "The orchestrator fans out for you") |
+| `development` `blocked` with `"fanout": "unavailable"` | It has no `Agent` tool and wrote slice briefs: launch one `sdlc:dev-worker` per `slices` entry (≤ `maxChildren`), then resume `development` as integrator (`references/parallelism.md`, "Development fan-out from briefs") |
 | `blocked` | Clear the named blocker: resume the stage that owns the question, `open-arch-revision` for a design that does not fit, `mark-blocked` for a cross-issue dependency |
 | `needs-human` | `pipeline.humanChannel: "session"`: ask in session, record the answer, resume the stage (`references/cloud-mode.md`, "Human channel"); `"github"`: `mark-needs-human <n> --reason "..."`, park, Step 1 |
 | `failed` | Inspect the worktree and result yourself, then resume the agent |
@@ -479,6 +469,8 @@ reads that branch's HEAD, and from the main checkout it falsely reports the doc 
 - Confirm the previous stage left a comment on the issue; if not, get one.
 - On an LLD-phase Task's clean `lld-review` → `finish-lld` ("Cutting an Epic's
   phase-Tasks").
+  Then, for each Task whose `lld.md` section says `Placement: local — <reason>`, run
+  `place <task> --where local`.
 - A handoff that proposes a new issue (a split, a finding this unit will not fix) → file
   it yourself (`references/rework.md`, "Where a finding this unit will not fix goes").
 
