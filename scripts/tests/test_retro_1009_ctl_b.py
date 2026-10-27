@@ -1,4 +1,6 @@
 """Retro 2026-10-09 (control plane, part B): regression tests with positive controls."""
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -85,6 +87,9 @@ def test_transition_into_arch_review_returns_the_epic_profile_skip_threshold(rep
 
     assert result["ready"] is True
     assert result["skip_confidence_threshold"] == 85
+    # Recorded for the SubagentStart hook, which injects `Skip threshold: 85` for the reviewer.
+    with open(os.path.join(s._run_state_dir(), s.SKIP_THRESHOLD_HINTS_FILE)) as f:
+        assert json.load(f)["10"] == 85
 
 
 def test_transition_into_lld_review_has_no_skip_threshold(repo):

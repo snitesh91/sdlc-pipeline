@@ -1718,6 +1718,8 @@ _DOC_ROOTS_CACHE: dict = {}
 DOC_ROOT_HINTS_FILE = "doc-roots.cache"
 # Unit -> its Initiative's resolved profile (`unit_initiative_profile`), same reader.
 INITIATIVE_HINTS_FILE = "initiative-profiles.cache"
+# Unit -> its arch-review skip bar (`skip_confidence_threshold`), same reader.
+SKIP_THRESHOLD_HINTS_FILE = "skip-thresholds.cache"
 _ANCESTRY_DEPTH = 4
 
 
@@ -5692,10 +5694,18 @@ def required_check_states(gh: GitHub, pr: int) -> Optional[dict]:
             "pending": [c for c in mine if c.get("bucket") == "pending"]}
 
 
+HANDOFF_COVERAGE_HEADING = "### Acceptance criteria coverage"
+
+
 def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> dict:
     """Post the `development->pr-review` handoff marker that queues the PR for review.
     Run after every development round, including rework. Refuses (exit 0) while a required
-    check has failed for a non-infra reason. Returns `queued_for`."""
+    check has failed for a non-infra reason, or when `summary` (the handoff comment) lacks
+    the `### Acceptance criteria coverage` table pr-review reads first. Returns `queued_for`."""
+    if HANDOFF_COVERAGE_HEADING not in summary:
+        return {"issue": issue, "pr": pr, "refused": "no_coverage_table",
+                "hint": f"--summary is the handoff comment (agents/development.md): include "
+                        f"its `{HANDOFF_COVERAGE_HEADING}` section, then hand off again"}
     states = required_check_states(gh, pr)
     if states and states["failing"]:
         return {"issue": issue, "pr": pr, "refused": "checks_failed",
@@ -5705,7 +5715,7 @@ def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> d
     extra = {key: [c.get("name") for c in states[src]]
              for key, src in (("checks_pending", "pending"), ("infra_suspect", "infra_suspect"))
              if states and states[src]}
-    text = f"✅ Development complete. {summary} PR #{pr} is queued for `pr-review`."
+    text = f"✅ Development complete. PR #{pr} is queued for `pr-review`.\n\n{summary.strip()}"
     if _handoff_already_posted(gh, issue, text):
         return {"issue": issue, "pr": pr, "queued_for": "pr-review", "already_posted": True, **extra}
     timestamp = _utc_now_marker()
@@ -6012,18 +6022,25 @@ def _post_start_comment(gh: GitHub, issue: int, role: str):
     gh.issue_comment(issue, f"🚧 Picking this up — {role} stage starting.")
 
 
-def _check_claimable(gh: GitHub, issue: int, role: str) -> dict:
+def _check_claimable(gh: GitHub, issue: int, role: str, refuse: bool = False) -> dict:
     """Raise unless `role` is claimable on `issue`: a known role and, for `development`,
-    no open PR (re-claiming would move Stage off PR Review and drop it from review)."""
+    no open PR (re-claiming would move Stage off PR Review and drop it from review).
+    With `refuse`, the open-PR case returns `refused` (`reason`, `pr`) instead of raising."""
     if role not in STAGE_OPTION_IDS:
         raise GhError(f"unknown role {role!r} -- must be one of "
                        f"{sorted(STAGE_OPTION_IDS)}")
     if role == "development":
         open_prs = gh.pr_list_for_branch(issue_branch(issue))
         if open_prs:
-            raise GhError(f"issue #{issue} already has open PR #{open_prs[0]['number']} -- "
-                          f"resume its development agent for the rework round instead of "
-                          f"re-claiming (references/rework.md)")
+            pr = open_prs[0]["number"]
+            reason = (f"issue #{issue} already has open PR #{pr} -- resume its development "
+                      f"agent, or after a session death run `prepare-rework {issue}` and "
+                      f"dispatch a replacement (references/rework.md, \"Replacing an agent "
+                      f"that cannot be resumed\"); never re-claim")
+            if refuse:
+                return {"issue": issue, "role": role, "claimable": False, "refused": True,
+                        "reason": reason, "pr": pr}
+            raise GhError(reason)
     return {"issue": issue, "role": role, "claimable": True}
 
 
@@ -6174,8 +6191,9 @@ def cmd_start_comment(gh: GitHub, issue: int, role: str) -> dict:
     _post_start_comment(gh, issue, role)
     result = {"issue": issue, "started": role, **reclaimed}
     if role == "arch-review":
-        result["skip_confidence_threshold"] = (
-            _profile_for_issue(gh, issue)["gates"]["skipConfidenceThreshold"])
+        threshold = _profile_for_issue(gh, issue)["gates"]["skipConfidenceThreshold"]
+        result["skip_confidence_threshold"] = threshold
+        _record_hints(SKIP_THRESHOLD_HINTS_FILE, {issue: threshold})  # the reviewer's hook line
     return result
 
 
@@ -11476,7 +11494,14 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
             seq.skip("check-claimable", "worktree-add", "claim")
             return seq.report(issue=number, role=role, path=None, claimed=False,
                               stop_at_cap=True)
-    seq.run("check-claimable", lambda: _check_claimable(gh, number, role))
+    claimable = seq.run("check-claimable", lambda: _check_claimable(gh, number, role, refuse=True),
+                        failed=lambda r: r.get("refused"))
+    if claimable is None and seq.failed_step == "check-claimable" and seq.ok:
+        # An open PR on a `development` unit is a structured refusal (exit 0), not a failure.
+        seq.skip("epic-worktree", "worktree-add", "claim")
+        refusal = seq.steps["check-claimable"]
+        return seq.report(issue=number, role=role, path=None, claimed=False, refused=True,
+                          pr=refusal["pr"])
     # A child of a non-standing Epic integrates into `epic-<parent>`. Ensure that branch AND its
     # worktree exist first (idempotently, exactly as cut-phase-tasks does) so `next-action` never
     # delegates a child onto a base branch that isn't there yet -- a live worktree is fast-forwarded.
@@ -11795,7 +11820,8 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--pr", type=int, required=True)
     p.add_argument("--summary", required=True,
-                    help="One sentence: what was built and tested")
+                    help="The handoff comment (agents/development.md, <= 6,000 chars); must "
+                         "hold its `### Acceptance criteria coverage` section")
     p.set_defaults(func=lambda a: cmd_handoff_to_pr_review(get_work_item_provider(), a.issue, a.pr, a.summary))
     p = sub.add_parser("record-pr-review",
                         help="Record a pr-review outcome on the issue")

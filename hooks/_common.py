@@ -142,7 +142,8 @@ def sdlc_role(agent_type) -> str:
     return agent_type[len("sdlc:"):] if agent_type.startswith("sdlc:") else ""
 
 
-REVIEW_ROLES = {"product-review", "design-review", "pr-review"}
+# arch-review / lld-review: the stage names a design-review fan-out child names its parent by.
+REVIEW_ROLES = {"product-review", "design-review", "pr-review", "arch-review", "lld-review"}
 # A non-sdlc subagent a review role launched (a fan-out axis): agent_guard stamps
 # `PARENT: <review role>` on its prompt's first line, and the guards hold it read-only.
 REVIEW_CHILD = "review-child"
@@ -160,7 +161,7 @@ def review_child_role(data: dict) -> str:
 def prompt_header(prompt) -> dict:
     """`KEY: value` pairs on a prompt's first line (`ROLE: arch-review ISSUE: 5`)."""
     first = str(prompt or "").lstrip().split("\n", 1)[0]
-    return {k.lower(): v for k, v in HEADER_RE.findall(first)}
+    return {k.lower(): v.strip("`#*") for k, v in HEADER_RE.findall(first)}
 
 
 def agent_transcript(data: dict) -> str:
