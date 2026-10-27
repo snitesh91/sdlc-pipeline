@@ -2,6 +2,10 @@
 
 Read this file after `references/stage-playbooks.md`. It binds the three stages that commit a design doc.
 
+## Style
+
+Write every doc and handoff in STE-lite (`references/stage-playbooks.md`, "Style"). Write for the reader the doc's rules name (`references/design-doc-rules.md`).
+
 ## Per-issue docs
 
 A design stage commits its doc on branch `issue-<n>` at one path. An Epic's architecture or lld phase-Task writes `<docRoot>/epic-<e>/<doc>`. Every other issue writes `<docRoot>/issue-<n>/<doc>`. Your prompt names the path.
