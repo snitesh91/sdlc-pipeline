@@ -1,161 +1,99 @@
-# Verification rules — prove a claim by running it, not by asserting it
+# Verification rules — prove a claim by running it
 
-Read by `architecture`, `lld`, `development`, `pr-review`, and `design-review` (both
-halves; the completeness-sweep rule governs both `architecture.md` and `lld.md`), and by the
+Read by `architecture`, `lld`, `development`, `pr-review` and `design-review`, and by the
 orchestrator for "Test scope".
 
 ## Compile-checking is not verification
 
-- A test runner's `--list`/dry-run, a type-check, and a lint pass show the code parses.
-  They do not show a test ran, and in `--list` output a skipped test looks the same as a
-  passing one.
-- **Never report a test as covering an acceptance criterion unless you saw it execute.**
-  If it could not run, say so, give the reason, and name the criterion that is still
-  unproven.
-- **A build's exit 0 is never evidence on its own.** An incremental build (`nest build`,
-  `tsc -b`) with a stale, gitignored `*.tsbuildinfo` can emit nothing and still exit 0.
-  Whenever a build is a verification gate (`development`, `pr-review`), do one of these
-  and say which in your handoff:
-  - before the build, delete the stale cache (`find <package> -name '*.tsbuildinfo' -delete`,
-    or the repo's clean target); or
-  - after the build, assert the expected artifact exists and is newer than the sources
+- A `--list` or dry-run, a type-check and a lint pass show only that code parses. In
+  `--list` output a skipped test looks like a passing one.
+- Never report a test as covering a criterion unless you saw it execute. If it could not
+  run, say why and name the criterion still unproven.
+- **A build's exit 0 is not evidence.** An incremental build with a stale `*.tsbuildinfo`
+  can emit nothing and exit 0. When a build is a gate, do one of these and say which:
+  - delete the stale cache before the build (`find <package> -name '*.tsbuildinfo' -delete`);
+  - assert the artifact is newer than the sources after it
     (`test -f dist/main.js && find dist -newer src -type f | head -1`).
-- **Integration/IT tests run against compiled `dist`.** When a diff changes a DTO, a route,
-  or anything OpenAPI-visible, clear stale output (`rm -rf dist *.tsbuildinfo`) and rebuild
-  before the integration/IT tier — a green run over a stale `dist` exercises the old code and
-  proves nothing.
+- **Integration tests run against compiled `dist`.** When the diff changes a DTO, a route or
+  anything OpenAPI-visible, run `rm -rf dist *.tsbuildinfo` and rebuild first.
 
 ## Test scope — which suites run where
 
-The one home of this rule; every other file points here. The orchestrator reads it before it
-writes a `development` or `pr-review` brief.
+The one home of this rule. The orchestrator reads it before a `development` or `pr-review`
+brief.
 
-- **The full integration suite runs as CI on the PR that lands the work on `main`:** the epic
-  PR into `main`, or, under an initiative branch, the epic PR into `initiative-<i>` and then the
-  initiative PR into `main`. The same holds for any PR into `main` / `initiative-*` a required
-  workflow covers (a standing child, a parentless issue): that check is the full run. The
-  pipeline waits for it (`merge-pr`, `close-epic`'s `awaiting_checks`) and no stage runs that
-  suite locally. The one exception is a suite whose workflow does not run on that PR (one that
-  runs only on push to `main`): `close-epic` lists it under `unattested_suites`, and it runs
-  once on the PR head and is `record-local-ci`'d (`references/operations.md`, "Local-CI
-  attestation").
-- **This needs the config to say so.** Each integration suite's `requiredWorkflows` entry
-  carries `bases: ["main", "initiative-*"]` (its workflow does not run on PRs into `epic-*`) and
-  `attestable: false` (its workflow runs on every PR into those bases). Without `bases`, every
-  Task PR into `epic-<n>` owes the suite: `transition` holds the review, and `suites.needed` /
-  the `missing-checks` hint ask for a run this section never owes — fix the config, never run it.
-  Without `attestable: false`, a suite the PR's CI does run still shows under
-  `unattested_suites`; wait for that check on the PR rather than running it.
-- **A Task merging into `epic-<n>` runs no integration suite by default.** `development` runs
-  the unit tests for its change and the pre-PR command as configured, with no integration flag.
-- **Two exceptions, and then only scoped specs, never the whole suite:**
-  1. The brief carries `Integration tests: mandatory`. The orchestrator adds that line only
-     when the change is a migration, a raw query, a cross-module change or a new or changed
-     external-API integration, and no required workflow runs the integration suite on the
-     PR. Run the integration specs the change impacts.
-  2. The unit adds or changes integration specs: the Epic's standing Integration-test Task, a
-     Task whose subsection names its own (under an Initiative with `testTasks: false`), or a
-     standing child before its PR into `main`. Run those specs, plus any the change impacts.
-- **The standing Integration-test Task** authors the Epic's missing integration specs and
-  runs only the specs it adds or changes, on its branch off `epic-<n>`. **The standing
-  e2e-test Task** runs only the e2e specs it adds or changes, against a stack built from
-  `epic-<n>` (`references/epics.md`, "Epic closing"). A standing Task with no spec to add runs
-  the existing specs its section names instead — still never a whole suite. Nothing in the
-  pipeline runs the full e2e suite: the driven repo runs it outside the pipeline.
-- **A scoped run is never attested under a whole-suite key.** `record-local-ci --suite <key>`
-  for a `requiredWorkflows` suite records that whole suite's run; a run of chosen specs goes in
-  the handoff's Commands table instead. The one exception is `e2e`, whose attestation is always
-  the e2e-test Task's own specs (`references/epics.md`, "Epic closing").
-- **`pr-review`** runs targeted specs when a specific finding needs confirming. It never
-  re-runs a suite a required check covers, runs integration specs on a Task only under the two
-  exceptions (scoped the same way), and never bounces a Task for integration or e2e evidence
-  this section does not owe.
-- **A reconcile or sync** (`epic-<n>` ← `main`, a branch's conflict resolution) runs no suite;
-  when the resolution changed code, run only the specs that code touches.
-- **After a failure, re-run only the failing specs** until they pass; never the whole suite
-  to confirm a fix. One clean pass is the evidence: no stability or soak re-runs unless the
-  design names them. The e2e-test Task's section is the one that does: it names what counts as
-  a stable pass of its specs versus a flake — one zero-retry run is not stability.
-- **A rework round, a resumed agent or a replacement** re-runs on the new head what this
-  section owes the round, nothing more.
-- **Any run:** a truncating suite only against a database whose effective name ends in
-  `_test` (never a DB-name override copied from an arbitrary Makefile target; otherwise stop
-  and report); a rebuilt `dist` when the diff changes anything compiled ("Compile-checking is
-  not verification").
+- **The full integration suite runs as CI on the PR that lands work on `main`** (or on
+  `initiative-<i>`, then `main`, under an initiative branch), and on any PR into those bases
+  that a required workflow covers. The pipeline waits for that check (`merge-pr`,
+  `close-epic`'s `awaiting_checks`). No stage runs it locally. Exception: a suite whose
+  workflow does not run on that PR is listed in `close-epic`'s `unattested_suites`; run it
+  once on the PR head and `record-local-ci` it.
+- **The config must say so.** Each integration suite's `requiredWorkflows` entry carries
+  `bases: ["main", "initiative-*"]` and `attestable: false`. Without `bases`, each Task PR into
+  `epic-<n>` seems to owe the suite (`transition` holds, `suites.needed` asks): fix the config,
+  never run the suite. Without `attestable: false`, wait for the PR's check instead.
+- **A Task into `epic-<n>` runs no integration suite.** `development` runs unit tests for its
+  change and the configured pre-PR command, with no integration option.
+- **Two exceptions. Each runs only the specs concerned, never the whole suite:**
+  1. The brief says `Integration tests: mandatory`. The orchestrator adds this line for a
+     migration, a raw query, a cross-module change, or a new or changed external-API
+     integration, when no required workflow runs the suite on the PR. Run the specs the change
+     impacts. It also adds it when the Task's footprint changes a cross-cutting rule (auth
+     guard, token/session lifetime, rate limit, clock, DB layer, shared test setup). The repo's
+     `AGENTS.md` may list its own such paths and require the full suite for them; follow it.
+  2. The unit adds or changes integration specs (the standing Integration-test Task, a Task
+     under `testTasks: false`, a standing child). Run those specs and the specs the change impacts.
+- **Standing test Tasks** run only the specs they add or change; the e2e-test Task runs them
+  against a stack built from `epic-<n>`. With no spec to add, run the existing specs the section
+  names. The pipeline never runs the full e2e suite.
+- **Never attest a scoped run under a whole-suite key.** Put it in the handoff's Commands
+  table. Exception: `e2e`, whose attestation is the e2e-test Task's own specs.
+- **`pr-review`** runs targeted specs only to confirm a finding. It never re-runs a suite a
+  required check covers. It never bounces a Task for integration or e2e evidence this section
+  does not owe.
+- **A reconcile or sync** runs no suite. When the resolution changed code, run the specs that
+  code touches.
+- **After a failure, re-run only the failing specs.** One clean pass is the evidence. Run
+  stability re-runs only when the design names them (the e2e-test Task's section does).
+- **Any run:** run a truncating suite only against a database whose name ends in `_test`.
+  Rebuild `dist` when the diff changes compiled code.
 
-## Establish a number by running the thing, not by modelling it
+## Establish a number by running the thing
 
-- **Run the rule; don't regex-model it.** A grep that imitates a rule measures the grep,
-  not the codebase. If the artifact is executable (a lint config, a script, a test, a
-  build), apply the change in a scratch copy, run it, and report that output. The same
-  applies to a prose criterion defined only in a design doc: apply it to the real tree.
-- **Search the whole tree, not the module you have in mind.** Anchor the pattern to the
-  symbol (e.g. the imported module name wherever it appears), not to a path prefix you
-  assume. Composition files often live one directory over.
-- **Prove the detector detects before you report an absence** ("0 cycles",
-  "0 violations", "no diff"). Use a **positive control**: add one deliberate instance of
-  what you are checking for, watch the count go non-zero, revert it, and watch it go
-  back.
+- **Run the rule; do not model it with a regex.** Apply the change in a scratch copy, run the
+  real lint, script, test or build, and report that output.
+- **Search the whole tree.** Anchor the pattern to the symbol, not to a path you assume.
+- **Prove the detector detects before you report an absence** ("0 cycles", "no diff"). Add
+  one deliberate instance, see the count go non-zero, revert, see it return.
 
-**Vacuous-pass tells** (the check passed because it examined nothing):
+Vacuous-pass tells:
 
-- **Stale incremental-build cache:** the compiler emits part of the tree and exits 0.
-  Clear build state and assert the emit count.
-- **Edge pattern too narrow:** the nodes under test get zero edges and a vacuous
-  "0 cycles". Assert non-vacuity (edge count, node count) before reading a graph result.
-- **Structurally skipped tests:** a harness that never forwards needed credentials
-  skips that subset on every run, so a before/after comparison "matches". A skip is not
-  coverage: count executed tests, not listed ones.
-- **A mutation that discriminates nothing** (e.g. mutating a permission both roles
-  already hold) stays green. That means a bad discriminator, not a finding about the
-  test. When a mutation stays green, first check it was a real mutation.
+- A stale build cache emits part of the tree. Clear it and assert the emit count.
+- A pattern too narrow gives zero edges and "0 cycles". Assert the edge and node counts.
+- A harness that drops credentials skips tests on every run. Count executed tests, not listed.
+- A mutation that changes nothing stays green. Check the mutation was real first.
 
-**Never `git stash`** — not for a mutation check, not to park work. Every worktree of a
-repo shares one stash stack, so with parallel agents a `stash pop` takes another agent's
-work. Mutate a scratch copy
-(`cp f .sdlc-scratch/f.orig`, edit, run, `cp` back) or commit and `git revert`. The Bash
-guard denies `git stash` to every stage agent.
+**Never `git stash`.** All worktrees share one stash stack. Mutate a scratch copy
+(`cp f .sdlc-scratch/f.orig`, edit, run, copy back), or commit and `git revert`.
 
-Give your own tooling the same scrutiny. Check a script you just wrote for false
-positives before using its output as evidence, and say you did so in the handoff.
+Check a script you wrote for false positives before you use its output. Say so in the handoff.
 
 ## A completeness claim over a footprint is a sweep, not a list
 
-This applies whenever a stage claims a set is complete:
+This applies to a class-of-surfaces criterion ("every interactive control is ≥44px"), a
+criterion → test map, and an inventory you will act on ("every endpoint to migrate").
 
-- a class-of-surfaces acceptance ("every interactive control is ≥44px", "no fixed bar
-  overlaps the nav");
-- a criterion → test map;
-- an inventory of items you are about to act on ("every endpoint that needs migrating",
-  "every file this touches").
-
-A prose list can only be disproved one missing instance per review round, so every stage
-that touches the class does the following:
-
-- **State completeness as a reproducible sweep, not an instance list.** Define the class
-  with a mechanical `grep`/`find` pattern anchored to the real signal (a symbol,
-  attribute, call site, decorator, or query-builder pattern). State which parts the sweep
-  covers, which it excludes, and why. Paste the command and its output. "I looked at
-  every file" is not a sweep; `comm -23 <sorted-find> <sorted-inventory>` returning empty
-  is.
-- **Build every inventory with such a sweep** before treating it as the scope of your
-  work. Never build it by reading the code.
-- **Cover every dimension the acceptance names.** "44×44px" means height and width as
-  separate terms, each with its own positive control. A guard that has only gone non-zero
-  on one axis does not cover the other.
-- **Criterion → test maps:** criteria that share one assertion shape (e.g. only the
-  reply's type) are not covered by that assertion. Run one positive control per family of
-  sibling expected values (`agents/development.md`, "How to write the tests").
-- **`development` applies the class rule to each instance; it does not re-judge the
-  class.** `lld` states the rule once (e.g. "every `fixed bottom-0` bar this child adds or
-  finds takes `bottom-14 md:bottom-0`"). `development` reports that it applied the rule to
-  each swept instance, not just that the AC "passes". Any per-file checklist is built from
-  the sweep's output, never typed by hand.
-- **The class population is a requirements fact.** Pin it at `architecture`/`lld`, and
-  escalate when it is unclear (e.g. does "interactive control" mean icon-only, or text
-  buttons and pagination too?). Never narrow it silently at `development`: `pr-review`
-  bounces that as an unauthorised scope reduction.
-- **After a second consecutive same-class bounce, stop patching instances** and close
-  the class at its root with a sweep. Reviewers record the recurrence with
-  `--same-class-recurrence` on `record-design-review` / `record-pr-review`, not in
-  verdict prose.
+- **State completeness as a reproducible sweep.** Define the class with a `grep`/`find`
+  anchored to the real signal (symbol, attribute, call site, decorator). State what it
+  includes and excludes. Paste the command and its output (`comm -23 <find> <inventory>`
+  returning empty).
+- Build every inventory with a sweep, never by reading code.
+- Cover each dimension the criterion names ("44×44px" is height and width), each with its own
+  positive control.
+- Criteria that share one assertion shape need one positive control per family.
+- `lld` states the class rule once. `development` applies it to each swept instance and
+  reports per instance.
+- The class population is a requirements fact. Pin it at `architecture`/`lld`. Escalate when
+  unclear. Never narrow it at `development`.
+- After a second consecutive same-class bounce, close the class at its root with a sweep.
+  Reviewers record the repeat with `--same-class-recurrence`.

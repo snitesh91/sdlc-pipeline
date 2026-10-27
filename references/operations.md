@@ -67,12 +67,9 @@ An explicit allow rule resolves before the classifier. Add to the driven repo's
 
 ## Auto-mode allow rule for the `pr-review` mutation probe
 
-The probe (the `Edit` tool; the edit guard denies a review role any edit outside its
-`<worktrees.root>/<reviewPrefix><n>/` tree) edits a file under the review worktree (`<worktrees.root>/<reviewPrefix><n>/`,
-default `/tmp/sdlc-review-<n>/`). Outside the project directory, so the auto-mode classifier
-may deny it; an explicit allow rule resolves before the classifier. Add to the driven repo's
-`.claude/settings.json` (path rules are `Edit(...)` only — `Write`/`MultiEdit` rules are never
-consulted; `//` is an absolute path):
+The probe edits a file in the review worktree (default `/tmp/sdlc-review-<n>/`), outside
+the project, so the classifier may deny it. Add an allow rule to the driven repo's
+`.claude/settings.json` (`Edit(...)` only; `//` is an absolute path):
 
 ```json
 { "permissions": { "allow": ["Edit(//tmp/sdlc-review-*/**)"] } }
@@ -287,9 +284,7 @@ at all: `references/verification-rules.md`, "Test scope".
   merge brought in touches its paths or the pipeline config. A failing run is never
   overridden. The carried check reads `<workflow> (carried)` with `carried_from`. So after
   the merge train syncs a PR, cancel the redundant run instead of waiting for it.
-- `merge-pr` accepts `--run-id`: the terminal-unit count is booked under that run rather
-  than whatever id last wrote the epic's run-state file (which may be a throwaway probe
-  run's). Without it, the state file's current id stands.
+- Pass `--run-id` to `merge-pr` so the terminal-unit count books under this run.
 - Each `requiredWorkflows` entry mirrors one workflow's `paths:` filter: `prefixes` /
   `files`, plus `excludeGlobs` for its negations (`!**/*.md` → `"**/*.md"`); a changed
   file matching one never requires the suite. `suite` keys are `[A-Za-z0-9_-]+` (checked
@@ -309,11 +304,9 @@ at all: `references/verification-rules.md`, "Test scope".
 is set, `pr-checks` returns a `hint` field naming the causes in likelihood order (and
 `merge-pr`'s refusal carries the same hint):
 
-- The workflow does not run on this PR (e.g. main-only) and its suite is not attested for
-  the current head → `development` runs the suite and `record-local-ci` for that head — only
-  where "Test scope" owes that run (`references/verification-rules.md`). An integration suite
-  owed on a Task PR into `epic-<n>` is a config defect instead: its entry lacks
-  `bases: ["main", "initiative-*"]`; fix the config, never run it.
+- The workflow does not run on this PR and its suite is not attested for the head →
+  `development` runs it and `record-local-ci`, only where "Test scope" owes that run. On a
+  Task PR into `epic-<n>`, an integration suite here is a config defect (`bases` missing).
 - The workflow file is not on the PR branch (added on the base after the branch was cut)
   → run `sync-branch` and push so it can run.
 - A still-required GHA workflow never reported (renamed out of step with
