@@ -202,11 +202,17 @@ def test_a_page_that_stays_short_while_the_next_has_items_raises():
         GitHubRest(runner=runner).issue_list()
 
 
-def test_a_genuine_short_last_page_ends_the_listing_with_one_peek():
-    """Positive control: a real last page costs one empty-page peek, no refetch."""
+def test_an_empty_page_and_a_spurious_empty_peek_do_not_end_the_listing():
+    # page 2 empty once AND the peek at page 3 empty once: one empty peek is not the end.
+    runner = Runner(pages={1: _full(1), 2: [[], _full(101)], 3: [[]] + [[_issue(201)]] * 3})
+    assert len(GitHubRest(runner=runner).issue_list()) == 201
+
+
+def test_a_genuine_short_last_page_ends_the_listing_with_two_peeks():
+    """Positive control: a real last page costs two empty-page peeks, no refetch."""
     runner = Runner(pages={1: _full(1), 2: [_issue(101)]})
     assert len(GitHubRest(runner=runner).issue_list()) == 101
-    assert [p for _, path, p in runner.calls if "state=open" in path] == [1, 2, 3]
+    assert [p for _, path, p in runner.calls if "state=open" in path] == [1, 2, 3, 3]
 
 
 # --- open-arch-revision keeps every --blocks ----------------------------------------------
@@ -342,3 +348,37 @@ def test_create_lld_tasks_labels_a_placement_local_task_and_only_it(repo):
     tasks = s.cmd_create_lld_tasks(gh, 9, repo_path=str(repo))["tasks"]
     assert s.local_label() in gh.issues[tasks["apk"]]["labels"]
     assert s.local_label() not in gh.issues[tasks["copy"]]["labels"]  # positive control
+
+
+# --- review fixes: by-number reads where the scoped index lacks a closed issue -------------
+
+def test_focus_issues_reloads_once_for_a_closed_issue_the_index_lacks():
+    runner = Runner([_issue(1)], issues={40: _issue(40, state="closed")})
+    gh = GitHubRest(runner=runner)
+    assert 40 not in _numbers(gh)
+    assert {i["number"]: i["state"] for i in s.focus_issues(gh, {40})}[40] == "CLOSED"
+    # Positive control: an issue already held costs no reload.
+    before = len(runner.gets("state=open"))
+    s.focus_issues(gh, {1})
+    assert len(runner.gets("state=open")) == before
+
+
+def test_dev_pr_scope_allows_a_doc_fix_to_a_closed_epic_outside_the_index(monkeypatch):
+    runner = Runner([_issue(1)], issues={40: _issue(40, state="closed"),
+                                         41: _issue(41)})
+    gh = GitHubRest(runner=runner)
+    monkeypatch.setattr(s, "all_doc_roots", lambda: ["docs/sdlc"])
+    out = s.dev_pr_scope_offenders(gh, 7, ["docs/sdlc/epic-40/lld.md"])
+    assert out["design_docs"] == []
+    # Control: an open Epic's design doc is still refused.
+    runner.open.append(_issue(41))
+    gh = GitHubRest(runner=runner)
+    assert s.dev_pr_scope_offenders(gh, 7, ["docs/sdlc/epic-41/lld.md"])["design_docs"] == [
+        "docs/sdlc/epic-41/lld.md"]
+
+
+def test_a_placement_line_before_depends_on_keeps_the_dependency():
+    section = ("Placement: local — needs dl.google.com\n"
+               "Depends on: core\n"
+               "Priority: High\n\nDesign.\n")
+    assert s.parse_task_depends_on(section) == ["core"]

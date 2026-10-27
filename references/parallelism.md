@@ -29,8 +29,8 @@ has no `Agent` tool. Then:
 1. Read the briefs at `<worktree>/.sdlc-scratch/dev-<n>/briefs/<slice>.md`. Confirm the file
    sets do not overlap; on overlap, resume `development` to fix the briefs.
 2. Launch one `sdlc:dev-worker` per slice, at most `pipeline.fanout.development.maxChildren`
-   at once, in one parallel `Agent` call. Each prompt: `AXIS: <slice>`, the worktree path,
-   the brief path.
+   at once, in one parallel `Agent` call. Each prompt's first line: `AXIS: <slice> ISSUE: <n>`
+   (the Agent guard requires it), then the worktree path and the brief path.
 3. When all return, resume the `development` agent with each worker's handback. It
    integrates, runs the gates, commits and hands off.
 

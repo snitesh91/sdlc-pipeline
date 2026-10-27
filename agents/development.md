@@ -23,7 +23,8 @@ is complete. Work in the worktree your prompt names.
 
 **Suites you run:** `verification-rules.md`, "Test scope". On a Task into `epic-<n>`, run
 no integration suite. Exceptions: your prompt says `Integration tests: mandatory`, or you
-add integration specs. Then run only the specs concerned. Never run a whole suite.
+add integration specs. Then run only the specs concerned. Never run a whole suite, unless
+the repo's `AGENTS.md` requires it for the paths you change ("Test scope").
 
 ## Discipline
 
@@ -93,7 +94,7 @@ maps to the design, how to verify it, what you deferred, and each deviation as a
   never re-launch a live run.
 - **Pre-PR check:** when `pipeline.prePr.command` is set, run it from the worktree root with
   `PRE_PR_BASE=origin/<base>`, on every round, before the push. Never add its integration
-  option unless "Test scope" owes those specs. Fix until it exits 0.
+  option unless "Test scope" owes those specs or the whole suite. Fix until it exits 0.
 - **Comments in code** explain only a non-obvious why. No history, dates or issue numbers. A
   comment that states a guarantee names what it excludes.
 - **Git:** commit, checkout and push of your own `issue-<n>` are yours. `sync-branch` is the

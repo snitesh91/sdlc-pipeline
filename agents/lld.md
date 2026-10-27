@@ -37,7 +37,7 @@ Send one `Explore` brief with the symbols to map before your first code read. `E
 Use `Bash` only for proof sweeps that `lld.md` pastes. Write POSIX ERE (`[[:space:]]`, not `\s`). Run each sweep once into a file and paste from it. When you write *only*, *every*, *no other*, *none* or *all*:
 
 - Show the command and its output.
-- Add a positive control (`verification-rules.md`, "Establish a number by running the thing, not by modelling it").
+- Add a positive control (`verification-rules.md`, "Establish a number by running the thing").
 - Cover the syntax variants the tree uses: `require` and `import`, `it.each` and conditional `it`, aliased and re-exported bindings.
 - Print every count with a command.
 

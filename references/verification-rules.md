@@ -34,7 +34,8 @@ brief.
   never run the suite. Without `attestable: false`, wait for the PR's check instead.
 - **A Task into `epic-<n>` runs no integration suite.** `development` runs unit tests for its
   change and the configured pre-PR command, with no integration option.
-- **Two exceptions. Each runs only the specs concerned, never the whole suite:**
+- **Two exceptions. Each runs only the specs concerned, never the whole suite (unless the
+  repo's `AGENTS.md` requires it, below):**
   1. The brief says `Integration tests: mandatory`. The orchestrator adds this line for a
      migration, a raw query, a cross-module change, or a new or changed external-API
      integration, when no required workflow runs the suite on the PR. Run the specs the change

@@ -20,6 +20,8 @@ AGENT_TOOL_LINE = {
           "use your agent file's no-Agent fallback and say so in your handoff.",
     False: "sdlc: Agent tool: available.",
 }
+# Roles whose `tools:` list has no Agent: the line would mislead them.
+NO_AGENT_ROLES = {"dev-worker", "exploratory", "initiative-close"}
 STYLE_LINE = ("sdlc: Write handoffs and reports in STE-lite: one instruction per sentence, "
               "active voice, no preamble, no recap.")
 GRAPH = os.path.join("graphify-out", "graph.json")
@@ -164,7 +166,9 @@ def main() -> int:
     cloud = cloud_session()
     if cloud:
         lines.append(CLOUD_GITHUB_LINE)
-    lines += [AGENT_TOOL_LINE[cloud], STYLE_LINE] + graph_line(config_path)
+    if sdlc_role(data.get("agent_type")) not in NO_AGENT_ROLES:
+        lines.append(AGENT_TOOL_LINE[cloud])
+    lines += [STYLE_LINE] + graph_line(config_path)
     lines += [
         f"sdlc: ${{CLAUDE_PLUGIN_ROOT}} is {root}; its references are "
         f"{os.path.join(root, 'references')}.",

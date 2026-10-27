@@ -154,8 +154,8 @@ closed sub-issues, or rotate a standing epic before it fills (e.g. `RTB-2`), the
   document"); `create-lld-tasks` sets them, else `pipeline.issueDefaults`.
 - **`Placement: local — <reason>`** marks a Task a cloud session cannot run: its criteria
   need hosts the cloud network denies (Android SDK, `dl.google.com`, Maven), a real phone
-  or Stage. On a cloud-placed Epic, after `finish-lld`, run `place <task> --where local`
-  for each such Task before it is picked (`references/cloud-mode.md`, "Placement rules").
+  or Stage. `create-lld-tasks` gives each such Task the local label when it creates it
+  (`references/cloud-mode.md`, "Placement rules").
   The `lld` handoff lists them.
 - A Task must carry its own Footprint and real `blockedBy` edges — `list-parallel-ready`
   orders from those, never from prose. Only a *cross-epic* dependency uses `mark-blocked`.

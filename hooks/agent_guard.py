@@ -85,12 +85,14 @@ def parent_transcript(data: dict) -> str:
 
 
 def review_child_prompt(launcher: str, data: dict, tool_input: dict):
-    """A review role's child prompt with a `PARENT: <role> ISSUE: <n>` first line, so the Bash
-    and Edit guards hold that child to read-only (`_common.review_child_role`); None otherwise."""
+    """A review role's child prompt with `PARENT: <role> ISSUE: <n>` appended to its first line,
+    so the Bash and Edit guards hold that child to read-only (`_common.review_child_role`) and
+    its `AXIS:` stays on the first line for slot release; None otherwise."""
     if launcher not in REVIEW_ROLES:
         return None
     issue = str(prompt_header(first_prompt(parent_transcript(data))).get("issue") or "?")
-    return f"PARENT: {launcher} ISSUE: {issue.strip('`#*')}\n{tool_input.get('prompt') or ''}"
+    first, sep, rest = str(tool_input.get("prompt") or "").lstrip().partition("\n")
+    return f"{first} PARENT: {launcher} ISSUE: {issue.strip('`#*')}".lstrip() + sep + rest
 
 
 def _slot_file(agent_id: str) -> str:
@@ -174,8 +176,13 @@ def main() -> int:
         if not child:
             return 0
         if child == WORKER_AGENT:
-            deny("sdlc:dev-worker is launched only by an sdlc:development agent; the "
-                 "orchestrator delegates the stage to sdlc:development.")
+            # The orchestrator launches slice workers when development handed back
+            # `"fanout": "unavailable"` (no Agent tool in its session).
+            if not (header.get("axis") and header.get("issue")):
+                deny("start an sdlc:dev-worker prompt with `AXIS: <slice> ISSUE: <n>`: the "
+                     "orchestrator launches one per slice brief development handed back.")
+                return 0
+            set_model(tool_input, (policy["fanout"].get("development") or {}).get("model"))
             return 0
         role = child
         if child == DESIGN_REVIEW:

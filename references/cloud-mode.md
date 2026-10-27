@@ -16,7 +16,7 @@ side owns it.
   `integration-test` by title, or `label:<name>`; default none). Use it for work only the laptop
   can run: e2e without a cloud e2e profile, Stage checks, a real phone, or a build that needs
   hosts the cloud network denies (Android SDK, `dl.google.com`, Maven). `lld` marks such a
-  Task `Placement: local`; place it local right after `finish-lld`, before it is picked
+  Task `Placement: local`; `create-lld-tasks` (in `finish-lld`) adds the label itself
   (`references/epics.md`, "`lld` specifies the Tasks").
 - **The session's placement:** env `SDLC_PLACEMENT` (`cloud` | `local`; any other value is an
   error) wins; else a truthy `CLAUDE_CODE_REMOTE` (`true` / `1`) means cloud; else local.

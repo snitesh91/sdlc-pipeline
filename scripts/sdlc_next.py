@@ -845,6 +845,20 @@ def _raw_parent(raw: dict) -> Optional[int]:
 _FOCUS: set = set()
 
 
+def focus_issues(gh, numbers) -> list:
+    """`gh.issue_list()` that also holds `numbers` (and their parent chains): a unit-scoped
+    index reloads once when one of them is missing (a closed Epic, a closed `Realises:` issue,
+    a finished unit's leftover branch). A whole-repo provider lists them anyway."""
+    numbers = {n for n in numbers if n}
+    new = numbers - _FOCUS
+    _FOCUS.update(numbers)
+    issues = gh.issue_list()
+    if new and new - {i["number"] for i in issues} and hasattr(gh, "_stale"):
+        gh._stale = True
+        issues = gh.issue_list()
+    return issues
+
+
 class GitHubRest(GitHub):
     """The GitHub client: REST for everything public REST covers, and `_no_rest_path` for the
     rest. Reads strip the cloud proxy's footer; config field ids map to REST ids and option
@@ -964,12 +978,13 @@ class GitHubRest(GitHub):
         for page in range(1, _REST_MAX_PAGES + 1):
             batch = fetch(page)
             # GitHub sometimes serves a short or empty page mid-list: a short page is the end
-            # only when the next page is empty too; otherwise refetch it until it is full.
+            # only when the next page is empty too (twice, for `confirm_end` lists: a spurious
+            # empty peek must not end the list); otherwise refetch it until it is full.
             # Page 1 is confirmed only for `confirm_end` lists (issues), to keep small reads
             # at one request.
             for _ in range(_REST_SHORT_PAGE_RETRIES):
                 if (len(batch) >= per_page or (page == 1 and not confirm_end)
-                        or not fetch(page + 1)):
+                        or (not fetch(page + 1) and (not confirm_end or not fetch(page + 1)))):
                     break
                 batch = fetch(page)
             else:
@@ -4391,7 +4406,8 @@ def dev_pr_scope_offenders(gh: WorkItemProvider, issue: int, changed_files: list
     design_prefix = tuple(f"{root}/epic-" for root in all_doc_roots())
     design_docs = sorted({p for p in changed_files if p.startswith(design_prefix)})
     if design_docs:
-        states = {i["number"]: i["state"] for i in gh.issue_list()}
+        epics = {_design_doc_epic(p, design_prefix) for p in design_docs}
+        states = {i["number"]: i["state"] for i in focus_issues(gh, epics)}
         design_docs = [p for p in design_docs
                        if states.get(_design_doc_epic(p, design_prefix)) != "CLOSED"]
     foreign: set = set()
@@ -6794,7 +6810,7 @@ def parse_task_field(section_text: str, line: re.Pattern) -> Optional[str]:
 
 # A metadata field line (`Depends on:`, `Priority:`, `Effort:`, `Realises:`), however marked up.
 _TASK_FIELD_START = re.compile(r"^[ \t]*(?:[-*][ \t]+)?`?(?:\*\*)?`?"
-                               r"(?:Depends on|Priority|Effort|Reali[sz]es)`?(?:\*\*)?`?[ \t]*:",
+                               r"(?:Depends on|Priority|Effort|Reali[sz]es|Placement)`?(?:\*\*)?`?[ \t]*:",
                                re.IGNORECASE)
 _MD_HEADING_LINE = re.compile(r"^[ \t]*#{1,6}[ \t]")
 _LIST_ITEM_LINE = re.compile(r"^[ \t]*[-*][ \t]+")
@@ -7012,7 +7028,9 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
     # A crash between create and push leaves issues the doc doesn't number yet.
     key_to_number = {h["task_key"]: h["number"] for h in headings
                      if h["number"] and h["task_key"]}
-    all_issues = {i["number"]: i for i in gh.issue_list()} if (pending or numbered) else {}
+    realised = {n for h in pending for n in parse_task_realises(doc[h["line_end"]:h["end"]])}
+    all_issues = ({i["number"]: i for i in focus_issues(gh, realised)}
+                  if (pending or numbered) else {})
     for child in all_issues.values():
         if (child.get("parent") or {}).get("number") != epic:
             continue
@@ -9098,6 +9116,15 @@ def sweep_units(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] = Non
     return {"units": units, "skipped_open": skipped_open, "unknown": unknown}
 
 
+def _run_state_epics() -> set:
+    """The Epic/Initiative numbers that have a run-state file."""
+    try:
+        names = os.listdir(_run_state_dir())
+    except OSError:
+        return set()
+    return {int(m.group(1)) for m in (re.fullmatch(r"epic-(\d+)\.json", n) for n in names) if m}
+
+
 def _stale_run_states(closed: set, dry_run: bool) -> list:
     """Delete run-state files of CLOSED epics/initiatives once no longer fresh (older than
     `guard.mainThreadFreshnessHours`) and no fresh file shares their run id -- no live run
@@ -9143,7 +9170,12 @@ def cmd_prune_stale(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] =
     then `git worktree prune` and `git fetch --prune origin`. `dry_run` reports only."""
     runner = runner or gh._run
     repo_path = repo_path or "."
-    issues = gh.issue_list()
+    # Finished units' leftovers and run states name closed issues a scoped index lacks.
+    try:
+        wanted = {n for _, n in present_units(repo_path, runner)}
+    except GhError:
+        wanted = set()
+    issues = focus_issues(gh, wanted | _run_state_epics())
     swept = sweep_units(gh, repo_path, runner, issues=issues, dry_run=dry_run)
     closed = {i["number"] for i in issues if i["state"] == "CLOSED"}
     result = _with_warnings({"dry_run": dry_run, **swept,

@@ -248,6 +248,8 @@ def sdlc_result(text: str):
         return None, '"stage" must be a non-empty string'
     if result.get("outcome") not in OUTCOMES:
         return None, f'"outcome" must be one of {", ".join(OUTCOMES)}'
+    if result["outcome"] == "done-with-concerns" and result["stage"] != "development":
+        return None, '"done-with-concerns" is a development outcome; use "done"'
     if result["outcome"] == "done-with-concerns":
         concern = result.get("concern")
         if not isinstance(concern, str) or not concern.strip() or len(concern) > CONCERN_CAP:
