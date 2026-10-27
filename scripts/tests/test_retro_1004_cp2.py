@@ -325,16 +325,16 @@ def _handoffs(gh):
 def test_repeated_handoff_is_not_reposted(monkeypatch):
     monkeypatch.setattr(s, "required_check_states", lambda gh, pr: None)
     gh = FakeGh([{"number": 9}])
-    s.cmd_handoff_to_pr_review(gh, 9, 42, "10 passed.")
-    again = s.cmd_handoff_to_pr_review(gh, 9, 42, "10 passed.")
+    s.cmd_handoff_to_pr_review(gh, 9, 42, "10 passed.\n\n### Acceptance criteria coverage\n| AC | test |")
+    again = s.cmd_handoff_to_pr_review(gh, 9, 42, "10 passed.\n\n### Acceptance criteria coverage\n| AC | test |")
     assert again["already_posted"] is True and _handoffs(gh) == 1
 
 
 def test_a_rework_round_handoff_is_posted_again(monkeypatch):
     monkeypatch.setattr(s, "required_check_states", lambda gh, pr: None)
     gh = FakeGh([{"number": 9}])
-    s.cmd_handoff_to_pr_review(gh, 9, 42, "10 passed.")
+    s.cmd_handoff_to_pr_review(gh, 9, 42, "10 passed.\n\n### Acceptance criteria coverage\n| AC | test |")
     s.cmd_record_pr_review(gh, 9, 42, "rework", "fix the guard")
-    s.cmd_handoff_to_pr_review(gh, 9, 42, "10 passed.")
-    s.cmd_handoff_to_pr_review(gh, 9, 42, "11 passed.")  # a different round's summary
+    s.cmd_handoff_to_pr_review(gh, 9, 42, "10 passed.\n\n### Acceptance criteria coverage\n| AC | test |")
+    s.cmd_handoff_to_pr_review(gh, 9, 42, "11 passed.\n\n### Acceptance criteria coverage\n| AC | test |")  # a different round's summary
     assert _handoffs(gh) == 3

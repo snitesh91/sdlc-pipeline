@@ -118,8 +118,12 @@ REASONS = {
                     "`--filter label=sdlc.issue=<n>`.",
     "worker-git-write": "A development worker never commits, pushes, syncs or changes branches: "
                         "edit your named files and hand back; the development agent integrates.",
-    "review-git-write": "Review roles are read-only on the branch: describe the fix in your "
-                        "review; the owning stage applies it.",
+    "review-git-write": "Review roles are read-only on the branch (no commit, push, merge, "
+                        "reset, checkout or switch): read through origin/ refs or your "
+                        "review-worktree-add tree, revert a probe with `git restore <file>`, and "
+                        "describe the fix in your review; the owning stage applies it.",
+    "mark-issue-closed": f"mark-issue-closed is CI's (`issues: closed`): close a unit with "
+                         f"{SDLC} close-issue <n> [--repo-path <p>].",
     "claude-session": "Starting or messaging Claude sessions (`claude`, `claude --cloud`) is the "
                       "orchestrator's: put what you need in your handoff (a question for the "
                       "operator: outcome needs-human).",
@@ -388,8 +392,7 @@ def check_role(words: list, role: str):
         return "worker-git-write"
     if role in REVIEW_ROLES | {REVIEW_CHILD} and words[0] == "git":
         sub, rest = _git_sub(words[1:])
-        if (sub in ("commit", "push", "merge") or (sub == "reset" and "--hard" in rest)
-                or (sub == "checkout" and "--" in rest)):
+        if sub in ("commit", "push", "merge", "reset", "checkout", "switch"):
             return "review-git-write"
     return None
 
@@ -462,6 +465,8 @@ def verdict(command: str, role: str = "", prefixes=DEFAULT_BRANCH_PREFIXES):
             key = verdict(script, role, prefixes) if script else None
         else:
             key = None
+        if not key and control_plane_command(words) == "mark-issue-closed":
+            key = "mark-issue-closed"
         if not key and role:
             key = check_role(words, role)
         if key:

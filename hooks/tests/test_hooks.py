@@ -590,6 +590,11 @@ ROLE_DENIED = [
     ("sdlc:design-review", "git -C /w merge origin/main", "read-only on the branch"),
     ("sdlc:product-review", "git reset --hard HEAD~1", "read-only on the branch"),
     ("sdlc:pr-review", "git checkout -- src/a.ts", "read-only on the branch"),
+    # Any branch move or reset, not only --hard / `checkout --` (Fable review 2026-10-27).
+    ("sdlc:pr-review", "git checkout issue-5", "read-only on the branch"),
+    ("sdlc:design-review", "git -C /w switch epic-9", "read-only on the branch"),
+    ("sdlc:product-review", "git reset HEAD~1", "read-only on the branch"),
+    ("sdlc:development", CP + "mark-issue-closed 5", "close-issue"),
 ]
 
 
@@ -1992,6 +1997,7 @@ def test_bash_guard_holds_a_review_fanout_child_read_only(tmp_path, sdlc_repo):
     sub.mkdir(parents=True)
     for agent, prompt in (("child", "PARENT: pr-review ISSUE: 12\nAXIS: edges"),
                           ("orch", "PARENT: pr-review ISSUE: 12 AXIS: edges\nBrief"),
+                          ("lld", "PARENT: `lld-review` ISSUE: `12` AXIS: footprints\nBrief"),
                           ("free", "AXIS: edges")):
         (sub / f"agent-{agent}.jsonl").write_text(json.dumps(
             {"type": "user", "message": {"role": "user", "content": prompt}}) + "\n")
@@ -2009,6 +2015,8 @@ def test_bash_guard_holds_a_review_fanout_child_read_only(tmp_path, sdlc_repo):
     assert run("child", 'python3 "$SDLC" pr-checks 12') == ""
     # An orchestrator-launched axis agent (cloud fallback) carries the same header.
     assert "read-only" in run("orch", "git commit -m x")
+    # A design-review child names its parent by stage (arch-review / lld-review), backticked or not.
+    assert "read-only" in run("lld", "git commit -m x")
     assert run("free", "git commit -m x") == ""  # unstamped agent: not a review child
 
 
@@ -2059,3 +2067,38 @@ def test_done_with_concerns_is_development_only():
     line = ('SDLC-RESULT: {"issue": 7, "stage": "lld", "outcome": "done-with-concerns", '
             '"concern": "x"}')
     assert "development outcome" in sdlc_result(line)[1]
+
+
+def test_prompt_header_strips_backticks_from_every_value():
+    from _common import prompt_header
+    head = prompt_header("ROLE: `lld-review` ISSUE: `#12` EPIC: **7**\nbody")
+    assert head == {"role": "lld-review", "issue": "12", "epic": "7"}
+
+
+def test_subagent_start_gives_arch_review_its_skip_threshold(sdlc_repo, tmp_path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "skip-thresholds.cache").write_text(json.dumps({"12": 85}))
+
+    def ctx(prompt):
+        proc = run_hook("subagent_start.py", {"agent_id": "a1", "agent_type": "sdlc:design-review",
+                                              "cwd": sdlc_repo, "prompt": prompt},
+                        env={"SDLC_RUNS_DIR": str(runs)})
+        return json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    assert "sdlc: Skip threshold: 85 " in ctx("ROLE: `arch-review` ISSUE: `12` EPIC: 9")
+    # Positive controls: lld-review gets no bar; an unrecorded unit gets none either.
+    assert "Skip threshold" not in ctx("ROLE: lld-review ISSUE: 12 EPIC: 9")
+    assert "Skip threshold" not in ctx("ROLE: arch-review ISSUE: 13 EPIC: 9")
+
+
+def test_reviewers_may_still_read_and_restore(sdlc_repo):
+    # Positive control: the probe's revert and read-only git stay allowed.
+    for cmd in ("git restore src/a.ts", "git diff origin/main...HEAD", "git show origin/issue-5:a.md",
+                "git fetch origin"):
+        assert guard(cmd, sdlc_repo, "sdlc:pr-review") is None, cmd
+
+
+def test_mark_issue_closed_is_denied_to_the_run_driving_main_thread(sdlc_repo, live):
+    assert "close-issue" in guard(CP + "mark-issue-closed 5", sdlc_repo, **live)
+    assert guard(CP + "close-issue 5 --repo-path /r", sdlc_repo, **live) is None

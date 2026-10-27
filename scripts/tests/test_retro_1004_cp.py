@@ -272,7 +272,7 @@ def _check(name, bucket, job=None, workflow="Backend CI"):
 def test_handoff_refuses_on_a_failed_required_check():
     gh = _HandoffGh(["backend/a.py"], [_check("backend", "fail", job=7)],
                     logs={7: "AssertionError: expected 2"})
-    result = s.cmd_handoff_to_pr_review(gh, 42, 77, "done")
+    result = s.cmd_handoff_to_pr_review(gh, 42, 77, "done\n\n### Acceptance criteria coverage\n| AC | test |")
     assert result["refused"] == "checks_failed" and gh.comments == []
     assert result["failing"] == [{"name": "backend",
                                   "failure_excerpt": "AssertionError: expected 2"}]
@@ -283,7 +283,7 @@ def test_handoff_proceeds_past_pending_and_infra_suspect_checks():
     gh = _HandoffGh(["backend/a.py"],
                     [_check("backend", "fail", job=7), _check("backend-it", "pending")],
                     logs={7: "No space left on device"})
-    result = s.cmd_handoff_to_pr_review(gh, 42, 77, "done")
+    result = s.cmd_handoff_to_pr_review(gh, 42, 77, "done\n\n### Acceptance criteria coverage\n| AC | test |")
     assert result["queued_for"] == "pr-review" and "refused" not in result
     assert result["checks_pending"] == ["backend-it"] and result["infra_suspect"] == ["backend"]
     assert len(gh.comments) == 1
@@ -294,13 +294,13 @@ def test_handoff_ignores_a_failed_check_outside_the_required_workflows():
     gh = _HandoffGh(["backend/a.py"], [_check("lint", "fail", workflow="Other"),
                                        _check("fe", "fail", workflow="Frontend CI"),
                                        _check("backend", "pass")])
-    result = s.cmd_handoff_to_pr_review(gh, 42, 77, "done")
+    result = s.cmd_handoff_to_pr_review(gh, 42, 77, "done\n\n### Acceptance criteria coverage\n| AC | test |")
     assert result == {"issue": 42, "pr": 77, "queued_for": "pr-review"}
 
 
 def test_handoff_without_pr_level_ci_behaves_as_before():
     # Positive control.
     gh = _HandoffGh(["backend/a.py"], [])
-    assert s.cmd_handoff_to_pr_review(gh, 42, 77, "done") == {
+    assert s.cmd_handoff_to_pr_review(gh, 42, 77, "done\n\n### Acceptance criteria coverage\n| AC | test |") == {
         "issue": 42, "pr": 77, "queued_for": "pr-review"}
     assert len(gh.comments) == 1

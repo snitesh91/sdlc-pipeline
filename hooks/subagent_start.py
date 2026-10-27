@@ -30,6 +30,8 @@ GRAPH = os.path.join("graphify-out", "graph.json")
 DOC_ROOT_HINTS_FILE = "doc-roots.cache"
 # Written by sdlc_next.py (`unit_initiative_profile`): unit -> its Initiative's profile.
 INITIATIVE_HINTS_FILE = "initiative-profiles.cache"
+# Written by sdlc_next.py (`start-comment` for arch-review): unit -> its skip bar.
+SKIP_THRESHOLD_HINTS_FILE = "skip-thresholds.cache"
 
 
 def header_units(data: dict) -> list:
@@ -104,6 +106,21 @@ def initiative_lines(config: dict, data: dict) -> list:
             f"python3 \"$SDLC\" initiative-profile {unit} and follow its testTasks."]
 
 
+def skip_threshold_lines(config: dict, data: dict) -> list:
+    """`Skip threshold: <N>` for an arch-review whose unit `transition` recorded a bar for."""
+    prompt = data.get("prompt")
+    if not prompt and data.get("agent_id") and data.get("transcript_path"):
+        prompt = first_prompt(agent_transcript(data))
+    if prompt_header(prompt).get("role") != "arch-review":
+        return []
+    hints = load_json(os.path.join(runs_dir(config), SKIP_THRESHOLD_HINTS_FILE))
+    for unit in header_units(data):
+        if isinstance(hints.get(str(unit)), int):
+            return [f"sdlc: Skip threshold: {hints[str(unit)]} (#{unit}'s profile bar: Gate B "
+                    f"is skipped only when your confidence is strictly above it)."]
+    return []
+
+
 def templates_dir(config: dict, config_path: str, doc_root) -> str:
     """`<unit docRoot>/<docTemplates>` when the repo has it, else under the top-level docRoot."""
     name = (config.get("pipeline") or {}).get("docTemplates") or "_templates"
@@ -162,7 +179,7 @@ def main() -> int:
             f"yours is not known here: run python3 \"$SDLC\" doc-root "
             f"{unit if unit is not None else '<your issue>'} and use its docRoot, "
             f"requirementsDir and docTemplates instead of the line above.")
-    lines += initiative_lines(config, data)
+    lines += initiative_lines(config, data) + skip_threshold_lines(config, data)
     cloud = cloud_session()
     if cloud:
         lines.append(CLOUD_GITHUB_LINE)
