@@ -11,9 +11,9 @@ A human reads each design doc. Write for that reader, not for the next agent.
 - Say nothing about the pipeline: no stage names, gates, fields, rounds, review history or revision deltas. Put process and deltas in the handoff comment.
 - State each fact once, in the section that owns it. Other sections refer to it by section name.
 - Never write a "changes to earlier documents" section. Link the earlier document in one line under Related or Constraints. Amend it only through `references/initiatives.md`, "Amending an approved `product.md`".
-- A doc over its word cap fails review. Cut, or split the work. Count with `wc -w` before handoff, template comments removed.
+- Keep each doc as short as its content allows. The targets below are guidance, not limits. A doc well over its target is a sign to cut detail or split the work; it never fails review for length alone.
 
-| Doc | Word cap |
+| Doc | Target length (about) |
 |---|---|
 | `product.md` | standing child 800; Initiative of one Epic 1,500; Initiative of several Epics 2,500 |
 | `architecture.md` | standing child 600; Epic 1,500 |
@@ -38,7 +38,7 @@ The reader decides what the product does. The reader does not read code.
 
 The reader approves the design at Gate B and may not be a specialist in this area.
 
-- Open with a plain-language summary of at most 150 words: what is built, how it works in everyday words, what it costs, what could go wrong. No identifiers or paths in it.
+- Open with a plain-language summary of about 150 words: what is built, how it works in everyday words, what it costs, what could go wrong. No identifiers or paths in it.
 - Follow it with one Mermaid diagram of the data and control flow. Add one diagram per new component boundary. A diagram shows the mechanism and where it fails, not boxes named after the feature.
 - For each technical choice, first say in plain words what it does, why this way and what it costs. Then give the technical detail.
 - Define every term of art (a protocol, pattern or vendor feature) in a few words on first use.
@@ -51,7 +51,7 @@ The reader approves the design at Gate B and may not be a specialist in this are
 - Write non-functional requirements as measurable scenarios. State the cost line, even when it is `$0`.
 - Write acceptance criteria as a flat checklist, one line each. Nothing else cites an AC by number.
 - Include Data model and Failure modes only when entities or invariants change, or a new failure path appears.
-- Include `## Footprint` and `## Implementation notes` only in a standing child's doc. Never in an Epic's doc. They do not count toward the cap.
+- Include `## Footprint` and `## Implementation notes` only in a standing child's doc. Never in an Epic's doc. They do not count toward the target.
 - No decisions-log section.
 
 ### `lld.md` is the developer's design
@@ -62,8 +62,8 @@ The reader is the developer who builds one Task.
 - Never restate `architecture.md`. Point to its section.
 - Never paste implementation code. A fenced snippet is allowed only for a contract (a signature, a type, a message shape) of at most 15 lines.
 - Paste proof-sweep output trimmed to the lines that settle the claim. Put a longer output in `.sdlc-scratch/` and quote its count.
-- The carving summary, `## Epic-close checks` and `## Sibling heads checked` share the 500 words outside Task sections.
-- A Task section that cannot fit 400 words is a Task too big: split it.
+- Aim for about 500 words outside Task sections (the carving summary, `## Epic-close checks`, `## Sibling heads checked`).
+- A Task section far over about 400 words often means the Task is too big: consider splitting it.
 
 ## Scope alignment before `product`
 

@@ -5,8 +5,8 @@ standing child (itself). An Epic has no product.md of its own.
 
 The reader is a product owner who does not read code. Rules: the sdlc plugin's
 references/design-doc-rules.md, "Document altitude". In short:
-  - Word cap: standing child 800; Initiative of one Epic 1,500; of several Epics 2,500.
-    Over the cap, split the work.
+  - Target length (guidance): about 800 words for a standing child; about 1,500 for an
+    Initiative of one Epic; about 2,500 for several. Keep it as short as the content allows.
   - Behaviour the user sees and business rules only. No code, paths, endpoints, tables,
     JSON, error codes, config keys, tool or component names, vendor APIs, or
     implementation choices.

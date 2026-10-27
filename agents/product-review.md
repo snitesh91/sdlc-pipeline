@@ -26,7 +26,7 @@ In scope:
 - **Inputs:** each operator decision and each ask in the issue body appears in the doc.
 - **Signals:** each Goal names an observable success signal, and a counter-signal where the goal can be gamed.
 - **Audience:** a product owner can read it. Grep for paths, backticks, endpoints, JSON, error codes, config keys, component, tool or vendor-API names; each hit is a finding. Acceptance criteria name a user action and what the user sees, not a test harness.
-- **Length:** `wc -w` against the word cap; no "changes to earlier documents" section.
+- **Length:** a doc well over its target length gets a non-blocking suggestion to cut or split; no "changes to earlier documents" section.
 
 Out of scope: how it will be built (components, files, data model, API shape). Never ask the doc to add design. Design already in the doc is an Audience finding.
 
@@ -45,7 +45,8 @@ Work these axes in sequence: criteria testability; **completeness ("what behavio
 - A missing or untestable acceptance criterion: blocking.
 - A false premise the requirements rest on: blocking.
 - An operator decision or issue ask missing from the doc: blocking.
-- Over the word cap, a "changes to earlier documents" section, or implementation content (the Audience list): blocking. The fix is to cut, move it to the handoff for `architecture`, or split the work.
+- A "changes to earlier documents" section, or implementation content (the Audience list): blocking. The fix is to cut, or move it to the handoff for `architecture`.
+- Length alone: never blocking.
 - Wording, formatting and ordering: never blocking.
 
 ## Output

@@ -2,8 +2,9 @@
 Template for <docRoot>/{epic,issue}-<n>/architecture.md: the HLD a human approves at
 Gate B and `lld` builds from. Rules: the sdlc plugin's references/design-doc-rules.md,
 "Document altitude". In short:
-  - Word cap: Epic 1,500; standing child 600 (Footprint and Implementation notes not
-    counted). Over the cap, cut detail down to lld.md.
+  - Target length (guidance): about 1,500 words for an Epic, about 600 for a standing
+    child (Footprint and Implementation notes not counted). Keep it as short as the
+    content allows; push code-level detail to lld.md.
   - The reader may not be a specialist. Explain each technical choice in plain words
     first (what it does, why this way, what it costs), then the technical detail.
     Define each term of art on first use.
@@ -26,7 +27,7 @@ Builds on [`product.md`](./product.md).
 
 ## Summary
 
-<!-- At most 150 words, everyday language, no identifiers or paths. What gets built, how
+<!-- About 150 words, everyday language, no identifiers or paths. What gets built, how
      it works, what it costs to run, and the main thing that could go wrong. A reviewer
      who reads only this and the diagram must understand the design. -->
 

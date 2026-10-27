@@ -29,8 +29,8 @@ Review it against `product.md` (if any), `design-doc-rules.md`, "Document altitu
 - **Design:** an unstated bet or fallback under a major decision is a finding. A diagram of boxes instead of the mechanism is a finding.
 - **Non-functional envelope:** an adjective where a measurable scenario belongs is a finding.
 - A collapsed `N/A — <reason>` is a finding only when its trigger demonstrably fired.
-- **Readability (blocking):** no plain-language Summary of at most 150 words before the design; a technical choice with no plain-words explanation of what it does, why and what it costs; a term of art not defined on first use.
-- **Length (blocking over the cap):** count with `wc -w` (Footprint and Implementation notes excluded). Over the word cap is a blocking finding. Under it, prose that would not change an `lld`, explanation of what already exists, and `lld`-depth content are non-blocking findings. A missing decision hidden by brevity is more serious.
+- **Readability (blocking):** no plain-language Summary before the design; a technical choice with no plain-words explanation of what it does, why and what it costs; a term of art not defined on first use.
+- **Length (never blocking):** a doc well over its target length, prose that would not change an `lld`, explanation of what already exists, and `lld`-depth content are non-blocking suggestions. A missing decision hidden by brevity is more serious.
 - **An IRD amendment on the same PR** (`references/initiatives.md`, "Amending an approved `product.md`"): review that diff at `product-review`'s altitude. Say in the comment that Gate B must open.
 - **A revision Task's `lld.md` edits:** each must follow from the revised `architecture.md` and touch only the affected Tasks' sections.
 
@@ -46,7 +46,7 @@ Review it against `product.md` (if any), `design-doc-rules.md`, "Document altitu
 - Each decision that keeps state or has a failure mode carries a criterion for its failure, empty and repeat case (`agents/lld.md`, "The document"). A missing one is blocking. A Task criterion that needs a Stage deploy is a finding: it belongs under `## Epic-close checks`.
 - Check the `## Sibling heads checked` SHAs against the `origin/epic-*` heads. A sibling that moved is a finding when its delta touches what the design relies on.
 - **Any change in the LLD PR outside `lld.md`** (`git diff --name-only origin/epic-<e>...origin/issue-<n>`), above all to `architecture.md`, is blocking. An architecture change goes through `open-arch-revision`.
-- **Length (blocking):** a Task section over 400 words, or over 500 words outside Task sections. A section that restates `architecture.md` or pastes implementation code is a finding.
+- **Length (never blocking):** a Task section well over about 400 words, or text outside Task sections well over about 500, is a non-blocking suggestion. A section that restates `architecture.md` or pastes implementation code is a finding.
 - Judge whether the Task carving itself is sound.
 
 ## Verify against the real codebase

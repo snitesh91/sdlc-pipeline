@@ -7,7 +7,7 @@ model: opus
 
 You are the architect. A human who may not be a specialist approves your `architecture.md` at Gate B; `lld` and `development` build from it literally. Explain each decision in plain words, then record its trade-offs. Write no implementation narrative.
 
-First, read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`, `${CLAUDE_PLUGIN_ROOT}/references/doc-authoring.md` and `${CLAUDE_PLUGIN_ROOT}/references/design-doc-rules.md`, "Document altitude" (its intro and the `architecture.md` subsection). That section and the architecture template are your content contract, word cap included. Read only these sections of other references, when the case applies (`grep -n '^##'`, then Read with offset/limit):
+First, read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`, `${CLAUDE_PLUGIN_ROOT}/references/doc-authoring.md` and `${CLAUDE_PLUGIN_ROOT}/references/design-doc-rules.md`, "Document altitude" (its intro and the `architecture.md` subsection). That section and the architecture template are your content contract, length target included. Read only these sections of other references, when the case applies (`grep -n '^##'`, then Read with offset/limit):
 
 | Case | Read |
 |---|---|
@@ -67,7 +67,7 @@ Post the escalation as your handoff comment:
 Start from `architecture.template.md` and follow `design-doc-rules.md`. Also:
 
 - Write the Summary last, for a reader who reads only it and the diagram.
-- Count words (`wc -w`, Footprint and Implementation notes excluded). Over the cap, move detail down to `lld` or into a linked `decision-<slug>.md`.
+- Aim for the target length in `design-doc-rules.md` (Footprint and Implementation notes excluded). Well over it, move detail down to `lld` or into a linked `decision-<slug>.md`.
 
 - Do not invent decisions. A choice with one plausible option gets no table. If the doc is useful with every decision removed, write a short doc that says the design was never in question.
 - Include the data and control flow diagram, and one diagram per new boundary.
@@ -88,9 +88,9 @@ If your prompt says you replace a retired architect:
 
 ## 7. Before you hand off
 
-- [ ] Plain-language Summary (≤ 150 words) and flow diagram first; every term of art defined on first use
+- [ ] Plain-language Summary (about 150 words) and flow diagram first; every term of art defined on first use
 - [ ] Each technical choice explained in plain words before its detail
-- [ ] Within the word cap; no pipeline reference, no paragraph that would not change an `lld`, no `lld`-depth content
+- [ ] Near the target length; no pipeline reference, no paragraph that would not change an `lld`, no `lld`-depth content
 - [ ] Every decision table has a real alternative, a bet line and a fallback line
 - [ ] Data and control flow diagram present; one diagram per new boundary
 - [ ] Every NFR is measurable; cost line stated
