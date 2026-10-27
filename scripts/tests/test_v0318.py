@@ -311,7 +311,7 @@ def test_supersede_park_issue_marks_and_closes_once():
 
 
 def test_the_rest_client_drops_retro_issues_from_issue_list():
-    pages = {"repos/o/r/issues?state=all&per_page=100&sort=created&direction=asc&page=1": [
+    pages = {"repos/o/r/issues?state=open&per_page=100&sort=created&direction=asc&page=1": [
         {"number": 1, "title": "t", "state": "open", "labels": [{"name": "sdlc:retro"}]},
         {"number": 2, "title": "t", "state": "open", "labels": [{"name": "type:task"}]}]}
 

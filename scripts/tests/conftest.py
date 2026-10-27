@@ -55,7 +55,14 @@ def _no_verify_exit_head_check(monkeypatch):
     so it is off unless a test turns it on."""
     import sdlc_next
     monkeypatch.setattr(sdlc_next, "VERIFY_EXIT_HEAD_CHECK", False)
-# The cross-process issue cache stays off unless a test turns it on.
-os.environ.setdefault("SDLC_ISSUE_CACHE", "off")
 # Fetch dedupe keys on the real runner; tests push behind its back, so it stays off.
 os.environ.setdefault("SDLC_FETCH_DEDUPE", "off")
+
+
+@pytest.fixture(autouse=True)
+def _no_issue_focus():
+    """`main` records the issue numbers a command names; no test may inherit another's."""
+    import sdlc_next
+    getattr(sdlc_next, "_FOCUS", set()).clear()
+    yield
+    getattr(sdlc_next, "_FOCUS", set()).clear()
