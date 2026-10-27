@@ -107,7 +107,7 @@ left). Then Step 4.
   local (`localTasks: ["e2e-test"]`, or `place <task> --where local`) rather than parking
   `needs-human`.
 - **Pushed work survives:** a session can die with no end marker. `development` pushes after
-  every green commit before its PR exists (`agents/development.md`, "Commits and pushes").
+  every green commit before its PR exists (`agents/development.md`, "Working in the repo").
 
 ## GitHub access in the cloud
 
