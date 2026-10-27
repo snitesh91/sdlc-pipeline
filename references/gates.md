@@ -12,7 +12,8 @@
 
 Passing or skipping a gate:
 
-- Standing child or parentless issue: claims `development`.
+- Standing child or parentless issue: claims the next stage (`architecture` after Gate A,
+  `development` after Gate B).
 - Phase-Task: claims no stage. An Architecture-phase or revision Task's design PR merges into
   `epic-<n>` (by the human, or by `skip-gate` / `waive-gate` through `merge-design-pr`), and the
   Task closes (`phase_task_complete: true`). A Product-Roadmap Task (Gate A) closes.
