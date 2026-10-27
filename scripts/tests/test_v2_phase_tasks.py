@@ -121,6 +121,9 @@ class FakeGh:
 
     # --- write side, for the flows that create work items (create-lld-tasks) ---
 
+    def ensure_label(self, label):
+        pass
+
     def issue_create(self, title, body, labels):
         number = (max(self.issues) if self.issues else 0) + 1
         self.issues[number] = {

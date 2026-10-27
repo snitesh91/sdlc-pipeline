@@ -825,46 +825,24 @@ def _number_from_url(url: Optional[str]) -> Optional[int]:
 
 # Upper bound on pages `GitHubRest._api_items` walks (100 items each).
 _REST_MAX_PAGES = 200
-_ISSUE_CACHE_TTL_S = 6 * 3600
-_ISSUE_CACHE_OVERLAP_S = 600
+# Refetches of a short page whose next page still has items (a transient GitHub glitch).
+_REST_SHORT_PAGE_RETRIES = 3
 _ISSUE_KEYS = ("number", "title", "body", "created_at", "updated_at", "state", "labels",
-               "type", "parent", "parent_issue_url", "milestone", "issue_field_values")
-
-
-def _issue_cache_enabled() -> bool:
-    return os.environ.get("SDLC_ISSUE_CACHE", "on").strip().lower() not in ("0", "off", "false")
-
-
-def _issue_cache_path(repo: str) -> str:
-    """Closed-issue cache: `$SDLC_CACHE_DIR`, else `<worktrees.root>/.sdlc-cache`."""
-    root = os.environ.get("SDLC_CACHE_DIR") or os.path.join(
-        PIPELINE["worktrees"]["root"], ".sdlc-cache")
-    return os.path.join(root, re.sub(r"[^A-Za-z0-9._-]", "_", repo) + "-issues.json")
+               "type", "parent", "parent_issue_url", "milestone", "issue_field_values",
+               "sub_issues_summary")
 
 
 def _slim_issue(raw: dict) -> dict:
     return {k: raw[k] for k in _ISSUE_KEYS if k in raw}
 
 
-def _read_json(path: str) -> Optional[dict]:
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else None
-    except (OSError, ValueError):
-        return None
+def _raw_parent(raw: dict) -> Optional[int]:
+    return (raw.get("parent") or {}).get("number") or _number_from_url(raw.get("parent_issue_url"))
 
 
-def _write_json_atomic(path: str, data: dict) -> None:
-    """Best effort: a cache that cannot be written only costs the next process a relist."""
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, path)
-    except OSError:
-        pass
+# Issue numbers the running command names (`main` sets it): `GitHubRest.issue_list` reads
+# them, and their sub-issue trees, even when closed.
+_FOCUS: set = set()
 
 
 class GitHubRest(GitHub):
@@ -969,7 +947,7 @@ class GitHubRest(GitHub):
         out = self._api(path, *args, method=method)
         return json.loads(out) if out.strip() else None
 
-    def _api_items(self, path: str, jq: str = ".[]") -> list:
+    def _api_items(self, path: str, jq: str = ".[]", confirm_end: bool = False) -> list:
         """Every item across all pages. `jq` is `.[]` (the page is a list) or `.<key>[]` (the
         list under `<key>`). Pages by `page=N` on this `repos/{owner}/{repo}` path rather than
         `gh api --paginate`: GitHub's `Link: next` URLs use `repositories/{id}/...`, which the
@@ -978,10 +956,27 @@ class GitHubRest(GitHub):
         if "per_page=" not in path:
             path += ("&" if "?" in path else "?") + "per_page=100"
         per_page = int(re.search(r"per_page=(\d+)", path).group(1))
+        def fetch(page: int) -> list:
+            data = self._api_json(f"{path}&page={page}")
+            return (data or []) if key is None else ((data or {}).get(key) or [])
+
         items: list = []
         for page in range(1, _REST_MAX_PAGES + 1):
-            data = self._api_json(f"{path}&page={page}")
-            batch = (data or []) if key is None else ((data or {}).get(key) or [])
+            batch = fetch(page)
+            # GitHub sometimes serves a short or empty page mid-list: a short page is the end
+            # only when the next page is empty too; otherwise refetch it until it is full.
+            # Page 1 is confirmed only for `confirm_end` lists (issues), to keep small reads
+            # at one request.
+            for _ in range(_REST_SHORT_PAGE_RETRIES):
+                if (len(batch) >= per_page or (page == 1 and not confirm_end)
+                        or not fetch(page + 1)):
+                    break
+                batch = fetch(page)
+            else:
+                if len(batch) < per_page:
+                    raise GhError(f"{path}: page {page} came back short ({len(batch)} of "
+                                  f"{per_page}) while page {page + 1} has items -- GitHub served "
+                                  f"a truncated listing; re-run the command")
             items.extend(batch)
             if len(batch) < per_page:
                 return items
@@ -1064,8 +1059,7 @@ class GitHubRest(GitHub):
 
     def _node(self, raw: dict) -> dict:
         """A REST issue in `issue_list()`'s GraphQL-era shape."""
-        parent = (raw.get("parent") or {}).get("number") or _number_from_url(
-            raw.get("parent_issue_url"))
+        parent = _raw_parent(raw)
         return {"number": raw["number"], "title": raw.get("title"),
                 "body": strip_proxy_footer(raw.get("body")) or "",
                 "createdAt": raw.get("created_at"), "updatedAt": raw.get("updated_at"),
@@ -1079,23 +1073,16 @@ class GitHubRest(GitHub):
     # --- issues ----------------------------------------------------------------------
 
     def issue_list(self) -> list:
-        """Every issue, open and closed. Served from a per-process index that refetches only
-        what this process changed; across processes closed issues come from the disk cache
-        (`_issue_cache_path`) and only open plus recently updated ones are listed."""
-        if not _issue_cache_enabled():
-            items = self._list_issues("all")
-            return without_retro_issues([self._node(i) for i in items])
+        """Every open issue, plus the closed issues the running command can reach: the
+        sub-issue trees of open parents and of the issues it names (`_FOCUS`), and every
+        listed issue's parent chain. Cost scales with open work, not the repo's history.
+        Served from a per-process index that refetches only what this process changed."""
         if self._index is None or self._stale:
             self._index, self._stale = self._load_index(), False
             self._dirty.clear()
         for number in sorted(self._dirty):
-            try:
-                raw = self._issue(number)
-            except GhError as e:
-                if "HTTP 404" not in str(e) and "HTTP 410" not in str(e):
-                    raise
-                raw = None
-            if raw and not raw.get("pull_request"):
+            raw = self._issue_or_none(number)
+            if raw:
                 self._index[number] = _slim_issue(raw)
             else:
                 self._index.pop(number, None)
@@ -1106,41 +1093,53 @@ class GitHubRest(GitHub):
 
     def _list_issues(self, state: str, extra: str = "&sort=created&direction=asc") -> list:
         return [i for i in self._api_items(f"repos/{self.repo}/issues?state={state}"
-                                           f"&per_page=100{extra}")
+                                           f"&per_page=100{extra}", confirm_end=True)
                 if not i.get("pull_request")]
 
-    def _load_index(self) -> dict:
-        """Open issues listed live; closed ones from the disk cache, topped up with every
-        issue updated since its last refresh (minus `_ISSUE_CACHE_OVERLAP_S`), and fully
-        relisted once `_ISSUE_CACHE_TTL_S` has passed."""
-        path = _issue_cache_path(self.repo)
-        now = time.time()
-        cache = _read_json(path) or {}
+    def _issue_or_none(self, number: int) -> Optional[dict]:
+        """The issue by number; None when it is gone or is a PR."""
         try:
-            closed = {int(k): dict(v) for k, v in cache["closed"].items()}
-            full_at, fetched_at = float(cache["full_at"]), float(cache["fetched_at"])
-            fresh = cache["repo"] == self.repo and now - full_at <= _ISSUE_CACHE_TTL_S
-        except (KeyError, TypeError, ValueError, AttributeError):
-            # A malformed or older-schema cache is no cache.
-            fresh = False
-        if not fresh:
-            items = self._list_issues("all")
-            full_at = now
-            index = {i["number"]: _slim_issue(i) for i in items}
-        else:
-            since = datetime.fromtimestamp(fetched_at - _ISSUE_CACHE_OVERLAP_S,
-                                           timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            for i in self._list_issues("closed", f"&since={since}&sort=updated"
-                                                 f"&direction=asc"):
-                closed[i["number"]] = _slim_issue(i)
-            index = dict(closed)
-            for i in self._list_issues("open"):
-                index[i["number"]] = _slim_issue(i)
-            # A closed-cache entry that is open again is now listed open.
-        _write_json_atomic(path, {
-            "repo": self.repo, "full_at": full_at, "fetched_at": now,
-            "closed": {str(n): v for n, v in index.items() if v.get("state") == "closed"}})
-        return index
+            raw = self._issue(number)
+        except GhError as e:
+            if "HTTP 404" not in str(e) and "HTTP 410" not in str(e):
+                raise
+            return None
+        return raw if raw and not raw.get("pull_request") else None
+
+    def _load_index(self) -> dict:
+        """Open issues listed live; closed ones only where a unit reaches them (sub-issues,
+        parents, the command's own numbers), each fetched by number or per parent."""
+        index = {i["number"]: _slim_issue(i) for i in self._list_issues("open")}
+        for number in sorted(_FOCUS - index.keys()):
+            raw = self._issue_or_none(number)
+            if raw:
+                index[number] = _slim_issue(raw)
+        walked: set = set()
+        fetched: set = set()
+        while True:
+            # A parent with more sub-issues than are indexed has closed ones still to read.
+            known: dict = {}
+            for i in index.values():
+                parent = _raw_parent(i)
+                if parent:
+                    known[parent] = known.get(parent, 0) + 1
+            todo = [n for n, i in index.items() if n not in walked
+                    and (i.get("sub_issues_summary") or {}).get("total", 0) > known.get(n, 0)]
+            missing = {p for p in known if p not in index and p not in fetched}
+            if not todo and not missing:
+                return index
+            for n in sorted(todo):
+                walked.add(n)
+                for child in self._api_items(f"repos/{self.repo}/issues/{n}/sub_issues",
+                                             confirm_end=True):
+                    if not child.get("pull_request"):
+                        index.setdefault(child["number"],
+                                         _slim_issue({**child, "parent": {"number": n}}))
+            for n in sorted(missing):
+                fetched.add(n)
+                raw = self._issue_or_none(n)
+                if raw:
+                    index[n] = _slim_issue(raw)
 
     def _comments(self, number: int) -> list:
         return [{"id": c.get("node_id"), "databaseId": c.get("id"),
@@ -5933,7 +5932,15 @@ def cmd_post_comment(gh: WorkItemProvider, issue: int, role: str, body_file: str
     if stage not in stages or not claimed:
         raise GhError(f"#{issue} is at Stage {stage!r} / status {status!r}, not claimed at "
                       f"{role!r} -- post-comment only serves the stage that holds the claim")
-    gh.issue_comment(issue, f"{body}\n\n<!-- role-comment: {role} @ {_utc_now_marker()} -->")
+    tag = f"<!-- role-comment: {role} @ "
+    last = next((c for c in reversed(gh.issue_view(issue).get("comments") or [])
+                 if tag in (c.get("body") or "")), None)
+    if last and last["body"].split(tag, 1)[0].strip() == body:
+        return {"refused": True, "posted": False, "duplicate_of": last.get("url"),
+                "reason": f"NOTHING WAS POSTED: the body is identical to this issue's last "
+                          f"`{role}` comment -- a stale body file from an earlier round. Write "
+                          f"this round's comment to a fresh file and re-run"}
+    gh.issue_comment(issue, f"{body}\n\n{tag}{_utc_now_marker()} -->")
     return {"issue": issue, "role": role, "posted": True}
 
 
@@ -6743,6 +6750,9 @@ def _task_line(name: str, after_separator: bool = True) -> re.Pattern:
 _DEPENDS_ON_LINE = _task_line("Depends on", after_separator=False)
 _PRIORITY_LINE = _task_line("Priority")
 _EFFORT_LINE = _task_line("Effort")
+# `Placement: local — <reason>`: the Task runs on the laptop (`localLabel`), e.g. it needs hosts
+# the cloud network blocks.
+_PLACEMENT_LINE = _task_line("Placement")
 _REALISES_LINE = _task_line("Reali[sz]es")
 _ISSUE_REF_RE = re.compile(r"#(\d+)")
 # `<!-- realises: #574 #577 -->` in a carved Task's body: the issues its PR delivers.
@@ -7038,7 +7048,11 @@ def cmd_create_lld_tasks(gh: GitHub, epic: int, repo_path: str = ".",
             body = (f"{doc[h['line_end']:h['end']].strip()}\n\n"
                     f"Carved from `{doc_path}` on `{epic_br}` (Epic #{epic}).\n\n"
                     f"<!-- task-key: {key} -->{realises_marker}")
-            created = cmd_create_issue(gh, title, body, epic, [], type_name=type_name,
+            placement = parse_task_field(doc[h["line_end"]:h["end"]], _PLACEMENT_LINE) or ""
+            labels = [local_label()] if placement.lower().startswith("local") else []
+            for label in labels:
+                gh.ensure_label(label)
+            created = cmd_create_issue(gh, title, body, epic, labels, type_name=type_name,
                                        **fields[key])
             if created.get("ok") is False:
                 # Never renumber the doc against a half-made issue.
@@ -7153,7 +7167,8 @@ def _merged_design_pr(gh: GitHub, comments: list, pr: int) -> Optional[tuple]:
 
 
 def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: str,
-                   runner: Runner = _default_runner, live: bool = True) -> dict:
+                   runner: Runner = _default_runner, live: bool = True,
+                   doc_only: bool = False) -> dict:
     """Pass a merged gate: reconcile the branch with its integration base, then claim the next stage
     (`live`) or only advance Stage (`live=False`, CI). Refuses a `stage`/`gate_pr` that
     disagrees with the issue's gate-pr marker (or, when no gate opened, its design PR that a
@@ -7174,6 +7189,10 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
                        f"field verbatim; it is the gate's owning doc-stage, not a target you pick")
     branch = issue_branch(issue)
     parent = phase_task_parent(gh, issue)
+    if doc_only and (parent is not None or not live):
+        raise GhError(f"--doc-only closes a standing child or parentless issue whose gate doc "
+                      f"is its whole deliverable; #{issue} is "
+                      f"{'a phase-Task (it closes on its own)' if parent else 'passed by CI'}")
     # The gate merged into the unit's integration base (its Epic's branch for a phase-Task
     # of a non-standing Epic), so reconcile the issue branch with that.
     base = (epic_branch(parent["number"]) if parent and parent["kind"] == "epic"
@@ -7185,6 +7204,13 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
             gh, repo_path, issue, stage, parent,
             f"Human review confirmed for `{stage}.md` — merged via #{gate_pr}.", runner),
             ws)
+    if doc_only:
+        gh.issue_comment(issue, f"✅ Human review confirmed for `{stage}.md` — merged via "
+                                f"#{gate_pr}. The doc was this unit's whole deliverable: closing "
+                                f"it, no `development` stage.")
+        return _with_workspace({**cmd_close_issue(gh, issue, repo_path, runner),
+                                "unit": "issue", "next_stage": None, "claimed": False,
+                                "doc_only": True}, ws)
     next_stage = STAGE_AFTER_GATE[stage]
     timestamp = _utc_now_marker()
     prefix = f"✅ Human review confirmed for `{stage}.md` — merged via #{gate_pr} — "
@@ -11651,6 +11677,22 @@ def _open_gate_cli(a) -> dict:
     return {**result, "title": title, "title_normalized": normalized}
 
 
+# Argument names that carry issue numbers (never a PR, line, limit or confidence).
+_FOCUS_ARGS = ("issue", "epic", "number", "initiative", "parent", "lld_task", "waits_on",
+               "skip_epic", "dep", "by", "blocks", "blocked_by")
+
+
+def _focus_numbers(args) -> set:
+    """The issue numbers a command names, for `GitHubRest.issue_list`'s closed-issue reads."""
+    out: set = set()
+    for name in _FOCUS_ARGS:
+        value = getattr(args, name, None)
+        for v in value if isinstance(value, (list, tuple)) else [value]:
+            if isinstance(v, int) and not isinstance(v, bool):
+                out.add(v)
+    return out
+
+
 def main(argv: Optional[list] = None) -> int:
     if not os.environ.get("GITHUB_TOKEN"):
         sources = " or ".join(([f"tokenEnv (${TOKEN_ENV})"] if TOKEN_ENV else [])
@@ -11808,7 +11850,10 @@ def main(argv: Optional[list] = None) -> int:
                     help=repo_path_help)
     p.add_argument("--gate-pr", type=int, required=True)
     p.add_argument("--stage", required=True, choices=["product", "architecture"])
-    p.set_defaults(func=lambda a: cmd_pass_gate(get_work_item_provider(), a.repo_path, a.issue, a.gate_pr, a.stage))
+    p.add_argument("--doc-only", action="store_true",
+                    help="The gate doc is the unit's whole deliverable: close it, no development")
+    p.set_defaults(func=lambda a: cmd_pass_gate(get_work_item_provider(), a.repo_path, a.issue,
+                                                a.gate_pr, a.stage, doc_only=a.doc_only))
     p = sub.add_parser("skip-gate")
     p.add_argument("issue", type=int)
     p.add_argument("--stage", required=True, choices=["architecture"])
@@ -12167,8 +12212,8 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("epic", type=int)
     p.add_argument("--title", required=True)
     p.add_argument("--body", required=True)
-    p.add_argument("--blocks", type=int, nargs="*", default=[],
-                    help="Units that must wait for the revision")
+    p.add_argument("--blocks", type=int, nargs="+", action="extend", default=[],
+                    help="Units that must wait for the revision (repeatable)")
     p.add_argument("--repo-path", default=".", help="The shared main checkout")
     p.set_defaults(func=lambda a: cmd_open_arch_revision(
         get_work_item_provider(), a.epic, a.title, a.body, a.blocks, a.repo_path))
@@ -12379,6 +12424,8 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_end_cloud_session(get_work_item_provider(), a.epic,
                                                         a.outcome, a.note, a.waits_on))
     args = parser.parse_args(argv)
+    _FOCUS.clear()
+    _FOCUS.update(_focus_numbers(args))
     refusal = comment_cap_refusal(args)
     if refusal:
         print(json.dumps(refusal))
