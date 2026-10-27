@@ -101,8 +101,9 @@ drives an unlinked issue. Unlink closed sub-issues, or rotate a standing epic be
   edge each. An unparsable dependency is refused (`dependency_parse_warnings`) and
   `finish-lld` stops: fix the line on `epic-<n>` and re-run.
 - **`Realises: #<n>, #<m>`**, only when the Task delivers existing issues. They are blocked on
-  the Task and closed when its PR merges or `close-issue` closes it. Unknown or closed numbers
-  go to `realises_failed`.
+  the Task and closed when its PR merges or `close-issue` closes it. A number that is not a
+  pre-existing issue goes to `realises_failed`; an already-closed one is listed in `realises`
+  (`blocked: false`, `reason: "already closed"`).
 - **Two standing Tasks per Epic, Integration-test and e2e-test**, run after the functional
   Tasks and run only the specs they add (`references/verification-rules.md`, "Test scope").
   None under `testTasks: false` ("Initiative branch").
@@ -135,8 +136,9 @@ A Task is what `development` loads into one fresh context and `pr-review` judges
   - `backend/src/notifications/**`
   ```
 - **Contract:** a shared contract no path shows (an API shape, a pinned count, a DB invariant)
-  gets a `Contract` heading with `reads:` / `changes:` bullets. A `changes:` that another
-  in-flight Task reads or changes counts as an overlap.
+  gets a `Contract` heading with `reads:` / `changes:` bullets. `lld-review`, and you before
+  running two Tasks at once, treat a `changes:` that another in-flight Task `reads:` or
+  `changes:` as a footprint overlap.
 - An Epic's `architecture.md` carries no Footprint.
 
 ## Architecture deviation escalation
@@ -154,7 +156,7 @@ premise) → revise:
    --found-by <stage>`. When the revision closes, resume its agent directly. **Never
    `set-stage` or `claim` it**: `verify-exit` would refuse. `transition`'s review start
    re-claims it (`reclaimed: true`).
-4. Valve: count this pairing on its own at `pipeline.escalation` (default 3 / 6). The third
+4. Valve: count the `lld`/`development` ↔ `architecture-revision` pairing on its own at `pipeline.escalation` (default 3 / 6). The third
    unsettled deviation brings the replacement architect; the sixth → `mark-needs-human` **on
    the Epic**.
 
@@ -172,8 +174,8 @@ All other rework: `references/rework.md`.
 - A non-standing Epic owns `epic-<n>`, created from `main` on first need. **Its Tasks branch
   from and merge into it.** At close it takes one merge from `origin/main` and merges to its
   base once.
-- **Straight into `main`:** standing children, parentless issues, Product-Roadmap Tasks (into
-  `initiative-<i>` under an initiative branch). `integration_base()` decides from the native
+- **Straight into `main`:** standing children, parentless issues, Product-Roadmap Tasks. A
+  standing Epic under an initiative branch sends its children to `initiative-<i>`. `integration_base()` decides from the native
   parent, never a label or branch name.
 - Design docs reach `epic-<n>` only through design PRs and `create-lld-tasks`' numbering
   commit. Never commit to it by hand or delete it while the Epic is open.
@@ -189,13 +191,16 @@ owns `initiative-<i>`. Without it, Epics close into `main`.
 - **Its Epics cut from, sync with and close into `initiative-<i>`** (`close-epic` result
   `base`). Each Epic closes on its own.
 - `next-action <initiative> --sync-epic` keeps it current (`unit: initiative`). On `conflict`:
-  `worktree-add <i> --unit initiative`, merge `origin/main`, resolve, push, call again.
+  `worktree-add <i> --unit initiative`, merge `origin/main`, resolve (delegate `development` for anything beyond a mechanical fix),
+  push, call again.
 - `close-epic` into it skips the profile's `deferSuites` (`deferred_to_initiative`); they run
   on the initiative PR. `testTasks: false` drops both standing test Tasks.
 - **Into `main` once, after every cut Epic closed:** `references/initiatives.md`, "Closing an
   Initiative", step 0. `close-initiative` refuses until it lands, and while
   `origin/initiative-<i>` holds commits `main` lacks (`unlanded_commits`), even if the label
-  was removed.
+  was removed. Label removed mid-flight: restore the label, then `open-initiative-pr` /
+  `merge-initiative-pr`, or land the branch. A later Epic closing into a re-created branch
+  un-lands it (a new PR is owed).
 
 ## Epic closing
 `pipeline.epicClose.auto` (default `false`): **off**, closing is the operator's call; **on**,

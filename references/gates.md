@@ -10,12 +10,12 @@
 - The profile decides whether a gate needs a human ("Waived gates"). A standing child routed
   past a stage never reaches its gate.
 
-Passing or skipping Gate B:
+Passing or skipping a gate:
 
 - Standing child or parentless issue: claims `development`.
 - Phase-Task: claims no stage. An Architecture-phase or revision Task's design PR merges into
   `epic-<n>` (by the human, or by `skip-gate` / `waive-gate` through `merge-design-pr`), and the
-  Task closes (`phase_task_complete: true`). A Product-Roadmap Task closes.
+  Task closes (`phase_task_complete: true`). A Product-Roadmap Task (Gate A) closes.
 - On `phase_task_complete: false`, read `reason` and `design_pr`. Fix the cause
   (`behind_base` → `sync-branch <n>`; `review_stale` → re-run the review on the new head and
   record it). Then re-run the command.

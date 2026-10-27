@@ -5,7 +5,7 @@ How an Initiative run cuts its Product-Roadmap Task and Epics, walks its Epics, 
 ## Cutting an Initiative's Product-Roadmap Task
 
 An Initiative never runs `product` itself. Right after it exists, cut its **one**
-Product-Roadmap Task:
+Product-Roadmap Task, unless it only groups engineering-driven Epics (then it has none):
 
 ```bash
 python3 "$SDLC" create-issue --parent <initiative-n> --title "Product Roadmap" \
@@ -93,7 +93,8 @@ When a `none` `reason` says every cut Epic is closed:
 2. **All met** (`clean`) → `python3 "$SDLC" close-initiative <initiative>`.
 3. **Anything unmet** (`rework`) → file the gap (a Task against the owning Epic, or judge it
    out of scope and say why), stop, and re-run from step 1 once fixed. When the owning Epic is
-   closed, file a `Bug` under the standing backlog Epic without asking, else a new gap Epic
-   under the Initiative.
+   closed, file it without asking: a `Bug` under the standing backlog Epic
+   (`create-issue --parent <standing epic> --type Bug`) if one exists, else a new gap Epic under
+   the Initiative.
 
 No human gate here: Gate A already approved `product.md`.

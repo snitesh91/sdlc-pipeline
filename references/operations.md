@@ -47,7 +47,7 @@ Revert the probe with `git restore <file>`. The Bash guard denies a review role 
 - Unit kind (Initiative / Epic / Task) comes **only** from `pipeline.classification` (default labels `type:initiative` / `type:epic` / `type:task`). A parentless `Feature` is not an Epic.
 - Create every issue with `create-issue --parent <n> --title .. --body .. --type <T> [--priority <P>] [--effort <E>]`. It sets every field below and the classification label (Priority/Effort from the flag, else `pipeline.issueDefaults`). A refusal lists the valid values.
 - On a post-create failure (`ok: false`), run the `repair-issue` command its `reason` gives. Never re-run `create-issue`.
-- Under a non-standing Epic, follow `create-issue` with `set-stage`.
+- Under a non-standing Epic, follow `create-issue` with `set-stage` (`finish-lld` stages the Tasks it creates; a closing-run `Bug` goes through `file-closing-delta`).
 - `audit-issues` lists open issues missing a field with each `repair` command, children first. Never let the container's repair hold up the children.
 
 | Field | Values | Rules |
@@ -90,7 +90,7 @@ Never close a dropped unit as completed. State why on the thread:
 
 - Every release path (`close-issue`, `merge-pr`, `mark-blocked`, `mark-needs-human`, `close-epic`) first runs `pipeline.worktrees.releaseCommand` inside the tree, when set (e.g. `make it-down`). It runs only on a tree about to be removed. A failure is reported (`release_command.ok: false`), never fatal. A tree released without it leaves that env for you to tear down.
 - On a terminal unit, `merge-pr` and `close-issue` run `cleanup`: worktrees, then branches whose work landed (unmerged work is kept, `retained_local_branch`). `close-epic` does the same for the Epic and its children; `prune-stale` sweeps every closed unit.
-- A failed deletion (not a keep) comes back as a top-level `warnings` list on `merge-pr`, `close-issue`, `close-epic`, `prune-stale` and their composites. Relay every line to the operator at once and again in Step 4.
+- A failed deletion (not a keep) comes back as a top-level `warnings` list on `merge-pr`, `close-issue`, `close-epic`, `prune-stale` and their composites. Relay every line to the operator at once and again in Step 4; the operator removes the branch.
 
 ## Assignee convention
 
@@ -106,7 +106,7 @@ This is a standing exception to any draft-PR rule in the operator's global `CLAU
 
 - **A phase-Task's design PR** merges inside `skip-gate`/`waive-gate`/`finish-lld`, or by the human at Gate B. `merge-pr` refuses a phase-Task. A gate PR the operator told you to merge: `merge-gate --operator-confirmed`.
 - Only the orchestrator merges, with `merge-pr`, after `pr-review` records clean. `merge-pr` does every post-merge write.
-- **A development PR authors no open Epic's design doc and touches no other Task's footprint.** `open-dev-pr` and `verify-exit` (`dev_pr_scope`) refuse it. A closed Epic's doc correction passes. A foreign-footprint path listed under `## Footprint deviations` passes as `acknowledged_deviations` for `pr-review` to judge. A design that must change needs an Architecture revision.
+- **A development PR authors no open Epic's design doc and touches no other Task's footprint.** `open-dev-pr` and `verify-exit` (`dev_pr_scope`) refuse it. A closed Epic's doc correction passes. An open Epic's design-doc path never passes as a deviation. A foreign-footprint path listed under `## Footprint deviations` passes as `acknowledged_deviations` for `pr-review` to judge. A design that must change needs an Architecture revision.
 - Never delete the per-issue docs folder after merge.
 - `merge-pr` is the only merge gate (no branch protection). It refuses on a non-passing check, a required suite with neither a passing check nor a fresh attestation, missing pipeline evidence (`missing_evidence`), or a stale base (`behind_base`: `references/parallelism.md`, "Git-conflict handling"). It pins the squash to the head SHA it read (`--match-head-commit`).
 - Pass `--run-id` to `merge-pr` so the terminal count books under this run.
@@ -117,7 +117,7 @@ This is a standing exception to any draft-PR rule in the operator's global `CLAU
 - **One rule** wherever a suite is checked (`transition` into `pr-review`, `pr-checks`, `merge-pr`, `close-epic`): a passing GHA check for its workflow on the PR head **or** a `record-local-ci` attestation for that head. Which suites a stage runs at all: `references/verification-rules.md`, "Test scope".
 - Attest with `record-local-ci --pr <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`, only for a suite actually run and passed. Its refusals name the fix.
 - An attestation counts only while `<sha>` is the PR head. A push makes it stale, unless the push only merged files outside the suite's coverage (`carried_attestation_forward`). Re-run and re-attest only when neither an attestation nor a passing check holds.
-- `transition --expect-stage pr-review` applies the rule after sync. It returns `held` with a per-suite `check`:
+- `transition --expect-stage pr-review` applies the rule after sync. It returns `held` with a per-suite `check` (`pending` / `failing` / `skipped` / `missing`) and `reason`:
   - `pending`: wait, re-run `transition`.
   - `failing`: resume `development`.
   - `missing`: no PR-level CI; run the suite and `record-local-ci` (or see `missing-checks` below).

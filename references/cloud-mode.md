@@ -24,7 +24,7 @@ decides which side owns an Epic; the two never work on the same Epic.
 
 ## `placement_mismatch`
 
-A guarded command exits 1 with `{"error": "placement_mismatch", ..., "hint"}`. Stop driving that
+A guarded command exits 1 with `{"error": "placement_mismatch", "session_placement", "signal", "unit_placement", "epic", "hint"}`. Stop driving that
 Epic, relay `hint`, and start nothing on it. Never set `SDLC_PLACEMENT` to pass it; only the
 operator sets it, for a misdetected session.
 
@@ -138,7 +138,7 @@ laptop Initiative run keeps the Initiative's own work and gives each Epic its ow
   gate PR merged, reviewed or pushed. An end marker with no waits waits for new GitHub activity.
   `--relaunch` overrides; `survey.relaunch` lists ready ones.
 - **`--allow-overlap`** skips the footprint checks (marker `overlap=1`). Operator's word only.
-- **A session started by hand:** `record-cloud-session <epic> --session <url|session_…>`.
+- **A session started by hand:** `record-cloud-session <epic> --session <url|session_…>` (adds the cloud label, posts the launch marker with `manual=1`).
 - **Idempotent:** a live session is never relaunched (`already_running`). `ok: false` with
   `output_tail`: no session id printed; relay the tail.
 - **`none`** names each Epic's cloud state; report and end. Re-run `/sdlc:run <initiative>` to
