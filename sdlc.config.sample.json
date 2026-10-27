@@ -204,7 +204,7 @@
     },
     "_models_comment": "Optional `models` ({\"<role>\": \"opus|sonnet|haiku\"}) and `fanout` ({\"<review-role>|development\": {\"allowed\", \"maxChildren\", \"model\", \"axisModels\"}}; `development` is off by default and turns on parallel implementation workers) override the plugin's hooks/model_policy.json per role; a hook enforces the result on every Agent call.",
     "workItemProvider": {
-      "_comment": "Which WorkItemProvider get_work_item_provider() returns. Only \"github\" is implemented -- Jira is a documented seam (README.md, \"Initiative-driven lifecycle\"), not built. Naming anything else is a refusal, not a silent fallback.",
+      "_comment": "Which WorkItemProvider get_work_item_provider() returns. Only \"github\" is implemented -- Jira is a documented seam (README.md, \"How it runs\"), not built. Naming anything else is a refusal, not a silent fallback.",
       "type": "github"
     },
     "_classification_comment": "How classify_unit tells an Initiative from an Epic from a Task; an issue matching no rule is \"other\", never a guess. Shown label-based; create-issue adds the kind's label itself. Either way every created issue also gets its native Issue Type, so the repo must be in an org with those types provisioned -- to classify by type instead, set a rule's \"field\" to \"issueType\" and \"value\" to the type's exact name. This is the ONLY way an Epic is recognised -- a standing or legacy epic needs the epic rule to match too, alongside its profile label.",

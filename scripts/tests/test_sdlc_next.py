@@ -974,7 +974,8 @@ def test_handoff_to_pr_review_posts_marker_without_referencing_a_stage_doc():
     runner.prefix_responses[("gh", "issue", "view", "42")] = '{"comments": []}'
     runner.prefix_responses[("gh", "pr", "checks", "77")] = "[]"
     gh = GitHub(runner=runner)
-    result = cmd_handoff_to_pr_review(gh, 42, 77, "142 passed, 0 failed.")
+    summary = "142 passed, 0 failed.\n\n### Acceptance criteria coverage\n| AC | test |"
+    result = cmd_handoff_to_pr_review(gh, 42, 77, summary)
     assert result == {"issue": 42, "pr": 77, "queued_for": "pr-review"}
     posts = [c for c in runner.calls if c[:3] == ["gh", "issue", "comment"]]
     assert len(posts) == 1
@@ -982,8 +983,9 @@ def test_handoff_to_pr_review_posts_marker_without_referencing_a_stage_doc():
     assert "development.md" not in body
     assert "testing.md" not in body
     assert "docs/sdlc/issue-42" not in body
-    assert body.startswith("✅ Development complete. 142 passed, 0 failed. ")
-    assert "PR #77 is queued for `pr-review`." in body
+    # The summary is the handoff comment, on its own lines after the opening sentence.
+    assert body.startswith("✅ Development complete. PR #77 is queued for `pr-review`.\n\n"
+                           "142 passed, 0 failed.\n\n### Acceptance criteria coverage")
     assert "<!-- stage-transition: development->pr-review @ " in body
 
 
@@ -6683,3 +6685,14 @@ def test_merge_pr_sets_the_terminal_fields_on_the_closed_issue():
 def test_pipeline_config_defaults_the_orchestrator_model_from_the_policy():
     import sdlc_next
     assert sdlc_next.PIPELINE["orchestrator"]["model"] == sdlc_next._MODEL_POLICY["orchestrator"]["model"]
+
+
+def test_handoff_refuses_a_summary_with_no_coverage_table():
+    """Regression: a one-sentence --summary left pr-review with no criterion->test map."""
+    from sdlc_next import cmd_handoff_to_pr_review
+    from tests.test_sdlc_next import ScriptedRunner
+    from sdlc_next import GitHub
+    runner = ScriptedRunner()
+    result = cmd_handoff_to_pr_review(GitHub(runner=runner), 42, 77, "Built it; 142 passed.")
+    assert result["refused"] == "no_coverage_table" and "--summary" in result["hint"]
+    assert runner.calls == []  # refused before any tracker call

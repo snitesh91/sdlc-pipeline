@@ -590,6 +590,11 @@ ROLE_DENIED = [
     ("sdlc:design-review", "git -C /w merge origin/main", "read-only on the branch"),
     ("sdlc:product-review", "git reset --hard HEAD~1", "read-only on the branch"),
     ("sdlc:pr-review", "git checkout -- src/a.ts", "read-only on the branch"),
+    # Any branch move or reset, not only --hard / `checkout --` (Fable review 2026-10-27).
+    ("sdlc:pr-review", "git checkout issue-5", "read-only on the branch"),
+    ("sdlc:design-review", "git -C /w switch epic-9", "read-only on the branch"),
+    ("sdlc:product-review", "git reset HEAD~1", "read-only on the branch"),
+    ("sdlc:development", CP + "mark-issue-closed 5", "close-issue"),
 ]
 
 
@@ -1013,7 +1018,22 @@ def test_agent_guard_forces_fanout_model(tmp_path, sdlc_repo):
     _parent_transcript(tmp_path, "p1", "ROLE: arch-review ISSUE: 5\nReview")
     out = launch(sdlc_repo, tmp_path, "general-purpose", model="sonnet",
                  parent=("p1", "sdlc:design-review"))
-    assert forced_model(out) == "opus" and out["updatedInput"]["prompt"] == "do it"
+    assert forced_model(out) == "opus"
+    assert out["updatedInput"]["prompt"] == "do it PARENT: design-review ISSUE: 5"
+
+
+@pytest.mark.parametrize("parent", ["sdlc:pr-review", "sdlc:product-review"])
+def test_agent_guard_stamps_review_fanout_children(tmp_path, sdlc_repo, parent):
+    _parent_transcript(tmp_path, "rv", "ROLE: pr-review ISSUE: 9\nReview")
+    out = launch(sdlc_repo, tmp_path, "general-purpose", model="opus", parent=("rv", parent),
+                 prompt="AXIS: edges\nFind gaps")
+    # Stamped even when the model already matches, so the guards can hold the child read-only.
+    assert out["permissionDecision"] == "allow"
+    assert out["updatedInput"]["prompt"] == f"AXIS: edges PARENT: {parent[5:]} ISSUE: 9\nFind gaps"
+    # The axis stays on the first line, so SubagentStop releases this child's own slot.
+    sys.path.insert(0, HOOKS)
+    from _common import prompt_header
+    assert prompt_header(out["updatedInput"]["prompt"])["axis"] == "edges"
 
 
 def test_agent_guard_axis_override(tmp_path):
@@ -1127,10 +1147,13 @@ def test_agent_guard_development_workers_must_be_dev_workers(tmp_path):
                                parent=("dev3", "sdlc:development"))) == "sonnet"
 
 
-def test_agent_guard_dev_worker_only_from_development(tmp_path, sdlc_repo):
-    out = launch(sdlc_repo, tmp_path, "sdlc:dev-worker", model="sonnet")
-    assert out["permissionDecision"] == "deny" and "only by an sdlc:development" in \
-        out["permissionDecisionReason"]
+def test_agent_guard_dev_worker_from_development_or_orchestrator(tmp_path, sdlc_repo):
+    # The orchestrator launches slice workers after a `fanout: unavailable` hand-back.
+    out = launch(sdlc_repo, tmp_path, "sdlc:dev-worker", model="sonnet",
+                 prompt="AXIS: api ISSUE: 12\nBuild the slice")
+    assert out is None or out["permissionDecision"] == "allow"
+    out = launch(sdlc_repo, tmp_path, "sdlc:dev-worker", model="sonnet", prompt="Build it")
+    assert out["permissionDecision"] == "deny" and "AXIS: <slice>" in out["permissionDecisionReason"]
     out = launch(sdlc_repo, tmp_path, "sdlc:dev-worker", model="sonnet", parent=("r1", "sdlc:pr-review"))
     assert out["permissionDecision"] == "deny"
 
@@ -1217,6 +1240,18 @@ def test_agent_guard_denied_launch_waits_on_the_holders_and_reclaims_when_one_re
     # A child of a parent holding no slots frees nothing and leaves no file behind.
     _child_stop(tmp_path, sdlc_repo, "c2", "nobody", "AXIS: flows\nGo")
     assert not (tmp_path / "data" / "fanout" / "nobody").exists()
+
+
+def test_stamped_review_child_releases_its_own_axis_slot(tmp_path, sdlc_repo):
+    _parent_transcript(tmp_path, "rv2", "ROLE: pr-review ISSUE: 9\nReview")
+    prompts = {}
+    for axis in ("blind", "edges"):
+        out = launch(sdlc_repo, tmp_path, "general-purpose", model="opus",
+                     parent=("rv2", "sdlc:pr-review"), prompt=f"AXIS: {axis}\nGo")
+        prompts[axis] = out["updatedInput"]["prompt"]
+    # The later child finishes first: its own slot frees, not the oldest one.
+    _child_stop(tmp_path, sdlc_repo, "c-edges", "rv2", prompts["edges"])
+    assert json.loads((tmp_path / "data" / "fanout" / "rv2").read_text()) == ["blind"]
 
 
 def test_agent_guard_applies_the_stricter_cap_when_the_parent_role_is_unreadable(tmp_path, sdlc_repo):
@@ -1381,7 +1416,7 @@ def test_subagent_start_single_doc_root_output_is_unchanged(sdlc_repo, tmp_path)
     ctx = _start_ctx(sdlc_repo, tmp_path, "ROLE: development ISSUE: 2011 EPIC: 1994",
                      hints={"2011": {"docRoot": TIJORI_DOCS}})
     assert "docRoot=docs/sdlc, requirementsDir=None" in ctx
-    assert "doc-root" not in ctx and "resolved for" not in ctx and len(ctx.splitlines()) == 4
+    assert "doc-root" not in ctx and "resolved for" not in ctx and len(ctx.splitlines()) == 6
 
 
 @pytest.fixture
@@ -1429,7 +1464,7 @@ def test_subagent_start_is_unchanged_without_initiative_profiles(sdlc_repo, tmp_
     hint = {"initiative": 1994, "name": "tijori", "branch": True, "testTasks": False}
     ctx = _initiative_ctx(sdlc_repo, tmp_path, "ROLE: lld ISSUE: 2012 EPIC: 1994",
                           hints={"2012": hint})
-    assert "test Tasks" not in ctx and len(ctx.splitlines()) == 4
+    assert "test Tasks" not in ctx and len(ctx.splitlines()) == 6
 
 
 # --- metrics (SubagentStop / SessionEnd) ------------------------------------------------
@@ -1867,11 +1902,17 @@ def test_a_fanout_handoff_result_is_a_valid_sdlc_result():
 
 # --- edit_guard: a review role edits only inside its detached review worktree ---------------
 
-def edit_guard(path, cwd, agent_type=None, tool="Edit", root=None):
-    payload = {"tool_name": tool, "tool_input": {"file_path": path}, "tool_use_id": "t1",
-               "cwd": cwd}
+def edit_guard(path, cwd, agent_type=None, tool="Edit", root=None, prompt="ROLE: pr-review ISSUE: 12\nReview"):
+    key = "notebook_path" if tool == "NotebookEdit" else "file_path"
+    session = tempfile.mkdtemp(prefix="sdlc-edit-guard-")
+    payload = {"tool_name": tool, "tool_input": {key: path}, "tool_use_id": "t1",
+               "cwd": cwd, "transcript_path": os.path.join(session, "s.jsonl")}
     if agent_type:
         payload.update(agent_id="a1", agent_type=agent_type)
+        if prompt is not None:
+            os.makedirs(os.path.join(session, "s", "subagents"))
+            with open(os.path.join(session, "s", "subagents", "agent-a1.jsonl"), "w") as f:
+                f.write(json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n")
     proc = run_hook("edit_guard.py", payload)
     assert proc.returncode == 0, proc.stderr
     if not proc.stdout.strip():
@@ -1890,20 +1931,24 @@ def review_repo(tmp_path):
     return repo, root
 
 
-@pytest.mark.parametrize("tool", ["Edit", "Write", "MultiEdit"])
+@pytest.mark.parametrize("tool", ["Edit", "Write", "MultiEdit", "NotebookEdit"])
 def test_edit_guard_allows_a_reviewer_inside_its_review_worktree(review_repo, tool):
     repo, root = review_repo
     path = str(root / "sdlc-review-12" / "src" / "guard.ts")
     assert edit_guard(path, repo, "sdlc:pr-review", tool=tool) is None
 
 
-@pytest.mark.parametrize("where", ["dev", "main", "prefix-dir", "sibling"])
+@pytest.mark.parametrize("where", ["dev", "main", "prefix-dir", "sibling", "other-unit",
+                                   "prefix-only", "longer-number"])
 def test_edit_guard_denies_a_reviewer_elsewhere(review_repo, where):
     repo, root = review_repo
     path = {"dev": str(root / "sdlc-dev-12" / "src" / "guard.ts"),
             "main": os.path.join(repo, "src", "guard.ts"),
             "prefix-dir": str(root / "sdlc-review-12"),
-            "sibling": str(root / "sdlc-review-12" / ".." / "sdlc-dev-12" / "a.ts")}[where]
+            "sibling": str(root / "sdlc-review-12" / ".." / "sdlc-dev-12" / "a.ts"),
+            "other-unit": str(root / "sdlc-review-13" / "a.ts"),
+            "prefix-only": str(root / "sdlc-review-evil" / "a.ts"),
+            "longer-number": str(root / "sdlc-review-123" / "a.ts")}[where]
     for role in ("sdlc:pr-review", "sdlc:design-review", "sdlc:product-review"):
         reason = edit_guard(path, repo, role)
         assert reason and "review worktree" in reason
@@ -1915,5 +1960,145 @@ def test_edit_guard_leaves_other_roles_alone(review_repo, agent):
     assert edit_guard(os.path.join(repo, "src", "x.ts"), repo, agent) is None
 
 
-def test_edit_guard_is_a_no_op_outside_a_driven_repo(plain_repo):
-    assert edit_guard(os.path.join(plain_repo, "x.ts"), plain_repo, "sdlc:pr-review") is None
+def test_edit_guard_fails_closed_for_a_reviewer_outside_a_driven_repo(plain_repo):
+    reason = edit_guard(os.path.join(plain_repo, "x.ts"), plain_repo, "sdlc:pr-review")
+    assert reason and "no sdlc-pipeline.config.json" in reason
+    assert edit_guard(os.path.join(plain_repo, "x.ts"), plain_repo, "sdlc:development") is None
+
+
+@pytest.mark.parametrize("prompt", [None, "Review this PR"])
+def test_edit_guard_denies_a_reviewer_with_no_unit_number(review_repo, prompt):
+    repo, root = review_repo
+    reason = edit_guard(str(root / "sdlc-review-12" / "a.ts"), repo, "sdlc:pr-review",
+                        prompt=prompt)
+    assert reason and "ISSUE: <n>" in reason
+
+
+def test_edit_guard_denies_a_reviewer_with_no_path(review_repo):
+    repo, root = review_repo
+    reason = edit_guard("", repo, "sdlc:pr-review")
+    assert reason and "review worktree" in reason
+
+
+def test_edit_guard_holds_a_review_fanout_child_read_only(review_repo):
+    repo, root = review_repo
+    path = str(root / "sdlc-review-12" / "a.ts")
+    reason = edit_guard(path, repo, "general-purpose",
+                        prompt="PARENT: pr-review ISSUE: 12\nAXIS: edges\nFind gaps")
+    assert reason and "fan-out child is read-only" in reason
+    # A general-purpose agent nobody stamped (no review parent) stays unguarded.
+    assert edit_guard(path, repo, "general-purpose", prompt="AXIS: edges\nFind gaps") is None
+    assert edit_guard(path, repo, "general-purpose",
+                      prompt="PARENT: development ISSUE: 12\nGo") is None
+
+
+def test_bash_guard_holds_a_review_fanout_child_read_only(tmp_path, sdlc_repo):
+    sub = tmp_path / "s" / "subagents"
+    sub.mkdir(parents=True)
+    for agent, prompt in (("child", "PARENT: pr-review ISSUE: 12\nAXIS: edges"),
+                          ("orch", "PARENT: pr-review ISSUE: 12 AXIS: edges\nBrief"),
+                          ("lld", "PARENT: `lld-review` ISSUE: `12` AXIS: footprints\nBrief"),
+                          ("free", "AXIS: edges")):
+        (sub / f"agent-{agent}.jsonl").write_text(json.dumps(
+            {"type": "user", "message": {"role": "user", "content": prompt}}) + "\n")
+
+    def run(agent, command):
+        proc = run_hook("bash_guard.py", {
+            "tool_name": "Bash", "tool_input": {"command": command}, "cwd": sdlc_repo,
+            "agent_id": agent, "agent_type": "general-purpose",
+            "transcript_path": str(tmp_path / "s.jsonl")})
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout.strip()
+
+    assert "read-only" in run("child", "git commit -m x")
+    assert "orchestrator" in run("child", 'python3 "$SDLC" record-pr-review 12 --verdict clean')
+    assert run("child", 'python3 "$SDLC" pr-checks 12') == ""
+    # An orchestrator-launched axis agent (cloud fallback) carries the same header.
+    assert "read-only" in run("orch", "git commit -m x")
+    # A design-review child names its parent by stage (arch-review / lld-review), backticked or not.
+    assert "read-only" in run("lld", "git commit -m x")
+    assert run("free", "git commit -m x") == ""  # unstamped agent: not a review child
+
+
+def _tools_ctx(sdlc_repo, env, agent_type="sdlc:development"):
+    proc = run_hook("subagent_start.py", {"agent_id": "a1", "agent_type": agent_type,
+                                          "cwd": sdlc_repo},
+                    env={"CLAUDE_PLUGIN_ROOT": "/plug", "SDLC_PLACEMENT": "",
+                         "CLAUDE_CODE_REMOTE": "", **env})
+    return json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_subagent_start_says_whether_the_agent_tool_exists(sdlc_repo):
+    assert "Agent tool: available." in _tools_ctx(sdlc_repo, {})
+    cloud = _tools_ctx(sdlc_repo, {"SDLC_PLACEMENT": "cloud"})
+    assert "Agent tool: unavailable" in cloud and "no Explore" in cloud
+    # Roles with no Agent in their tools: list get no line at all.
+    assert "Agent tool" not in _tools_ctx(sdlc_repo, {}, "sdlc:dev-worker")
+
+
+def test_subagent_start_adds_the_ste_lite_line(sdlc_repo):
+    assert "STE-lite: one instruction per sentence" in _tools_ctx(sdlc_repo, {})
+
+
+def test_subagent_start_adds_the_graphify_line_only_with_a_graph(sdlc_repo):
+    assert "graphify" not in _tools_ctx(sdlc_repo, {})
+    graph = os.path.join(sdlc_repo, "graphify-out")
+    os.makedirs(graph)
+    open(os.path.join(graph, "graph.json"), "w").write("{}")
+    ctx = _tools_ctx(sdlc_repo, {})
+    assert "Run `graphify query` before the first Grep" in ctx and graph in ctx
+
+
+def test_done_with_concerns_needs_a_one_line_concern():
+    sys.path.insert(0, HOOKS)
+    from _common import sdlc_result
+    base = 'SDLC-RESULT: {"issue": 7, "stage": "development", "outcome": "done-with-concerns"'
+    result, problem = sdlc_result(base + ', "concern": "retry path untested under load"}')
+    assert problem is None and result["concern"].startswith("retry")
+    for tail in ("}", ', "concern": ""}', ', "concern": "' + "x" * 201 + '"}'):
+        assert sdlc_result(base + tail)[0] is None
+    # Positive control: plain done needs no concern.
+    assert sdlc_result('SDLC-RESULT: {"issue": 7, "stage": "development", "outcome": "done"}')[1] is None
+
+
+def test_done_with_concerns_is_development_only():
+    sys.path.insert(0, HOOKS)
+    from _common import sdlc_result
+    line = ('SDLC-RESULT: {"issue": 7, "stage": "lld", "outcome": "done-with-concerns", '
+            '"concern": "x"}')
+    assert "development outcome" in sdlc_result(line)[1]
+
+
+def test_prompt_header_strips_backticks_from_every_value():
+    from _common import prompt_header
+    head = prompt_header("ROLE: `lld-review` ISSUE: `#12` EPIC: **7**\nbody")
+    assert head == {"role": "lld-review", "issue": "12", "epic": "7"}
+
+
+def test_subagent_start_gives_arch_review_its_skip_threshold(sdlc_repo, tmp_path):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "skip-thresholds.cache").write_text(json.dumps({"12": 85}))
+
+    def ctx(prompt):
+        proc = run_hook("subagent_start.py", {"agent_id": "a1", "agent_type": "sdlc:design-review",
+                                              "cwd": sdlc_repo, "prompt": prompt},
+                        env={"SDLC_RUNS_DIR": str(runs)})
+        return json.loads(proc.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    assert "sdlc: Skip threshold: 85 " in ctx("ROLE: `arch-review` ISSUE: `12` EPIC: 9")
+    # Positive controls: lld-review gets no bar; an unrecorded unit gets none either.
+    assert "Skip threshold" not in ctx("ROLE: lld-review ISSUE: 12 EPIC: 9")
+    assert "Skip threshold" not in ctx("ROLE: arch-review ISSUE: 13 EPIC: 9")
+
+
+def test_reviewers_may_still_read_and_restore(sdlc_repo):
+    # Positive control: the probe's revert and read-only git stay allowed.
+    for cmd in ("git restore src/a.ts", "git diff origin/main...HEAD", "git show origin/issue-5:a.md",
+                "git fetch origin"):
+        assert guard(cmd, sdlc_repo, "sdlc:pr-review") is None, cmd
+
+
+def test_mark_issue_closed_is_denied_to_the_run_driving_main_thread(sdlc_repo, live):
+    assert "close-issue" in guard(CP + "mark-issue-closed 5", sdlc_repo, **live)
+    assert guard(CP + "close-issue 5 --repo-path /r", sdlc_repo, **live) is None

@@ -1,84 +1,57 @@
 <!--
-Template for <docRoot>/issue-<n>/product.md -- the product stage's requirements
-document, written by an Initiative's Product-Roadmap Task (covering the whole
-Initiative, by functional area) or by a standing-epic child (covering itself). An
-Epic has no product.md of its own.
+Template for <docRoot>/issue-<n>/product.md: the requirements document (IRD) of an
+Initiative's Product-Roadmap Task (the whole Initiative, by functional area) or of a
+standing child (itself). An Epic has no product.md of its own.
 
-This document is an IRD -- an initial requirements document, in the same house style as
-the repo's existing requirements documents (<requirements-dir>/IRD-*.md). Read the repo's
-worked-example IRD before writing one; its section order is the one below.
+The reader is a product owner who does not read code. Rules: the sdlc plugin's
+references/design-doc-rules.md, "Document altitude". In short:
+  - Target length (guidance): about 800 words for a standing child; about 1,500 for an
+    Initiative of one Epic; about 2,500 for several. Keep it as short as the content allows.
+  - Behaviour the user sees and business rules only. No code, paths, endpoints, tables,
+    JSON, error codes, config keys, tool or component names, vendor APIs, or
+    implementation choices.
+  - No pipeline talk, no "what changed" section, no "changes to earlier documents"
+    section (link the earlier document under Related), no hedging.
+  - Each fact once, in the section that owns it.
 
-Fill every section in order. A section with genuinely nothing in it is dropped, not kept
-as a placeholder -- except Open Questions, which stays as "None" so a reader knows the
-question was asked.
-
-What this document is NOT (see "Document altitude" in the sdlc plugin's
-references/design-doc-rules.md):
-  - not a report on the pipeline -- no stage names, no gate references, no field names,
-    no "this document creates no children", no notes on what the product stage did or did
-    not do. A reader must not be able to tell from the prose that an automated pipeline
-    produced it.
-  - not a design document -- state the capability and the observable behaviour that is
-    required; the platform, vendor, service and mechanism that deliver it are the
-    architecture stage's decisions, not requirements.
-  - not a revision log -- there is no "what changed since the last version" section.
-    Revisions are recorded in the "Last revised" line and, where a requirement genuinely
-    reversed, in the Decisions Log entry itself.
-  - not repetitive -- each fact (a limit, a shape, a rule, a ruling) is stated in full in
-    the one section that owns it; every other section refers to it ("the cap in section 2")
-    instead of restating it.
-  - not hedged -- no confidence disclaimers, no "this is a hypothesis" framing. Where a
-    claim is unverified, say what is unverified in that specific requirement, or put it
-    in Open Questions.
-
-Delete this comment block before committing the real document.
+Fill the sections in this order. Drop a section with nothing in it, except Open
+Questions, which stays as "None". Delete this comment block before committing.
 -->
 
-# <IRD title — plain product language, no issue number>
+# <IRD title, plain product language, no issue number>
 
 **Status**: Draft
 **Date**: <YYYY-MM-DD>
-**Last revised**: <YYYY-MM-DD — one line on what changed; omit on a first draft>
+**Last revised**: <YYYY-MM-DD, one line on what changed; omit on a first draft>
 **Tracking**: <owner>/<repo>#<n>
-**Related**: <IRD-00X, other epics this depends on or hands scope to — omit if none>
+**Related**: <earlier IRDs or epics this depends on, replaces or hands scope to; omit if none>
 
 ---
 
 ## Background
 
-<!-- Why this work exists, in prose a non-engineer can follow. What is true today, what is
-     wrong or missing about it, and who feels it. Two to five paragraphs. This is the first
-     thing a reviewer reads -- it replaces any summary box. Why, not what: the requirements
-     themselves belong in Functional Scope. -->
+<!-- Why this work exists, for a non-engineer. What is true today, what is wrong or
+     missing, and who feels it. One to three short paragraphs. -->
 
 ---
 
 ## Goals
 
-<!-- Outcome bullets, not features, one line each. Each one is something that becomes true
-     for a user, an operator, or the business when this is done -- not a summary of the
-     scope below. -->
+<!-- One line each: an outcome for a user, an operator or the business, with its
+     observable success signal, plus a counter-signal where the goal can be gamed. -->
 
-- ...
+- <outcome>. **Signal:** <what we observe>. **Counter-signal:** <what must not get worse>
 
 ---
 
 ## Functional Scope
 
-<!-- The body of the document. One numbered subsection per functional area, each holding the
-     requirements for that area as prose plus bullets. Requirements state observable
-     behaviour: what the system must do, what a user or operator must be able to do, what
-     must be configurable without a code change. Name the capability, not the product that
-     provides it.
-
-     Detail belongs here, inline -- the architecture stage reads this document in full. Do
-     not hide requirement detail in collapsed <details> blocks. -->
+<!-- One numbered subsection per functional area. Each: what the user can do and what
+     they see, and the business rules (who may, how many, how often, what happens when it
+     fails). Name the capability, never the product, component or mechanism behind it.
+     A few bullets per area; a long area is a sign to split. -->
 
 ### 1. <Area>
-
-...
-
-### 2. <Area>
 
 ...
 
@@ -86,19 +59,18 @@ Delete this comment block before committing the real document.
 
 ## User Experience
 
-<!-- Only for user-facing or operator-facing work. Screens, states, and what the person sees
-     at each step -- empty states and error states included. An ASCII mock-up or a linked
-     image is worth more than a paragraph; include one wherever the layout matters. Do not
-     draw a system flow diagram here: how the parts connect is architecture's picture to
-     draw, not this document's. Drop the whole section for work with no human-facing
-     surface. -->
+<!-- Only for user-facing or operator-facing work. Each new or changed screen or message:
+     what the person sees at each step, empty and error states included. An ASCII mock-up
+     where layout matters. Describe what a message must convey; quote exact wording only
+     when the wording itself is the decision. Drop the section when nothing is
+     user-facing. -->
 
 ---
 
 ## Non-Functional Requirements
 
-<!-- Performance, availability, security, privacy, retention, cost ceilings, operability.
-     Each one measurable -- a number, a bound, or a stated observable condition. -->
+<!-- What the user or business can observe: speed, availability, privacy, retention,
+     cost ceiling. Each with a number or an observable condition. -->
 
 - ...
 
@@ -106,11 +78,8 @@ Delete this comment block before committing the real document.
 
 ## Constraints
 
-<!-- Only genuine constraints the work must respect: an operator ruling, a platform the
-     business has already committed to, a regulatory limit, a budget ceiling. Write each as
-     the constraint itself, never as a chosen solution ("must run with no persistent agent
-     host", not "use vendor X"), and do not repeat it in the Decisions Log. Drop the section
-     if there are none. -->
+<!-- Fixed limits the work must respect: an operator ruling, a platform the business has
+     committed to, a regulation, a budget. State the limit, not a solution. Drop if none. -->
 
 - ...
 
@@ -118,11 +87,9 @@ Delete this comment block before committing the real document.
 
 ## Acceptance Criteria
 
-<!-- Literal checklist, every item independently testable and written so a failing test can
-     be derived from it without reading any code. The architecture and development stages work from this list
-     directly. Name the behaviour and point at the Functional Scope item that holds its
-     detail rather than restating its limits. Number them AC1.. and group under a bold line
-     per functional area when the list runs long. -->
+<!-- One line each: an action a person takes in the product and what they then see.
+     Testable without reading code. No test-harness design, no implementation terms.
+     Number them AC1..; group under a bold line per functional area when long. -->
 
 - [ ] **AC1** — ...
 
@@ -130,8 +97,8 @@ Delete this comment block before committing the real document.
 
 ## Out of Scope
 
-<!-- What a reader might reasonably expect here and will not get, each with a one-line reason
-     and, where it exists, a pointer to the epic or IRD that owns it instead. -->
+<!-- What a reader might expect and will not get, each with a one-line reason and, where
+     one exists, the IRD or epic that owns it. -->
 
 - ...
 
@@ -139,9 +106,7 @@ Delete this comment block before committing the real document.
 
 ## Open Questions
 
-<!-- Ranked by how much the answer changes the work. Each carries why it matters and a stated
-     default, so it is answerable in seconds. Keep the section with "None" rather than
-     dropping it. -->
+<!-- Ranked by impact. Each with why it matters and a default. "None" if none. -->
 
 1. ...
 
@@ -149,8 +114,7 @@ Delete this comment block before committing the real document.
 
 ## Decisions Log
 
-<!-- Numbered, permanent, append-only. One line per decision with the reasoning compressed
-     into it -- the worked-example IRD's style. A decision reversed later is rewritten in place with the
-     new ruling and the date, so the log always reads as current truth. -->
+<!-- Numbered, append-only, one line each with its reason. A reversed decision is
+     rewritten in place with the new ruling and the date. -->
 
-1. **<Decision>**: <why, in one or two sentences>
+1. **<Decision>**: <why, in one sentence>

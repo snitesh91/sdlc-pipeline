@@ -2,64 +2,30 @@
 
 ## Repo access
 
-- Every `gh` and control-plane call needs a token. Locally, an ambient `GH_TOKEN` /
-  `GITHUB_TOKEN` (e.g. from direnv) is used as is. Otherwise, and always in a cloud container
-  (`CLAUDE_CODE_REMOTE`, whatever `SDLC_PLACEMENT` says), the SessionStart hook exports both from
-  the config's `tokenEnv` var, else `tokenPath`; a local `gh` login only silences its
-  missing-token warning.
-- The token must be a **classic** PAT (`ghp_`); fine-grained PATs cannot read check-runs
-  or write the custom Stage/Pipeline Status fields.
-- `gh` reads and comments work; issue creation is `create-issue` only ("Issue taxonomy").
-- In a cloud session GraphQL and every `gh issue`/`gh pr` subcommand are blocked: read with
-  `gh api` GETs, write only through `python3 "$SDLC"` commands (`references/cloud-mode.md`,
-  "GitHub access in the cloud").
-- The pipeline neither reads nor writes Projects v2 board state; Pipeline Status is the
-  only status it maintains (`references/epics.md`, "Epic board Status").
+- Every `gh` and control-plane call needs a **classic** PAT (`ghp_`). Fine-grained PATs cannot read check-runs or write the Stage/Pipeline Status fields.
+- Locally, an ambient `GH_TOKEN` / `GITHUB_TOKEN` is used as is. Otherwise, and always in a cloud container (`CLAUDE_CODE_REMOTE`), the SessionStart hook exports both from the config's `tokenEnv` var, else `tokenPath`.
+- Create issues only with `create-issue` ("Issue taxonomy").
+- In a cloud session, read with `gh api` GETs and write only through `python3 "$SDLC"` (`references/cloud-mode.md`, "GitHub access in the cloud").
+- The pipeline never reads or writes Projects v2 board state. Pipeline Status is the only status it keeps (`references/epics.md`, "Epic board Status").
 
 ## Plugin pin
 
-A session runs the marketplace `ref` pinned in the `.claude/settings.json` of the checkout it
-starts in (the driven repo's main checkout, on `main`), read once at session start — never
-from a unit's branch or worktree; CI uses the `SDLC_PIPELINE_REF` Actions variable. So a
-bump merged to `main` reaches every unit, in-flight epics included, from the next session
-once installed; bump only while no run is live, since agents read the playbook mid-run.
-`claude plugin marketplace update` never re-reads the pinned ref. Install the new tag with
-`claude plugin marketplace add "<owner>/sdlc-pipeline#<tag>" --scope project` (then revert
-the reformat it makes to `.claude/settings.json`), then
-`claude plugin update sdlc@sdlc-pipeline --scope project`.
-
-A session keeps the plugin it loaded. `next-action` stamps the run's root issue with its
-version (`sdlc:plugin-version` marker) and refuses, naming both versions, when a newer plugin
-last moved the run (or the Initiative above it): continue from a session on that version or
-newer. A same-or-newer session continues. A new run on a plugin older than the repo's pin
-gets `plugin_warning`: relay it.
+- A session runs the marketplace `ref` pinned in `.claude/settings.json` of the checkout it starts in (the driven repo's main checkout). It reads the pin once, at session start, never from a unit's worktree. CI uses the `SDLC_PIPELINE_REF` Actions variable.
+- A bump merged to `main` reaches every unit, in-flight Epics included, from the next session that installs it. Bump only while no run is live: agents read the playbook mid-run.
+- Install a new tag: `claude plugin marketplace add "<owner>/sdlc-pipeline#<tag>" --scope project`, revert the reformat it makes to `.claude/settings.json`, then `claude plugin update sdlc@sdlc-pipeline --scope project`. `claude plugin marketplace update` never re-reads the pinned ref.
+- A session keeps the plugin it loaded. `next-action` stamps the run's root issue with its version (`sdlc:plugin-version` marker). It refuses, naming both versions, when a newer plugin last moved the run or its Initiative: continue from a session on that version or newer.
+- A new run on a plugin older than the repo pin gets `plugin_warning`. Relay it.
 
 ## Auto-mode classifier denies a composite
 
-The auto-mode classifier can deny a heavier composite (e.g. `finish-lld`: several issue
-creates plus a merge) even under a `Bash(python3 "$SDLC" *)` allow rule. You cannot grant
-yourself an auto-mode override: ask the operator to run the pipeline in manual permission
-mode (switch the session out of auto, or restart with `sdlc-run <n> --permission-mode
-default`), then re-run the command (composites are idempotent).
-
-A denied `git push` or `open-dev-pr` never parks a finished unit: run the denied step yourself
-from the main thread (or ask the operator to approve it), then resume the agent for its remaining exit actions. The
-operator can add the allow rules ("Auto-mode allow rules for `development`'s push and PR").
-When the main thread is denied too, park it with `mark-needs-human <n> --reason "..."
---classifier-denied <step> --run-id "$RUN_ID"`: the worktree is kept, and the next run's
-`next-action` returns it as `resume` (`reason_code: classifier_denied`, `denied_step`). Retry
-`denied_step` first. The run that parked it never resumes it.
-
-A classifier **outage** (no verdict or a classifier error on every state-changing call while
-reads work) is neither a denial nor a stage failure. An agent's `failed` / `blocked` citing
-it is resumed to retry its exit action once the classifier answers again (a review's
-reported verdict you may record yourself: SKILL.md, "After the subagent returns"); never
-re-run the stage.
+- The classifier can deny a heavy composite (e.g. `finish-lld`) even under a `Bash(python3 "$SDLC" *)` allow rule. You cannot override it yourself. Ask the operator to switch the session out of auto mode (or restart with `sdlc-run <n> --permission-mode default`), then re-run the command. Composites are idempotent.
+- A denied `git push` or `open-dev-pr` never parks a finished unit. Run the denied step from the main thread (or ask the operator to approve it), then resume the agent for its remaining exit actions. The operator can add the allow rules below.
+- When the main thread is denied too: `mark-needs-human <n> --reason "..." --classifier-denied <step> --run-id "$RUN_ID"`. The worktree is kept. The next run's `next-action` returns it as `resume` (`reason_code: classifier_denied`, `denied_step`): retry `denied_step` first. The run that parked it never resumes it.
+- A classifier **outage** (every state-changing call errors while reads work) is not a denial and not a stage failure. Resume the agent to retry its exit action once the classifier answers. Never re-run the stage. You may record a review's reported verdict yourself (SKILL.md, "After the subagent returns").
 
 ## Auto-mode allow rules for `development`'s push and PR
 
-An explicit allow rule resolves before the classifier. Add to the driven repo's
-`.claude/settings.json` (the Bash guard still denies force-push):
+An explicit allow rule resolves before the classifier. Add to the driven repo's `.claude/settings.json` (the Bash guard still denies force-push):
 
 ```json
 { "permissions": { "allow": ["Bash(git push *)", "Bash(git -C * push *)", "Bash(python3 \"$SDLC\" open-dev-pr *)"] } }
@@ -67,282 +33,112 @@ An explicit allow rule resolves before the classifier. Add to the driven repo's
 
 ## Auto-mode allow rule for the `pr-review` mutation probe
 
-The probe (the `Edit` tool; the edit guard denies a review role any edit outside its
-`<worktrees.root>/<reviewPrefix><n>/` tree) edits a file under the review worktree (`<worktrees.root>/<reviewPrefix><n>/`,
-default `/tmp/sdlc-review-<n>/`). Outside the project directory, so the auto-mode classifier
-may deny it; an explicit allow rule resolves before the classifier. Add to the driven repo's
-`.claude/settings.json` (path rules are `Edit(...)` only — `Write`/`MultiEdit` rules are never
-consulted; `//` is an absolute path):
+The probe edits a file in the review worktree (default `/tmp/sdlc-review-<n>/`), outside the project. Add to the driven repo's `.claude/settings.json` (`//` is an absolute path):
 
 ```json
 { "permissions": { "allow": ["Edit(//tmp/sdlc-review-*/**)"] } }
 ```
 
-Revert the probe with `git restore <file>`: the Bash guard denies a review role `git checkout
--- <file>` along with commit/push/merge/reset.
+Revert the probe with `git restore <file>`. The Bash guard denies a review role `git checkout` (a branch or `-- <file>`), `git switch`, `git reset`, commit, push and merge.
 
 ## Issue taxonomy
 
-`stage:X` / `status:X` in this skill mean "Stage field = X" / "Pipeline Status field =
-X" — never labels. `epic:architected` is a runtime state label (renameable via
-`pipeline.labels.architected`). Unit kind (Initiative / Epic / Task) comes **only**
-from `pipeline.classification` (label-based by default: `type:initiative` /
-`type:epic` / `type:task`); a parentless `Feature` is not an epic.
-
-Every issue the pipeline creates goes through `create-issue --parent <n> --title ..
---body .. --type <T> [--priority <P>] [--effort <E>]` — the orchestrator's command. It sets
-every field below and the classification label itself (Priority/Effort from the flag, else
-`pipeline.issueDefaults`); a refusal lists the valid values. A post-create failure returns
-`ok: false` naming the issue: run the `repair-issue` command its `reason` gives, never
-re-run. `repair-issue` fills only what is missing, except an explicit `--priority`/`--effort`,
-which it sets over an existing value. Under a non-standing Epic follow with `set-stage`
-(`finish-lld` stages the Tasks it creates; a closing-run `Bug` goes through
-`file-closing-delta`). `audit-issues [--epic <n>]` lists open issues missing any of these fields (with `--epic`, only that Epic's
-subtree), each with its `repair` command, children first and the Epic's/Initiative's own
-gaps last (`container: true`) — repair the container's Priority/Effort too, but never let
-it hold up the children; an Epic or Initiative is never flagged for lacking a parent.
+- `stage:X` / `status:X` mean "Stage field = X" / "Pipeline Status field = X", never labels. `epic:architected` is a runtime label (`pipeline.labels.architected`).
+- Unit kind (Initiative / Epic / Task) comes **only** from `pipeline.classification` (default labels `type:initiative` / `type:epic` / `type:task`). A parentless `Feature` is not an Epic.
+- Create every issue with `create-issue --parent <n> --title .. --body .. --type <T> [--priority <P>] [--effort <E>]`. It sets every field below and the classification label (Priority/Effort from the flag, else `pipeline.issueDefaults`). A refusal lists the valid values.
+- On a post-create failure (`ok: false`), run the `repair-issue` command its `reason` gives. Never re-run `create-issue`.
+- Under a non-standing Epic, follow `create-issue` with `set-stage` (`finish-lld` stages the Tasks it creates; a closing-run `Bug` goes through `file-closing-delta`).
+- `audit-issues` lists open issues missing a field with each `repair` command, children first. Never let the container's repair hold up the children.
 
 | Field | Values | Rules |
 |---|---|---|
-| Stage | `Product` / `Architecture` / `Development` / `Testing` / `PR Review` / `LLD` | Sole source of `current_stage()`. Set by `claim` (inside `start-stage`, `pass-gate`, `skip-gate`, `waive-gate`), `set-stage`, `route`, `merge-lld-doc`; `open-dev-pr` sets `PR Review`. `arch-review`/`lld-review` write no value of their own. `Testing` is retired (only read, for issues stranded there). `next-action` sets `default_stage()` on first sight: `product` for an Initiative's child or parentless issue. A standing child gets none — `next-action` returns `route`. A non-standing Epic's children get **no** default (phase-Tasks via `set-stage`, Tasks via `merge-lld-doc`; a late Stage-less child is reported `unstaged`). Cleared on close, and on the Epic when it becomes `epic:architected`. |
-| Pipeline Status | `Todo` / `In Progress` / `Awaiting Human Review` / `Feedback Received` / `Needs Human` / `Done` | `In Progress` = claimed by a live run (crash-recovery marker). `Awaiting Human Review` / `Feedback Received` = paused at an open gate (both gate-pending). `Needs Human` = only the operator can decide. `Todo` is set by `create-issue` (and the workflow on open), and on a unit parked or advanced unclaimed; `Done` on close. Blocked is not a value — it is derived from `blockedBy`. |
-| Type | `Task` / `Bug` / `Feature` / `Epic` / `Initiative` | Mandatory; a defect is type `Bug`, never a `Task` with a label. Routing ignores it. |
-| Priority | `Urgent` / `High` / `Medium` / `Low` | Set by `create-issue`; empty = `Medium`. `Critical` / `Blocker` are accepted as aliases for `Urgent`. Orders children. |
-| Effort | `High` / `Medium` / `Low` | Set by `create-issue`; read by nothing. `High` alone is not a reason to split a Task — footprint collision is (`references/epics.md`). |
-| `blockedBy` | native relationship | ≥ 1 open blocker = not eligible; clears when the blocker closes. Set with `mark-blocked <n> --dep <m>`. |
-| Assignee | native | Unassigned = agent-owned (below). |
+| Stage | `Product` / `Architecture` / `Development` / `Testing` / `PR Review` / `LLD` | Sole source of `current_stage()`. Set by `claim`, `set-stage`, `route`, `merge-lld-doc`; `open-dev-pr` sets `PR Review`. Reviews set none. `Testing` is retired. `next-action` sets `product` on an Initiative's child or a parentless issue; a standing child gets `route`; a non-standing Epic's Stage-less child is `unstaged`. Cleared on close. |
+| Pipeline Status | `Todo` / `In Progress` / `Awaiting Human Review` / `Feedback Received` / `Needs Human` / `Done` | `In Progress` = claimed by a live run. `Awaiting Human Review` / `Feedback Received` = gate-pending. `Needs Human` = operator decides. Blocked derives from `blockedBy`. |
+| Type | `Task` / `Bug` / `Feature` / `Epic` / `Initiative` | Mandatory. A defect is `Bug`, never a labelled `Task`. Routing ignores it. |
+| Priority | `Urgent` / `High` / `Medium` / `Low` | Empty = `Medium`. `Critical` / `Blocker` alias `Urgent`. Orders children. |
+| Effort | `High` / `Medium` / `Low` | Read by nothing. `High` alone never splits a Task; a footprint collision does (`references/epics.md`). |
+| `blockedBy` | native relationship | ≥ 1 open blocker = not eligible. Set with `mark-blocked <n> --dep <m>`. |
+| Assignee | native | Unassigned = agent-owned ("Assignee convention"). |
 
-A hand-filed child must be a sub-issue of an epic or `next-action` never sees it; under a
-non-standing Epic it also needs `set-stage`. A new Epic runs nothing itself — cut its
-phase-Tasks (`SKILL.md`); it must carry the epic classification.
+A hand-filed child must be a sub-issue of its Epic, or `next-action` never sees it. Under a non-standing Epic it also needs `set-stage`. A new Epic runs nothing itself: cut its phase-Tasks (SKILL.md).
 
 ### `pipeline.profiles` — epic behaviour by label
 
-Ordered array; `resolve_profile(epic)` returns the first entry whose `match`
-(`{ "label": "<name>" }` or `"*"`) holds. Toggles: `driven`, `epicLevelPhase` (`false` =
-standing), `childrenNeedArchitectedEpic`, `closes`, and `gates`
-(`skipConfidenceThreshold`, `requiresHumanGateA`, `requiresHumanGateB`). Omitted toggles inherit shipped
-defaults (`legacy`, `standing`, catch-all `default`); `gates` inherit `pipeline.gates`. A
-profile applies only to an issue `pipeline.classification` already calls an epic.
-Field reference: `sdlc.config.sample.json`. `product-review` is not a toggle.
+Ordered array. `resolve_profile(epic)` returns the first entry whose `match` (`{ "label": "<name>" }` or `"*"`) holds. Toggles: `driven`, `epicLevelPhase` (`false` = standing), `childrenNeedArchitectedEpic`, `closes`, `gates` (`skipConfidenceThreshold`, `requiresHumanGateA`, `requiresHumanGateB`). Omitted toggles inherit the shipped defaults (`legacy`, `standing`, catch-all `default`); `gates` inherit `pipeline.gates`. A profile applies only to an issue `pipeline.classification` calls an Epic. Field reference: `sdlc.config.sample.json`.
 
 ### `pipeline.initiativeProfiles` — Initiative behaviour by label (opt-in)
 
-Ordered array, default `[]`; the first entry whose `match` (`{ "label": "<name>" }` or
-`"*"`) is on the Initiative wins. **The default is the label's absence:** an Initiative no
-entry matches, a bare or engineering-driven Epic, a standing epic and a parentless issue keep
-the plain flow — Epics close into `main`, their children into `epic-<n>`, both standing test
-Tasks carved — and a repo without `initiativeProfiles` (or with no entry setting `branch`)
-makes no extra lookups. A failed GitHub read while resolving the profile stops the step that needed it (exit 1,
-or an `error` / `*_error` field); it never falls back to `main` or to the initiative branch.
-`initiative-<n>` is a pipeline branch (the Bash guard, `prune-stale`) only while
-`initiativeProfiles` is set.
+Ordered array, default `[]`; the first entry whose `match` is on the Initiative wins. With no match, the plain flow holds. A failed read while resolving it stops the step; it never falls back to a base. `initiative-<n>` is a pipeline branch only while `initiativeProfiles` is set. Toggles (`sdlc.config.sample.json`):
 
-Toggles: `branch` (default `false`; `true` = `initiative-<i>`,
-`references/epics.md`, "Initiative branch"), `testTasks` (default `true`; `false` = no
-standing Integration-test / e2e-test Tasks), `deferSuites` (suite keys `close-epic` does not
-demand of an Epic closing into the initiative branch), `closeSuites` (suite keys, need not be
-in `requiredWorkflows`, that `merge-initiative-pr` needs attested at the initiative PR head;
-`record-local-ci` accepts them), `placement` (`cloud` | `local`; overrides
-`placement.initiativeEpics` for this Initiative), `reviewDepth` (`full` | `light`; `light` =
-every review under it runs single-pass, the guard denies fan-out, and `pr-review` skips the
-mutation probe — for throwaway or feasibility work). Prefixes: `branches.initiativePrefix` (`initiative-`),
-`worktrees.initiativePrefix` (`sdlc-initiative-`). `initiative-profile <n>` prints the
-profile governing any unit; `start-stage` records it for the SubagentStart hook.
+- `branch` (`true` = `initiative-<i>`, `references/epics.md`, "Initiative branch").
+- `testTasks` (`false` = no standing test Tasks).
+- `deferSuites`: suites `close-epic` does not demand into the initiative branch. `closeSuites`: suites `merge-initiative-pr` needs attested at its head.
+- `placement` (`cloud` | `local`): overrides `placement.initiativeEpics`.
+- `reviewDepth: light`: single-pass reviews, no fan-out, no mutation probe.
 
-```json
-"pipeline": {"initiativeProfiles": [{"name": "branched", "match": {"label": "initiative:branch"},
-  "branch": true, "testTasks": false, "deferSuites": ["backend-it"], "closeSuites": ["e2e"]}]}
-```
+`initiative-profile <n>` prints the profile for any unit.
 
 ## Dropping a unit
 
-A unit the operator drops is never closed as completed. Say why on the thread and close it
-with the right state reason:
+Never close a dropped unit as completed. State why on the thread:
 
-- **An Epic under an Initiative:** `detach-epic <epic> --reason "<why>"` first — it removes
-  the sub-issue link the Initiative loop walks and every `blockedBy` edge between the Epic
-  and its sibling Epics (a dependent sibling would otherwise wait on it forever), commenting
-  on the Epic and the Initiative; its own children stay with it. Then `close-issue <epic>
-  --not-planned --reason "<why>"`, and each open child the same way.
-- **Any other unit:** `close-issue <n> --not-planned --reason "<why>"` — state reason
-  `NOT_PLANNED`, the reason commented first, terminal fields set, worktree released
-  (a dirty or unpushed one is refused and reported, never destroyed).
-- `comment <n> --body "..."` (or `--body-file`) leaves any other plain audit-trail note —
-  no marker, orchestrator only; stage agents keep `post-comment`.
+- **An Epic under an Initiative:** run `detach-epic <epic> --reason "<why>"` first. It removes the sub-issue link and every `blockedBy` edge to sibling Epics. Then `close-issue <epic> --not-planned --reason "<why>"`, and each open child the same way.
+- **Any other unit:** `close-issue <n> --not-planned --reason "<why>"`. A dirty or unpushed worktree is refused and reported, never destroyed.
+- Leave any other audit note with `comment <n> --body "..."` (orchestrator only; stage agents use `post-comment`).
 
 ## Worktree release
 
-Every path that releases a unit's worktree (`close-issue`, `merge-pr`, `mark-blocked`,
-`mark-needs-human`, `close-epic`) first runs `pipeline.worktrees.releaseCommand` inside
-the tree when the config sets one (a shell string; e.g. `make it-down` where the driven
-repo keeps a per-worktree test env), then `git worktree remove`. It runs only on a tree
-that is about to be removed — never on one refused for uncommitted or unpushed work — and
-a failure is reported (`release_command.ok: false`), never fatal. A tree released without
-the hook (a refusal, a crash) leaves that env for you to tear down by hand.
-
-Once a unit is terminal, `merge-pr` and `close-issue` (so every phase-Task close) also run
-the unit's cleanup (`cleanup`), in this order: its review worktree, its worktree, then
-`origin/<branch>` — deleted only when its head is on a merged PR head or the base (kept,
-with the reason, while a PR is open or it carries unmerged commits, e.g. a `--not-planned`
-unit's) — then the local ref, deleted only when its tip is on a merged PR head, the base
-or the kept origin branch (`retained_local_branch` otherwise), then `git worktree prune`.
-`close-epic` does the same for the epic and its children; `prune-stale` sweeps every
-closed unit.
-
-A deletion that failed (not a keep) comes back as a top-level `warnings` list, one line
-per branch, on `merge-pr`, `close-issue`, `close-epic`, `prune-stale` and the composites
-that run them. Relay every line to the operator as soon as you see it and again in Step 4; the
-operator removes the branch.
+- Every release path (`close-issue`, `merge-pr`, `mark-blocked`, `mark-needs-human`, `close-epic`) first runs `pipeline.worktrees.releaseCommand` inside the tree, when set (e.g. `make it-down`). It runs only on a tree about to be removed. A failure is reported (`release_command.ok: false`), never fatal. A tree released without it leaves that env for you to tear down.
+- On a terminal unit, `merge-pr` and `close-issue` run `cleanup`: worktrees, then branches whose work landed (unmerged work is kept, `retained_local_branch`). `close-epic` does the same for the Epic and its children; `prune-stale` sweeps every closed unit.
+- A failed deletion (not a keep) comes back as a top-level `warnings` list on `merge-pr`, `close-issue`, `close-epic`, `prune-stale` and their composites. Relay every line to the operator at once and again in Step 4; the operator removes the branch.
 
 ## Assignee convention
 
-Only the operator's login is assignable; there is no agent account. Unassigned is the
-agent-owned state; only `check-epics-closeable` assigns (the operator, once, with an
-epic's closing checklist).
+Only the operator's login is assignable. Unassigned is agent-owned. Only `check-epics-closeable` assigns (the operator, once, with an Epic's closing checklist).
 
 ## Before opening any PR, check whether one already exists
 
-Before creating a branch for any ad-hoc PR (doc landing, pipeline fix):
-
-```bash
-gh pr list --state open --json number,title,headRefName
-# cloud session: gh api 'repos/<repo>/pulls?state=open' --jq '.[] | {number, title, head: .head.ref}'
-git worktree list          # a worktree you did not create = another session is on it
-```
-
-(`open-dev-pr` already returns an existing PR with `created: false`.) If a duplicate is
-opened anyway, keep the one current with `main` and close the other with a comment
-naming its replacement. Never leave two open PRs for one change.
+Before any ad-hoc PR, list open PRs (`gh pr list --state open`; cloud: `gh api 'repos/<repo>/pulls?state=open'`) and `git worktree list` (a worktree you did not create = another session). If a duplicate exists, keep the one current with `main` and close the other naming its replacement.
 
 ## PRs merge automatically — no human review gate
 
-Standing, narrow exception to any draft-PR rule in the operator's global `CLAUDE.md`, scoped
-to PRs this pipeline opens in the configured repo: `development` opens a draft; after a clean
-adversarial `pr-review` and green CI, `merge-pr` marks it ready and squash-merges it. The
-human gates on product/architecture are separate and unaffected.
+This is a standing exception to any draft-PR rule in the operator's global `CLAUDE.md`, for PRs this pipeline opens. `development` opens a draft. After a clean `pr-review` and green CI, `merge-pr` marks it ready and squash-merges it. Human gates on product and architecture are separate.
 
-- **A phase-Task's design PR** (`issue-<n>` → `epic-<n>`, docs only) merges with
-  `merge-design-pr` (directly, or inside `skip-gate`/`waive-gate`/`finish-lld`) after
-  `lld-review` records clean, or `arch-review` records clean above the skip threshold /
-  under a profile that waives Gate B; otherwise the human merges it at Gate B. It runs no
-  code checks, keeps the branch, and never closes the Task. `merge-pr` refuses a phase-Task.
-  A gate PR the operator told you to merge goes through `merge-gate --operator-confirmed`
-  (`references/gates.md`, "Merging a gate PR for the operator").
-- Merge only with `merge-pr`, run by the orchestrator after `pr-review` records clean — a
-  reviewer never merges the diff it reviewed. It does every post-merge write itself (audit
-  comments, closing the issue, terminal fields); on an already-merged PR it only finishes
-  that bookkeeping (`recovered: true`).
-- **A development PR authors no open Epic's design doc, and touches no other Task's
-  footprint.** `open-dev-pr` refuses (before opening) a branch diff that edits a design doc
-  under `<docRoot>/epic-<n>/` while Epic n is open (e.g. `lld.md`; a closed Epic's correction
-  passes: `references/epics.md`, "A closed Epic's design docs are its as-built record") or a
-  file listed in another open Task's `## Footprint` of the Epic's `lld.md`; files in the
-  unit's own footprint are fine. `verify-exit` reports
-  the same offenders on the pr-review handoff (`dev_pr_scope`). A foreign-Footprint path the
-  PR body acknowledges under `## Footprint deviations` passes both, returned as
-  `acknowledged_deviations` for `pr-review` to adjudicate (`agents/development.md`, gate 6);
-  an open Epic's design-doc path never does. If the design truly needs to change, escalate an
-  Architecture revision — do not edit the doc from a development branch.
+- **A phase-Task's design PR** merges inside `skip-gate`/`waive-gate`/`finish-lld`, or by the human at Gate B. `merge-pr` refuses a phase-Task. A gate PR the operator told you to merge: `merge-gate --operator-confirmed`.
+- Only the orchestrator merges, with `merge-pr`, after `pr-review` records clean. `merge-pr` does every post-merge write.
+- **A development PR authors no open Epic's design doc and touches no other Task's footprint.** `open-dev-pr` and `verify-exit` (`dev_pr_scope`) refuse it. A closed Epic's doc correction passes. An open Epic's design-doc path never passes as a deviation. A foreign-footprint path listed under `## Footprint deviations` passes as `acknowledged_deviations` for `pr-review` to judge. A design that must change needs an Architecture revision.
 - Never delete the per-issue docs folder after merge.
-- `merge-pr` is the only merge gate (branch protection is unavailable — don't look for
-  it). It refuses on a non-passing check, a code-touching PR whose required suite has
-  neither a passing GHA check nor a fresh local-CI attestation, missing pipeline
-  evidence (`missing_evidence`), or a stale base (`behind_base` —
-  `references/parallelism.md`, "Git-conflict handling"). The squash is pinned to the head
-  SHA whose checks it read (`--match-head-commit`): a push in between fails the merge.
+- `merge-pr` is the only merge gate (no branch protection). It refuses on a non-passing check, a required suite with neither a passing check nor a fresh attestation, missing pipeline evidence (`missing_evidence`), or a stale base (`behind_base`: `references/parallelism.md`, "Git-conflict handling"). It pins the squash to the head SHA it read (`--match-head-commit`).
+- Pass `--run-id` to `merge-pr` so the terminal count books under this run.
 
 ## Local-CI attestation
 
-A required suite (`requiredWorkflows`; keep in step with the workflows' `name:` fields) is
-required on a PR only when the PR changes a file its entry covers; an empty or docs-only diff
-requires nothing. **One rule wherever the pipeline checks a suite** (`transition` into
-`pr-review`, `pr-checks`, `merge-pr`, `close-epic`): the suite is satisfied by **a passing
-GHA check for its workflow on the current PR head OR a `record-local-ci` attestation for
-that head**. `record-local-ci` is for a suite with no PR-level CI (a workflow that runs only
-on push to `main`); a suite whose workflow runs on every PR it applies to is marked
-`attestable: false` (below), so no stage is ever asked to run it. Which suites a stage runs
-at all: `references/verification-rules.md`, "Test scope".
+- A required suite (`requiredWorkflows`, in step with the workflows' `name:`) applies to a PR only when the PR changes a file its entry covers.
+- **One rule** wherever a suite is checked (`transition` into `pr-review`, `pr-checks`, `merge-pr`, `close-epic`): a passing GHA check for its workflow on the PR head **or** a `record-local-ci` attestation for that head. Which suites a stage runs at all: `references/verification-rules.md`, "Test scope".
+- Attest with `record-local-ci --pr <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`, only for a suite actually run and passed. Its refusals name the fix.
+- An attestation counts only while `<sha>` is the PR head. A push makes it stale, unless the push only merged files outside the suite's coverage (`carried_attestation_forward`). Re-run and re-attest only when neither an attestation nor a passing check holds.
+- `transition --expect-stage pr-review` applies the rule after sync. It returns `held` with a per-suite `check` (`pending` / `failing` / `skipped` / `missing`) and `reason`:
+  - `pending`: wait, re-run `transition`.
+  - `failing`: resume `development`.
+  - `missing`: no PR-level CI; run the suite and `record-local-ci` (or see `missing-checks` below).
+  - Suites passed by their check are listed in `satisfied_by_check`. A non-attestable suite is never held here; `merge-pr` gates it.
+- **A check carries across a sync merge** (`pipeline.ci.carryChecksAcrossSync`, default `true`): a pending, cancelled or absent run on a sync-merge head takes its pre-merge pass when the merge touched none of its paths or the config (`<workflow> (carried)`). A failing run is never overridden. Cancel the redundant run.
+- `requiredWorkflows` entries (`sdlc.config.sample.json`): `prefixes` / `files` / `excludeGlobs` mirror the workflow's `paths:`; optional `commandPattern`, `bases` (fnmatch globs) and `attestable: false` (only the check counts; `record-local-ci` refuses it where the workflow covers the PR; `close-epic` lists it under `awaiting_checks`). A PR into a non-`main` base also owes that base's committed entries.
 
-- Attesting: for each attestable suite it actually ran and passed, `development` runs
-  `record-local-ci --pr <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`,
-  which embeds the captured output on the PR; its refusals (no real output file, an
-  unexpanded `<placeholder>` in `--command`, a non-attestable suite) name the fix.
-- An attestation counts only while `<sha>` is the PR's current head. A later push (rework,
-  `sync-branch`) makes it stale unless the push only merged files outside the suite's
-  coverage, which carries it forward (`carried_attestation_forward`), never re-run. A passing
-  check on the new head satisfies the suite too: re-run and re-attest only when neither holds.
-- The rule is applied **post-sync**: `transition --expect-stage pr-review` refuses the
-  review start when an attestable suite the PR touches has neither, returning `held` (per
-  suite: `check` = `pending` / `failing` / `skipped` / `missing`, and a `reason`).
-  `pending` → wait, re-run `transition`. `failing` → the PR is not reviewable; resume
-  `development`. `missing` → the suite has no PR-level CI: run it and `record-local-ci`
-  (or see `missing-checks` below). Suites satisfied by their check are listed as
-  `satisfied_by_check`. A non-attestable suite is never held here; `merge-pr` gates it.
-- `merge-pr` / `pr-checks` apply the same OR rule per suite; `merge-pr` also refuses on any
-  failing or pending check on the PR.
-- **A check carries across a sync merge** (`pipeline.ci.carryChecksAcrossSync`, default
-  `true`): when the head is a sync merge and a required workflow's run on it is pending,
-  cancelled or absent, its pass on the head before the merge counts, provided nothing the
-  merge brought in touches its paths or the pipeline config. A failing run is never
-  overridden. The carried check reads `<workflow> (carried)` with `carried_from`. So after
-  the merge train syncs a PR, cancel the redundant run instead of waiting for it.
-- `merge-pr` accepts `--run-id`: the terminal-unit count is booked under that run rather
-  than whatever id last wrote the epic's run-state file (which may be a throwaway probe
-  run's). Without it, the state file's current id stands.
-- Each `requiredWorkflows` entry mirrors one workflow's `paths:` filter: `prefixes` /
-  `files`, plus `excludeGlobs` for its negations (`!**/*.md` → `"**/*.md"`); a changed
-  file matching one never requires the suite. `suite` keys are `[A-Za-z0-9_-]+` (checked
-  at config load). An optional `commandPattern` regex must match the attested `--command`.
-  Optional **`bases`** (names or fnmatch globs, e.g. `["main", "initiative-*"]`) scopes an
-  entry to those PR base branches only (omitted = every base) — so an integration suite can be required on PRs into `main` yet
-  ignored on child PRs into an epic branch. Optional **`attestable: false`** (default
-  `true`): the workflow runs on every PR the entry applies to, so only its passing check
-  satisfies the suite — no stage runs it locally for that PR, `record-local-ci` refuses it
-  wherever its workflow covers the PR (on a PR its workflow does not cover, e.g. into
-  `epic-*`, it keeps a run as a record only: `stands_in_for_check: false`), and `close-epic`
-  lists it under `awaiting_checks` instead of `unattested_suites`.
-- A PR into a branch other than `main` also owes the entries that branch's own committed
-  config adds (`origin/<base>`); the local config's entry wins on a shared `workflow` name.
+**`pr-checks` status `missing-checks`** never means "still running". Never poll it. Act on its `hint` (also on `merge-pr`'s refusal), causes in likelihood order:
 
-**`pr-checks` status `missing-checks`** is never "still running" — never poll it. When it
-is set, `pr-checks` returns a `hint` field naming the causes in likelihood order (and
-`merge-pr`'s refusal carries the same hint):
-
-- The workflow does not run on this PR (e.g. main-only) and its suite is not attested for
-  the current head → `development` runs the suite and `record-local-ci` for that head — only
-  where "Test scope" owes that run (`references/verification-rules.md`). An integration suite
-  owed on a Task PR into `epic-<n>` is a config defect instead: its entry lacks
-  `bases: ["main", "initiative-*"]`; fix the config, never run it.
-- The workflow file is not on the PR branch (added on the base after the branch was cut)
-  → run `sync-branch` and push so it can run.
-- A still-required GHA workflow never reported (renamed out of step with
-  `requiredWorkflows`, disabled, `paths:` mismatch) → config defect: `pr-review` stops
-  with `needs-human` (`agents/pr-review.md`, exit actions); you run `mark-needs-human`.
+- The workflow does not run on this PR and the suite is not attested: `development` runs it and `record-local-ci`, only where "Test scope" owes that run. On a Task PR into `epic-<n>`, an integration suite here is a config defect (`bases` missing).
+- The workflow file is not on the PR branch: `sync-branch` and push.
+- A required workflow never reported (renamed, disabled, `paths:` mismatch): config defect. `pr-review` stops with `needs-human`; you run `mark-needs-human`.
 
 ## A check the runner failed
 
-`pr-checks` gives each failed check a `failure_excerpt` and `infra_suspect`, plus a top-level
-`infra_suspect` and `hint`; `merge-pr`'s refusal and `close-epic`'s `failing_checks` /
-`infra_suspect` carry the same. On `infra_suspect`, get the runner fixed (the operator's or
-infra's job), then `rerun-checks <pr>` (reruns the head's failed runs → `pr`, `head`,
-`rerun`, `failed`, `nothing_to_rerun`) — never a code rework.
+`pr-checks` gives each failed check a `failure_excerpt` and `infra_suspect`, plus a top-level `infra_suspect` and `hint`. `merge-pr`'s refusal and `close-epic`'s `failing_checks` carry the same. On `infra_suspect`, get the runner fixed (operator or infra), then `rerun-checks <pr>`. Never send it back as code rework.
 
 ## Break-glass: local merge while the PR API is down
 
-Only while `gh pr ready`/`gh pr merge` fail and the git remote still accepts pushes — never
-as a shortcut, never skipping a check `merge-pr` enforces:
+Use only while `gh pr ready`/`gh pr merge` fail and the remote still accepts pushes. Never skip a check `merge-pr` enforces.
 
-1. Verify by hand what `merge-pr` would: passing checks or a fresh matching local-CI
-   attestation, the `development->pr-review` handoff with a clean `pr-review`, and the
-   freshness gate (`sync-branch` first when behind on anything but docs).
-2. Read each affected PR's real state (`gh pr view <pr> --json state,mergedAt`; in a cloud
-   session `gh api repos/<repo>/pulls/<pr> --jq '{state, merged_at}'`); a merged PR needs
-   no second merge.
-3. Squash, never a merge commit, in an ephemeral worktree on `origin/<base>` (the unit's
-   integration base: `references/epics.md`, "The epic integration branch"): `git merge --squash origin/issue-<n>`,
-   `git commit -m "<title> (Closes #<n>)"`, `git push origin <base>`. Never force-push
-   `main`; reconcile forward.
-4. Once the API is back: close the PR with the audit-trail comment `merge-pr` would post,
-   close the issue with "Merged via #<pr>", delete the branch, and set its terminal
-   fields (`close-issue`). Record the outage and what was merged by hand.
+1. Verify by hand what `merge-pr` would: checks or attestation, a clean `pr-review`, a current base. Confirm the PR is not already merged.
+2. In an ephemeral worktree on `origin/<base>`: `git merge --squash origin/issue-<n>`, `git commit -m "<title> (Closes #<n>)"`, `git push origin <base>`. Never force-push `main`.
+3. Once the API is back: close the PR with `merge-pr`'s audit comment, `close-issue` with "Merged via #<pr>", delete the branch, and record what you merged by hand.

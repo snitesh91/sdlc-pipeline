@@ -8,7 +8,9 @@ import time
 CONFIG_NAME = "sdlc-pipeline.config.json"
 CONFIG_DIRS = ("", ".config", ".claude")  # same lookup places as sdlc_next.py
 HEADER_RE = re.compile(r"\b([A-Z]+):\s*(\S+)")
-OUTCOMES = ("done", "clean", "rework", "blocked", "needs-human", "failed")
+OUTCOMES = ("done", "done-with-concerns", "clean", "rework", "blocked", "needs-human", "failed")
+# `done-with-concerns` (development) carries a one-line `"concern"` pr-review checks first.
+CONCERN_CAP = 200
 RESULT_PREFIX = "SDLC-RESULT:"
 RESULT_FORMAT = (RESULT_PREFIX + ' {"issue": <n>, "stage": "<stage>", "outcome": "'
                  + "|".join(OUTCOMES) + '"}')
@@ -140,10 +142,26 @@ def sdlc_role(agent_type) -> str:
     return agent_type[len("sdlc:"):] if agent_type.startswith("sdlc:") else ""
 
 
+# arch-review / lld-review: the stage names a design-review fan-out child names its parent by.
+REVIEW_ROLES = {"product-review", "design-review", "pr-review", "arch-review", "lld-review"}
+# A non-sdlc subagent a review role launched (a fan-out axis): agent_guard stamps
+# `PARENT: <review role>` on its prompt's first line, and the guards hold it read-only.
+REVIEW_CHILD = "review-child"
+
+
+def review_child_role(data: dict) -> str:
+    """REVIEW_CHILD for a non-sdlc subagent whose prompt carries a review role's `PARENT:`
+    header, else "" (the main thread, an sdlc agent, any other subagent)."""
+    if not data.get("agent_id") or sdlc_role(data.get("agent_type")):
+        return ""
+    header = prompt_header(first_prompt(agent_transcript(data)))
+    return REVIEW_CHILD if header.get("parent") in REVIEW_ROLES else ""
+
+
 def prompt_header(prompt) -> dict:
     """`KEY: value` pairs on a prompt's first line (`ROLE: arch-review ISSUE: 5`)."""
     first = str(prompt or "").lstrip().split("\n", 1)[0]
-    return {k.lower(): v for k, v in HEADER_RE.findall(first)}
+    return {k.lower(): v.strip("`#*") for k, v in HEADER_RE.findall(first)}
 
 
 def agent_transcript(data: dict) -> str:
@@ -231,6 +249,13 @@ def sdlc_result(text: str):
         return None, '"stage" must be a non-empty string'
     if result.get("outcome") not in OUTCOMES:
         return None, f'"outcome" must be one of {", ".join(OUTCOMES)}'
+    if result["outcome"] == "done-with-concerns" and result["stage"] != "development":
+        return None, '"done-with-concerns" is a development outcome; use "done"'
+    if result["outcome"] == "done-with-concerns":
+        concern = result.get("concern")
+        if not isinstance(concern, str) or not concern.strip() or len(concern) > CONCERN_CAP:
+            return None, (f'"done-with-concerns" needs a "concern": a non-empty one-line string '
+                          f'of at most {CONCERN_CAP} chars')
     if "next" in result or "why" in result:
         if result.get("next") not in NEXT_STAGES:
             return None, f'"next" must be one of {", ".join(NEXT_STAGES)}, with a "why"'

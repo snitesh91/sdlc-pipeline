@@ -246,7 +246,7 @@ def test_issue_list_has_the_graphql_shape_and_drops_pull_requests():
                issue_field_values=[{**_fv(12, None, "In Progress"), "issue_field_name": None}]),
         {**_issue(7), "pull_request": {"url": "x"}},
     ]
-    gh, runner = _gh({("GET", f"{R}/issues?state=all&per_page=100&sort=created&direction=asc"):
+    gh, runner = _gh({("GET", f"{R}/issues?state=open&per_page=100&sort=created&direction=asc"):
                       raw})
     assert gh.issue_list() == [
         {"number": 5, "title": "Epic", "body": "scope", "createdAt": "2026-08-01T00:00:00Z",
@@ -263,7 +263,7 @@ def test_issue_list_has_the_graphql_shape_and_drops_pull_requests():
 def test_stage_and_status_read_from_rest_fields():
     raw = [_issue(5, issue_field_values=[_fv(11, "Stage", "PR Review"),
                                          _fv(12, "Pipeline Status", "Needs Human")])]
-    gh, _ = _gh({("GET", f"{R}/issues?state=all&per_page=100&sort=created&direction=asc"): raw})
+    gh, _ = _gh({("GET", f"{R}/issues?state=open&per_page=100&sort=created&direction=asc"): raw})
     node = gh.issue_list()[0]
     assert (s.current_stage(node), s.pipeline_status(node)) == ("pr-review", "needs-human")
 
@@ -617,7 +617,8 @@ def test_api_items_pages_by_page_number_never_by_link_following():
     gh = GitHubRest(runner=runner)
     items = gh._api_items(f"repos/{s.REPO}/things")
     assert len(items) == 201 and items[-1] == {"n": "last"}
-    assert [c[1] for c in runner.calls] == [f"repos/{s.REPO}/things"] * 3
+    # The third page is short, so one empty-page peek confirms it is the last.
+    assert [c[1] for c in runner.calls] == [f"repos/{s.REPO}/things"] * 4
     assert not any("--paginate" in str(c) for c in runner.calls)
 
 

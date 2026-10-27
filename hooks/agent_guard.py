@@ -11,7 +11,7 @@ import json
 import os
 import time
 
-from _common import (agent_transcript, emit, first_prompt, load_json, model_policy, plugin_data_dir,
+from _common import (REVIEW_ROLES, agent_transcript, emit, first_prompt, load_json, model_policy, plugin_data_dir,
                      prompt_header, read_input, repo_config, run, runs_dir, sdlc_role)
 
 DESIGN_REVIEW = "design-review"
@@ -29,12 +29,16 @@ def deny(reason: str) -> None:
          permissionDecisionReason="sdlc agent guard: " + reason)
 
 
-def set_model(tool_input: dict, model, warning: str = "") -> None:
-    """Replace only `model`; every other field of the call is kept. A `warning` rides along
-    as context even when the model already matches."""
-    fields = {}
+def set_model(tool_input: dict, model, warning: str = "", prompt: str = None) -> None:
+    """Replace only `model` (and `prompt`, when given); every other field of the call is kept.
+    A `warning` rides along as context even when the model already matches."""
+    fields, updates = {}, {}
     if model and tool_input.get("model") != model:
-        fields["updatedInput"] = {**tool_input, "model": model}
+        updates["model"] = model
+    if prompt is not None and prompt != tool_input.get("prompt"):
+        updates["prompt"] = prompt
+    if updates:
+        fields["updatedInput"] = {**tool_input, **updates}
     if warning:
         fields["additionalContext"] = "sdlc agent guard: " + warning
     if fields:
@@ -78,6 +82,17 @@ def light_review(config: dict, header: dict) -> bool:
 def parent_transcript(data: dict) -> str:
     """The calling subagent's own transcript: `<session>/subagents/agent-<id>.jsonl`."""
     return agent_transcript(data)
+
+
+def review_child_prompt(launcher: str, data: dict, tool_input: dict):
+    """A review role's child prompt with `PARENT: <role> ISSUE: <n>` appended to its first line,
+    so the Bash and Edit guards hold that child to read-only (`_common.review_child_role`) and
+    its `AXIS:` stays on the first line for slot release; None otherwise."""
+    if launcher not in REVIEW_ROLES:
+        return None
+    issue = str(prompt_header(first_prompt(parent_transcript(data))).get("issue") or "?")
+    first, sep, rest = str(tool_input.get("prompt") or "").lstrip().partition("\n")
+    return f"{first} PARENT: {launcher} ISSUE: {issue.strip('`#*')}".lstrip() + sep + rest
 
 
 def _slot_file(agent_id: str) -> str:
@@ -161,8 +176,13 @@ def main() -> int:
         if not child:
             return 0
         if child == WORKER_AGENT:
-            deny("sdlc:dev-worker is launched only by an sdlc:development agent; the "
-                 "orchestrator delegates the stage to sdlc:development.")
+            # The orchestrator launches slice workers when development handed back
+            # `"fanout": "unavailable"` (no Agent tool in its session).
+            if not (header.get("axis") and header.get("issue")):
+                deny("start an sdlc:dev-worker prompt with `AXIS: <slice> ISSUE: <n>`: the "
+                     "orchestrator launches one per slice brief development handed back.")
+                return 0
+            set_model(tool_input, (policy["fanout"].get("development") or {}).get("model"))
             return 0
         role = child
         if child == DESIGN_REVIEW:
@@ -185,7 +205,7 @@ def main() -> int:
         deny(f"{parent}'s parallel workers run as subagent_type sdlc:{WORKER_AGENT} (its own "
              f"guard: no commit, push or control-plane command); relaunch with that type.")
         return 0
-    warning = ""
+    warning, launcher = "", parent
     if parent == DESIGN_REVIEW:
         parent = design_review_role(
             prompt_header(first_prompt(parent_transcript(data))).get("role"), policy["fanout"])
@@ -219,7 +239,7 @@ def main() -> int:
              f"running. retry_after={retry}{suffix}")
         return 0
     set_model(tool_input, (fanout.get("axisModels") or {}).get(header.get("axis"))
-              or fanout.get("model"), warning)
+              or fanout.get("model"), warning, review_child_prompt(launcher, data, tool_input))
     return 0
 
 

@@ -1,5 +1,6 @@
 """SubagentStart: tell every sdlc:* agent where the control plane, docs and references are."""
 import os
+import subprocess
 
 from _common import (CONFIG_DIRS, RESULT_FORMAT, agent_transcript, cloud_session, emit,
                      first_prompt, load_json, plugin_root, prompt_header, read_input, repo_config,
@@ -13,10 +14,24 @@ CLOUD_GITHUB_LINE = (
     '(post-comment, open-dev-pr, record-local-ci, ...), so a failing one is a control-plane '
     'error to report as it is, not a ban on writes.')
 
+# The cloud harness gives subagents no Agent tool (so no Explore and no fan-out); say so up front.
+AGENT_TOOL_LINE = {
+    True: "sdlc: Agent tool: unavailable in this cloud session (no Explore, no fan-out children); "
+          "use your agent file's no-Agent fallback and say so in your handoff.",
+    False: "sdlc: Agent tool: available.",
+}
+# Roles whose `tools:` list has no Agent: the line would mislead them.
+NO_AGENT_ROLES = {"dev-worker", "exploratory", "initiative-close"}
+STYLE_LINE = ("sdlc: Write handoffs and reports in STE-lite: one instruction per sentence, "
+              "active voice, no preamble, no recap.")
+GRAPH = os.path.join("graphify-out", "graph.json")
+
 # Written by sdlc_next.py (`doc_roots_for`) in the run-state directory: unit -> resolved roots.
 DOC_ROOT_HINTS_FILE = "doc-roots.cache"
 # Written by sdlc_next.py (`unit_initiative_profile`): unit -> its Initiative's profile.
 INITIATIVE_HINTS_FILE = "initiative-profiles.cache"
+# Written by sdlc_next.py (`start-comment` for arch-review): unit -> its skip bar.
+SKIP_THRESHOLD_HINTS_FILE = "skip-thresholds.cache"
 
 
 def header_units(data: dict) -> list:
@@ -91,16 +106,54 @@ def initiative_lines(config: dict, data: dict) -> list:
             f"python3 \"$SDLC\" initiative-profile {unit} and follow its testTasks."]
 
 
+def skip_threshold_lines(config: dict, data: dict) -> list:
+    """`Skip threshold: <N>` for an arch-review whose unit `transition` recorded a bar for."""
+    prompt = data.get("prompt")
+    if not prompt and data.get("agent_id") and data.get("transcript_path"):
+        prompt = first_prompt(agent_transcript(data))
+    if prompt_header(prompt).get("role") != "arch-review":
+        return []
+    hints = load_json(os.path.join(runs_dir(config), SKIP_THRESHOLD_HINTS_FILE))
+    for unit in header_units(data):
+        if isinstance(hints.get(str(unit)), int):
+            return [f"sdlc: Skip threshold: {hints[str(unit)]} (#{unit}'s profile bar: Gate B "
+                    f"is skipped only when your confidence is strictly above it)."]
+    return []
+
+
 def templates_dir(config: dict, config_path: str, doc_root) -> str:
     """`<unit docRoot>/<docTemplates>` when the repo has it, else under the top-level docRoot."""
     name = (config.get("pipeline") or {}).get("docTemplates") or "_templates"
-    repo = os.path.dirname(os.path.abspath(config_path))
-    if os.path.basename(repo) in CONFIG_DIRS:
-        repo = os.path.dirname(repo)
+    repo = repo_dir(config_path)
     if doc_root and os.path.isdir(os.path.join(repo, doc_root, name)):
         return f"{doc_root}/{name}"
     top = config.get("docRoot")
     return f"{top}/{name}" if top else name
+
+
+def repo_dir(config_path: str) -> str:
+    """The checkout holding the config (its repo root, past a `.config`/`.claude` subdir)."""
+    repo = os.path.dirname(os.path.abspath(config_path))
+    return os.path.dirname(repo) if os.path.basename(repo) in CONFIG_DIRS else repo
+
+
+def graph_line(config_path: str) -> list:
+    """The graphify rule, only when the agent's checkout or the main checkout (a worktree's
+    `graphify-out/` is git-ignored, so only the main one has it) holds a built graph."""
+    repo = repo_dir(config_path)
+    dirs = [repo]
+    try:
+        common = subprocess.run(["git", "-C", repo, "rev-parse", "--path-format=absolute",
+                                 "--git-common-dir"], capture_output=True, text=True, timeout=5)
+        if common.returncode == 0 and common.stdout.strip():
+            dirs.append(os.path.dirname(common.stdout.strip()))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for d in dirs:
+        if os.path.isfile(os.path.join(d, GRAPH)):
+            return [f"sdlc: Run `graphify query` before the first Grep when graphify-out/graph.json "
+                    f"exists (here: {os.path.join(d, GRAPH)}; run graphify from {d})."]
+    return []
 
 
 def main() -> int:
@@ -126,9 +179,13 @@ def main() -> int:
             f"yours is not known here: run python3 \"$SDLC\" doc-root "
             f"{unit if unit is not None else '<your issue>'} and use its docRoot, "
             f"requirementsDir and docTemplates instead of the line above.")
-    lines += initiative_lines(config, data)
-    if cloud_session():
+    lines += initiative_lines(config, data) + skip_threshold_lines(config, data)
+    cloud = cloud_session()
+    if cloud:
         lines.append(CLOUD_GITHUB_LINE)
+    if sdlc_role(data.get("agent_type")) not in NO_AGENT_ROLES:
+        lines.append(AGENT_TOOL_LINE[cloud])
+    lines += [STYLE_LINE] + graph_line(config_path)
     lines += [
         f"sdlc: ${{CLAUDE_PLUGIN_ROOT}} is {root}; its references are "
         f"{os.path.join(root, 'references')}.",

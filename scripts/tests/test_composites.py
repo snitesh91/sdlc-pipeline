@@ -448,9 +448,11 @@ def test_start_stage_development_with_an_open_pr_stops_before_worktree_and_claim
 
     result = s.cmd_start_stage(gh, 10, "development")
 
-    assert (result["ok"], result["failed_step"], result["claimed"]) == (
-        False, "check-claimable", False)
-    assert "open PR #77" in result["error"]
+    # A structured refusal (exit 0): resume or replace the agent, never re-claim.
+    assert (result["ok"], result["failed_step"], result["claimed"], result["refused"],
+            result["pr"]) == (True, "check-claimable", False, True, 77)
+    assert "open PR #77" in result["reason"] and "prepare-rework 10" in result["reason"]
+    assert "epic-worktree" in result["remaining_steps"]
     assert gh.issues[10]["stage"] == "pr-review" and gh.comments_on(10) == []
 
 

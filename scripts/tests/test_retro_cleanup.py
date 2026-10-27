@@ -298,3 +298,21 @@ def test_prune_removes_only_stale_run_states_of_closed_epics(tmp_path, monkeypat
     assert removed == [str(tmp_path / "epic-9.json")]
     assert sorted(p.name for p in tmp_path.iterdir()) == ["epic-12.json", "epic-14.json",
                                                          "epic-15.json"]
+
+
+def test_prune_stale_cleans_a_closed_unit_a_scoped_index_does_not_hold(repo):
+    # The REST index holds closed issues only under an open parent or when a command names
+    # them; prune-stale names its units' numbers so a finished parentless unit is still swept.
+    gh = _real(_task(5), repo)
+    wt5 = _worktree_with_doc(gh, repo, 5, "src/a.txt", "a\n")
+    _merged_pr(gh)
+    gh.issues[5]["state"] = "CLOSED"
+    full = gh.issue_list
+    gh._stale = False
+    gh.issue_list = lambda: [i for i in full()
+                             if i["state"] != "CLOSED" or i["number"] in s._FOCUS]
+
+    result = s.cmd_prune_stale(gh, str(repo))
+
+    assert [u["issue"] for u in result["units"]] == [5] and result["unknown"] == []
+    assert not Path(wt5).exists() and not _on_origin(repo, "issue-5")
