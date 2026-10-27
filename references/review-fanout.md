@@ -27,7 +27,7 @@ Read the sections below only when you fan out.
 ## Fan-out — caps and the wait loop
 
 - The Agent guard hook caps the children and sets their model from `${CLAUDE_PLUGIN_ROOT}/hooks/model_policy.json` (`fanout.<role>`).
-- `maxChildren` caps children running at once: `product-review` 2, `arch-review` 2, `pr-review` 3, `lld-review` 4.
+- The policy's `maxChildren` (`show-config` → `fanout.<role>.maxChildren`) caps children running at once.
 - **Wait-and-dispatch loop:** a launch denied at the cap carries `retry_after: {waiting_on: [holders], hint}`. Wait for a holder to report, re-launch the denied axis, and repeat until every axis ran. Work an axis yourself only when no holder is left. Never drop the completeness lens.
 - **`reviewDepth: light`** on the Initiative profile denies all fan-out. Work every axis yourself in one pass.
 - **No `Agent` tool** (the SubagentStart context says so) and the input is over the fan-out bar: hand the fan-out to the orchestrator ("The orchestrator fans out for you"). Never go serial silently. Never report a fan-out that did not run.
@@ -44,7 +44,7 @@ Read the sections below only when you fan out.
 On a first round over the fan-out bar with no `Agent` tool, do not review serially and do not post a verdict yet:
 
 1. **You:** pick the axes. Write one brief per axis to `<worktree>/.sdlc-scratch/review-<n>/briefs/<axis>.md`: the doc or diff, the worktree, the axis brief, and the verify and positive-control rules. Hand back with outcome `blocked`, `"fanout": "unavailable"` and `"axes": ["<axis>", ...]` in your `SDLC-RESULT`. Post nothing else. `pr-review`'s `blind` brief holds the diff only.
-2. **Orchestrator:** launch one `general-purpose` agent per axis in one message, each prompt's first line `PARENT: <role> ISSUE: <n> AXIS: <axis>` (the guards then hold the agent read-only) followed by its brief, at the role's fan-out model (`show-config` → `fanout.<role>.model`), at most `maxChildren` at once. Save each reply to `<worktree>/.sdlc-scratch/review-<n>/<axis>.md`. Resume the review agent with `SendMessage`: "axis replies are in `.sdlc-scratch/review-<n>/`".
+2. **Orchestrator:** launch one `general-purpose` agent per axis in one message, each prompt's first line `PARENT: <agent role> ISSUE: <n> AXIS: <axis>`, where `<agent role>` is `product-review`, `design-review` or `pr-review` (the guards then hold the agent read-only) followed by its brief, at the role's fan-out model (`show-config` → `fanout.<role>.model`), at most `maxChildren` at once. Save each reply to `<worktree>/.sdlc-scratch/review-<n>/<axis>.md`. Resume the review agent with `SendMessage`: "axis replies are in `.sdlc-scratch/review-<n>/`".
 3. **You, resumed:** read the axis files, verify every candidate, form the verdict, post it and run your exit actions. State axis coverage as `fanout: orchestrator`.
 
 ## A fan-out child's reply is terse too

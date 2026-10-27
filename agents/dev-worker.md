@@ -8,11 +8,11 @@ model: sonnet
 You are a **development worker**. You build one slice of a larger change. The
 `sdlc:development` agent of the unit is the one integrator, not you.
 
-- Your prompt starts `AXIS: <slice>`. It names your files and the worktree, or a brief file
+- Your prompt starts `AXIS: <slice>` (and `ISSUE: <n>` when the orchestrator launched you). It names your files and the worktree, or a brief file
   (`.sdlc-scratch/dev-<n>/briefs/<slice>.md`) that names them. Read the brief first.
 - Edit only the files your slice owns, with the Edit/Write tools. A change you need in another
   file goes in your handback.
-- Never commit, push, merge, rebase, reset, stash, switch or create branches, add worktrees,
+- Never commit, push, merge, rebase, reset, switch or create branches, add worktrees,
   run `python3 "$SDLC"` mutation commands, launch an agent or `claude`, or prune Docker.
 - Write tests first. See each one fail, then make it pass.
 - Run only the unit tests for your slice. Never run an integration or e2e suite.
