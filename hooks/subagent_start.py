@@ -1,5 +1,6 @@
 """SubagentStart: tell every sdlc:* agent where the control plane, docs and references are."""
 import os
+import subprocess
 
 from _common import (CONFIG_DIRS, RESULT_FORMAT, agent_transcript, cloud_session, emit,
                      first_prompt, load_json, plugin_root, prompt_header, read_input, repo_config,
@@ -12,6 +13,16 @@ CLOUD_GITHUB_LINE = (
     'through the proxy); write only through `python3 "$SDLC"` commands -- they work here '
     '(post-comment, open-dev-pr, record-local-ci, ...), so a failing one is a control-plane '
     'error to report as it is, not a ban on writes.')
+
+# The cloud harness gives subagents no Agent tool (so no Explore and no fan-out); say so up front.
+AGENT_TOOL_LINE = {
+    True: "sdlc: Agent tool: unavailable in this cloud session (no Explore, no fan-out children); "
+          "use your agent file's no-Agent fallback and say so in your handoff.",
+    False: "sdlc: Agent tool: available.",
+}
+STYLE_LINE = ("sdlc: Write handoffs and reports in STE-lite: one instruction per sentence, "
+              "active voice, no preamble, no recap.")
+GRAPH = os.path.join("graphify-out", "graph.json")
 
 # Written by sdlc_next.py (`doc_roots_for`) in the run-state directory: unit -> resolved roots.
 DOC_ROOT_HINTS_FILE = "doc-roots.cache"
@@ -94,13 +105,36 @@ def initiative_lines(config: dict, data: dict) -> list:
 def templates_dir(config: dict, config_path: str, doc_root) -> str:
     """`<unit docRoot>/<docTemplates>` when the repo has it, else under the top-level docRoot."""
     name = (config.get("pipeline") or {}).get("docTemplates") or "_templates"
-    repo = os.path.dirname(os.path.abspath(config_path))
-    if os.path.basename(repo) in CONFIG_DIRS:
-        repo = os.path.dirname(repo)
+    repo = repo_dir(config_path)
     if doc_root and os.path.isdir(os.path.join(repo, doc_root, name)):
         return f"{doc_root}/{name}"
     top = config.get("docRoot")
     return f"{top}/{name}" if top else name
+
+
+def repo_dir(config_path: str) -> str:
+    """The checkout holding the config (its repo root, past a `.config`/`.claude` subdir)."""
+    repo = os.path.dirname(os.path.abspath(config_path))
+    return os.path.dirname(repo) if os.path.basename(repo) in CONFIG_DIRS else repo
+
+
+def graph_line(config_path: str) -> list:
+    """The graphify rule, only when the agent's checkout or the main checkout (a worktree's
+    `graphify-out/` is git-ignored, so only the main one has it) holds a built graph."""
+    repo = repo_dir(config_path)
+    dirs = [repo]
+    try:
+        common = subprocess.run(["git", "-C", repo, "rev-parse", "--path-format=absolute",
+                                 "--git-common-dir"], capture_output=True, text=True, timeout=5)
+        if common.returncode == 0 and common.stdout.strip():
+            dirs.append(os.path.dirname(common.stdout.strip()))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for d in dirs:
+        if os.path.isfile(os.path.join(d, GRAPH)):
+            return [f"sdlc: Run `graphify query` before the first Grep when graphify-out/graph.json "
+                    f"exists (here: {os.path.join(d, GRAPH)}; run graphify from {d})."]
+    return []
 
 
 def main() -> int:
@@ -127,8 +161,10 @@ def main() -> int:
             f"{unit if unit is not None else '<your issue>'} and use its docRoot, "
             f"requirementsDir and docTemplates instead of the line above.")
     lines += initiative_lines(config, data)
-    if cloud_session():
+    cloud = cloud_session()
+    if cloud:
         lines.append(CLOUD_GITHUB_LINE)
+    lines += [AGENT_TOOL_LINE[cloud], STYLE_LINE] + graph_line(config_path)
     lines += [
         f"sdlc: ${{CLAUDE_PLUGIN_ROOT}} is {root}; its references are "
         f"{os.path.join(root, 'references')}.",

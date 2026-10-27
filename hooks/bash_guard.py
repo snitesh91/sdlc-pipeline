@@ -12,7 +12,8 @@ import re
 import shlex
 import sys
 
-from _common import emit, load_json, read_input, repo_config, run, run_states, sdlc_role
+from _common import (REVIEW_CHILD, REVIEW_ROLES, emit, load_json, read_input, repo_config,
+                     review_child_role, run, run_states, sdlc_role)
 
 SDLC = 'python3 "$SDLC"'
 # Wrapper -> its options that consume the next word; `timeout` also takes a duration.
@@ -66,7 +67,6 @@ ROLE_COMMANDS = {
                   "release-review-worktree", "post-comment"},
     "initiative-close": {"record-initiative-verification"},
 }
-REVIEW_ROLES = {"product-review", "design-review", "pr-review"}
 # A development worker (`sdlc:dev-worker`) edits files in its integrator's worktree only: no git
 # write that moves history or branches (`dev-worker` has no control-plane commands either).
 WORKER_ROLE = "dev-worker"
@@ -386,7 +386,7 @@ def check_role(words: list, role: str):
             return "run-rerun"
     if role == WORKER_ROLE and words[0] == "git" and _git_sub(words[1:])[0] in WORKER_GIT_DENIED:
         return "worker-git-write"
-    if role in REVIEW_ROLES and words[0] == "git":
+    if role in REVIEW_ROLES | {REVIEW_CHILD} and words[0] == "git":
         sub, rest = _git_sub(words[1:])
         if (sub in ("commit", "push", "merge") or (sub == "reset" and "--hard" in rest)
                 or (sub == "checkout" and "--" in rest)):
@@ -495,7 +495,7 @@ def main() -> int:
     config_path = repo_config(data.get("cwd") or os.getcwd())
     if not isinstance(command, str) or not config_path:
         return 0
-    role = sdlc_role(data.get("agent_type"))
+    role = sdlc_role(data.get("agent_type")) or review_child_role(data)
     config = load_json(config_path)
     if not role and not main_thread_guarded(config, str(data.get("session_id") or "")):
         # One line so an unguarded run is visible, never silent.
