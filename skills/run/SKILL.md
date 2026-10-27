@@ -276,7 +276,7 @@ Give the agent (by `gh` command for anything large; in the cloud a `gh api` GET)
 3. For `lld`: `architecture.md` is the source of truth; fits-vs-deviates comes first.
 4. Its worktree, with "use absolute paths or a standalone `cd`; never chain `cd <path> && …`; never touch the main
    checkout". For `development`, the test-env helper and `Integration tests: mandatory` only per
-   "Test scope"; never brief a whole-suite run "Test scope" does not owe. For `pr-review`, the repo root.
+   "Test scope"; never brief a whole-suite run "Test scope" does not owe. For `pr-review` and `initiative-close`, the repo root.
 5. For a review: diff against `origin/` refs after `git fetch origin`.
 6. Prior art only you can read: export it to `<worktree>/.sdlc-scratch/prior-art/` and name each file in the prompt.
 

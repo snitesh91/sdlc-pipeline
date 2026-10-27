@@ -7,7 +7,7 @@ Read by `product`, `architecture`, `lld` (each its own subsection) and by `produ
 A human reads each design doc. Write for that reader, not for the next agent.
 
 - Start `product.md` and `architecture.md` from the template in the `docTemplates` directory your SubagentStart context names, else `${CLAUDE_PLUGIN_ROOT}/templates/`. The template holds the section order. Delete its HTML comments.
-- Write in STE-lite (`references/doc-authoring.md`, "Style").
+- Write in STE-lite (`references/stage-playbooks.md`, "Style").
 - Say nothing about the pipeline: no stage names, gates, fields, rounds, review history or revision deltas. Put process and deltas in the handoff comment.
 - State each fact once, in the section that owns it. Other sections refer to it by section name.
 - Never write a "changes to earlier documents" section. Link the earlier document in one line under Related or Constraints. Amend it only through `references/initiatives.md`, "Amending an approved `product.md`".

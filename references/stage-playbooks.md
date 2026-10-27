@@ -5,7 +5,7 @@ Every stage agent reads this file first; its agent file names the rest. The driv
 
 - The SubagentStart hook gives you `$SDLC`, `<docRoot>` and `<requirements-dir>`; else run `python3 "$SDLC" doc-root <n>`.
 - The control plane owns every GitHub mutation, worktree, force-push and rebase. The Bash guard denies hand-run ones and names the command to use.
-- Launch only the subagents your agent file allows: a read-only `Explore`, or a review role's fan-out children (`references/review-fanout.md`).
+- Launch only the subagents your agent file allows: a read-only `Explore`, a review role's fan-out children (`references/review-fanout.md`), or `development`'s `sdlc:dev-worker` workers (`agents/development.md`, "Parallel workers").
 - Put scratch files only under `<worktree>/.sdlc-scratch/`. Never use `/tmp`.
 - Never edit the plugin. Flag a pipeline problem in your handoff.
 

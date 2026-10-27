@@ -86,6 +86,7 @@ pass/fail numbers.
   mandates (its container, when it says so).
 - You may send a cross-file search to `Explore`. Without the `Agent` tool, search yourself
   and write "Explore: unavailable" in the handoff.
+- If you change pipeline files the repo tracks (its config, the gate workflow), commit them with the related code.
 - Reuse the test-env helper your prompt names. Keep the stack up between runs.
 - Redirect each suite run to a file under `.sdlc-scratch/`. Read back only summary and
   failure lines.
@@ -149,6 +150,8 @@ When your prompt says you replace a retired implementer: keep every commit and c
 Re-derive only the disputed area your prompt names. Fix that class at its root.
 
 ## Exit actions, in order
+
+A run-only brief (suite attestation for `close-epic`) runs step 3 only.
 
 1. Run the completion gates, then the pre-PR check, then push once.
 2. `python3 "$SDLC" open-dev-pr <n> --title "..." --body "..." --summary "..."`. A verify-only
