@@ -504,6 +504,9 @@ delegate at `path` (Step 3); on `failed_step` act on its `reason`. To skip `pr-r
 `skip-pr-review <n> --pr <pr> --reason "<one line>" --run-id "$RUN_ID"`. `route` only moves
 forward; when a later stage finds an open product decision, `set-stage <n> --stage product`
 and run a fresh `product`.
+When the gate doc is the child's whole deliverable (a design-doc correction), `open-gate` it
+even if the profile waives the gate, and once merged run `pass-gate <n> --doc-only`: it closes
+the unit instead of claiming `development`.
 
 ### Stop at the run cap — reset your context between batches
 
