@@ -14,7 +14,8 @@ from .github import GhError, GitHub, WorkItemProvider, _utc_now_marker
 from .units import SKIP_THRESHOLD_HINTS_FILE, _record_hints, is_epic, is_epic_standing
 from .evidence import (
     LOCAL_CI_COMMAND_PATTERNS, LOCAL_CI_SUITES, _PR_REVIEW_OUTCOME_MARKER,
-    _UNEXPANDED_PLACEHOLDER, last_pr_review_outcome, last_transition_to,
+    _UNEXPANDED_PLACEHOLDER, LOCAL_CI_CLOUD_MARKER, last_pr_review_outcome, last_transition_to,
+    remote_session,
 )
 
 
@@ -204,7 +205,8 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
                        f"<details><summary>captured output (tail)</summary>\n\n"
                        f"{fence}\n{evidence}\n{fence}\n\n</details>\n\n"
                        f"<!-- local-ci: {suite}:{pr} @ {sha} -->\n"
-                       f"<!-- attested-at: {timestamp} -->")
+                       f"<!-- attested-at: {timestamp} -->"
+                       + (f"\n{LOCAL_CI_CLOUD_MARKER}" if remote_session() else ""))
     return {"pr": pr, "suite": suite, "sha": sha, "command": command.strip(),
             "evidence_lines": len(evidence.splitlines()), "attested": True, **accepted}
 

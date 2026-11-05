@@ -219,44 +219,154 @@ def test_prune_stale_finds_a_dead_initiative_close_tree(monkeypatch, tmp_path):
 
 # ---- policy-version-silent-collision ----
 
-def _versioned(monkeypatch, ours, theirs, epic_files=("src/policy.ts",)):
-    monkeypatch.setitem(s.PIPELINE["epicClose"], "versionedFiles",
-                        [{"path": "src/policy.ts", "versionPattern": r'POLICY_VERSION = "([^"]+)"'}])
+_VERSION = 'export const POLICY_VERSION = "{}";\n'
+
+
+def _versioned(monkeypatch, files, epic_files=("web/policy/privacy.tsx",)):
+    """`files`: `{(ref, path): text}` for origin/epic-9 and origin/main."""
+    monkeypatch.setitem(s.PIPELINE["epicClose"], "versionedFiles", [
+        {"versionFile": "shared/policy/version.ts",
+         "versionPattern": r'POLICY_VERSION = "([^"]+)"', "textPaths": ["web/policy/**"]}])
     gh = types.SimpleNamespace(base_delta_files=lambda head, base="main": list(epic_files))
 
     def runner(argv):
         if argv[3] == "show":
-            return ours if argv[4].startswith("origin/epic-9:") else theirs
+            ref, path = argv[4][len("origin/"):].split(":", 1)
+            if (ref, path) not in files:
+                raise GhError("missing")
+            return files[(ref, path)]
         return ""
     return s._versioned_file_collisions(gh, "epic-9", "main", ".", runner)
 
 
-def test_a_changed_policy_text_under_main_s_version_is_a_collision(monkeypatch):
-    """Regression (#4853/#4132): two Epics set one version string for different text."""
-    out = _versioned(monkeypatch, 'POLICY_VERSION = "2026-11-04"\nA',
-                     'POLICY_VERSION = "2026-11-04"\nB')
-    assert out == ["`src/policy.ts` (version '2026-11-04')"]
+def test_policy_text_changed_under_main_s_current_version_is_a_collision(monkeypatch):
+    """Regression (#4853/#4132): both Epics set version.ts to one string; the epic's policy
+    page text differs from main's while the version equals main's current one."""
+    out = _versioned(monkeypatch, {
+        ("epic-9", "shared/policy/version.ts"): _VERSION.format("2026-11-04"),
+        ("main", "shared/policy/version.ts"): _VERSION.format("2026-11-04"),
+        ("epic-9", "web/policy/privacy.tsx"): "A",
+        ("main", "web/policy/privacy.tsx"): "B"})
+    assert len(out) == 1 and "'2026-11-04'" in out[0] and "web/policy/privacy.tsx" in out[0]
 
 
-def test_a_bumped_version_or_an_untouched_file_is_no_collision(monkeypatch):
+def test_a_differing_version_or_unchanged_text_is_no_collision(monkeypatch):
     # Positive control.
-    assert _versioned(monkeypatch, 'POLICY_VERSION = "2026-11-05"\nA',
-                      'POLICY_VERSION = "2026-11-04"\nB') == []
-    assert _versioned(monkeypatch, 'POLICY_VERSION = "2026-11-04"\nA',
-                      'POLICY_VERSION = "2026-11-04"\nB', epic_files=()) == []
+    base = {("main", "shared/policy/version.ts"): _VERSION.format("2026-11-04"),
+            ("main", "web/policy/privacy.tsx"): "B"}
+    assert _versioned(monkeypatch, {**base,
+        ("epic-9", "shared/policy/version.ts"): _VERSION.format("2026-11-05"),
+        ("epic-9", "web/policy/privacy.tsx"): "A"}) == []
+    assert _versioned(monkeypatch, {**base,
+        ("epic-9", "shared/policy/version.ts"): _VERSION.format("2026-11-04"),
+        ("epic-9", "web/policy/privacy.tsx"): "B"}) == []
+    assert _versioned(monkeypatch, base, epic_files=("api/x.ts",)) == []
 
 
 # ---- cloud-ci-local-checks: attestable "cloud" ----
 
-def test_a_cloud_attestable_suite_is_attestable_only_in_a_cloud_session(monkeypatch):
+_CLOUD_IT = {"workflow": "IT", "suite": "it", "prefixes": ("api/",), "files": (),
+             "excludeGlobs": (), "bases": ("main",), "attestable": "cloud"}
+_ATTEST = "<!-- local-ci: it:5 @ abc1234 -->"
+
+
+def test_a_cloud_suite_is_attestable_only_under_the_harness_signal(monkeypatch):
     monkeypatch.setattr(s, "CLOUD_ATTESTABLE_SUITES", frozenset({"it"}))
+    monkeypatch.setenv("SDLC_PLACEMENT", "cloud")  # the laptop override never counts
     assert s.suite_not_attestable("it") is True
-    monkeypatch.setenv("SDLC_PLACEMENT", "cloud")
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
     assert s.suite_not_attestable("it") is False
 
 
 def test_a_false_suite_stays_non_attestable_in_the_cloud(monkeypatch):
     # Positive control.
     monkeypatch.setattr(s, "NON_ATTESTABLE_SUITES", frozenset({"it"}))
-    monkeypatch.setenv("SDLC_PLACEMENT", "cloud")
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
     assert s.suite_not_attestable("it") is True and s.suite_not_attestable("other") is False
+
+
+def test_the_merge_gate_takes_a_cloud_suite_only_from_a_cloud_stamped_attestation(monkeypatch):
+    """Review: `SDLC_PLACEMENT=cloud record-local-ci` on a laptop satisfied a cloud suite, and
+    missing_required_workflows ignored `attestable`."""
+    monkeypatch.setattr(s, "required_workflows", lambda base=None: (_CLOUD_IT,))
+    laptop = [{"body": _ATTEST}]
+    assert s.missing_required_workflows(["api/x.ts"], [], laptop, "abc1234", "main") == ["IT"]
+    cloud = [{"body": f"{_ATTEST}\n{s.LOCAL_CI_CLOUD_MARKER}"}]
+    assert s.missing_required_workflows(["api/x.ts"], [], cloud, "abc1234", "main") == []
+
+
+def test_the_merge_gate_never_takes_an_attestation_for_a_false_suite(monkeypatch):
+    monkeypatch.setattr(s, "required_workflows",
+                        lambda base=None: ({**_CLOUD_IT, "attestable": False},))
+    cloud = [{"body": f"{_ATTEST}\n{s.LOCAL_CI_CLOUD_MARKER}"}]
+    assert s.missing_required_workflows(["api/x.ts"], [], cloud, "abc1234", "main") == ["IT"]
+    # Positive control: an attestable suite still takes a plain attestation.
+    monkeypatch.setattr(s, "required_workflows",
+                        lambda base=None: ({**_CLOUD_IT, "attestable": True},))
+    assert s.missing_required_workflows(["api/x.ts"], [], [{"body": _ATTEST}], "abc1234",
+                                        "main") == []
+
+
+def test_close_epic_takes_a_cloud_suite_only_from_a_cloud_stamped_attestation(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    monkeypatch.setattr(s, "CLOUD_ATTESTABLE_SUITES", frozenset({"it"}))
+    view = {"headRefOid": "abc1234", "comments": [{"body": _ATTEST}]}
+    gh = types.SimpleNamespace(files_since=lambda sha, ref: [])
+    assert s._pr_suite_evidence(gh, _CLOUD_IT, view, [], "abc1234", True, set()) is None
+    view["comments"] = [{"body": f"{_ATTEST}\n{s.LOCAL_CI_CLOUD_MARKER}"}]
+    assert s._pr_suite_evidence(gh, _CLOUD_IT, view, [], "abc1234", True, set()) == "fresh"
+
+
+def test_record_local_ci_stamps_the_placement_only_under_the_harness_signal(monkeypatch):
+    monkeypatch.setenv("SDLC_PLACEMENT", "cloud")
+    posted = []
+    gh = types.SimpleNamespace(pr_comment=lambda pr, body: posted.append(body))
+    monkeypatch.setattr(s, "read_ci_evidence", lambda path: "ok")
+    suite = s.LOCAL_CI_SUITES[0]
+    monkeypatch.setattr(s, "suite_not_attestable", lambda suite: False)
+    monkeypatch.setitem(s.LOCAL_CI_COMMAND_PATTERNS, suite, None)
+    s.cmd_record_local_ci(gh, 5, suite, "abc1234", "make test", "out.txt")
+    assert s.LOCAL_CI_CLOUD_MARKER not in posted[-1]
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    s.cmd_record_local_ci(gh, 5, suite, "abc1234", "make test", "out.txt")
+    assert s.LOCAL_CI_CLOUD_MARKER in posted[-1]
+
+
+# ---- the cloud epic PR is marked in its body at creation ----
+
+def _cloud_close(monkeypatch, attestable):
+    monkeypatch.setattr(s, "required_workflows",
+                        lambda base=None: ({**_CLOUD_IT, "attestable": attestable},))
+    gh = _epic([_marks()[0], _marks()[1]])
+    created, labels = [], []
+    gh.pr_create = lambda **kw: created.append(kw) or 38
+    gh.ensure_label = lambda label: None
+    gh.pr_add_label = lambda n, label: labels.append((n, label))
+
+    class _Stop(Exception):
+        pass
+
+    def stop(n):
+        raise _Stop  # past the create; the merge is not under test
+
+    gh.pr_ready = stop
+    try:
+        s.cmd_close_epic(gh, 9)
+    except _Stop:
+        pass
+    return created, labels
+
+
+def test_a_cloud_epic_pr_carries_the_ci_local_marker_from_creation(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    created, labels = _cloud_close(monkeypatch, "cloud")
+    assert s.CI_LOCAL_MARKER in created[0]["body"] and labels == [(38, "ci:local")]
+
+
+def test_a_laptop_or_non_cloud_suite_epic_pr_has_no_marker(monkeypatch):
+    # Positive control.
+    created, labels = _cloud_close(monkeypatch, "cloud")
+    assert s.CI_LOCAL_MARKER not in created[0]["body"] and labels == []
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    created, labels = _cloud_close(monkeypatch, True)
+    assert s.CI_LOCAL_MARKER not in created[0]["body"] and labels == []

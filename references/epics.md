@@ -97,7 +97,9 @@ drives an unlinked issue. Unlink closed sub-issues, or rotate a standing epic be
 - **Headings:** `## Task <KEY>: <title>`, `<KEY>` a lowercase slug. A section without a
   `Footprint` is skipped (`skipped_sections`); put prose under a non-`Task` heading.
 - **`Depends on: <KEY>`**, only for real ordering. `create-lld-tasks` adds one `blockedBy`
-  edge each. An unparsable dependency is refused (`dependency_parse_warnings`) and
+  edge each, and on every re-run makes the edges between the Epic's Tasks match these lines
+  exactly: it removes a sibling edge no line names (`edges_removed`), a hand-added one
+  included. Put any ordering edge between Tasks in `lld.md`'s `Depends on:`. An unparsable dependency is refused (`dependency_parse_warnings`) and
   `finish-lld` stops: fix the line on `epic-<n>` and re-run.
 - **`Realises: #<n>, #<m>`**, only when the Task delivers existing issues. They are blocked on
   the Task and closed when its PR merges or `close-issue` closes it. A number that is not a
@@ -226,9 +228,9 @@ the doc). An Epic with no phase-Tasks and no `epic:architected` goes to `needs_p
    Every other suite waits for the epic PR's check (`references/verification-rules.md`,
    "Test scope").
 3. Second call: refuses on `missing_verification` or a `missing` suite (`checks:
-   missing-checks`) or `version_collisions` (a `pipeline.epicClose.versionedFiles` file whose
-   text the epic changed while its version string still equals the base's: bump it on
-   `epic-<n>`); otherwise merges `epic-<n>` into its base. The epic PR exists from this
+   missing-checks`) or `version_collisions` (a `pipeline.epicClose.versionedFiles` entry whose
+   `textPaths` differ from the base's while its `versionFile`'s version equals the base's:
+   bump it on `epic-<n>`); otherwise merges `epic-<n>` into its base. The epic PR exists from this
    call: attest each named suite on it (`record-local-ci --pr <pr>`), wait for
    `awaiting_checks`, and call again. After the merge it closes the Epic and cleans up
    (`cleanup`, `children_cleanup`, `run_state`, `stack`; `recovered: true` on an
@@ -237,8 +239,9 @@ the doc). An Epic with no phase-Tasks and no `epic:architected` goes to `needs_p
 **Evidence carry-forward:** the exploratory record survives a delta that touches only
 `pipeline.epicClose.evidenceCarryForward.paths` (default `**/*.md`, `docs/**`, `<docRoot>/**`)
 and is under 300 files, or a delta of files the epic itself never changed against its base
-(`main` moved on independently: a deploy workflow, an infra value). Never widen the set to
-source or tests. A suite attestation carries forward when nothing its workflow covers changed
+(`main` moved on independently: a deploy workflow, an infra value). The second case is an
+accepted trade-off (operator, 2026-10-29): an interface change on `main` that the epic calls
+is not retested until the epic PR's CI. Never widen the set to source or tests. A suite attestation carries forward when nothing its workflow covers changed
 since its sha; a suite's check carries across a reconcile merge by the same rule
 (`pipeline.ci.carryChecksAcrossSync`). A suite with no epic-PR
 attestation is satisfied when every merged child PR that touched its paths was attested or

@@ -11,8 +11,9 @@ from .units import (
     resolve_initiative_profile, resolve_profile,
 )
 from .evidence import (
-    EPIC_CLOSE_REQUIRED_EVIDENCE, _EPIC_VERIFICATION_MARKER, epic_branch,
+    EPIC_CLOSE_REQUIRED_EVIDENCE, _EPIC_VERIFICATION_MARKER, _glob_matches, epic_branch,
     evidence_carries_forward, local_ci_suites_attested, missing_epic_verification,
+    remote_session,
 )
 
 
@@ -91,9 +92,12 @@ def _pr_suite_evidence(gh, spec: dict, view: dict, checks: list, ref: str,
     if suite_not_attestable(suite):
         return None
     comments = view.get("comments", [])
-    if suite in local_ci_suites_attested(comments, view.get("headRefOid")):
+    # A cloud suite counts only from an attestation stamped in a cloud session.
+    cloud_only = spec.get("attestable") == "cloud" or suite in CLOUD_ATTESTABLE_SUITES
+    if suite in local_ci_suites_attested(comments, view.get("headRefOid"), cloud_only):
         return "fresh"
-    sha = _latest_attested_sha_by_suite(comments).get(suite) if carry_forward else None
+    sha = (_latest_attested_sha_by_suite(comments, cloud_only).get(suite) if carry_forward
+           else None)
     if not sha:
         return None
     try:
@@ -517,14 +521,22 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         pr_number = existing[0]["number"]
     else:
         # `Closes #<n>` only auto-closes on the default branch; close-epic closes it either way.
+        ci_local = _ci_local(base)
         pr_number = gh.pr_create(
             base=base, head=branch,
             title=f"{detail['title']} — epic integration (#{epic})",
             body=f"Integration of every child of #{epic}"
                  + (f" into `{base}` (the Initiative's branch; it reaches `main` at "
                     f"initiative close)" if base != "main" else "")
-                 + f".\n\nCloses #{epic}",
+                 + f".\n\nCloses #{epic}" + (f"\n\n{CI_LOCAL_MARKER}" if ci_local else ""),
             draft=True)
+        if ci_local:
+            # For visibility only: the label lands after `opened`, whose payload lacks it.
+            try:
+                gh.ensure_label(CI_LOCAL_LABEL)
+                gh.pr_add_label(pr_number, CI_LOCAL_LABEL)
+            except GhError:
+                pass
     # The PR's files, checks and attestations are the gate's inputs, so it must exist first.
     evidence = _close_epic_evidence(gh, epic, branch, children, pr_number, carry_forward,
                                     base, deferred)
@@ -545,16 +557,32 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                               runner, {**target, **evidence, **cleaned}, base=base)
 
 
+CI_LOCAL_LABEL = "ci:local"
+# In the PR body from creation, so the `opened` payload already carries it (a label cannot:
+# GitHub's create-PR APIs take none). The repo's jobs gate on it.
+CI_LOCAL_MARKER = "<!-- sdlc:ci-local -->"
+
+
+def _ci_local(base: str) -> bool:
+    """Whether a cloud session's epic PR into `base` runs its CI in session: a required suite
+    there is `attestable: "cloud"` (references/cloud-mode.md, "CI in a cloud run")."""
+    return remote_session() and any(
+        w.get("attestable") == "cloud" and _workflow_applies_to_base(w, base)
+        for w in required_workflows(base))
+
+
 def _versioned_file_collisions(gh, branch: str, base: str, repo_path: str,
                                runner: Runner) -> list:
-    """`pipeline.epicClose.versionedFiles` entries (`{path, versionPattern}`) the epic changed
-    whose version string still equals `base`'s: two branches setting one version for
-    different text merge with no conflict, so nothing else catches it."""
+    """`pipeline.epicClose.versionedFiles` entries (`{versionFile, versionPattern, textPaths}`)
+    whose versioned text (any `textPaths` glob) differs between `origin/<base>` and the epic
+    while `versionFile`'s captured version equals the base's current one: two Epics setting one
+    version for different text merge with no conflict, so nothing else catches it."""
     entries = PIPELINE["epicClose"].get("versionedFiles") or []
     if not entries:
         return []
-    epic_files = set(gh.base_delta_files(base, base=branch))
-    entries = [e for e in entries if e["path"] in epic_files]
+    epic_files = gh.base_delta_files(base, base=branch)
+    entries = [e for e in entries
+               if any(_glob_matches(p, g) for p in epic_files for g in e["textPaths"])]
     if not entries:
         return []
     _fetch_origin(repo_path, runner)
@@ -563,20 +591,22 @@ def _versioned_file_collisions(gh, branch: str, base: str, repo_path: str,
         try:
             return runner(["git", "-C", repo_path, "show", f"origin/{ref}:{path}"])
         except GhError:
-            return None  # added or deleted by the epic: no version to collide with
+            return None
 
-    def version(text: str, pattern: str) -> Optional[str]:
-        m = re.search(pattern, text)
+    def version(ref: str, e: dict) -> Optional[str]:
+        m = re.search(e["versionPattern"], show(ref, e["versionFile"]) or "")
         return (m.group(1) if m.groups() else m.group(0)) if m else None
 
     out = []
     for e in entries:
-        ours, theirs = show(branch, e["path"]), show(base, e["path"])
-        if ours is None or theirs is None or ours == theirs:
+        changed = sorted(p for p in epic_files if any(_glob_matches(p, g) for g in e["textPaths"])
+                         and show(branch, p) != show(base, p))
+        if not changed:
             continue
-        v = version(ours, e["versionPattern"])
-        if v == version(theirs, e["versionPattern"]):
-            out.append(f"`{e['path']}` (version {v!r})")
+        ours = version(branch, e)
+        if ours is not None and ours == version(base, e):
+            out.append(f"`{e['versionFile']}` still at {base}'s version {ours!r} while its "
+                       f"text changed ({', '.join(changed[:5])})")
     return out
 
 
@@ -995,7 +1025,7 @@ from .worktrees import (  # noqa: E402
 )
 from .design_gates import MergeConflict, cmd_sync_branch, git_reconcile_branch  # noqa: E402
 from .checks import (  # noqa: E402
-    _MISSING_WORKFLOW_HINT, _is_failed_check,
+    CLOUD_ATTESTABLE_SUITES, _MISSING_WORKFLOW_HINT, _is_failed_check,
     _latest_attested_sha_by_suite, _suite_reattest_needed, _with_uncovered,
     _workflow_applies_to_base, _workflow_covers, effective_checks, enrich_failed_checks,
     merge_gate_status, required_workflows, suite_not_attestable, touches_pipeline_config,

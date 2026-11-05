@@ -142,7 +142,7 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `pipeline.models.<role>` / `pipeline.fanout.<role>` | `hooks/model_policy.json` | Model per stage; which reviews fan out, how wide, at which model; `development` parallel workers (off by default) |
 | `pipeline.epicClose.auto` | `false` | Whether the orchestrator closes a verified epic itself |
 | `pipeline.epicClose.prepare` | `""` | Shell command `close-epic` runs in the epic worktree before the exploratory pass (e.g. a dependency install); reported as `prepare` |
-| `pipeline.epicClose.versionedFiles` | `[]` | `[{path, versionPattern}]`: a file whose text the epic changed must move its version string (regex, group 1 if any) off the base's; `close-epic` refuses with `version_collisions` else |
+| `pipeline.epicClose.versionedFiles` | `[]` | `[{versionFile, versionPattern, textPaths}]`: when any `textPaths` glob's file differs between the base and the epic, `versionFile`'s version (regex, group 1 if any) must differ from the base's; `close-epic` refuses with `version_collisions` else |
 | `requiredWorkflows[].attestable` | `true` | `false`: only the workflow's check counts. `"cloud"`: an attestation counts only from a cloud session (no runner there; `references/cloud-mode.md`, "CI in a cloud run") |
 | `pipeline.issueDefaults.priority` / `.effort` | `Medium` / `Medium` | Priority / Effort `create-issue` sets when no flag or lld line names one |
 | `projectFields.issueTypeIds` | — | Native Issue Type ids; `create-issue` refuses a type missing here |

@@ -96,8 +96,10 @@ epic → `main` (or `initiative-*`) PR: Task PRs into `epic-<n>` run no full sui
    dev lanes exhausts the VM).
 2. In the epic worktree, run the repo's pre-PR command with its full integration scope
    (`pipeline.prePr.command` and the repo's IT flag).
-3. Label the epic PR `ci:local` (`pr-add-label <pr> ci:local`): the repo's PR workflows skip
-   their hosted jobs on it.
+3. `close-epic` opens the epic PR with `<!-- sdlc:ci-local -->` in its body and adds the
+   label `ci:local` for visibility. The repo's PR jobs gate on
+   `if: ${{ !contains(github.event.pull_request.body, '<!-- sdlc:ci-local -->') }}`: the body
+   is in the `opened` and `synchronize` payloads, a label added after creation is not.
 4. `record-local-ci --pr <pr> --suite <suite> --sha <head>` for each suite that passed, then
    call `close-epic` again.
 
