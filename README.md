@@ -18,7 +18,8 @@ references/*.md                  on-demand rules shared by the skill and the age
 templates/*.template.md          product.md / architecture.md skeletons
 hooks/                           hooks.json, the hook scripts, model_policy.json, hooks/tests
 bin/sdlc-run                     starts a run on the policy's orchestrator model (on PATH)
-scripts/sdlc_next.py             the control plane; scripts/tests is its suite
+scripts/sdlc_next.py             the control plane's CLI entry point; scripts/tests is its suite
+scripts/sdlc/                    the control plane's code, one module per concern
 scripts/sdlc_metrics.py          cost/outcome report over the metrics store
 workflows/gate-auto-advance.yml  real-time gate backstop, copied into the driven repo
 .github/workflows/tests.yml      this repo's CI: both pytest suites on every PR and on main
