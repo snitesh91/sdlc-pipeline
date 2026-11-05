@@ -517,11 +517,13 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                 "reason": "a versioned file's text changed but its version did not move past "
                           f"`{base}`'s: {'; '.join(collisions)} -- bump the version on "
                           f"`{branch}` (a Task's rework), then re-run close-epic"}
+    ci_local = _ci_local(base)
     if existing:
         pr_number = existing[0]["number"]
+        if ci_local:
+            _mark_ci_local(gh, pr_number)
     else:
         # `Closes #<n>` only auto-closes on the default branch; close-epic closes it either way.
-        ci_local = _ci_local(base)
         pr_number = gh.pr_create(
             base=base, head=branch,
             title=f"{detail['title']} — epic integration (#{epic})",
@@ -531,12 +533,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                  + f".\n\nCloses #{epic}" + (f"\n\n{CI_LOCAL_MARKER}" if ci_local else ""),
             draft=True)
         if ci_local:
-            # For visibility only: the label lands after `opened`, whose payload lacks it.
-            try:
-                gh.ensure_label(CI_LOCAL_LABEL)
-                gh.pr_add_label(pr_number, CI_LOCAL_LABEL)
-            except GhError:
-                pass
+            _label_ci_local(gh, pr_number)
     # The PR's files, checks and attestations are the gate's inputs, so it must exist first.
     evidence = _close_epic_evidence(gh, epic, branch, children, pr_number, carry_forward,
                                     base, deferred)
@@ -569,6 +566,24 @@ def _ci_local(base: str) -> bool:
     return remote_session() and any(
         w.get("attestable") == "cloud" and _workflow_applies_to_base(w, base)
         for w in required_workflows(base))
+
+
+def _label_ci_local(gh, pr: int) -> None:
+    """For visibility only: the label lands after `opened`, whose payload lacks it."""
+    try:
+        gh.ensure_label(CI_LOCAL_LABEL)
+        gh.pr_add_label(pr, CI_LOCAL_LABEL)
+    except GhError:
+        pass
+
+
+def _mark_ci_local(gh, pr: int) -> None:
+    """A reused PR opened without the marker: add it to the body (the next push's
+    `synchronize` payload carries it), then label it."""
+    body = gh.pr_view(pr, "body").get("body") or ""
+    if CI_LOCAL_MARKER not in body:
+        gh.pr_edit_body(pr, f"{body}\n\n{CI_LOCAL_MARKER}".lstrip())
+        _label_ci_local(gh, pr)
 
 
 def _versioned_file_collisions(gh, branch: str, base: str, repo_path: str,
@@ -604,7 +619,10 @@ def _versioned_file_collisions(gh, branch: str, base: str, repo_path: str,
         if not changed:
             continue
         ours = version(branch, e)
-        if ours is not None and ours == version(base, e):
+        if ours is None:
+            out.append(f"`{e['versionFile']}`: versionPattern no match in {e['versionFile']} "
+                       f"on `{branch}` while its text changed ({', '.join(changed[:5])})")
+        elif ours == version(base, e):
             out.append(f"`{e['versionFile']}` still at {base}'s version {ours!r} while its "
                        f"text changed ({', '.join(changed[:5])})")
     return out
@@ -908,8 +926,12 @@ def _initiative_pr_evidence(gh: GitHub, initiative_issue: dict, pr: int) -> dict
     files = gh.pr_files(pr)
     status, missing = merge_gate_status(files, checks, comments, head, "main")
     attested = local_ci_suites_attested(comments, head)
+    cloud_attested = local_ci_suites_attested(comments, head, cloud_only=True)
     close_suites = resolve_initiative_profile(initiative_issue)["closeSuites"]
-    unattested = [suite for suite in close_suites if suite not in attested]
+    # A cloud-attestable suite counts only from an attestation stamped in a cloud session.
+    unattested = [suite for suite in close_suites
+                  if suite not in (cloud_attested if suite in CLOUD_ATTESTABLE_SUITES
+                                   else attested)]
     out = {"head": head, "checks": status, "missing_workflows": missing,
            "close_suites": close_suites, "unattested_close_suites": unattested,
            "ready": status == "passed" and not unattested}
@@ -942,8 +964,11 @@ def cmd_open_initiative_pr(gh: GitHub, initiative: int, repo_path: str = ".",
                     f"`{branch}` conflicts with main ({', '.join(sync.get('conflicting_files', []))})"
                     f" -- resolve it in `worktree-add {initiative} --unit initiative`'s tree, "
                     f"push, then re-run open-initiative-pr")}
+    ci_local = _ci_local("main")
     if landing["state"] == "open":
         pr, created = landing["pr"], False
+        if ci_local:
+            _mark_ci_local(gh, pr)
     else:
         pr = gh.pr_create(
             base="main", head=branch,
@@ -952,9 +977,12 @@ def cmd_open_initiative_pr(gh: GitHub, initiative: int, repo_path: str = ".",
                   f"({', '.join(f'#{n}' for n in epics)}), integrated on `{branch}`.\n\n"
                   f"Merged by `merge-initiative-pr {initiative}` once the required checks and "
                   f"suite attestations are green at its head; #{initiative} then closes after "
-                  f"its requirements validation (`close-initiative`)."),
+                  f"its requirements validation (`close-initiative`)."
+                  + (f"\n\n{CI_LOCAL_MARKER}" if ci_local else "")),
             draft=False)
         created = True
+        if ci_local:
+            _label_ci_local(gh, pr)
     return {"initiative": initiative, "opened": True, "created": created, "pr": pr,
             "branch": branch, "epics": epics, "sync": sync,
             "evidence": _initiative_pr_evidence(gh, initiative_issue, pr)}
