@@ -200,3 +200,35 @@ def test_the_gate_scan_reads_open_gate_prs_units_only():
     gh = GitHubRest(runner=call)
     assert 70 in {i["number"] for i in s.with_scan(gh, gh.issue_list(), "gate")}
     assert f"{R}/issues/71" not in runner.single_gets()
+
+
+def test_a_short_sub_issue_page_below_the_known_count_is_refetched_not_taken_as_the_end():
+    """Regression: page 1 of an Epic's sub-issues glitches short once; the tree keeps every Task."""
+    runner = _world()
+    full, served = runner.subs[10], []
+    real = runner.__call__
+
+    def call(argv):
+        if any("/10/sub_issues" in a for a in argv) and not served:
+            served.append(1)
+            return json.dumps(full[:1])
+        return real(argv)
+    s._FOCUS.update({10})
+    issues = {i["number"] for i in GitHubRest(runner=call).issue_list()}
+    assert {11, 12} <= issues
+
+
+def test_a_sub_issue_list_that_stays_below_the_known_count_raises():
+    runner = _world()
+    runner.subs[10] = runner.subs[10][:1]  # summary says 2; GitHub keeps serving 1
+    s._FOCUS.update({10})
+    with pytest.raises(s.GhError, match="truncated listing"):
+        GitHubRest(runner=runner).issue_list()
+
+
+def test_a_complete_short_sub_issue_list_ends_in_one_read():
+    """Control: a list that meets its known count ends at once."""
+    runner = _world()
+    s._FOCUS.update({10})
+    GitHubRest(runner=runner).issue_list()
+    assert len([c for c in runner.calls if c[1].endswith("/10/sub_issues?per_page=100")]) == 1
