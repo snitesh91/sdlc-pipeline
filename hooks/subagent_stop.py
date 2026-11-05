@@ -14,6 +14,10 @@ from agent_guard import release_slot
 
 TAIL_BYTES = 2_000_000
 COMMENT_ROLES = ("product", "architecture", "lld")
+# A stage handback is routing only; evidence lives in the PR, comment or doc. Exploratory and
+# initiative-close return their findings report, and a fan-out hand-back carries its briefs.
+HANDBACK_CAP = 1_500
+UNCAPPED_ROLES = ("exploratory", "initiative-close")
 POST_COMMENT_RE = re.compile(r"post-comment\b.*--role[ =]+[\"']?(\w[\w-]*)")
 
 
@@ -164,6 +168,13 @@ def main() -> int:
               f"one line:\n{RESULT_FORMAT}", file=sys.stderr)
         return 2
     result = sdlc_result(text)[0] if text is not None else None
+    if (text is not None and len(text) > HANDBACK_CAP and role not in UNCAPPED_ROLES
+            and result and "fanout" not in result):
+        print(f"sdlc: your handback is {len(text)} chars; the cap is {HANDBACK_CAP:,}. Move the "
+              f"evidence into the issue comment or PR and re-send only HEAD / PR, BLOCKER, "
+              f"QUESTIONS, CONCERN and DETAIL (stage-playbooks.md, \"The handback is terse\"), "
+              f"ending with the same SDLC-RESULT line.", file=sys.stderr)
+        return 2
     if (role in COMMENT_ROLES and result and result.get("outcome") == "done" and path
             and posted_handoff(path, role) is False):
         print(f"sdlc: no handoff comment was posted this round. Write it to a file (<= 2,000 "

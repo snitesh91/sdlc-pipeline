@@ -428,6 +428,56 @@ def enrich_failed_checks(gh, checks: list) -> bool:
     return any_suspect
 
 
+# Lines of a failed-step log that name a failure; everything else (install, build chatter) is dropped.
+_FAILURE_LINE_RE = re.compile(
+    r"\bFAIL(ED)?\b|✕|✗|●|\berror\b|assert|Expected|Received|\bexpect\(|Traceback|"
+    r"Exception|exit code [1-9]|ENOSPC|Timeout", re.IGNORECASE)
+_LOG_PREFIX_RE = re.compile(r"^[^\t]*\t[^\t]*\t(?:\d{4}-\d\d-\d\dT[\d:.]+Z ?)?")
+CI_SUMMARY_LINES_PER_JOB = 25
+CI_SUMMARY_CHAR_CAP = 4000
+
+
+def _failure_lines(log: str) -> list:
+    """The failure-naming lines of a `--log-failed` log, job/step/timestamp prefix stripped,
+    de-duplicated in order."""
+    seen, out = set(), []
+    for raw in log.splitlines():
+        line = _LOG_PREFIX_RE.sub("", raw).rstrip()
+        if line.strip() and _FAILURE_LINE_RE.search(line) and line not in seen:
+            seen.add(line)
+            out.append(line[:300])
+    return out
+
+
+def cmd_ci_failure_summary(gh: GitHub, pr_number: int) -> dict:
+    """A PR's failing checks with only their failure lines (failing tests, assertions,
+    errors), bounded per job and in total, so a raw CI log never reaches the orchestrator."""
+    checks = gh.pr_checks(pr_number)
+    budget = CI_SUMMARY_CHAR_CAP
+    out = []
+    for check in (c for c in checks if _is_failed_check(c)):
+        entry = {"name": check.get("name"), "workflow": check.get("workflow"),
+                 "link": check.get("link"), "failures": None}
+        try:
+            _, job = _check_run_and_job(check)
+            lines = _failure_lines(gh.job_failed_log(job)) if job is not None else None
+        except Exception:  # a missing log must never mask the failing check itself
+            lines = None
+        if lines is not None:
+            kept = []
+            for line in lines[:CI_SUMMARY_LINES_PER_JOB]:
+                if len(line) > budget:
+                    break
+                budget -= len(line)
+                kept.append(line)
+            entry.update(failures=kept, truncated=len(kept) < len(lines),
+                         infra_suspect=infra_suspect_text("\n".join(lines)))
+        out.append(entry)
+    return {"pr": pr_number, "failing": out,
+            "passed": sum(c.get("bucket") == "pass" for c in checks),
+            "pending": sum(c.get("bucket") == "pending" for c in checks)}
+
+
 def _infra_hint(pr_number: int) -> str:
     return (f"A failed check's log matches a CI-infrastructure pattern (runner disk, docker "
             f"daemon, lost runner, OOM) -- infra_suspect, not a code failure. Fix the runner, "

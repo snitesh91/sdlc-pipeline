@@ -580,6 +580,29 @@ def _versioned_file_collisions(gh, branch: str, base: str, repo_path: str,
     return out
 
 
+def brief_close_epic(result: dict) -> dict:
+    """`close-epic --brief`: the same result with each bulky list or map reduced to what the
+    orchestrator acts on -- counts, suite names and failing check names."""
+    out = dict(result)
+    if "evidence" in out:
+        suites = out["evidence"].get("suites") or {}
+        out["evidence"] = {"exploratory": out["evidence"].get("exploratory"),
+                           "suites": {k: (v.get("status") if isinstance(v, dict) else v)
+                                      for k, v in suites.items()}}
+    for key in ("carried_forward_files", "children_cleanup"):
+        if key in out:
+            out[key] = len(out[key])
+    if "stale_delta" in out:
+        out["stale_delta"] = {k: v.get("count") for k, v in out["stale_delta"].items()}
+    if "failing_checks" in out:
+        out["failing_checks"] = [c.get("name") for c in out["failing_checks"]]
+    out.pop("cleanup", None)
+    if "failing_checks" in out or "infra_suspect" in out:
+        out["hint"] = (out.get("hint", "") + " " if out.get("hint") else "") + \
+            "Run `ci-failure-summary <pr>` for the failing tests."
+    return out
+
+
 def _reconcile_skippable(gh, branch: str, base: str, behind: int) -> Optional[dict]:
     """`{behind, files}` when every file `base` gained lies in the evidence carry-forward set
     and the epic never touched it: a reconcile would only re-stale the closing evidence."""

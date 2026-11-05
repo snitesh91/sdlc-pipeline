@@ -28,7 +28,7 @@ issue about to close.
 
 ## Replacing an agent that cannot be resumed
 
-The replacement starts from the existing work. Its dispatch carries:
+After a container restart, first read the lost agent's final text from its transcript (`context-budget.md`, "After a container restart"); act on its `SDLC-RESULT` if it has one. The replacement starts from the existing work. Its dispatch carries:
 
 - the existing doc and its status ("`lld.md` at `<sha>` passed `lld-review` in round 2");
 - the commits on the branch, by SHA, one line each;
