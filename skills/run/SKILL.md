@@ -36,6 +36,7 @@ All under `${CLAUDE_PLUGIN_ROOT}/references/`.
 | `initiatives.md` | Driving an Initiative |
 | `retro.md` | Parking a finding; running a retro |
 | `history.md` | The incident behind a rule |
+| `context-budget.md` | Every run: updates, briefs, CI failures, side requests, waits, phase-boundary stops, a restart |
 
 ## The lifecycle model
 
@@ -174,11 +175,6 @@ local Tasks (`localLabel`). On `placement_mismatch`, stop, relay its `hint`, sta
 cloud run asks in session and keeps working; it ends only when nothing can move
 (`references/cloud-mode.md`, "A cloud run").
 
-## Config can move under you
-
-On `config_changed` from `merge-pr` or `next-action`, re-read the config before the next stage
-and tell the operator the changed `keys`.
-
 ## What you decide, and what you take to the operator
 
 - **During `development` and `pr-review`, apply the recommended fix yourself.**
@@ -194,7 +190,8 @@ and tell the operator the changed `keys`.
 
 When a unit hits `blocked` / `needs-human` / an open gate, park it and return to Step 1. End only
 when Step 1 returns `none` (on an Initiative, its own `none`), then Step 4. Unattended looping:
-`references/continuous-mode.md`.
+`references/continuous-mode.md`. On `config_changed` (`merge-pr`, `next-action`), re-read the
+config before the next stage and tell the operator the changed `keys`.
 
 ## Concurrency
 
@@ -213,7 +210,7 @@ python3 "$SDLC" next-action <epic> --run-id "$RUN_ID" --sync-epic
 
 | `action` | What to do |
 |---|---|
-| `resume` | A session died mid-stage. If you drive that unit now, skip it and survey again. On `likely_live`, launch nothing; ask the operator. Else, with an open PR: `prepare-rework <n>`, then dispatch per `references/rework.md`, "Replacing an agent that cannot be resumed"; never `start-stage`. Without one: resume at `stage` from comments and committed docs (Step 3) |
+| `resume` | A session died mid-stage. If you drive that unit now, skip it and survey again. On `likely_live`, launch nothing; ask the operator. Else, with an open PR: `prepare-rework <n>`, then dispatch per `references/rework.md`, "Replacing an agent that cannot be resumed"; never `start-stage`. Without one: resume at `stage` from comments and committed docs (Step 3). After a restart, read the lost agent's transcript first (`references/context-budget.md`) |
 | `route` | Fresh standing child: `advance-standing <n> --from none --to <stage>` ("Routing a standing child"; Step 2's scope alignment first for `product`) |
 | `delegate` | Step 2, then Step 3 |
 | `pass-gate` | `references/gates.md`, "Passing a gate"; pass `issue`/`gate_pr`/`stage` verbatim |
@@ -252,7 +249,8 @@ back what it covers, excludes and leaves open, and ask the genuine ambiguities i
 python3 "$SDLC" start-stage <n> --role <role> --run-id "$RUN_ID"
 ```
 
-`<role>` is `next-action`'s `stage`. Tell the operator in one line what you picked up. With
+`<role>` is `next-action`'s `stage`. Routine events (claimed, handed off, merged) get one line;
+full summaries only at gates, questions, rework findings and Step 4 (`references/context-budget.md`). With
 `pipeline.stack.enabled`, run `provision-epic-stack <n>` at the Epic's first touch.
 
 ## Step 3 — Run this stage, then the next, then the next
@@ -269,10 +267,10 @@ own. There is no `testing` stage; a child left at the retired `Testing` Stage is
 
 Give the agent (by `gh` command for anything large; in the cloud a `gh api` GET):
 
-1. The unit's number, title, body and thread; for a phase-Task, its parent's too.
-2. The doc path it owns, under the unit's `<docRoot>` (`start-stage`'s `doc_root` or `doc-root <n>`).
-   For a functional Task's `development` and `pr-review`: read the design with
+1. Pointers, not copies: the unit's number (and its parent's, for a phase-Task); the agent reads
+   body and thread. For a functional Task's `development` and `pr-review`, the design command:
    `python3 "$SDLC" lld-section --epic <parent> --task <n> --repo-path <worktree>`.
+2. The doc path it owns, under the unit's `<docRoot>` (`start-stage`'s `doc_root` or `doc-root <n>`).
 3. For `lld`: `architecture.md` is the source of truth; fits-vs-deviates comes first.
 4. Its worktree, with "use absolute paths or a standalone `cd`; never chain `cd <path> && …`; never touch the main
    checkout". For `development`, the test-env helper and `Integration tests: mandatory` only per
@@ -284,14 +282,14 @@ Never restate the agent file's rules. Template (`EPIC` is the Initiative/Epic yo
 
 > ROLE: <role> ISSUE: <n> EPIC: <epic>
 > Unit: #<n> — <title>. Worktree: <path>. Doc you own: <doc-path>.
-> The 2–3 unit-specific facts.
+> The 2–3 facts it cannot read (operator answers, prior findings). Under ~1,500 chars.
 
 Write the first line plain, with no backticks: the hooks parse it. SubagentStart adds
 `arch-review`'s `Skip threshold`.
 
 Note each agent's ID per role for resume-based rework (session only; drop it at the unit's
 stopping point). Send findings back with `SendMessage` yourself, never via a relay fork. Send
-cross-file searches to a read-only `Explore` subagent.
+cross-file searches to `Explore`, and an operator side request to a `general-purpose` subagent.
 
 ### After the subagent returns
 
@@ -353,7 +351,9 @@ doc is the whole deliverable, `open-gate` it even if waived, then `pass-gate <n>
 
 ### Stop at the run cap — reset your context between batches
 
-`parallelism.maxTasksPerRun` (0 = unlimited) caps units driven to a terminal state per run id.
+`parallelism.maxTasksPerRun` (0 = unlimited; keep it near 5) caps units driven to a terminal state
+per run id. Also stop at a phase boundary once this run drove a unit: after a `finish-lld` that cut
+Tasks, and before the first `close-epic` (cloud: `--outcome context-reset`; `references/context-budget.md`).
 On `stop-at-cap` (or `stop_at_cap: true`), finish in-flight work and stop; do not call
 `next-action`/`list-parallel-ready` again. The next `/sdlc:run` resumes there. `resume`,
 `pass-gate`, `address-gate-feedback` and `in_flight` units are never capped;
@@ -372,5 +372,4 @@ got, never a regenerated one; a `warning` lists `recent_runs` to pick from.
 
 ## Step 5 — Retrospective (only when the operator asks)
 
-Never start a retro on your own. Park friction findings with `park-finding`
-(`references/retro.md`).
+Never start a retro on your own. Park friction findings with `park-finding` (`references/retro.md`).

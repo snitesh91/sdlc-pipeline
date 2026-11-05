@@ -70,6 +70,7 @@ python3 "$SDLC" end-cloud-session <epic> --outcome <outcome> [--waits-on <n> ...
 | `waiting-epic` | only another Epic unblocks it | required: that Epic |
 | `waiting-local` | `none` says `waiting_local`: only local Tasks remain | default: the open local Tasks |
 | `stopped` | stopped by the operator, or anything else | — |
+| `context-reset` | a phase-boundary stop to shed context (`context-budget.md`); relaunch-ready at once | — |
 | `abandoned` | laptop only, for a dead session ("Status and stalls") | — |
 
 The recorded wait drives the relaunch ("Initiative → cloud Epics"). Then Step 4.

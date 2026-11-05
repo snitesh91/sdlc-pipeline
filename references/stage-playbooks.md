@@ -28,7 +28,7 @@ Nothing wakes you after your turn ends. Wait for a background command with Monit
 
 ### The handback is terse
 
-Your final message is for routing; evidence lives in the PR, comment or doc. Send only: **HEAD / PR**; **BLOCKER** (one line, `blocked` / `needs-human` / `failed` only); **QUESTIONS** (`needs-human` only, up to 4 lines `Q: <question> — options: <a> | <b>`); **CONCERN** (`done-with-concerns` only, one line); **DETAIL** (the link to the evidence). The last line is `SDLC-RESULT: {"issue": <n>, "stage": "<role>", "outcome": "<outcome>"}`. A standing child may add `"next"` and `"why"` (≤ 120 chars); the orchestrator decides.
+Your final message is for routing; evidence lives in the PR, comment or doc. Send only: **HEAD / PR**; **BLOCKER** (one line, `blocked` / `needs-human` / `failed` only); **QUESTIONS** (`needs-human` only, up to 4 lines `Q: <question> — options: <a> | <b>`); **CONCERN** (`done-with-concerns` only, one line); **DETAIL** (the link to the evidence). The last line is `SDLC-RESULT: {"issue": <n>, "stage": "<role>", "outcome": "<outcome>"}`. A standing child may add `"next"` and `"why"` (≤ 120 chars); the orchestrator decides. The whole final message stays under 1,500 characters: the SubagentStop hook refuses a longer one once, and you re-send it terse. Wait on one Monitor until your stage ends; never send an interim `SDLC-RESULT`.
 
 | `outcome` | Meaning |
 |---|---|

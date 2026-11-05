@@ -27,8 +27,9 @@ from .issue_ops import _first_line, cmd_place
 # --- Initiative -> cloud Epics ------------------------------------------------------------
 
 # `waiting-local`: only local Tasks (`placement_scope`) remain; a laptop run takes them.
+# `context-reset`: the run stopped at a phase boundary to shed context; relaunch-ready at once.
 CLOUD_SESSION_OUTCOMES = ("closed", "waiting-human", "waiting-epic", "waiting-local", "stopped",
-                          "abandoned")
+                          "abandoned", "context-reset")
 
 
 # A live session's heartbeat (its launch marker's `heartbeat=`) is rewritten at most this often.
@@ -342,6 +343,8 @@ def session_waits(gh, session: Optional[dict], by_number: dict,
     Tasks) clears once cloud work reappears under `epic` or no local Task is left open."""
     ended = (session or {}).get("ended") or {}
     waits = ended.get("waits") or []
+    if ended.get("outcome") == "context-reset":
+        return {"outcome": "context-reset", "waits": [], "pending": [], "resolved": True}
     if ended.get("outcome") == "waiting-local" and epic is not None:
         issues = list(by_number.values())
         pending = local_task_numbers(epic, issues)

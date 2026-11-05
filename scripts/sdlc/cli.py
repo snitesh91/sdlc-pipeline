@@ -15,7 +15,7 @@ from .units import PLACEMENTS, PlacementMismatch, cmd_doc_root, cmd_initiative_p
 from .evidence import LOCAL_CI_SUITES, REVIEW_ROLES
 from .epic_close import (
     INITIATIVE_VERIFICATION_OUTCOMES, cmd_check_initiative_closeable, cmd_close_epic,
-    cmd_close_initiative, cmd_merge_initiative_pr, cmd_open_initiative_pr,
+    brief_close_epic, cmd_close_initiative, cmd_merge_initiative_pr, cmd_open_initiative_pr,
     cmd_record_epic_verification, cmd_record_initiative_verification,
 )
 from .gate_eval import cmd_check_gate
@@ -40,7 +40,7 @@ from .gates import (
     cmd_resolve_thread, cmd_skip_gate, cmd_waive_gate,
 )
 from .dev_pr import cmd_cite, cmd_open_dev_pr, cmd_verify_citations, cmd_verify_exit
-from .checks import cmd_merge_pr, cmd_pr_checks, cmd_rerun_checks, cmd_update_pr_body
+from .checks import cmd_ci_failure_summary, cmd_merge_pr, cmd_pr_checks, cmd_rerun_checks, cmd_update_pr_body
 from .issue_ops import (
     cmd_close_issue, cmd_mark_blocked, cmd_mark_issue_closed, cmd_mark_needs_human,
     cmd_mark_todo, cmd_place, cmd_prune_stale,
@@ -418,6 +418,10 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("pr-checks")
     p.add_argument("pr", type=int)
     p.set_defaults(func=lambda a: cmd_pr_checks(get_work_item_provider(), a.pr))
+    p = sub.add_parser("ci-failure-summary",
+                        help="A PR's failing checks with only their failure lines, bounded")
+    p.add_argument("pr", type=int)
+    p.set_defaults(func=lambda a: cmd_ci_failure_summary(get_work_item_provider(), a.pr))
     p = sub.add_parser("update-pr-body",
                         help="Replace an open pipeline PR's description from a file (REST)")
     p.add_argument("pr", type=int)
@@ -512,9 +516,11 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--clean-worktree", action="store_true",
                     help="Before a reconcile or the merge, discard the closing run's untracked "
                          "output from the epic worktree; refuses on tracked changes")
-    p.set_defaults(func=lambda a: cmd_close_epic(get_work_item_provider(), a.epic, a.repo_path,
-                                                  carry_forward=a.carry_forward,
-                                                  clean_worktree=a.clean_worktree))
+    p.add_argument("--brief", action="store_true",
+                    help="Counts in place of the evidence, file and cleanup lists")
+    p.set_defaults(func=lambda a: (brief_close_epic if a.brief else (lambda r: r))(
+        cmd_close_epic(get_work_item_provider(), a.epic, a.repo_path,
+                       carry_forward=a.carry_forward, clean_worktree=a.clean_worktree)))
     p = sub.add_parser("record-epic-verification",
                         help="Record one half of an epic's closing verification")
     p.add_argument("epic", type=int)
