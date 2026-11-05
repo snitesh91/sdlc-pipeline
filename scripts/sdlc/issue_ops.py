@@ -24,8 +24,8 @@ from .run_state import _run_state_dir, record_terminal_unit
 from .plugin_version import worktree_path_for_branch
 from .worktrees import (
     _docker_cleanup_enabled, _landed, _run_retry_transient, cmd_release_review_worktree,
-    docker_sweep, release_detached_dev_worktree, release_worktree, unit_docker_prefix,
-    worktree_entries,
+    _remove_worktree, docker_sweep, release_detached_dev_worktree, release_worktree,
+    unit_docker_prefix, worktree_entries,
 )
 from .checks import _close_realised_issues, _release_parked_unit
 
@@ -214,7 +214,8 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
     review worktree, its worktree (releaseCommand first), `origin/<branch>`, then the local
     ref, then `git worktree prune`. Never raises; each part reports what it did or why not
     (`docker`, `review_worktree`, `worktree`, `remote_branch`, `local_branch`,
-    `worktree_pruned`). In a cloud session the worktree parts are skipped (`skipped: "cloud"`).
+    `worktree_pruned`). A cloud session releases them too: its container outlives many units,
+    and each merged tree (node_modules included) left behind fills its disk.
     `base` defaults to the unit's integration base, resolved only when needed."""
     runner = runner or gh._run
     repo_path = repo_path or "."
@@ -246,14 +247,10 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
         out["docker"] = docker_sweep(unit_docker_prefix(number, unit), runner, dry_run)
     # Every later step runs `git -C repo_path`: never from inside the tree released below.
     repo_path = _repo_path_outside_worktree(repo_path, branch, runner)
-    local_fs = not cloud_skips_local_cleanup()
     if unit == "issue":
-        out["review_worktree"] = (cmd_release_review_worktree(number, repo_path, runner, shell,
-                                                              dry_run)
-                                  if local_fs else {"skipped": "cloud"})
-    if not local_fs:
-        out["worktree"] = {"released": False, "skipped": "cloud"}
-    elif dry_run:
+        out["review_worktree"] = cmd_release_review_worktree(number, repo_path, runner, shell,
+                                                             dry_run)
+    if dry_run:
         try:
             held = worktree_path_for_branch(branch, runner=runner, base_repo=repo_path)
         except GhError:
@@ -263,7 +260,7 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
     else:
         out["worktree"] = release_worktree(branch, runner=runner, base_repo=repo_path,
                                            shell=shell, safe_refs=safe_refs)
-    if local_fs and unit == "issue" and out["worktree"].get("reason") == "no worktree":
+    if unit == "issue" and out["worktree"].get("reason") == "no worktree":
         # Before the remote delete: `origin/issue-<n>` is one of the refs that vouch for it.
         detached = release_detached_dev_worktree(number, repo_path, runner, shell, safe_refs,
                                                  dry_run)
@@ -273,7 +270,7 @@ def cleanup_unit(gh: GitHub, number: int, unit: str = "issue", repo_path: str = 
                                                   safe_refs, dry_run)
     out["local_branch"] = _cleanup_local_branch(repo_path, branch, runner, safe_refs,
                                                 out["remote_branch"], dry_run)
-    if not dry_run and local_fs:
+    if not dry_run:
         try:
             runner(["git", "-C", repo_path, "worktree", "prune"])
             out["worktree_pruned"] = True
@@ -484,28 +481,62 @@ def cmd_prune_stale(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] =
         wanted = {n for _, n in present_units(repo_path, runner)}
     except GhError:
         wanted = set()
-    issues = focus_issues(gh, wanted | _run_state_epics())
+    verifier_trees = _initiative_close_trees(repo_path, runner)
+    issues = focus_issues(gh, wanted | set(verifier_trees) | _run_state_epics())
     swept = sweep_units(gh, repo_path, runner, issues=issues, dry_run=dry_run)
     closed = {i["number"] for i in issues if i["state"] == "CLOSED"}
     result = _with_warnings({"dry_run": dry_run, **swept,
                              ("would_remove_run_states" if dry_run else "run_states_removed"):
                                  _stale_run_states(closed, dry_run)},
                             *swept["units"])
+    stale_trees = [(n, path) for n, path in sorted(verifier_trees.items()) if n in closed]
+    if stale_trees:
+        result["initiative_close_trees"] = [
+            _remove_verifier_tree(repo_path, n, path, runner, dry_run) for n, path in stale_trees]
     if not dry_run:
-        steps = [("fetch_pruned", ["git", "-C", repo_path, "fetch", "--prune", "origin"])]
-        if cloud_skips_local_cleanup():
-            result["worktree_pruned"] = False
-            result["skipped"] = "cloud"
-        else:
-            steps.insert(0, ("worktree_pruned", ["git", "-C", repo_path, "worktree", "prune"]))
+        steps = [("worktree_pruned", ["git", "-C", repo_path, "worktree", "prune"]),
+                 ("fetch_pruned", ["git", "-C", repo_path, "fetch", "--prune", "origin"])]
+        if cloud_skips_local_cleanup() and _docker_cleanup_enabled():
+            # A long cloud run's image builds fill its disk; unused build cache only.
+            steps.append(("docker_builder_pruned", ["docker", "builder", "prune", "-f"]))
         for key, argv in steps:
             try:
                 _run_retry_transient(argv, runner)
                 result[key] = True
-            except GhError as exc:
+            except (GhError, OSError) as exc:  # OSError: no docker binary
                 result[key] = False
                 result[f"{key}_error"] = str(exc)
     return result
+
+
+def _initiative_close_trees(repo_path: str, runner: Runner) -> dict:
+    """`{initiative: path}` of the detached `<ephemeralPrefix>initiative-<n>` trees an
+    `initiative-close` agent makes under `worktrees.root` (a dead agent leaves its tree)."""
+    w = PIPELINE["worktrees"]
+    name_re = re.compile(rf"^{re.escape(w['ephemeralPrefix'])}initiative-(\d+)$")
+    root = os.path.realpath(w["root"])
+    try:
+        entries = worktree_entries(repo_path, runner)
+    except GhError:
+        return {}
+    out = {}
+    for e in entries[1:]:
+        m = name_re.match(os.path.basename(e["path"]))
+        if m and e["branch"] is None and os.path.dirname(os.path.realpath(e["path"])) == root:
+            out[int(m.group(1))] = e["path"]
+    return out
+
+
+def _remove_verifier_tree(repo_path: str, n: int, path: str, runner: Runner,
+                          dry_run: bool) -> dict:
+    """Remove a closed Initiative's read-only verifier tree (it never holds commits)."""
+    if dry_run:
+        return {"initiative": n, "path": path, "would_release": True}
+    try:
+        return {"initiative": n, "path": path, "released": True,
+                **_remove_worktree(repo_path, path, runner)}
+    except GhError as exc:
+        return {"initiative": n, "path": path, "released": False, "reason": str(exc)}
 
 
 def _placement_units(number: int, issues: list) -> set:

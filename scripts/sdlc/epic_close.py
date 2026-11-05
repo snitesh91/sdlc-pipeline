@@ -19,10 +19,23 @@ from .evidence import (
 class _EpicEvidenceDelta:
     """`stale_since` for `missing_epic_verification`: how `branch` moved on from a tested
     `sha` (`fresh` | `carried_forward` | `stale` | `uncomparable`, with the files), remembered
-    per sha so close-epic can report what it carried forward."""
+    per sha so close-epic can report what it carried forward. With `base`, a delta that
+    touches no file the epic itself changed against `base` (main moved on independently)
+    also carries forward."""
 
-    def __init__(self, gh, branch: str, carry_forward: bool = True):
+    def __init__(self, gh, branch: str, carry_forward: bool = True, base: Optional[str] = None):
         self.gh, self.branch, self.carry_forward, self.deltas = gh, branch, carry_forward, {}
+        self.base, self._epic_files = base, None
+
+    def _independent_of_epic(self, files: list) -> bool:
+        """Whether `files` touch no file the epic changed against `base` (nor the pipeline
+        config): what main brought in that the tested tree never depended on."""
+        if self.base is None or touches_pipeline_config(files):
+            return False
+        if self._epic_files is None:
+            self._epic_files = self.gh.base_delta_files(self.base, base=self.branch)
+        return (len(self._epic_files) < COMPARE_FILES_CAP
+                and not set(files) & set(self._epic_files))
 
     def classify(self, sha: str) -> dict:
         if sha not in self.deltas:
@@ -30,7 +43,8 @@ class _EpicEvidenceDelta:
                 files = self.gh.files_since(sha, self.branch)
                 status = ("fresh" if not files
                           else "carried_forward" if self.carry_forward and len(files) < 300
-                          and all(evidence_carries_forward(p) for p in files)
+                          and (all(evidence_carries_forward(p) for p in files)
+                               or self._independent_of_epic(files))
                           else "stale")
             except GhError:
                 files, status = [], "uncomparable"
@@ -74,7 +88,7 @@ def _pr_suite_evidence(gh, spec: dict, view: dict, checks: list, ref: str,
     if workflow_check_state(checks, spec["workflow"]) == "passing":
         return "passing_check"
     suite = spec["suite"]
-    if suite in NON_ATTESTABLE_SUITES:
+    if suite_not_attestable(suite):
         return None
     comments = view.get("comments", [])
     if suite in local_ci_suites_attested(comments, view.get("headRefOid")):
@@ -131,7 +145,9 @@ def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
     view, checks = {}, []
     if epic_pr is not None:
         view = gh.pr_view(epic_pr, "comments,headRefOid")
-        checks = gh.pr_checks(epic_pr)
+        # A reconcile merge whose incoming files miss a suite's paths keeps that suite's
+        # earlier pass (merge-pr's carry rule), so an independent main never re-requires CI.
+        checks = effective_checks(gh, epic_pr) if carry_forward else gh.pr_checks(epic_pr)
     chain = None
     suites, unattested, awaiting, missing, breaks, carried = {}, [], [], [], {}, set()
     for spec in required_workflows(base):
@@ -154,7 +170,7 @@ def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
         if status is None:
             status = "missing"
             missing.append(spec["workflow"])
-            (awaiting if suite in NON_ATTESTABLE_SUITES else unattested).append(suite)
+            (awaiting if suite_not_attestable(suite) else unattested).append(suite)
         suites[suite] = status
     return {"suites": suites, "unattested": unattested, "awaiting": awaiting, "missing": missing,
             "breaks": breaks, "carried_files": carried, "checks": checks}
@@ -227,7 +243,7 @@ def _close_epic_evidence(gh, epic: int, branch: str, children: list, epic_pr: Op
     any), `unattested_suites`, `evidence`, `carried_forward_files`, `evidence_breaks`,
     plus the private `_missing_workflows` the merge gate reads."""
     comments = gh.issue_view(epic).get("comments", [])
-    delta = _EpicEvidenceDelta(gh, branch, carry_forward)
+    delta = _EpicEvidenceDelta(gh, branch, carry_forward, base)
     problems = missing_epic_verification(comments, delta)
     files = gh.pr_files(epic_pr) if epic_pr is not None else gh.base_delta_files(base, base=branch)
     suites = _epic_suite_evidence(gh, branch, children, files, epic_pr, carry_forward,
@@ -272,11 +288,12 @@ def _stale_evidence_delta(comments: list, delta: _EpicEvidenceDelta) -> dict:
     return out
 
 
-def _close_epic_exploratory_problems(gh, epic: int, branch: str, carry_forward: bool) -> list:
+def _close_epic_exploratory_problems(gh, epic: int, branch: str, carry_forward: bool,
+                                     base: Optional[str] = None) -> list:
     """Just the exploratory half of `_close_epic_evidence`, to decide before the epic PR is
     opened whether the second call can proceed at all."""
     return missing_epic_verification(gh.issue_view(epic).get("comments", []),
-                                     _EpicEvidenceDelta(gh, branch, carry_forward))
+                                     _EpicEvidenceDelta(gh, branch, carry_forward, base))
 
 
 def clean_epic_worktree(epic: int, repo_path: str = ".",
@@ -413,7 +430,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     if base != "main":
         # An Epic cut before its Initiative opted in: stand the initiative branch up first.
         ensure_branch_on_origin(repo_path, base, runner=runner)
-    verifying = bool(_close_epic_exploratory_problems(gh, epic, branch, carry_forward))
+    verifying = bool(_close_epic_exploratory_problems(gh, epic, branch, carry_forward, base))
     if verifying and initiative is not None:
         # Only while verification is owed: a later call never re-syncs, so a busy main
         # cannot keep moving the tree under a finished exploratory pass.
@@ -451,8 +468,16 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
             return refused
         # The epic branch rarely has a live worktree by close time; reconcile in
         # an ephemeral one under the branch lock, never in the main checkout.
-        with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
-            git_reconcile_branch(ws.path, branch, base=base, runner=runner)
+        try:
+            with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
+                git_reconcile_branch(ws.path, branch, base=base, runner=runner)
+        except MergeConflict as e:
+            return {"epic": epic, "merged": False, "branch": branch, **target, **cleaned,
+                    "conflict": True, "conflicting_files": e.files,
+                    "reason": f"`{branch}` conflicts with `origin/{base}` on {len(e.files)} "
+                              f"file(s) -- resolve it per references/parallelism.md, "
+                              f"\"Git-conflict handling\" (epic reconcile), push "
+                              f"`{branch}`, then re-run close-epic"}
         timestamp = _utc_now_marker()
         gh.issue_comment(epic,
             f"🔄 Reconciled `{branch}` with `origin/{base}` ({behind} commit(s) picked up). "
@@ -481,6 +506,13 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                 **ready_tree(),
                 "reason": f"closing verification incomplete: "
                           f"{'; '.join(evidence['missing_verification'])}"}
+    collisions = _versioned_file_collisions(gh, branch, base, repo_path, runner)
+    if collisions:
+        return {"epic": epic, "merged": False, "branch": branch, **target,
+                "version_collisions": collisions,
+                "reason": "a versioned file's text changed but its version did not move past "
+                          f"`{base}`'s: {'; '.join(collisions)} -- bump the version on "
+                          f"`{branch}` (a Task's rework), then re-run close-epic"}
     if existing:
         pr_number = existing[0]["number"]
     else:
@@ -511,6 +543,41 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     gh.pr_merge(pr_number)
     return _finish_epic_close(gh, epic, None, pr_number, children, all_issues, repo_path,
                               runner, {**target, **evidence, **cleaned}, base=base)
+
+
+def _versioned_file_collisions(gh, branch: str, base: str, repo_path: str,
+                               runner: Runner) -> list:
+    """`pipeline.epicClose.versionedFiles` entries (`{path, versionPattern}`) the epic changed
+    whose version string still equals `base`'s: two branches setting one version for
+    different text merge with no conflict, so nothing else catches it."""
+    entries = PIPELINE["epicClose"].get("versionedFiles") or []
+    if not entries:
+        return []
+    epic_files = set(gh.base_delta_files(base, base=branch))
+    entries = [e for e in entries if e["path"] in epic_files]
+    if not entries:
+        return []
+    _fetch_origin(repo_path, runner)
+
+    def show(ref: str, path: str) -> Optional[str]:
+        try:
+            return runner(["git", "-C", repo_path, "show", f"origin/{ref}:{path}"])
+        except GhError:
+            return None  # added or deleted by the epic: no version to collide with
+
+    def version(text: str, pattern: str) -> Optional[str]:
+        m = re.search(pattern, text)
+        return (m.group(1) if m.groups() else m.group(0)) if m else None
+
+    out = []
+    for e in entries:
+        ours, theirs = show(branch, e["path"]), show(base, e["path"])
+        if ours is None or theirs is None or ours == theirs:
+            continue
+        v = version(ours, e["versionPattern"])
+        if v == version(theirs, e["versionPattern"]):
+            out.append(f"`{e['path']}` (version {v!r})")
+    return out
 
 
 def _reconcile_skippable(gh, branch: str, base: str, behind: int) -> Optional[dict]:
@@ -900,15 +967,16 @@ from . import gate_eval  # noqa: E402,F401
 from .run_state import archive_run_state  # noqa: E402
 from .plugin_version import worktree_path_for_branch  # noqa: E402
 from .worktrees import (  # noqa: E402
-    BranchWorkspace, _resume_live_worktree, _run_retry_transient, _with_workspace, branch_lock,
+    BranchWorkspace, _fetch_origin, _resume_live_worktree, _run_retry_transient, _with_workspace, branch_lock,
     ensure_branch_on_origin,
 )
-from .design_gates import cmd_sync_branch, git_reconcile_branch  # noqa: E402
+from .design_gates import MergeConflict, cmd_sync_branch, git_reconcile_branch  # noqa: E402
 from .checks import (  # noqa: E402
-    NON_ATTESTABLE_SUITES, _MISSING_WORKFLOW_HINT, _is_failed_check,
+    _MISSING_WORKFLOW_HINT, _is_failed_check,
     _latest_attested_sha_by_suite, _suite_reattest_needed, _with_uncovered,
-    _workflow_applies_to_base, _workflow_covers, enrich_failed_checks, merge_gate_status,
-    required_workflows, workflow_check_state,
+    _workflow_applies_to_base, _workflow_covers, effective_checks, enrich_failed_checks,
+    merge_gate_status, required_workflows, suite_not_attestable, touches_pipeline_config,
+    workflow_check_state,
 )
 from .issue_ops import (  # noqa: E402
     _with_warnings, cleanup_unit, cmd_mark_issue_closed, sweep_units,

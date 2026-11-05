@@ -1,5 +1,5 @@
-"""Retro 2026-10-12, cloud: a cloud session skips local filesystem cleanup (its container is
-discarded), and skips the ref delete the proxy refuses when GitHub auto-deletes merged heads."""
+"""Retro 2026-10-12, cloud (worktree release reversed 2026-11-05: a long run fills the disk):
+a cloud session keeps a parked unit's tree for its resume, and skips the ref delete the proxy refuses when GitHub auto-deletes merged heads."""
 from pathlib import Path
 
 import pytest
@@ -16,17 +16,18 @@ def cloud(monkeypatch):
     monkeypatch.setenv("SDLC_PLACEMENT", "cloud")
 
 
-def test_cloud_merge_pr_keeps_the_worktree_and_still_deletes_the_branch(repo, cloud):
+def test_cloud_merge_pr_releases_the_worktree_and_deletes_the_branch(repo, cloud):
+    # Retro 2026-11-05 (cloud-merged-worktrees-fill-disk): kept trees filled a long cloud
+    # run's disk (ENOSPC after 11 Tasks), so a cloud session releases them too.
     gh = _real(_task(), repo)
     wt = _worktree_with_doc(gh, repo, 5, "src/a.txt", "a\n")
     pr = _merged_pr(gh)
 
     result = s.cmd_merge_pr(gh, pr, 5, repo_path=str(repo))
 
-    assert Path(wt).exists()
-    assert result["worktree"] == {"released": False, "skipped": "cloud"}
-    assert result["cleanup"]["review_worktree"] == {"skipped": "cloud"}
-    assert "worktree_pruned" not in result["cleanup"]
+    assert not Path(wt).exists() and result["worktree"]["released"] is True
+    assert "skipped" not in result["cleanup"]["review_worktree"]
+    assert result["cleanup"]["worktree_pruned"] is True
     assert result["cleanup"]["remote_branch"]["deleted"] is True
     assert not result.get("warnings")
 
@@ -97,7 +98,7 @@ def test_local_deletes_even_when_the_repo_auto_deletes_heads(repo):
     assert result["cleanup"]["remote_branch"]["deleted"] is True
 
 
-def test_cloud_prune_stale_skips_worktrees_but_still_prunes_origin(repo, cloud):
+def test_cloud_prune_stale_releases_worktrees_and_prunes_origin(repo, cloud):
     gh = _real(_task(5), repo)
     wt5 = _worktree_with_doc(gh, repo, 5, "src/a.txt", "a\n")
     _merged_pr(gh)
@@ -105,9 +106,10 @@ def test_cloud_prune_stale_skips_worktrees_but_still_prunes_origin(repo, cloud):
 
     result = s.cmd_prune_stale(gh, str(repo))
 
-    assert Path(wt5).exists() and not _on_origin(repo, "issue-5")
-    assert result["skipped"] == "cloud" and result["worktree_pruned"] is False
+    assert not Path(wt5).exists() and not _on_origin(repo, "issue-5")
+    assert "skipped" not in result and result["worktree_pruned"] is True
     assert result["fetch_pruned"] is True
+    assert "docker_builder_pruned" not in result  # docker cleanup is off in tests
 
 
 def test_cloud_close_epic_clean_worktree_still_removes_the_output(repo, cloud):

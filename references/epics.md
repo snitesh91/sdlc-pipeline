@@ -213,7 +213,9 @@ the doc). An Epic with no phase-Tasks and no `epic:architected` goes to `needs_p
 **`close-epic <n>` is two calls. Every refusal is a structured exit-0 result.**
 
 1. First call: refuses on `open_children`. When `epic-<n>` is behind `origin/main` it
-   reconciles and stops (`reconciled`), unless everything `main` gained is in the
+   reconciles and stops (`reconciled`); a conflict returns `conflict: true` and
+   `conflicting_files` (exit 0; resolve it per `references/parallelism.md`, "Git-conflict
+   handling"), unless everything `main` gained is in the
    carry-forward set and untouched by the epic (`reconcile_skipped`). Every result carries
    `unattested_suites` (run and attest), `awaiting_checks` (`attestable: false`: only the epic
    PR's check satisfies them), and `evidence` per kind (`fresh` | `carried_forward_from <sha>`
@@ -224,7 +226,9 @@ the doc). An Epic with no phase-Tasks and no `epic:architected` goes to `needs_p
    Every other suite waits for the epic PR's check (`references/verification-rules.md`,
    "Test scope").
 3. Second call: refuses on `missing_verification` or a `missing` suite (`checks:
-   missing-checks`); otherwise merges `epic-<n>` into its base. The epic PR exists from this
+   missing-checks`) or `version_collisions` (a `pipeline.epicClose.versionedFiles` file whose
+   text the epic changed while its version string still equals the base's: bump it on
+   `epic-<n>`); otherwise merges `epic-<n>` into its base. The epic PR exists from this
    call: attest each named suite on it (`record-local-ci --pr <pr>`), wait for
    `awaiting_checks`, and call again. After the merge it closes the Epic and cleans up
    (`cleanup`, `children_cleanup`, `run_state`, `stack`; `recovered: true` on an
@@ -232,8 +236,11 @@ the doc). An Epic with no phase-Tasks and no `epic:architected` goes to `needs_p
 
 **Evidence carry-forward:** the exploratory record survives a delta that touches only
 `pipeline.epicClose.evidenceCarryForward.paths` (default `**/*.md`, `docs/**`, `<docRoot>/**`)
-and is under 300 files. Never widen the set to source or tests. A suite attestation carries
-forward when nothing its workflow covers changed since its sha. A suite with no epic-PR
+and is under 300 files, or a delta of files the epic itself never changed against its base
+(`main` moved on independently: a deploy workflow, an infra value). Never widen the set to
+source or tests. A suite attestation carries forward when nothing its workflow covers changed
+since its sha; a suite's check carries across a reconcile merge by the same rule
+(`pipeline.ci.carryChecksAcrossSync`). A suite with no epic-PR
 attestation is satisfied when every merged child PR that touched its paths was attested or
 checked at its merged head and no direct `epic-<n>` commit touched them; else
 `evidence_breaks` names the break. `--no-carry-forward` accepts only evidence at the epic

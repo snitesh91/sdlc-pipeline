@@ -26,6 +26,14 @@ def cmd_add_blocked_by(gh: GitHub, issue: int, dep: int) -> dict:
     return {"issue": issue, "blocked_on": dep, "added": True}
 
 
+def cmd_remove_blocked_by(gh: GitHub, issue: int, dep: int) -> dict:
+    """Remove a native `blockedBy` edge (no-op when it is absent)."""
+    if dep not in gh.blocked_by(issue):
+        return {"issue": issue, "blocked_on": dep, "removed": False, "reason": "no such edge"}
+    gh.remove_blocked_by(issue, dep)
+    return {"issue": issue, "blocked_on": dep, "removed": True}
+
+
 def _task_line(name: str, after_separator: bool = True) -> re.Pattern:
     """A `<name>: <value>` field in a Task section: at line start (bullet, bold and backtick
     wrappers tolerated) or, with `after_separator`, after a ` / ` or ` | ` separating it from a
@@ -245,13 +253,27 @@ def task_type_name() -> str:
 
 def _wire_numbered_task_edges(gh: GitHub, doc: str, numbered: list, key_to_number: dict,
                               all_issues: dict, result: dict) -> None:
-    """Add each already-numbered Task's missing `Depends on:` `blockedBy` edges (an open
-    dependency only, never twice) into `result["edges_added"]` / `result["edges_failed"]`."""
+    """Reconcile each already-numbered Task's `blockedBy` edges onto sibling Tasks with its
+    `Depends on:` lines: add the missing ones (an open dependency only, never twice) into
+    `result["edges_added"]` / `result["edges_failed"]`, and remove a sibling edge the doc no
+    longer names (an LLD revision dropped it) into `result["edges_removed"]`."""
+    siblings = set(key_to_number.values())
     for h in numbered:
         issue_number = h["number"]
         if (all_issues.get(issue_number) or {}).get("state", "OPEN") != "OPEN":
             continue  # a closed Task waits on nothing
-        for dep_key in parse_task_depends_on(doc[h["line_end"]:h["end"]]):
+        section = doc[h["line_end"]:h["end"]]
+        if not task_dependency_defect(section):
+            wanted = {key_to_number.get(k) for k in parse_task_depends_on(section)}
+            try:
+                for dep in gh.blocked_by(issue_number):
+                    if dep in siblings and dep not in wanted:
+                        gh.remove_blocked_by(issue_number, dep)
+                        result.setdefault("edges_removed", []).append(
+                            {"issue": issue_number, "on": dep})
+            except GhError as e:
+                result["edges_failed"].append({"issue": issue_number, "error": str(e)})
+        for dep_key in parse_task_depends_on(section):
             dep = key_to_number.get(dep_key)
             if dep is None or dep == issue_number:
                 result["edges_failed"].append(

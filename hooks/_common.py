@@ -211,6 +211,27 @@ def result_text(text, handback):
     return handback
 
 
+def latest_header_prompt(transcript: str, key: str = "issue") -> str:
+    """The last user text message whose first line carries a `<KEY>: <value>` header (a
+    resumed agent's new brief rebinds it), else the first prompt. Tool results carry no text
+    blocks, so only the orchestrator's own messages count."""
+    found = ""
+    try:
+        with open(transcript) as f:
+            for line in f:
+                if '"user"' not in line:
+                    continue
+                entry = json.loads(line)
+                msg = entry.get("message") if isinstance(entry, dict) else None
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    text = message_text(msg.get("content"))
+                    if prompt_header(text).get(key):
+                        found = text
+    except (OSError, ValueError):
+        pass
+    return found or first_prompt(transcript)
+
+
 def first_prompt(transcript: str) -> str:
     """The first user message of a transcript (a subagent's delegation prompt), or ""."""
     try:

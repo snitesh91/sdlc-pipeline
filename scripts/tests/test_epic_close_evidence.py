@@ -49,7 +49,8 @@ def test_record_takes_an_explicit_sha_and_rejects_a_bad_one():
 
 def test_evidence_goes_stale_when_code_lands_after_the_tested_head():
     # Regression: only a `main` reconcile invalidated the record; a later code merge did not.
-    gh = _epic(_marks(), files_since=["backend/src/upload.ts"])
+    gh = _epic(_marks(), files_since=["backend/src/upload.ts"],
+               delta=("backend/a.ts", "backend/src/upload.ts"))
     result = s.cmd_close_epic(gh, 9)
     assert result["merged"] is False
     assert any("code has landed since" in p for p in result["missing_verification"])
@@ -204,7 +205,8 @@ def test_a_configured_fixtures_only_delta_carries_the_exploratory_evidence_forwa
 def test_a_path_outside_the_carry_forward_set_still_forces_a_re_run(monkeypatch):
     # Positive control: widening the set to fixtures does not widen it to source.
     monkeypatch.setattr(s, "EVIDENCE_CARRY_FORWARD_GLOBS", FIXTURE_GLOBS)
-    gh = _epic([_marks()[1]], files_since=["backend/test/fixtures/seed.json", "backend/src/a.ts"])
+    gh = _epic([_marks()[1]], files_since=["backend/test/fixtures/seed.json", "backend/src/a.ts"],
+               delta=("backend/src/a.ts",))
     result = s.cmd_close_epic(gh, 9)
     assert result["merged"] is False
     assert result["evidence"]["exploratory"] == "missing"

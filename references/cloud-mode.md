@@ -74,12 +74,28 @@ python3 "$SDLC" end-cloud-session <epic> --outcome <outcome> [--waits-on <n> ...
 
 The recorded wait drives the relaunch ("Initiative → cloud Epics"). Then Step 4.
 
-- **No local cleanup:** the container and its `/tmp` data are discarded at the end. Cleanup
-  commands skip worktree and data removal (`skipped: "cloud"`); never remove them by hand. Branch
-  and Docker cleanup still run; `close-epic --clean-worktree` still cleans the epic worktree.
+- **Cleanup:** `merge-pr`, `close-epic` and `prune-stale` release a closed unit's worktrees as
+  on a laptop: a long run's merged trees (`node_modules` included) fill the disk. `prune-stale`
+  also prunes the unused Docker build cache. Parking keeps the unit's tree for its resume, and
+  stack teardown keeps its data dir (`skipped: "cloud"`).
 - **e2e:** with no cloud e2e profile in the repo's cloud setup, make the e2e-test Task local
   instead of parking `needs-human`.
 - **Pushed work survives** a dead session (`agents/development.md`, "Working in the repo").
+
+## CI in a cloud run
+
+A cloud session has no self-hosted runner; a PR's hosted jobs bill minutes. For a suite set
+`attestable: "cloud"` (`references/operations.md`, "Local-CI attestation"). It covers only the
+epic → `main` (or `initiative-*`) PR: Task PRs into `epic-<n>` run no full suites.
+
+1. Before the second `close-epic` call, wait until no dev lane is in flight (full IT next to
+   dev lanes exhausts the VM).
+2. In the epic worktree, run the repo's pre-PR command with its full integration scope
+   (`pipeline.prePr.command` and the repo's IT flag).
+3. Label the epic PR `ci:local` (`pr-add-label <pr> ci:local`): the repo's PR workflows skip
+   their hosted jobs on it.
+4. `record-local-ci --pr <pr> --suite <suite> --sha <head>` for each suite that passed, then
+   call `close-epic` again.
 
 ## GitHub access in the cloud
 

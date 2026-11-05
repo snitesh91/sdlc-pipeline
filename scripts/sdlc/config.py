@@ -214,7 +214,10 @@ _PIPELINE_DEFAULTS = {
                   "evidenceCarryForward": {"paths": ["**/*.md", "docs/**", "{docRoot}/**"]},
                   # Shell command close-epic runs in the epic worktree before the
                   # exploratory pass (e.g. a dependency install); "" = none.
-                  "prepare": ""},
+                  "prepare": "",
+                  # `[{path, versionPattern}]`: files whose text change must move a version
+                  # string (regex; group 1 if any) past the base's -- close-epic refuses else.
+                  "versionedFiles": []},
     # Priority / Effort `create-issue` sets when no flag names one (fields configured only).
     "issueDefaults": {"priority": "Medium", "effort": "Medium"},
     # `schemaGlobs`: an epic sync whose incoming base delta touches one of these is reported

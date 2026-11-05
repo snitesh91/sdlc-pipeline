@@ -1912,7 +1912,8 @@ def edit_guard(path, cwd, agent_type=None, tool="Edit", root=None, prompt="ROLE:
         if prompt is not None:
             os.makedirs(os.path.join(session, "s", "subagents"))
             with open(os.path.join(session, "s", "subagents", "agent-a1.jsonl"), "w") as f:
-                f.write(json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n")
+                for p in ([prompt] if isinstance(prompt, str) else prompt):
+                    f.write(json.dumps({"type": "user", "message": {"role": "user", "content": p}}) + "\n")
     proc = run_hook("edit_guard.py", payload)
     assert proc.returncode == 0, proc.stderr
     if not proc.stdout.strip():
@@ -1972,6 +1973,20 @@ def test_edit_guard_denies_a_reviewer_with_no_unit_number(review_repo, prompt):
     reason = edit_guard(str(root / "sdlc-review-12" / "a.ts"), repo, "sdlc:pr-review",
                         prompt=prompt)
     assert reason and "ISSUE: <n>" in reason
+
+
+def test_edit_guard_rebinds_a_reviewer_resumed_onto_a_new_unit(review_repo):
+    """Regression (resumed-reviewer-stale-worktree-guard): a pr-review agent resumed from #12
+    onto #14 was held to sdlc-review-12, so its probe in sdlc-review-14 was denied."""
+    repo, root = review_repo
+    briefs = ["ROLE: pr-review ISSUE: 12\nReview", "Probe result?",
+              [{"type": "tool_result", "tool_use_id": "t", "content": "ROLE: pr-review ISSUE: 99"}],
+              "ROLE: pr-review ISSUE: 14\nReview the next unit"]
+    assert edit_guard(str(root / "sdlc-review-14" / "a.ts"), repo, "sdlc:pr-review",
+                      prompt=briefs) is None
+    # Positive control: the old unit's tree is now out of bounds.
+    assert edit_guard(str(root / "sdlc-review-12" / "a.ts"), repo, "sdlc:pr-review",
+                      prompt=briefs)
 
 
 def test_edit_guard_denies_a_reviewer_with_no_path(review_repo):

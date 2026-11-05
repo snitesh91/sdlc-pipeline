@@ -5105,6 +5105,11 @@ def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
             gh_responses[("gh", "api", "graphql", "-f", "query=" + _SET_ISSUE_FIELD_MUTATION.format(
                 issue_id=f"ISSUE_{n}", field_id=field_id, option_id=option_id))] = "{\"data\": {}}"
     gh_prefixes = {("gh", "issue", "comment"): "", ("gh", "issue", "edit"): ""}
+    # create-issue reads each parent's sub-issue count before creating (the 100 cap).
+    from sdlc_next import _SUB_ISSUE_TOTAL_QUERY
+    for n in (40, 41):
+        gh_responses[("gh", "api", "graphql", "-f", f"query={_SUB_ISSUE_TOTAL_QUERY.format(n=n)}")] = \
+            json.dumps({"data": {"repository": {"issue": {"subIssuesSummary": {"total": 1}}}}})
 
     # 1. Cut Epic #41 under Initiative #40.
     gh_responses[("gh", "api", "repos/owner/repo/issues", "-f", "title=Epic: WhatsApp booklist lookup",

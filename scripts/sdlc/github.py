@@ -43,7 +43,10 @@ def _default_runner(argv: list) -> str:
         _PUSH_GENERATION[0] += 1
     result = subprocess.run(argv, capture_output=True, text=True)
     if result.returncode != 0:
-        raise GhError(f"command failed ({result.returncode}): {' '.join(argv)}\n{result.stderr}")
+        # `gh api` prints an HTTP error's JSON body (e.g. a 422's "No commits between") on
+        # stdout, not stderr: keep it so callers can match the reason.
+        raise GhError(f"command failed ({result.returncode}): {' '.join(argv)}\n{result.stderr}"
+                      + (f"\n{result.stdout[:2000]}" if result.stdout.strip() else ""))
     return result.stdout
 
 
@@ -77,6 +80,7 @@ class WorkItemProvider(Protocol):
     def clear_stage_and_status_fields(self, number: int) -> None: ...
     def clear_stage_field(self, number: int) -> None: ...
     def add_sub_issue(self, parent_number: int, child_number: int) -> None: ...
+    def sub_issue_total(self, number: int) -> int: ...
     def remove_sub_issue(self, parent_number: int, child_number: int) -> None: ...
     def ensure_label(self, label: str) -> None: ...
 
@@ -220,6 +224,11 @@ class GitHub:
         """Delete only the Stage value (Pipeline Status untouched)."""
         issue_id = self.issue_node_id(number)
         self.graphql(_DELETE_ISSUE_FIELD_VALUE_MUTATION.format(issue_id=issue_id, field_id=STAGE_FIELD_ID))
+
+    def sub_issue_total(self, number: int) -> int:
+        """How many sub-issues `number` has, closed ones included (GitHub caps it at 100)."""
+        data = self.graphql(_SUB_ISSUE_TOTAL_QUERY.format(n=number))
+        return int(data["repository"]["issue"]["subIssuesSummary"]["total"])
 
     def add_sub_issue(self, parent_number: int, child_number: int):
         parent_id = self.issue_node_id(parent_number)
@@ -920,6 +929,10 @@ class GitHubRest(GitHub):
     def clear_stage_field(self, number: int):
         self._clear_field(number, self._field(STAGE_FIELD_ID, "stageFieldId"))
 
+    def sub_issue_total(self, number: int) -> int:
+        return int(self._api(f"repos/{self.repo}/issues/{number}", "--jq",
+                             ".sub_issues_summary.total // 0").strip() or 0)
+
     def add_sub_issue(self, parent_number: int, child_number: int):
         self._sub_issue_write(f"repos/{self.repo}/issues/{parent_number}/sub_issues",
                               child_number, "POST")
@@ -1203,6 +1216,11 @@ _ISSUE_LIST_QUERY = """query {{ repository(owner:"__OWNER__", name:"__NAME__") {
       }}
     }}
   }}
+}} }}"""
+
+
+_SUB_ISSUE_TOTAL_QUERY = """query {{ repository(owner:"__OWNER__", name:"__NAME__") {{
+  issue(number: {n}) {{ subIssuesSummary {{ total }} }}
 }} }}"""
 
 

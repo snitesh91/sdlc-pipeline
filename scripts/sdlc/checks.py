@@ -41,7 +41,8 @@ def checks_status(checks: list) -> str:
 # `excludeGlobs` mirrors the workflow's path negations (`!**/*.md`): a match never counts.
 # `bases`: the PR base branches (names or fnmatch globs) this entry applies to (empty = every
 # base). `attestable`:
-# False when no `local-ci` attestation can stand in for it (a passing GHA check only).
+# False when no `local-ci` attestation can stand in for it (a passing GHA check only);
+# "cloud" when one can only from a cloud session (no runner there; laptops keep the check).
 def _normalise_workflows(raw: list) -> tuple:
     return tuple(
         {"workflow": w["workflow"], "suite": w["suite"],
@@ -95,6 +96,15 @@ def required_workflows(base_ref: Optional[str] = None) -> tuple:
 # GHA check satisfies their required workflow.
 NON_ATTESTABLE_SUITES = frozenset(
     w["suite"] for w in CONFIG["requiredWorkflows"] if w.get("attestable") is False)
+CLOUD_ATTESTABLE_SUITES = frozenset(
+    w["suite"] for w in CONFIG["requiredWorkflows"] if w.get("attestable") == "cloud")
+
+
+def suite_not_attestable(suite: str) -> bool:
+    """Whether no `local-ci` attestation can stand in for `suite` in this session: an
+    `attestable: false` suite, or an `attestable: "cloud"` one outside a cloud session."""
+    return suite in NON_ATTESTABLE_SUITES or (
+        suite in CLOUD_ATTESTABLE_SUITES and not cloud_skips_local_cleanup())
 
 
 def _workflow_covers(spec: dict, path: str) -> bool:
@@ -336,7 +346,7 @@ def pr_stale_attestations(gh: WorkItemProvider, issue: int, pr: int) -> dict:
     stale, carried, passed_by_check = [], [], []
     for spec in required_workflows(base_ref):
         suite = spec.get("suite")
-        if not suite or suite in NON_ATTESTABLE_SUITES:
+        if not suite or suite_not_attestable(suite):
             continue
         if not _workflow_applies_to_base(spec, base_ref):
             continue
@@ -572,8 +582,30 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
             raise
     gh.pr_comment(pr_number, f"Auto-merged under the pipeline's scoped PR-merge override — "
                               f"see \"PRs merge automatically\" in the pipeline docs.")
+    unverified = _unverified_suites(files, checks, view.get("comments", []), head, base)
+    if unverified:
+        carried_forward = {**carried_forward, "unverified_suites": unverified,
+                           "unverified_hint": _UNVERIFIED_HINT}
     return _with_uncovered(_finalize_merged_pr(gh, pr_number, issue, repo_path, base, files,
                                                carried_forward, run_id=run_id), files, base)
+
+
+_UNVERIFIED_HINT = ("these suites' workflows are scoped to other bases and nothing ran them "
+                    "here: their first run is the epic PR's CI at close (a warning, not a gate)")
+
+
+def _unverified_suites(files: list, checks: list, comments: list, head: Optional[str],
+                       base: str) -> list:
+    """Suites a PR into a non-`main` base touches whose workflow does not apply to that base
+    and that have neither a passing check nor an attestation at `head`."""
+    if base == "main":
+        return []
+    attested = local_ci_suites_attested(comments, head)
+    return sorted({w["suite"] for w in required_workflows(base)
+                   if not _workflow_applies_to_base(w, base)
+                   and any(_workflow_covers(w, p) for p in files)
+                   and workflow_check_state(checks, w["workflow"]) != "passing"
+                   and w["suite"] not in attested})
 
 
 def _finalize_merged_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str,

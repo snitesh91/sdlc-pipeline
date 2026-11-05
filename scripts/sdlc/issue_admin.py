@@ -167,6 +167,14 @@ def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: lis
         steps.append(("set_effort", lambda n: gh.set_effort_field(n, fields["effort"])))
     for dep in blocked_by or []:
         steps.append((f"add_blocked_by:{dep}", lambda n, dep=dep: _add_blocked_by_once(gh, n, dep)))
+    # Refuse before creating at the parent's cap: a created-but-unlinked issue is invisible to
+    # the parent-link lookups re-runs use, so each retry would duplicate it.
+    total_of = getattr(gh, "sub_issue_total", None)
+    if total_of and total_of(parent) >= SUB_ISSUE_CAP:
+        raise GhError(f"#{parent} already has {SUB_ISSUE_CAP} sub-issues (GitHub's cap, closed "
+                      f"children count): nothing was created. Unlink closed sub-issues from "
+                      f"#{parent}, or rotate to a new parent (references/epics.md, \"The "
+                      f"100-sub-issue cap\"), then re-run.")
     number = gh.issue_create(title, body, labels)
     result = {"issue": number, "parent": parent, "type": type_name,
               "pipeline_status": "todo", **fields,
@@ -199,6 +207,7 @@ def cmd_create_issue(gh: GitHub, title: str, body: str, parent: int, labels: lis
 
 
 # GitHub caps a parent at 100 sub-issues, closed ones included.
+SUB_ISSUE_CAP = 100
 _SUB_ISSUE_CAP_RE = re.compile(r"cannot have more than \d+ sub-issues", re.IGNORECASE)
 
 

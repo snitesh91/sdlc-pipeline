@@ -194,7 +194,7 @@ def cmd_record_local_ci(gh: GitHub, pr: int, suite: str, sha: str,
                       f"requiredWorkflows[].commandPattern {pattern!r} -- attest the real "
                       f"suite command")
     accepted = (_non_attestable_suite_uncovered(gh, pr, suite)
-                if suite in NON_ATTESTABLE_SUITES else {})
+                if suite_not_attestable(suite) else {})
     evidence = read_ci_evidence(output)
     timestamp = _utc_now_marker()
     fence = "```"
@@ -220,7 +220,8 @@ def _non_attestable_suite_uncovered(gh: GitHub, pr: int, suite: str) -> dict:
                 if w["suite"] == suite and _workflow_applies_to_base(w, base)
                 and any(_workflow_covers(w, p) for p in files)]
     if covering:
-        raise GhError(f"the {suite!r} suite is configured `attestable: false` and its required "
+        raise GhError(f"the {suite!r} suite is configured `attestable: false` (or `attestable: "
+                      f"\"cloud\"` outside a cloud session) and its required "
                       f"workflow ({', '.join(covering)}) covers this PR into {base!r} -- a "
                       f"local-ci attestation cannot stand in for it; only a passing GitHub "
                       f"Actions check satisfies it")
@@ -556,7 +557,7 @@ from . import design_gates  # noqa: E402,F401
 from .design_gates import DESIGN_STAGE_REVIEW, find_design_pr  # noqa: E402
 from .gates import _profile_for_issue  # noqa: E402
 from .checks import (  # noqa: E402
-    NON_ATTESTABLE_SUITES, _is_failed_check, _workflow_applies_to_base, _workflow_covers,
+    _is_failed_check, _workflow_applies_to_base, _workflow_covers, suite_not_attestable,
     effective_checks, enrich_failed_checks, pr_stale_attestations, required_workflows,
 )
 from .issue_admin import cmd_pairing_counts  # noqa: E402

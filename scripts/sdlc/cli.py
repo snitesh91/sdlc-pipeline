@@ -33,7 +33,7 @@ from .handoff import (
 from .design_gates import (
     cmd_merge_design_pr, cmd_merge_lld_doc, cmd_open_design_pr, cmd_sync_branch,
 )
-from .lld_tasks import cmd_add_blocked_by, cmd_create_lld_tasks
+from .lld_tasks import cmd_add_blocked_by, cmd_create_lld_tasks, cmd_remove_blocked_by
 from .gates import (
     HUMAN_GATE_TOGGLES, cmd_auto_pass_gate, cmd_mark_feedback_addressed,
     cmd_mark_feedback_received, cmd_merge_gate, cmd_pass_gate, cmd_pause_for_epic_regate,
@@ -81,6 +81,12 @@ def _focus_numbers(args) -> set:
             if isinstance(v, int) and not isinstance(v, bool):
                 out.add(v)
     return out
+
+
+def _pr_add_label(gh: GitHubRest, pr: int, label: str) -> dict:
+    gh.ensure_label(label)
+    gh.pr_add_label(pr, label)
+    return {"pr": pr, "label": label, "added": True}
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -179,6 +185,11 @@ def main(argv: Optional[list] = None) -> int:
                     help="File with the run's captured output (tail is embedded)")
     p.set_defaults(func=lambda a: cmd_record_local_ci(get_work_item_provider(), a.pr, a.suite, a.sha,
                                                        a.command, a.output))
+    p = sub.add_parser("pr-add-label",
+                        help="Add a label to a PR (e.g. ci:local on a cloud epic PR)")
+    p.add_argument("pr", type=int)
+    p.add_argument("label")
+    p.set_defaults(func=lambda a: _pr_add_label(get_work_item_provider(), a.pr, a.label))
     p = sub.add_parser("record-design-review",
                         help="Record an arch-review/lld-review outcome on the unit")
     p.add_argument("issue", type=int)
@@ -395,6 +406,11 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--on", type=int, required=True, dest="dep")
     p.set_defaults(func=lambda a: cmd_add_blocked_by(get_work_item_provider(), a.issue, a.dep))
+    p = sub.add_parser("remove-blocked-by",
+                        help="Remove a native blockedBy edge (no-op when absent)")
+    p.add_argument("issue", type=int)
+    p.add_argument("--on", type=int, required=True, dest="dep")
+    p.set_defaults(func=lambda a: cmd_remove_blocked_by(get_work_item_provider(), a.issue, a.dep))
     p = sub.add_parser("create-lld-tasks",
                         help="Create one Task per lld.md Task section and renumber the doc (idempotent)")
     p.add_argument("epic", type=int, help="The Epic")
@@ -824,8 +840,10 @@ def main(argv: Optional[list] = None) -> int:
     try:
         result = args.func(args)
         print(json.dumps(result))
-        # Commands that report their own `ok: False` (auto-pass-gate, composites) exit 1.
-        return 0 if result.get("ok", True) else 1
+        # Commands that report their own `ok: False` (auto-pass-gate, composites) exit 1 --
+        # except an issue created but left unlinked at the sub-issue cap: a retry would
+        # duplicate it, so it is a result to act on (`linked: false`), not a failure.
+        return 0 if result.get("ok", True) or result.get("linked") is False else 1
     except PlacementMismatch as e:
         print(json.dumps(e.payload))
         return 1
