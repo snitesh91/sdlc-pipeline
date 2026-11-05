@@ -18,7 +18,7 @@ Default to a single pass. Fan out only on a first round, and only when the input
 
 - `arch-review` / `lld-review`: a design doc of roughly 500+ lines.
 - `product-review`: a `product.md` of roughly 300+ lines, or one an Initiative splits into several Epics.
-- `pr-review`: a diff of roughly 1,000+ changed lines, or one spanning several modules. Split by layer (edge, intent, verification) or by module slice. The Blind Hunter child runs whenever an `Agent` tool exists, below the bar too (`agents/pr-review.md`, Step 2).
+- `pr-review`: a diff of roughly 800+ changed lines, or one spanning several modules. Split by layer (edge, intent, verification) or by module slice. The Blind Hunter child runs whenever an `Agent` tool exists, below the bar too (`agents/pr-review.md`, Step 2).
 
 On a rework round, review the delta yourself. Dispatch an axis only where the delta could reopen something an earlier round established. State any departure, with its reason, in the handoff comment.
 
@@ -31,6 +31,7 @@ Read the sections below only when you fan out.
 - **Wait-and-dispatch loop:** a launch denied at the cap carries `retry_after: {waiting_on: [holders], hint}`. Wait for a holder to report, re-launch the denied axis, and repeat until every axis ran. Work an axis yourself only when no holder is left. Never drop the completeness lens.
 - **`reviewDepth: light`** on the Initiative profile denies all fan-out. Work every axis yourself in one pass.
 - **No `Agent` tool** (the SubagentStart context says so) and the input is over the fan-out bar: hand the fan-out to the orchestrator ("The orchestrator fans out for you"). Never go serial silently. Never report a fan-out that did not run.
+- **Expect no `Agent` tool in a subagent.** Review agents list `Agent`, but the harness often withholds it from a subagent (always so far in cloud sessions). Orchestrator-run fan-out is then the default path, not a fallback: an input over the bar is never reviewed in one pass.
 
 ## Review fan-out discipline
 

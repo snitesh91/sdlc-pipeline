@@ -34,7 +34,8 @@ brief.
   `epic-<n>` seems to owe the suite (`transition` holds, `suites.needed` asks): fix the config,
   never run the suite. Without `attestable: false`, wait for the PR's check instead.
 - **A Task into `epic-<n>` runs no integration suite.** `development` runs unit tests for its
-  change and the configured pre-PR command, with no integration option.
+  changed files only, and the configured pre-PR command once, on the final round, scoped to
+  `origin/epic-<n>`, with no integration option. The full suites run once, at epic close.
 - **Two exceptions. Each runs only the specs concerned, never the whole suite (unless the
   repo's `AGENTS.md` requires it, below):**
   1. The brief says `Integration tests: mandatory`. The orchestrator adds this line for a
