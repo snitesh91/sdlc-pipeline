@@ -30,6 +30,7 @@ The reader decides what the product does. The reader does not read code.
 - Write each acceptance criterion as one line a person can check by using the product: an action and what the user then sees. No test-harness design (sample sets, fixtures, phrasing counts). No implementation term.
 - Put fixed user-facing wording in the doc only when the wording itself is the decision (a legal line, a price line). Otherwise describe what the message must convey.
 - Put an ASCII mockup under User Experience only for a new or changed screen. No system flow diagram.
+- **UI-facing work ships visuals.** For each new or changed screen, commit visual mock-ups in the product's look under `<docRoot>/<unit dir>/mockups/`, plus one clickable demo of the workflow built from them (e.g. a static HTML prototype). Link both under User Experience. The ASCII sketch and the mock-up must agree. Work with no UI change skips this.
 - No hedging and no meta-commentary: no TL;DR, no confidence disclaimer, no "what changed" section. Put uncertainty in the requirement or in Open Questions.
 - Keep detail inline. Never use `<details>`.
 - Write a fixed business limit under Constraints as the limit, not as a product that meets it.

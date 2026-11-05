@@ -6,8 +6,8 @@ guard fails closed: no config, path or unit number is a denial.
 """
 import os
 
-from _common import (REVIEW_ROLES, agent_transcript, emit, first_prompt, load_json, prompt_header,
-                     read_input, repo_config, review_child_role, run, sdlc_role)
+from _common import (REVIEW_ROLES, agent_transcript, emit, latest_header_prompt, load_json,
+                     prompt_header, read_input, repo_config, review_child_role, run, sdlc_role)
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 
@@ -28,10 +28,12 @@ def allowed(path: str, config: dict, cwd: str, unit: str) -> bool:
 
 
 def own_unit(data: dict) -> str:
-    """The reviewer's ISSUE number from its delegation prompt's header, or ""."""
+    """The reviewer's ISSUE number from its latest brief's header (a resume onto a new unit
+    rebinds it), or ""."""
     if not data.get("agent_id"):
         return ""
-    value = str(prompt_header(first_prompt(agent_transcript(data))).get("issue") or "").strip("`#*")
+    value = str(prompt_header(latest_header_prompt(agent_transcript(data))).get("issue")
+                or "").strip("`#*")
     return value if value.isdigit() else ""
 
 

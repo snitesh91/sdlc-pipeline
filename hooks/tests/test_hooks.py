@@ -705,6 +705,31 @@ def test_subagent_stop_blocks(tmp_path, sdlc_repo, text, problem):
     assert problem in proc.stderr and "SDLC-RESULT: {" in proc.stderr
 
 
+LONG_BODY = "evidence line\n" * 150  # ~2,100 chars
+
+
+def test_subagent_stop_blocks_an_over_cap_handback(tmp_path, sdlc_repo):
+    # Regression (retro 2026-11-05): 1-3K-token handbacks filled the orchestrator's context.
+    proc = stop(tmp_path, sdlc_repo, LONG_BODY + GOOD)
+    assert proc.returncode == 2 and "cap is 1,500" in proc.stderr
+
+
+@pytest.mark.parametrize("agent_type,text", [
+    ("sdlc:development", GOOD),  # positive control: a terse handback passes
+    ("sdlc:exploratory", LONG_BODY + 'SDLC-RESULT: {"issue": 5, "stage": "exploratory", "outcome": "done"}'),
+    ("sdlc:development", LONG_BODY + 'SDLC-RESULT: {"issue": 5, "stage": "development", '
+                                     '"outcome": "blocked", "fanout": "unavailable"}'),
+])
+def test_subagent_stop_handback_cap_exemptions(tmp_path, sdlc_repo, agent_type, text):
+    proc = stop(tmp_path, sdlc_repo, text, agent_type=agent_type)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_subagent_stop_handback_cap_allows_after_one_block(tmp_path, sdlc_repo):
+    proc = stop(tmp_path, sdlc_repo, LONG_BODY + GOOD, active=True)
+    assert proc.returncode == 0, proc.stderr
+
+
 POST_CMD = 'python3 "$SDLC" post-comment 5 --role {role} --body-file /tmp/c.md'
 DONE = 'SDLC-RESULT: {{"issue": 5, "stage": "{role}", "outcome": "{outcome}"}}'
 
@@ -1912,7 +1937,8 @@ def edit_guard(path, cwd, agent_type=None, tool="Edit", root=None, prompt="ROLE:
         if prompt is not None:
             os.makedirs(os.path.join(session, "s", "subagents"))
             with open(os.path.join(session, "s", "subagents", "agent-a1.jsonl"), "w") as f:
-                f.write(json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n")
+                for p in ([prompt] if isinstance(prompt, str) else prompt):
+                    f.write(json.dumps({"type": "user", "message": {"role": "user", "content": p}}) + "\n")
     proc = run_hook("edit_guard.py", payload)
     assert proc.returncode == 0, proc.stderr
     if not proc.stdout.strip():
@@ -1972,6 +1998,20 @@ def test_edit_guard_denies_a_reviewer_with_no_unit_number(review_repo, prompt):
     reason = edit_guard(str(root / "sdlc-review-12" / "a.ts"), repo, "sdlc:pr-review",
                         prompt=prompt)
     assert reason and "ISSUE: <n>" in reason
+
+
+def test_edit_guard_rebinds_a_reviewer_resumed_onto_a_new_unit(review_repo):
+    """Regression (resumed-reviewer-stale-worktree-guard): a pr-review agent resumed from #12
+    onto #14 was held to sdlc-review-12, so its probe in sdlc-review-14 was denied."""
+    repo, root = review_repo
+    briefs = ["ROLE: pr-review ISSUE: 12\nReview", "Probe result?",
+              [{"type": "tool_result", "tool_use_id": "t", "content": "ROLE: pr-review ISSUE: 99"}],
+              "ROLE: pr-review ISSUE: 14\nReview the next unit"]
+    assert edit_guard(str(root / "sdlc-review-14" / "a.ts"), repo, "sdlc:pr-review",
+                      prompt=briefs) is None
+    # Positive control: the old unit's tree is now out of bounds.
+    assert edit_guard(str(root / "sdlc-review-12" / "a.ts"), repo, "sdlc:pr-review",
+                      prompt=briefs)
 
 
 def test_edit_guard_denies_a_reviewer_with_no_path(review_repo):
@@ -2047,6 +2087,7 @@ def test_subagent_start_adds_the_graphify_line_only_with_a_graph(sdlc_repo):
     open(os.path.join(graph, "graph.json"), "w").write("{}")
     ctx = _tools_ctx(sdlc_repo, {})
     assert "Run `graphify query` before the first Grep" in ctx and graph in ctx
+    assert "git diff origin/<base>...HEAD" in ctx
 
 
 def test_done_with_concerns_needs_a_one_line_concern():

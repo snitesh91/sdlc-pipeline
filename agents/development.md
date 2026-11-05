@@ -16,7 +16,7 @@ it only where a gate below cites it. Work in the worktree your prompt names.
 
 | Unit | Design | Tests you write |
 |---|---|---|
-| Functional Task of a non-standing Epic | `python3 "$SDLC" lld-section --epic <parent> --task <n> --repo-path <worktree>`. Never read the whole `lld.md`. Read `architecture.md` only where your section points. | Unit tests only. Under `testTasks: false`, also the integration/e2e coverage your section names. |
+| Functional Task of a non-standing Epic | `python3 "$SDLC" lld-section --epic <parent> --task <n> --repo-path <worktree>`. Never read the whole `lld.md`. Read `architecture.md` only where your section points. | Unit tests only, and run only those for the files you change; the full suites run once, at epic close. Under `testTasks: false`, also the integration/e2e coverage your section names. |
 | Standing Integration-test Task | Same `lld-section` call. | Author the Epic's missing integration specs. Fix every failure they show. |
 | Standing e2e-test Task | Same `lld-section` call. | Author the Epic's missing e2e specs against a stack built from `epic-<n>`. Fix every failure. |
 | Standing-epic child | `<docRoot>/issue-<n>/architecture.md` and `product.md`, or the issue body when routed past them. Recommend `"next": "merge"` only for a trivially low-risk diff. | The integration/e2e coverage your design names. |
@@ -42,6 +42,10 @@ integration specs, or the repo's `AGENTS.md` requires the full suite for the pat
 - Genuine ambiguity: stop and ask (`stage-playbooks.md`, "Rework and blockers").
 - **UI Task:** if the `ui-ux-pro-max` skill is installed, load it with the `Skill` tool
   before you write UI code.
+- **UI Task, mockup check before the PR:** serve the built page locally, screenshot each
+  changed screen at a desktop and a phone width, and compare it with the design's mockup
+  (layout, element order, wording, palette). Fix each gap. List every intended difference
+  under `### Deviations from the design`, or write "matches the mockup".
 
 ## You write no document
 
@@ -93,11 +97,17 @@ pass/fail numbers.
 - Copy an attested suite's command from its workflow file (`requiredWorkflows[].files`),
   flags included. Failures across suites you never touched: check your command first.
 - A command that can outlast the tool timeout: `run_in_background`, output to a log that ends
-  `echo SUITE_EXIT=$? >> <log>`, wait for that line with `Monitor`. On a resume, poll the log;
-  never re-launch a live run.
+  `echo SUITE_EXIT=$? >> <log>`, wait for that line with one `Monitor` (an until-loop on the
+  log or the run's pid). Never stack short sleep timers: each one wakes the orchestrator. On a
+  resume, poll the log; never re-launch a live run. Emit `SDLC-RESULT` once, at stage end.
+- **Cloud session, e2e stack:** enable the repo's committed agent-proxy CA opt-in
+  (`references/cloud-mode.md`, "e2e in a cloud session"). Never patch Dockerfiles or compose
+  uncommitted, and never attest a run on an uncommitted tree.
 - **Pre-PR check:** when `pipeline.prePr.command` is set, run it from the worktree root with
-  `PRE_PR_BASE=origin/<base>`, on every round, before the push. Never add its integration
-  option unless "Test scope" owes those specs or the whole suite. Fix until it exits 0.
+  `PRE_PR_BASE=origin/<base>` (the unit's integration base, e.g. `epic-<n>`; never default to
+  `main`). Check its plan with `--dry-run` first, if it has one. Run it once, on the final
+  round before the push, not on every intermediate commit. Never add its integration option
+  unless "Test scope" owes those specs or the whole suite. Fix until it exits 0.
 - **Comments in code** explain only a non-obvious why. No history, dates or issue numbers. A
   comment that states a guarantee names what it excludes.
 - **Git:** commit, checkout and push of your own `issue-<n>` are yours. `sync-branch` is the

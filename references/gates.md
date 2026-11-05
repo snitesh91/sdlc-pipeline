@@ -47,6 +47,8 @@ python3 "$SDLC" open-gate <n> --doc product.md --next-stage architecture \
   # --repo-path optional: the branch's live worktree is auto-resolved
 ```
 
+- UI-facing Gate A: name the `mockups/` set and the demo in `--summary`, with their paths, so
+  the operator sees the change at a glance.
 - `open-gate` owns the PR title, body, status and issue comment. You choose only `--summary`,
   `--doc` and `--next-stage` (A: `product.md` → `architecture`; B: `architecture.md` →
   `development`; a phase-Task needs `--next-stage` but ignores it). Pass no `--title`.

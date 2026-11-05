@@ -42,6 +42,7 @@ Brief: find real bugs, security holes, data-integrity and concurrency defects, m
 3. Treat the description and handoff as claims to check against the design. Note each claim you will verify.
 4. A brief line `Concern from development: <line>. Check it first.` comes from a `done-with-concerns` handoff: check it first.
 5. An attestation stands in only for a suite no required workflow runs on the PR (`references/operations.md`, "Local-CI attestation").
+6. **UI Task:** the handoff states the mockup check (`agents/development.md`, "UI Task, mockup check") with each intended difference, or "matches the mockup". A missing statement is blocking.
 
 ## Step 4 — The other three layers
 

@@ -34,6 +34,7 @@ def test_the_worktree_stamp_then_reads_stale_when_origin_moved_on():
     s.cmd_record_epic_verification(gh, 9, "exploratory", "ok", repo_path=WT,
                                    runner=_rev_parse(TESTED))
     gh.files_since = lambda sha, branch: ["backend/src/x.ts"] if sha == TESTED else []
+    gh.base_delta_files = lambda head, base="main": ["backend/src/x.ts"]
     result = s.cmd_close_epic(gh, 9)
     assert result["merged"] is False and result["evidence"]["exploratory"] == "missing"
     assert result["stale_delta"] == {"exploratory": {"files": ["backend/src/x.ts"], "count": 1}}
@@ -79,7 +80,7 @@ def test_a_stale_exploratory_record_reports_its_delta_capped_at_50():
     # Regression (incident b): main moved during the pass and the orchestrator had to work
     # out the delta by hand to brief a scoped re-pass.
     files = [f"backend/src/f{i}.ts" for i in range(60)]
-    result = s.cmd_close_epic(_epic(_marks(), files_since=files), 9)
+    result = s.cmd_close_epic(_epic(_marks(), files_since=files, delta=tuple(files)), 9)
     assert result["stale_delta"]["exploratory"] == {"files": files[:50], "count": 60}
     assert set(result["stale_delta"]) == {"exploratory"}
 

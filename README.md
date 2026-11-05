@@ -18,7 +18,8 @@ references/*.md                  on-demand rules shared by the skill and the age
 templates/*.template.md          product.md / architecture.md skeletons
 hooks/                           hooks.json, the hook scripts, model_policy.json, hooks/tests
 bin/sdlc-run                     starts a run on the policy's orchestrator model (on PATH)
-scripts/sdlc_next.py             the control plane; scripts/tests is its suite
+scripts/sdlc_next.py             the control plane's CLI entry point; scripts/tests is its suite
+scripts/sdlc/                    the control plane's code, one module per concern
 scripts/sdlc_metrics.py          cost/outcome report over the metrics store
 workflows/gate-auto-advance.yml  real-time gate backstop, copied into the driven repo
 .github/workflows/tests.yml      this repo's CI: both pytest suites on every PR and on main
@@ -94,8 +95,8 @@ which fails closed for a review role.
 | `PreToolUse` (Bash) | Denies hand-run `gh api graphql`, `gh issue create/edit/close/reopen`, `gh pr create/merge/ready/close`, mutating `gh api`, `git worktree add` (except `--detach`), force-push and rebase, naming the `python3 "$SDLC"` command to use instead; limits each `sdlc:<role>` agent to its role's control-plane commands (`post-comment` only with its own `--role`), denies every stage agent `git stash`, `claude`, a host-wide `docker ... prune`, hand-run `gh pr comment` / `gh issue comment`, `gh run rerun` and `sync-branch`; denies review roles (and the fan-out children they or the orchestrator launch with a `PARENT: <review role>` header) `git commit/push/merge/reset/checkout/switch`; denies `mark-issue-closed` to every guarded session (CI's). A main-thread `gh pr create --head <branch>` or `gh pr merge <branch>` naming a non-pipeline branch (an operator-directed PR) is allowed; an operator-directed issue title/body/label edit goes through `edit-issue`. Only each segment's leading words count. Stage agents are always guarded; the main thread only while its session drives a run (a run-state file written in the last 8 h, stamped by `next-action --run-id`), so hand-run backlog or issue cleanup outside a run is allowed. `guard.mainThread: "always"` guards every main-thread session |
 | `PreToolUse` (Agent) | Sets every `sdlc:*` agent's `model` from `hooks/model_policy.json` (overridable per role by `pipeline.models` / `pipeline.fanout`), whether the main thread or a continuous-mode cycle agent launches it; denies nested stages and fan-out a role may not do or has exhausted; lets the policy's `explore` roles (`development`, `lld`, `architecture`, `product`) launch a read-only `Explore` search; caps `development`'s parallel workers when `pipeline.fanout.development` allows them (off by default), which run only as `sdlc:dev-worker` (no git writes, no control-plane commands, no `SDLC-RESULT`) |
 | `PreToolUse` (Edit/Write) | Lets a review role (`product-review`, `design-review`, `pr-review`) edit only inside its own detached review worktree (`<worktrees.root>/<reviewPrefix><n>/`, for `pr-review`'s reverted mutation probe); every other role and the main thread are unaffected |
-| `SubagentStart` | Gives each `sdlc:*` agent `$SDLC`, its unit's `docRoot` / `requirementsDir` (per `docRoots`), `docTemplates`, its Initiative profile, whether the `Agent` tool exists, the STE-lite style line, the graphify line (when a graph exists), an arch-review's `Skip threshold: <N>`, the references path and the `SDLC-RESULT` format |
-| `SubagentStop` | An `sdlc:*` agent cannot stop until its final message ends with `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "done\|done-with-concerns\|clean\|rework\|blocked\|needs-human\|failed"}` (optional `"next"`/`"why"`: a standing child's recommended next stage; `done-with-concerns`, `development` only, needs a one-line `"concern"`); and, for `product`/`architecture`/`lld` finishing `done`, until its handoff went out via `post-comment`; records every finished agent's metrics |
+| `SubagentStart` | Gives each `sdlc:*` agent `$SDLC`, its unit's `docRoot` / `requirementsDir` (per `docRoots`), `docTemplates`, its Initiative profile, whether the `Agent` tool exists, the STE-lite style line, the graphify line (when a graph exists; it notes the graph shows `main`), an arch-review's `Skip threshold: <N>`, the references path and the `SDLC-RESULT` format |
+| `SubagentStop` | An `sdlc:*` agent cannot stop until its final message ends with `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "done\|done-with-concerns\|clean\|rework\|blocked\|needs-human\|failed"}` (optional `"next"`/`"why"`: a standing child's recommended next stage; `done-with-concerns`, `development` only, needs a one-line `"concern"`); and, for `product`/`architecture`/`lld` finishing `done`, until its handoff went out via `post-comment`; refuses once a final message over 1,500 characters (not `exploratory`, `initiative-close` or a `"fanout"` hand-back); records every finished agent's metrics |
 | `SessionEnd` | Records the orchestrator's (main thread's) metrics |
 
 ## Tunables
@@ -107,7 +108,7 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 |---|---|---|
 | `parallelism.devLane` / `.prReview` / `.designLane` | 1 / 1 / 1 | Lane caps; set a lane above 1 to fan it out |
 | `parallelism.crossEpicFootprintCheck` | false | Also check dev-lane footprints against other epics' live worktrees (they never hold a slot) |
-| `parallelism.maxTasksPerRun` | 0 (unlimited) | Units driven to a terminal state per run |
+| `parallelism.maxTasksPerRun` | 0 (unlimited) | Units driven to a terminal state per run; about 5 keeps the orchestrator's context small (`references/context-budget.md`) |
 | `parallelism.cloudSessions` | 3 | Live claude.ai cloud sessions (one per Epic) `launch-cloud-epic` allows repo-wide |
 | `repo` / `docRoot` / `requirementsDir` / `tokenPath` / `humanAssignee` | — (required) | `owner/name`, doc tree, requirements docs (IRDs), PAT file, the operator login `check-epics-closeable` assigns |
 | `docRoots` | unset | Per-product doc trees in a repo hosting several products: `[{"name", "match": {"issues": [<root issue>, ...]} or {"label": "<label>"}, "docRoot", "requirementsDir"?}]`. A unit takes the first entry naming it or an ancestor (Task → Epic → Initiative) by number or label, else the top-level `docRoot` / `requirementsDir` (unset = exactly the top-level values, nothing looked up). `doc-root <n>` prints a unit's roots; the SubagentStart hook gives each agent its unit's |
@@ -141,9 +142,15 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `pipeline.models.<role>` / `pipeline.fanout.<role>` | `hooks/model_policy.json` | Model per stage; which reviews fan out, how wide, at which model; `development` parallel workers (off by default) |
 | `pipeline.epicClose.auto` | `false` | Whether the orchestrator closes a verified epic itself |
 | `pipeline.epicClose.prepare` | `""` | Shell command `close-epic` runs in the epic worktree before the exploratory pass (e.g. a dependency install); reported as `prepare` |
+| `pipeline.epicClose.versionedFiles` | `[]` | `[{versionFile, versionPattern, textPaths}]`: when any `textPaths` glob's file differs between the base and the epic, `versionFile`'s version (regex, group 1 if any) must differ from the base's; `close-epic` refuses with `version_collisions` else |
+| `requiredWorkflows[].attestable` | `true` | `false`: only the workflow's check counts. `"cloud"`: an attestation counts only from a cloud session (no runner there; `references/cloud-mode.md`, "CI in a cloud run") |
 | `pipeline.issueDefaults.priority` / `.effort` | `Medium` / `Medium` | Priority / Effort `create-issue` sets when no flag or lld line names one |
 | `projectFields.issueTypeIds` | — | Native Issue Type ids; `create-issue` refuses a type missing here |
 | `projectFields.priorityFieldId` / `.priorityOptionIds` / `.effortFieldId` / `.effortOptionIds` | unset | Optional Priority / Effort fields; when set, `create-issue` writes them |
+
+## Notification cost
+
+Each background-task or subagent notification carries about 300 tokens of fixed harness text, which the plugin cannot shrink. The orchestrator cuts the event count instead: batch dispatch, one `Monitor` per wait, CI polls at the rate CI changes, and one `SDLC-RESULT` per stage (`references/context-budget.md`, "Fewer events").
 
 ## Metrics
 
@@ -188,7 +195,7 @@ python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<proj
 - Issue tracking sits behind a `WorkItemProvider` interface, and GitHub is the only
   implementation, a REST client on the laptop and in the cloud; only PR ready-for-review and
   review threads differ by placement (`references/cloud-mode.md`, "GitHub access in the
-  cloud"). `SDLC_GITHUB_API=graphql` selects the old GraphQL client. Code hosting is GitHub.
+  cloud"). Code hosting is GitHub.
 
 ## Running the tests
 

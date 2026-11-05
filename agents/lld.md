@@ -87,7 +87,7 @@ Each section covers:
 
 Metadata lines, plain text, never in backticks, directly under the heading:
 
-- `Depends on: <KEY>, <KEY>` only for a real ordering need. Never quote a `Depends on:` line elsewhere in the section.
+- `Depends on: <KEY>, <KEY>` only for a real ordering need. Never quote a `Depends on:` line elsewhere in the section. `create-lld-tasks` makes the Tasks' `blockedBy` edges match these lines exactly, so an edge missing here is removed on the next run.
 - `Priority: Urgent|High|Medium|Low` and `Effort: High|Medium|Low`, optional. Any other value fails the whole run.
 - `Realises: #n, #m` when the Task delivers issues that already exist. Name every one. Never carve a pre-existing issue as its own section unless that issue is the Task.
 - `Placement: local — <reason>` when the Task must run on the laptop.

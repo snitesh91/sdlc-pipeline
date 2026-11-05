@@ -9,6 +9,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sdlc_next import GitHub, GhError, REPO
+from tests.listed_github import graphql_listing  # noqa: E402,F401
+
+
+@pytest.fixture(autouse=True)
+def _graphql_listing(graphql_listing):
+    """These tests script the base client's whole-repo listing (`tests/listed_github.py`)."""
+
 
 
 def test_config_drives_repo_docroot_and_graphql_owner_for_an_arbitrary_repo(tmp_path):
@@ -24,8 +31,8 @@ def test_config_drives_repo_docroot_and_graphql_owner_for_an_arbitrary_repo(tmp_
     out = subprocess.check_output(
         [sys.executable, "-c",
          "import sdlc_next as s; print(s.REPO); print(s.DOC_ROOT); "
-         "print(s.STAGE_FIELD_ID); print('__OWNER__' not in s._ISSUE_LIST_QUERY); "
-         "print('acme' in s._ISSUE_LIST_QUERY and 'rocket' in s._ISSUE_LIST_QUERY)"],
+         "print(s.STAGE_FIELD_ID); print('__OWNER__' not in s._ISSUE_NODE_ID_QUERY); "
+         "print('acme' in s._ISSUE_NODE_ID_QUERY and 'rocket' in s._ISSUE_NODE_ID_QUERY)"],
         env=env, cwd=script_dir, text=True).splitlines()
     assert out == ["acme/rocket", "design/pipeline", "STAGE_FIELD_XYZ", "True", "True"]
 
@@ -101,7 +108,7 @@ def _list_node(number, title="x", labels=None, created="2026-08-01T00:00:00Z", b
 
 
 def test_issue_list_fetches_via_graphql_and_flattens_labels_fields_and_type():
-    from sdlc_next import _ISSUE_LIST_QUERY
+    from tests.listed_github import ISSUE_LIST_QUERY as _ISSUE_LIST_QUERY
     argv = ["gh", "api", "graphql", "-f", f"query={_ISSUE_LIST_QUERY.format(after='null')}"]
     node = _list_node(9, issue_type="Task", parent=92, priority="High")
     runner = ScriptedRunner({tuple(argv): _issue_list_page([node])})
@@ -118,7 +125,7 @@ def test_issue_list_fetches_via_graphql_and_flattens_labels_fields_and_type():
 
 
 def test_issue_list_paginates_until_hasNextPage_false():
-    from sdlc_next import _ISSUE_LIST_QUERY
+    from tests.listed_github import ISSUE_LIST_QUERY as _ISSUE_LIST_QUERY
     page1_argv = ["gh", "api", "graphql", "-f", f"query={_ISSUE_LIST_QUERY.format(after='null')}"]
     page2_argv = ["gh", "api", "graphql", "-f", f"query={_ISSUE_LIST_QUERY.format(after=chr(34)+'CURSOR'+chr(34))}"]
     runner = ScriptedRunner({
@@ -481,7 +488,7 @@ def _epic(number, priority=None, created="2026-08-01T00:00:00Z", labels=None, st
 
 
 def _list_argv(after="null"):
-    from sdlc_next import _ISSUE_LIST_QUERY
+    from tests.listed_github import ISSUE_LIST_QUERY as _ISSUE_LIST_QUERY
     return ["gh", "api", "graphql", "-f", f"query={_ISSUE_LIST_QUERY.format(after=after)}"]
 
 
@@ -5105,6 +5112,11 @@ def test_v2_full_lifecycle_cutting_an_epic_and_its_phase_tasks():
             gh_responses[("gh", "api", "graphql", "-f", "query=" + _SET_ISSUE_FIELD_MUTATION.format(
                 issue_id=f"ISSUE_{n}", field_id=field_id, option_id=option_id))] = "{\"data\": {}}"
     gh_prefixes = {("gh", "issue", "comment"): "", ("gh", "issue", "edit"): ""}
+    # create-issue reads each parent's sub-issue count before creating (the 100 cap).
+    from sdlc_next import _SUB_ISSUE_TOTAL_QUERY
+    for n in (40, 41):
+        gh_responses[("gh", "api", "graphql", "-f", f"query={_SUB_ISSUE_TOTAL_QUERY.format(n=n)}")] = \
+            json.dumps({"data": {"repository": {"issue": {"subIssuesSummary": {"total": 1}}}}})
 
     # 1. Cut Epic #41 under Initiative #40.
     gh_responses[("gh", "api", "repos/owner/repo/issues", "-f", "title=Epic: WhatsApp booklist lookup",

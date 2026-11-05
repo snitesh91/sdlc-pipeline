@@ -152,7 +152,9 @@ def graph_line(config_path: str) -> list:
     for d in dirs:
         if os.path.isfile(os.path.join(d, GRAPH)):
             return [f"sdlc: Run `graphify query` before the first Grep when graphify-out/graph.json "
-                    f"exists (here: {os.path.join(d, GRAPH)}; run graphify from {d})."]
+                    f"exists (here: {os.path.join(d, GRAPH)}; run graphify from {d}). The graph "
+                    f"shows main, not your branch: read branch changes with "
+                    f"`git diff origin/<base>...HEAD`."]
     return []
 
 
