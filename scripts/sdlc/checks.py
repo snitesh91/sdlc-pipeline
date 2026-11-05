@@ -15,8 +15,8 @@ from .config import (
 from .github import GhError, GitHub, WorkItemProvider, _default_runner, _utc_now_marker
 from .units import cloud_skips_local_cleanup, current_stage, resolve_initiative_profile
 from .evidence import (
-    _LOCAL_CI_MARKER, _glob_matches, epic_branch, integration_base, local_ci_suites_attested,
-    missing_pipeline_evidence,
+    LOCAL_CI_CLOUD_MARKER, _LOCAL_CI_MARKER, _glob_matches, epic_branch, integration_base,
+    local_ci_suites_attested, missing_pipeline_evidence, remote_session,
 )
 from .run_state import record_terminal_unit
 from .worktrees import _docker_cleanup_enabled, docker_sweep, release_worktree, unit_docker_prefix
@@ -102,9 +102,21 @@ CLOUD_ATTESTABLE_SUITES = frozenset(
 
 def suite_not_attestable(suite: str) -> bool:
     """Whether no `local-ci` attestation can stand in for `suite` in this session: an
-    `attestable: false` suite, or an `attestable: "cloud"` one outside a cloud session."""
+    `attestable: false` suite, or an `attestable: "cloud"` one outside a cloud session (the
+    harness's CLAUDE_CODE_REMOTE, never the SDLC_PLACEMENT override)."""
     return suite in NON_ATTESTABLE_SUITES or (
-        suite in CLOUD_ATTESTABLE_SUITES and not cloud_skips_local_cleanup())
+        suite in CLOUD_ATTESTABLE_SUITES and not remote_session())
+
+
+def _attestation_counts(spec: dict, attested: set, cloud_attested: set) -> bool:
+    """Whether a gate takes `spec`'s suite as attested: never an `attestable: false` suite,
+    and an `attestable: "cloud"` one only from an attestation stamped in a cloud session."""
+    suite = spec.get("suite")
+    if spec.get("attestable") is False or suite in NON_ATTESTABLE_SUITES:
+        return False
+    if spec.get("attestable") == "cloud" or suite in CLOUD_ATTESTABLE_SUITES:
+        return suite in cloud_attested
+    return suite in attested
 
 
 def _workflow_covers(spec: dict, path: str) -> bool:
@@ -201,6 +213,7 @@ def missing_required_workflows(changed_files: list, checks: list,
     from that workflow nor a `local-ci` attestation for `head_sha`. A base-scoped entry
     (`bases`) is skipped unless the PR's `base_ref` matches it."""
     attested = local_ci_suites_attested(comments or [], head_sha)
+    cloud_attested = local_ci_suites_attested(comments or [], head_sha, cloud_only=True)
     missing = []
     for spec in required_workflows(base_ref):
         if not _workflow_applies_to_base(spec, base_ref):
@@ -209,7 +222,7 @@ def missing_required_workflows(changed_files: list, checks: list,
             continue
         if workflow_check_state(checks, spec["workflow"]) == "passing":
             continue
-        if spec.get("suite") in attested or spec.get("suite") in deferred:
+        if _attestation_counts(spec, attested, cloud_attested) or spec.get("suite") in deferred:
             continue
         missing.append(spec["workflow"])
     return missing
@@ -301,10 +314,13 @@ _MISSING_WORKFLOW_HINT = (
     "`mark-needs-human`.")
 
 
-def _latest_attested_sha_by_suite(comments: list) -> dict:
-    """The most recent attested sha per suite from `local-ci` markers (comments in order)."""
+def _latest_attested_sha_by_suite(comments: list, cloud_only: bool = False) -> dict:
+    """The most recent attested sha per suite from `local-ci` markers (comments in order;
+    `cloud_only`: only those stamped in a cloud session)."""
     latest = {}
     for c in comments:
+        if cloud_only and LOCAL_CI_CLOUD_MARKER not in c.get("body", ""):
+            continue
         for m in _LOCAL_CI_MARKER.finditer(c.get("body", "")):
             latest[m.group(1)] = m.group(3).lower()
     return latest

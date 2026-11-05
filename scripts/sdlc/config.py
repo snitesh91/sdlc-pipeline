@@ -215,8 +215,9 @@ _PIPELINE_DEFAULTS = {
                   # Shell command close-epic runs in the epic worktree before the
                   # exploratory pass (e.g. a dependency install); "" = none.
                   "prepare": "",
-                  # `[{path, versionPattern}]`: files whose text change must move a version
-                  # string (regex; group 1 if any) past the base's -- close-epic refuses else.
+                  # `[{versionFile, versionPattern, textPaths}]`: when a `textPaths` file
+                  # differs from the base's, `versionFile`'s version (regex; group 1 if any)
+                  # must differ from the base's -- close-epic refuses else.
                   "versionedFiles": []},
     # Priority / Effort `create-issue` sets when no flag names one (fields configured only).
     "issueDefaults": {"priority": "Medium", "effort": "Medium"},

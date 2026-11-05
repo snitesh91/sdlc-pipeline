@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 from typing import Callable, Optional
 
@@ -104,14 +105,27 @@ LOCAL_CI_COMMAND_PATTERNS = {
 _UNEXPANDED_PLACEHOLDER = re.compile(r"<[A-Za-z_][\w.-]*>")
 
 
-def local_ci_suites_attested(comments: list, head_sha: str) -> set:
-    """Set of suite keys with a `local-ci` attestation matching `head_sha`.
+# Stamped by `record-local-ci`: where the run happened, from CLAUDE_CODE_REMOTE (the
+# harness's own signal), never the `SDLC_PLACEMENT` override a laptop can set.
+LOCAL_CI_CLOUD_MARKER = "<!-- local-ci-placement: cloud -->"
+
+
+def remote_session() -> bool:
+    """Whether this process runs in a Claude cloud session (CLAUDE_CODE_REMOTE)."""
+    return os.environ.get("CLAUDE_CODE_REMOTE", "").strip().lower() in ("true", "1")
+
+
+def local_ci_suites_attested(comments: list, head_sha: str, cloud_only: bool = False) -> set:
+    """Set of suite keys with a `local-ci` attestation matching `head_sha` (`cloud_only`:
+    only attestations stamped from a cloud session).
     Prefix match either way (short vs full sha); an unknown head trusts nothing."""
     if not head_sha:
         return set()
     head = head_sha.lower()
     attested = set()
     for c in comments:
+        if cloud_only and LOCAL_CI_CLOUD_MARKER not in c.get("body", ""):
+            continue
         for m in _LOCAL_CI_MARKER.finditer(c.get("body", "")):
             suite, sha = m.group(1), m.group(3).lower()
             if head.startswith(sha) or sha.startswith(head):
