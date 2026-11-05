@@ -99,26 +99,9 @@ class GitHub:
         self._run = runner
 
     def issue_list(self) -> list:
-        """Every issue, open and closed, with labels, fields, `issueType` and `parent`
-        flattened. GraphQL because `gh issue list --json` exposes neither of the last two."""
-        issues = []
-        after = "null"
-        while True:
-            data = self.graphql(_ISSUE_LIST_QUERY.format(after=after))
-            conn = data["repository"]["issues"]
-            for node in conn["nodes"]:
-                node["labels"] = node["labels"]["nodes"]
-                node["milestone"] = (node.get("milestone") or {}).get("title")
-                node["fields"] = {
-                    v["field"]["name"]: v["name"]
-                    for v in node.pop("issueFieldValues")["nodes"]
-                    if v["__typename"] == "IssueFieldSingleSelectValue"
-                }
-                issues.append(node)
-            if not conn["pageInfo"]["hasNextPage"]:
-                break
-            after = f'"{conn["pageInfo"]["endCursor"]}"'
-        return without_retro_issues(issues)
+        """`GitHubRest` reads the issues a command reaches; this base class lists none (the
+        whole-repo GraphQL listing was retired in v0.4.3)."""
+        raise NotImplementedError("issue_list is GitHubRest's")
 
     def issue_view(self, number: int) -> dict:
         out = self._run(["gh", "issue", "view", str(number), "--repo", self.repo,
@@ -526,29 +509,43 @@ def _raw_parent(raw: dict) -> Optional[int]:
     return (raw.get("parent") or {}).get("number") or _number_from_url(raw.get("parent_issue_url"))
 
 
-# Issue numbers the running command names (`main` sets it): `GitHubRest.issue_list` reads
-# them, and their sub-issue trees, even when closed.
+# Issue numbers the running command names (`main` sets it). With any set, `GitHubRest.issue_list`
+# reads only their trees: each number, its parent chain up, and its root's sub-issues down
+# (open and closed). It lists no open issues at all.
 _FOCUS: set = set()
 
 
-# Which open parents' closed sub-issues `GitHubRest.issue_list` reads (`main` sets it per
-# command): "all" (with `_FOCUS`, only the trees holding those numbers), "childless" (only
-# parents with no open child: every child closed), or "none".
+# For a command that names no issue (`main` sets both per command): which open issues
+# `GitHubRest.issue_list` lists -- REST filter strings (`&type=Epic`, `&labels=x`), or [""]
+# for every open issue -- and which listed parents' closed sub-issues it reads: "all",
+# "childless" (only parents whose every sub-issue is closed), or "none".
+_LISTING: list = [[""]]
 _CLOSED_WALK = ["all"]
 
 
+def kind_filter(kind: str) -> str:
+    """The REST list filter for `pipeline.classification.<kind>` (a label or an Issue Type)."""
+    rule = PIPELINE["classification"][kind]
+    key = {"label": "labels", "issueType": "type"}.get(rule.get("field"))
+    if key is None:
+        raise GhError(f"pipeline.classification.{kind}.field={rule.get('field')!r} has no REST "
+                      f"list filter (label or issueType)")
+    return f"&{key}={urllib.parse.quote(rule['value'], safe='')}"
+
+
 def focus_issues(gh, numbers) -> list:
-    """`gh.issue_list()` that also holds `numbers` (and their parent chains): a unit-scoped
-    index reloads once when one of them is missing (a closed Epic, a closed `Realises:` issue,
-    a finished unit's leftover branch). A whole-repo provider lists them anyway."""
-    numbers = {n for n in numbers if n}
-    new = numbers - _FOCUS
-    _FOCUS.update(numbers)
-    issues = gh.issue_list()
-    if new and new - {i["number"] for i in issues} and hasattr(gh, "_stale"):
-        gh._stale = True
-        issues = gh.issue_list()
-    return issues
+    """`gh.issue_list()` that also holds `numbers` and their trees (a closed Epic, a closed
+    `Realises:` issue, a finished unit's leftover branch). A tree-scoped index adds just those
+    trees; a whole-repo provider lists them anyway."""
+    _FOCUS.update(n for n in numbers if n)
+    return gh.issue_list()
+
+
+def with_scan(gh, issues: list, kind: str) -> list:
+    """`issues` plus a repo-wide scan a tree-scoped index lacks: "gate" (units of open gate
+    PRs: the Gate A queue is repo-wide) or "cloud" (cloud-placed Epics/Initiatives and their
+    trees). A provider without `scan` already lists every issue."""
+    return gh.scan(kind) if hasattr(gh, "scan") else issues
 
 
 class GitHubRest(GitHub):
@@ -807,13 +804,20 @@ class GitHubRest(GitHub):
     # --- issues ----------------------------------------------------------------------
 
     def issue_list(self) -> list:
-        """Every open issue, plus the closed issues the running command can reach: the
-        sub-issue trees of open parents and of the issues it names (`_FOCUS`), and every
-        listed issue's parent chain. Cost scales with open work, not the repo's history.
-        Served from a per-process index that refetches only what this process changed."""
+        """The issues this command reaches: with `_FOCUS`, only the named trees (no listing);
+        else the `_LISTING` open issues plus the closed sub-issues `_CLOSED_WALK` asks for and
+        every listed issue's parent chain. Served from a per-process index that grows with
+        `_FOCUS` and refetches only what this process changed."""
         if self._index is None or self._stale:
-            self._index, self._stale = self._load_index(), False
+            self._index, self._stale = {}, False
+            self._done: set = set()  # listing / scans / roots already read into the index
+            self._gone: set = set()  # numbers that 404 (never refetched)
             self._dirty.clear()
+        if _FOCUS:
+            self._add_trees(_FOCUS)
+        elif "listing" not in self._done:
+            self._done.add("listing")
+            self._list_and_walk()
         for number in sorted(self._dirty):
             raw = self._issue_or_none(number)
             if raw:
@@ -824,6 +828,19 @@ class GitHubRest(GitHub):
         return without_retro_issues(
             [self._node(self._index[n]) for n in sorted(
                 self._index, key=lambda n: (self._index[n].get("created_at") or "", n))])
+
+    def scan(self, kind: str) -> list:
+        """`issue_list()` plus repo-wide scan `kind` (`with_scan`), read once per process."""
+        self.issue_list()
+        if kind not in self._done:
+            self._done.add(kind)
+            if kind == "gate":
+                self._scan_gates()
+            elif kind == "cloud":
+                self._scan_cloud()
+            else:
+                raise GhError(f"unknown issue scan {kind!r}")
+        return self.issue_list()
 
     def _list_issues(self, state: str, extra: str = "&sort=created&direction=asc") -> list:
         return [i for i in self._api_items(f"repos/{self.repo}/issues?state={state}"
@@ -840,32 +857,61 @@ class GitHubRest(GitHub):
             return None
         return raw if raw and not raw.get("pull_request") else None
 
-    def _load_index(self) -> dict:
-        """Open issues listed live; closed ones only where a unit reaches them (sub-issues,
-        parents, the command's own numbers), each fetched by number or per parent. With
-        `_FOCUS` set, only the trees holding those numbers walk their closed sub-issues; other
-        open parents keep just their open children (their `sub_issues_summary` still counts
-        all). Independent reads run in parallel."""
-        index = {i["number"]: _slim_issue(i) for i in self._list_issues("open")}
-        for raw in _parallel(self._issue_or_none, sorted(_FOCUS - index.keys())):
+    def _fetch_into_index(self, numbers) -> None:
+        """Read `numbers` by number, in parallel; one that is gone is never asked for again."""
+        need = sorted({n for n in numbers if n and n not in self._index and n not in self._gone})
+        for n, raw in zip(need, _parallel(self._issue_or_none, need)):
             if raw:
-                index[raw["number"]] = _slim_issue(raw)
+                self._index[n] = _slim_issue(raw)
+            else:
+                self._gone.add(n)
+
+    def _sub_issues(self, numbers) -> None:
+        """Every sub-issue (open and closed) of `numbers`, in parallel, into the index."""
+        numbers = sorted(numbers)
+        subs = _parallel(lambda n: self._api_items(
+            f"repos/{self.repo}/issues/{n}/sub_issues",
+            expected=(self._index[n].get("sub_issues_summary") or {}).get("total")), numbers)
+        for n, children in zip(numbers, subs):
+            for child in children:
+                if not child.get("pull_request"):
+                    self._index.setdefault(child["number"],
+                                           _slim_issue({**child, "parent": {"number": n}}))
+
+    def _add_trees(self, numbers) -> None:
+        """Each of `numbers`, its parent chain up to its root, and the root's whole sub-issue
+        tree down; every level's reads run in parallel."""
+        index = self._index
+        self._fetch_into_index(numbers)
+        heads, roots, seen = {n for n in numbers if n in index}, set(), set()
+        while heads:
+            seen |= heads
+            up = {n: _raw_parent(index[n]) for n in heads}
+            self._fetch_into_index(p for p in up.values() if p not in seen)
+            heads = set()
+            for n, p in up.items():
+                if p and p in index and p not in seen:
+                    heads.add(p)
+                elif not p or p not in seen:
+                    roots.add(n)
+        def has_subs(n: int) -> bool:
+            return bool((index[n].get("sub_issues_summary") or {}).get("total"))
+
+        todo = {r for r in roots if ("root", r) not in self._done}
+        while todo:
+            self._done.update(("root", n) for n in todo)
+            self._sub_issues(n for n in todo if has_subs(n))
+            todo = {n for n, i in index.items() if _raw_parent(i) in todo and has_subs(n)
+                    and ("root", n) not in self._done}
+
+    def _list_and_walk(self) -> None:
+        """A command that names no issue: the `_LISTING` open issues, the closed sub-issues
+        `_CLOSED_WALK` asks for, and every listed issue's parent chain."""
+        index, mode = self._index, _CLOSED_WALK[0]
+        for query in _LISTING[0]:
+            for raw in self._list_issues("open", extra=f"{query}&sort=created&direction=asc"):
+                index.setdefault(raw["number"], _slim_issue(raw))
         walked: set = set()
-        fetched: set = set()
-
-        def _walks(n: int, in_focus_tree: bool, open_children: int) -> bool:
-            if n in _FOCUS or in_focus_tree and _FOCUS:
-                return True
-            mode = _CLOSED_WALK[0]
-            return (mode == "all" and not _FOCUS) or (mode == "childless" and not open_children)
-
-        def top(n: int) -> int:
-            seen = {n}
-            while (p := _raw_parent(index[n])) in index and p not in seen:
-                n = p
-                seen.add(n)
-            return n
-
         while True:
             # A parent with more sub-issues than are indexed has closed ones still to read.
             known: dict = {}
@@ -873,26 +919,37 @@ class GitHubRest(GitHub):
                 parent = _raw_parent(i)
                 if parent:
                     known[parent] = known.get(parent, 0) + 1
-            roots = {top(n) for n in _FOCUS if n in index}
-            todo = [n for n, i in index.items() if n not in walked
-                    and (i.get("sub_issues_summary") or {}).get("total", 0) > known.get(n, 0)
-                    and _walks(n, top(n) in roots, known.get(n, 0))]
-            missing = sorted(p for p in known if p not in index and p not in fetched)
+            todo = []
+            for n, i in index.items():
+                summary = i.get("sub_issues_summary") or {}
+                total = summary.get("total", 0)
+                if n in walked or total <= known.get(n, 0) or mode == "none":
+                    continue
+                if mode == "all" or summary.get("completed") == total:
+                    todo.append(n)
+            missing = [p for p in known if p not in index and p not in self._gone]
             if not todo and not missing:
-                return index
+                return
             walked.update(todo)
-            fetched.update(missing)
-            subs = _parallel(lambda n: self._api_items(
-                f"repos/{self.repo}/issues/{n}/sub_issues",
-                expected=index[n]["sub_issues_summary"]["total"]), sorted(todo))
-            for n, children in zip(sorted(todo), subs):
-                for child in children:
-                    if not child.get("pull_request"):
-                        index.setdefault(child["number"],
-                                         _slim_issue({**child, "parent": {"number": n}}))
-            for raw in _parallel(self._issue_or_none, missing):
-                if raw:
-                    index[raw["number"]] = _slim_issue(raw)
+            self._sub_issues(todo)
+            self._fetch_into_index(missing)
+
+    def _scan_gates(self) -> None:
+        """The units of open PRs labelled `labels.gate`: every open gate, repo-wide."""
+        gate = PIPELINE["labels"]["gate"]
+        prefix = PIPELINE["branches"]["issuePrefix"]
+        heads = [p["head"]["ref"] for p in self._api_items(f"repos/{self.repo}/pulls?state=open")
+                 if any(l.get("name") == gate for l in p.get("labels") or [])]
+        self._fetch_into_index(int(h[len(prefix):]) for h in heads
+                               if h.startswith(prefix) and h[len(prefix):].isdigit())
+
+    def _scan_cloud(self) -> None:
+        """Open issues labelled with the cloud label (Epics, Initiatives) and their trees."""
+        label = urllib.parse.quote(PIPELINE["placement"]["cloudLabel"], safe="")
+        placed = self._list_issues("open", extra=f"&labels={label}")
+        for raw in placed:
+            self._index.setdefault(raw["number"], _slim_issue(raw))
+        self._add_trees(raw["number"] for raw in placed)
 
     def _comments(self, number: int) -> list:
         return [{"id": c.get("node_id"), "databaseId": c.get("id"),
@@ -1238,27 +1295,22 @@ class GitHubRest(GitHub):
         self._api(f"repos/{self.repo}/pulls/{pr}/ccr/comments/{comment}/resolve", method="POST")
 
 
-GITHUB_APIS = ("graphql", "rest")
-
-
 def github_api() -> dict:
-    """Which GitHub client this session uses and the `signal` that decided it:
-    `SDLC_GITHUB_API` (graphql|rest), else REST (`GitHubRest`) in every placement."""
+    """The GitHub client this session uses: always REST (`GitHubRest`). `SDLC_GITHUB_API` other
+    than `rest` is an error: the all-GraphQL client was retired in v0.4.3."""
     explicit = os.environ.get("SDLC_GITHUB_API", "").strip().lower()
-    if explicit:
-        if explicit not in GITHUB_APIS:
-            raise GhError(f"SDLC_GITHUB_API={explicit!r} is neither 'graphql' nor 'rest' -- "
-                          f"fix or unset it")
-        return {"api": explicit, "signal": "SDLC_GITHUB_API"}
-    return {"api": "rest", "signal": "default"}
+    if explicit and explicit != "rest":
+        raise GhError(f"SDLC_GITHUB_API={explicit!r}: only 'rest' exists (the GraphQL client was "
+                      f"retired in v0.4.3) -- unset it")
+    return {"api": "rest", "signal": "SDLC_GITHUB_API" if explicit else "default"}
 
 
 def get_work_item_provider(runner: Runner = _default_runner) -> WorkItemProvider:
-    """The configured `pipeline.workItemProvider`; only "github" exists, anything else raises.
-    GitHub is `GitHubRest`, or the GraphQL `GitHub` when `SDLC_GITHUB_API=graphql`."""
+    """The configured `pipeline.workItemProvider`; only "github" (`GitHubRest`) exists."""
     provider = PIPELINE.get("workItemProvider", {}).get("type", "github")
     if provider == "github":
-        return (GitHubRest if github_api()["api"] == "rest" else GitHub)(runner=runner)
+        github_api()
+        return GitHubRest(runner=runner)
     raise GhError(f"pipeline.workItemProvider.type={provider!r} is not implemented -- "
                   f"only 'github' exists today (see README.md, 'Initiative-driven lifecycle')")
 
@@ -1266,26 +1318,6 @@ def get_work_item_provider(runner: Runner = _default_runner) -> WorkItemProvider
 _UNRESOLVED_THREADS_QUERY = """query {{ repository(owner:"__OWNER__", name:"__NAME__") {{
   pullRequest(number: {pr}) {{
     reviewThreads(first: 50) {{ nodes {{ id isResolved comments(first:10){{ nodes{{ body author{{ login }} }} }} }} }}
-  }}
-}} }}"""
-
-
-_ISSUE_LIST_QUERY = """query {{ repository(owner:"__OWNER__", name:"__NAME__") {{
-  issues(first: 100, after: {after}, orderBy: {{field: CREATED_AT, direction: ASC}}) {{
-    pageInfo {{ hasNextPage endCursor }}
-    nodes {{
-      number title body createdAt updatedAt state
-      labels(first: 20) {{ nodes {{ name }} }}
-      issueType {{ name }}
-      parent {{ number }}
-      milestone {{ title }}
-      issueFieldValues(first: 10) {{
-        nodes {{
-          __typename
-          ... on IssueFieldSingleSelectValue {{ field {{ ... on IssueFieldSingleSelect {{ name }} }} name }}
-        }}
-      }}
-    }}
   }}
 }} }}"""
 

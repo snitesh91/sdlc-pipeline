@@ -1,8 +1,11 @@
 """Retro 2026-11-05 (v0.4.3): network budget. A command reads only the trees it names; other
 open parents keep their closed sub-issues unread; independent reads run in parallel; a sub-issue
 list whose size is known needs no end-of-list peek; ids and empty comment threads cost nothing."""
+import json
 import threading
 import time
+
+import pytest
 
 import sdlc_next as s
 from sdlc_next import GitHubRest
@@ -12,8 +15,8 @@ from tests.test_retro_1027_issue_reads import R, Runner
 EPIC = {"labels": [{"name": "type:epic"}]}
 
 
-def _summary(total):
-    return {"total": total, "completed": 0, "percent_completed": 0}
+def _summary(total, completed=0):
+    return {"total": total, "completed": completed, "percent_completed": 0}
 
 
 def _world():
@@ -24,18 +27,30 @@ def _world():
     standing = _issue(50, sub_issues_summary=_summary(151), **EPIC)
     open51 = _issue(51, parent_issue_url=parent(50))
     closed = [_issue(n, state="closed") for n in range(100, 250)]
-    return Runner([epic, task, standing, open51],
+    opened = [epic, task, standing, open51]
+    return Runner(opened, issues={i["number"]: i for i in opened},
                   subs={10: [task, _issue(12, state="closed")], 50: [open51, *closed]})
 
 
-def test_a_focused_command_walks_only_its_own_tree():
-    s._FOCUS.update({10})
+def test_a_focused_command_reads_only_its_own_tree_and_lists_nothing():
+    s._FOCUS.update({11})  # a Task: up to its Epic, then the Epic's whole tree down
     runner = _world()
     issues = {i["number"]: i["state"] for i in GitHubRest(runner=runner).issue_list()}
-    assert issues[12] == "CLOSED" and 100 not in issues
+    assert issues == {10: "OPEN", 11: "OPEN", 12: "CLOSED"}
+    assert runner.gets("state=open") == []
     assert runner.gets("/sub_issues") == [f"{R}/issues/10/sub_issues?per_page=100"]
-    # One open page, one end peek, one sub-issue read: no call scales with other Epics' history.
+    # The Task, its Epic, the Epic's sub-issues: nothing scales with other Epics or the repo.
     assert len(runner.calls) == 3
+
+
+def test_a_later_focus_adds_only_its_tree():
+    s._FOCUS.update({11})
+    runner = _world()
+    gh = GitHubRest(runner=runner)
+    gh.issue_list()
+    before = len(runner.calls)
+    assert 51 in {i["number"] for i in s.focus_issues(gh, {51})}
+    assert runner.gets("state=open") == [] and len(runner.calls) == before + 3  # 51, 50, 50's subs
 
 
 def test_an_unfocused_command_still_sees_every_open_parents_closed_children():
@@ -113,14 +128,15 @@ def test_list_needs_human_reads_no_closed_sub_issues(monkeypatch):
     assert runner.gets("/sub_issues") == []
 
 
-def test_check_epics_closeable_walks_only_parents_with_no_open_child(monkeypatch):
+def test_check_epics_closeable_lists_epics_and_walks_only_finished_ones(monkeypatch):
     runner = _world()
-    runner.open.append(_issue(60, sub_issues_summary=_summary(1), **EPIC))  # all children closed
+    runner.open.append(_issue(60, sub_issues_summary=_summary(1, 1), **EPIC))  # all closed
     runner.subs[60] = [_issue(61, state="closed")]
     monkeypatch.setenv("GITHUB_TOKEN", "x")
     monkeypatch.setattr(s, "get_work_item_provider", lambda: GitHubRest(runner=runner))
     s.main(["check-epics-closeable"])
     assert runner.gets("/sub_issues") == [f"{R}/issues/60/sub_issues?per_page=100"]
+    assert all("labels=type%3Aepic" in p for p in runner.gets("state=open"))
 
 
 def test_branch_heads_come_from_one_shared_ls_remote(tmp_path, monkeypatch):
@@ -149,3 +165,38 @@ def test_prs_for_a_branch_are_read_once_until_a_write():
     gh.issue_comment(9, "x")
     gh.pr_list_for_branch("issue-9")
     assert len([c for c in runner.calls if "pulls?head=" in c[1]]) == 2
+
+
+@pytest.mark.parametrize("argv", [
+    ["next-action", "10", "--run-id", "r"], ["list-parallel-ready", "10"],
+    ["list-design-ready", "10"], ["list-ready-for-review", "10"],
+    ["audit-issues", "--epic", "10"], ["cloud-status", "10"], ["close-epic", "10"],
+    ["prune-stale", "--dry-run"]])
+def test_a_numbered_command_never_lists_open_issues(monkeypatch, argv):
+    """Read-only commands (close-epic refuses on the open child before any write)."""
+    runner = _world()
+    monkeypatch.setenv("GITHUB_TOKEN", "x")
+    monkeypatch.setattr(s, "get_work_item_provider", lambda: GitHubRest(runner=runner))
+    try:
+        s.main(argv)
+    except Exception:  # noqa: BLE001 -- the fake answers little; only the reads matter here
+        pass
+    assert runner.single_gets() or runner.gets("/sub_issues")  # it did read the unit
+    assert [p for p in runner.gets("/issues?state=") if "labels=" not in p] == []
+    assert not any("/50/sub_issues" in p for p in runner.gets("/sub_issues"))
+
+
+def test_the_gate_scan_reads_open_gate_prs_units_only():
+    runner = _world()
+    runner.issues[70] = _issue(70)
+    real = runner.__call__
+
+    def call(argv):
+        if any(a.startswith(f"{R}/pulls?state=open") for a in argv):
+            return json.dumps([{"head": {"ref": "issue-70"}, "labels": [{"name": "sdlc:gate"}]},
+                               {"head": {"ref": "issue-71"}, "labels": []}])
+        return real(argv)
+    s._FOCUS.update({11})
+    gh = GitHubRest(runner=call)
+    assert 70 in {i["number"] for i in s.with_scan(gh, gh.issue_list(), "gate")}
+    assert f"{R}/issues/71" not in runner.single_gets()

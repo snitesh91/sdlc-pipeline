@@ -8,6 +8,13 @@ import pytest
 
 import sdlc_next as s
 from tests.test_retro_control_plane import _epic_tree, _no_worktree_runner
+from tests.listed_github import graphql_listing  # noqa: E402,F401
+
+
+@pytest.fixture(autouse=True)
+def _graphql_listing(graphql_listing):
+    """These tests script the base client's whole-repo listing (`tests/listed_github.py`)."""
+
 
 
 # ---- 1: close-issue --not-planned does not count toward the run cap ----

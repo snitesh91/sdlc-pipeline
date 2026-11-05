@@ -9,7 +9,7 @@ from .config import (
     PR_REVIEW_PARALLELISM, RESUME_LIVE_WINDOW_MINUTES, REVIEW_ENTRY_STAGES, Runner,
     issue_branch,
 )
-from .github import GhError, GitHub, WorkItemProvider, _default_runner, _utc_now_marker
+from .github import GhError, GitHub, WorkItemProvider, _default_runner, _utc_now_marker, with_scan
 from .units import (
     _parse_marker_ts, cloud_label, current_stage, default_stage, doc_root_for, effective_gates,
     epic_base, forget_initiative_hint, has_label, hint_doc_roots, in_scope, initiative_branch,
@@ -142,8 +142,15 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
     other_side = sorted(i["number"] for i in children if not in_scope(i, scope))
     children = [i for i in children if in_scope(i, scope)]
     # A profile whose Gate A auto-passes never fills the human queue, so it is uncapped.
-    product_headroom = (product_wip_headroom(all_issues)
-                        if effective_gates(epic_issue)["requiresHumanGateA"] else None)
+    # Read lazily: the Gate A queue is repo-wide (`with_scan`), and only a fresh product
+    # delegation needs it.
+    gate_a_human = effective_gates(epic_issue)["requiresHumanGateA"]
+    headroom: list = []
+
+    def product_headroom() -> Optional[int]:
+        if not headroom:
+            headroom.append(product_wip_headroom(with_scan(gh, all_issues, "gate")))
+        return headroom[0]
     deferred_by_cap: list = []
     unstaged: list = []
     # Run cap gates only fresh work; refusing in-flight work would strand it mid-pipeline.
@@ -157,7 +164,10 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
     cloud_survey: dict = {}
 
     def capped(stage: str) -> bool:
-        return stage == "product" and product_headroom is not None and product_headroom <= 0
+        if stage != "product" or not gate_a_human:
+            return False
+        left = product_headroom()
+        return left is not None and left <= 0
 
     def lane_refusal(number: int) -> Optional[str]:
         """Why a fresh dev-lane unit cannot start now, else None; computes the lane once."""
@@ -229,7 +239,8 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                 "Architecture revision phase-Task when it doesn't fit the design.")
         if deferred_by_cap:
             result["product_cap"] = {"limit": PRODUCT_WIP_CAP,
-                                     "pending": product_gate_pending(all_issues),
+                                     "pending": product_gate_pending(
+                                         with_scan(gh, all_issues, "gate")),
                                      "deferred": deferred_by_cap}
         elif is_initiative(epic_issue) and epic_issue["state"] == "CLOSED":
             result["reason"] = f"Initiative #{epic} is closed -- nothing left to do."

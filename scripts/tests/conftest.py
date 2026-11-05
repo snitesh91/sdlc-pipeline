@@ -65,6 +65,8 @@ def _no_issue_focus():
     import sdlc_next
     getattr(sdlc_next, "_FOCUS", set()).clear()
     sdlc_next._CLOSED_WALK[0] = "all"
+    sdlc_next._LISTING[0] = [""]
     yield
     getattr(sdlc_next, "_FOCUS", set()).clear()
     sdlc_next._CLOSED_WALK[0] = "all"
+    sdlc_next._LISTING[0] = [""]
