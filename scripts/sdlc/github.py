@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Callable, Optional, Protocol, runtime_checkable
 
@@ -45,6 +46,11 @@ def _default_runner(argv: list) -> str:
     if result.returncode != 0:
         raise GhError(f"command failed ({result.returncode}): {' '.join(argv)}\n{result.stderr}")
     return result.stdout
+
+
+def _is_real_runner(runner) -> bool:
+    """`_default_runner`, or a provider's tracking wrapper around it (not a test fake)."""
+    return runner is _default_runner or getattr(runner, "real", False)
 
 
 @runtime_checkable
@@ -492,7 +498,22 @@ _REST_MAX_PAGES = 200
 _REST_SHORT_PAGE_RETRIES = 3
 
 
-_ISSUE_KEYS = ("number", "title", "body", "created_at", "updated_at", "state", "labels",
+# Concurrent GitHub reads per command: enough to hide latency, well under REST's secondary
+# rate limit (100 concurrent requests).
+_READ_WORKERS = 6
+
+
+def _parallel(fn: Callable, items) -> list:
+    """`[fn(x) for x in items]`, run on up to `_READ_WORKERS` threads; order kept and the
+    first exception re-raised, as the serial loop would."""
+    items = list(items)
+    if len(items) < 2:
+        return [fn(x) for x in items]
+    with ThreadPoolExecutor(max_workers=min(_READ_WORKERS, len(items))) as pool:
+        return list(pool.map(fn, items))
+
+
+_ISSUE_KEYS = ("id", "node_id", "number", "title", "body", "created_at", "updated_at", "state", "labels",
                "type", "parent", "parent_issue_url", "milestone", "issue_field_values",
                "sub_issues_summary")
 
@@ -508,6 +529,12 @@ def _raw_parent(raw: dict) -> Optional[int]:
 # Issue numbers the running command names (`main` sets it): `GitHubRest.issue_list` reads
 # them, and their sub-issue trees, even when closed.
 _FOCUS: set = set()
+
+
+# Which open parents' closed sub-issues `GitHubRest.issue_list` reads (`main` sets it per
+# command): "all" (with `_FOCUS`, only the trees holding those numbers), "childless" (only
+# parents with no open child: every child closed), or "none".
+_CLOSED_WALK = ["all"]
 
 
 def focus_issues(gh, numbers) -> list:
@@ -539,6 +566,8 @@ class GitHubRest(GitHub):
         self._dirty: set = set()
         self._stale = False
         self._sub_issue_child = False  # add/remove_sub_issue mark the child themselves
+        self._issues: dict = {}  # `_issue` reads, dropped on any write
+        self._prs: dict = {}  # `_prs_for_branch` reads, dropped on any write
         self._run = self._tracked(runner)
 
     _MUTATING_FLAGS = ("-f", "-F", "--field", "--raw-field", "--input")
@@ -546,6 +575,9 @@ class GitHubRest(GitHub):
 
     def _tracked(self, runner: Runner) -> Runner:
         def run(argv: list) -> str:
+            if _may_move_origin(argv):
+                self._issues.clear()
+                self._prs.clear()
             created = self._note_mutation(argv)
             out = runner(argv)
             if created and self._index is not None:
@@ -554,6 +586,7 @@ class GitHubRest(GitHub):
                 except (ValueError, KeyError, TypeError):
                     self._stale = True
             return out
+        run.real = _is_real_runner(runner)
         return run
 
     def _note_mutation(self, argv: list) -> bool:
@@ -626,11 +659,13 @@ class GitHubRest(GitHub):
         out = self._api(path, *args, method=method)
         return json.loads(out) if out.strip() else None
 
-    def _api_items(self, path: str, jq: str = ".[]", confirm_end: bool = False) -> list:
+    def _api_items(self, path: str, jq: str = ".[]", confirm_end: bool = False,
+                   expected: Optional[int] = None) -> list:
         """Every item across all pages. `jq` is `.[]` (the page is a list) or `.<key>[]` (the
         list under `<key>`). Pages by `page=N` on this `repos/{owner}/{repo}` path rather than
         `gh api --paginate`: GitHub's `Link: next` URLs use `repositories/{id}/...`, which the
-        cloud's GitHub proxy rejects (HTTP 403)."""
+        cloud's GitHub proxy rejects (HTTP 403). `expected` (a count the caller already holds,
+        e.g. a parent's `sub_issues_summary.total`) ends the list without an end-of-list peek."""
         key = None if jq == ".[]" else jq[1:-2]
         if "per_page=" not in path:
             path += ("&" if "?" in path else "?") + "per_page=100"
@@ -639,17 +674,24 @@ class GitHubRest(GitHub):
             data = self._api_json(f"{path}&page={page}")
             return (data or []) if key is None else ((data or {}).get(key) or [])
 
+        def is_end(page: int, batch: list, held: int) -> bool:
+            # GitHub sometimes serves a short or empty page mid-list. A short page is the end
+            # when the caller's count is reached, or when the next page is empty: one peek, or
+            # two for an empty page of a `confirm_end` list (the glitch seen most). Page 1 is
+            # confirmed only for `confirm_end` lists, to keep small reads at one request.
+            if expected is not None and held + len(batch) >= expected:
+                return True
+            if page == 1 and not confirm_end and expected is None:
+                return True
+            if fetch(page + 1):
+                return False
+            return not (confirm_end and not batch and fetch(page + 1))
+
         items: list = []
         for page in range(1, _REST_MAX_PAGES + 1):
             batch = fetch(page)
-            # GitHub sometimes serves a short or empty page mid-list: a short page is the end
-            # only when the next page is empty too (twice, for `confirm_end` lists: a spurious
-            # empty peek must not end the list); otherwise refetch it until it is full.
-            # Page 1 is confirmed only for `confirm_end` lists (issues), to keep small reads
-            # at one request.
             for _ in range(_REST_SHORT_PAGE_RETRIES):
-                if (len(batch) >= per_page or (page == 1 and not confirm_end)
-                        or (not fetch(page + 1) and (not confirm_end or not fetch(page + 1)))):
+                if len(batch) >= per_page or is_end(page, batch, len(items)):
                     break
                 batch = fetch(page)
             else:
@@ -658,7 +700,7 @@ class GitHubRest(GitHub):
                                   f"{per_page}) while page {page + 1} has items -- GitHub served "
                                   f"a truncated listing; re-run the command")
             items.extend(batch)
-            if len(batch) < per_page:
+            if len(batch) < per_page or (expected is not None and len(items) >= expected):
                 return items
         raise GhError(f"{path}: more than {_REST_MAX_PAGES} pages -- refusing to list further")
 
@@ -667,10 +709,22 @@ class GitHubRest(GitHub):
         return [f["filename"] for f in self._api_items(f"repos/{self.repo}/pulls/{number}/files")]
 
     def _issue(self, number: int) -> dict:
-        return self._api_json(f"repos/{self.repo}/issues/{number}")
+        """One issue, read once per process until a write may have changed it."""
+        cached = self._issues.get(number)
+        if cached is None:
+            cached = self._issues[number] = self._api_json(f"repos/{self.repo}/issues/{number}")
+        return cached
+
+    def _held_issue(self, number: int) -> Optional[dict]:
+        """The issue if this process already read it (index or `_issue`), else None."""
+        return self._issues.get(number) or (self._index or {}).get(number)
 
     def _issue_db_id(self, number: int) -> int:
-        """The issue's numeric REST id (sub-issue and dependency endpoints take it)."""
+        """The issue's numeric REST id (sub-issue and dependency endpoints take it); ids never
+        change, so one already read is reused."""
+        held = self._held_issue(number)
+        if held and held.get("id"):
+            return int(held["id"])
         return int(self._api(f"repos/{self.repo}/issues/{number}", "--jq", ".id").strip())
 
     # --- org issue fields: config GraphQL ids -> REST ids / option names ---------------
@@ -788,14 +842,30 @@ class GitHubRest(GitHub):
 
     def _load_index(self) -> dict:
         """Open issues listed live; closed ones only where a unit reaches them (sub-issues,
-        parents, the command's own numbers), each fetched by number or per parent."""
+        parents, the command's own numbers), each fetched by number or per parent. With
+        `_FOCUS` set, only the trees holding those numbers walk their closed sub-issues; other
+        open parents keep just their open children (their `sub_issues_summary` still counts
+        all). Independent reads run in parallel."""
         index = {i["number"]: _slim_issue(i) for i in self._list_issues("open")}
-        for number in sorted(_FOCUS - index.keys()):
-            raw = self._issue_or_none(number)
+        for raw in _parallel(self._issue_or_none, sorted(_FOCUS - index.keys())):
             if raw:
-                index[number] = _slim_issue(raw)
+                index[raw["number"]] = _slim_issue(raw)
         walked: set = set()
         fetched: set = set()
+
+        def _walks(n: int, in_focus_tree: bool, open_children: int) -> bool:
+            if n in _FOCUS or in_focus_tree and _FOCUS:
+                return True
+            mode = _CLOSED_WALK[0]
+            return (mode == "all" and not _FOCUS) or (mode == "childless" and not open_children)
+
+        def top(n: int) -> int:
+            seen = {n}
+            while (p := _raw_parent(index[n])) in index and p not in seen:
+                n = p
+                seen.add(n)
+            return n
+
         while True:
             # A parent with more sub-issues than are indexed has closed ones still to read.
             known: dict = {}
@@ -803,23 +873,26 @@ class GitHubRest(GitHub):
                 parent = _raw_parent(i)
                 if parent:
                     known[parent] = known.get(parent, 0) + 1
+            roots = {top(n) for n in _FOCUS if n in index}
             todo = [n for n, i in index.items() if n not in walked
-                    and (i.get("sub_issues_summary") or {}).get("total", 0) > known.get(n, 0)]
-            missing = {p for p in known if p not in index and p not in fetched}
+                    and (i.get("sub_issues_summary") or {}).get("total", 0) > known.get(n, 0)
+                    and _walks(n, top(n) in roots, known.get(n, 0))]
+            missing = sorted(p for p in known if p not in index and p not in fetched)
             if not todo and not missing:
                 return index
-            for n in sorted(todo):
-                walked.add(n)
-                for child in self._api_items(f"repos/{self.repo}/issues/{n}/sub_issues",
-                                             confirm_end=True):
+            walked.update(todo)
+            fetched.update(missing)
+            subs = _parallel(lambda n: self._api_items(
+                f"repos/{self.repo}/issues/{n}/sub_issues",
+                expected=index[n]["sub_issues_summary"]["total"]), sorted(todo))
+            for n, children in zip(sorted(todo), subs):
+                for child in children:
                     if not child.get("pull_request"):
                         index.setdefault(child["number"],
                                          _slim_issue({**child, "parent": {"number": n}}))
-            for n in sorted(missing):
-                fetched.add(n)
-                raw = self._issue_or_none(n)
+            for raw in _parallel(self._issue_or_none, missing):
                 if raw:
-                    index[n] = _slim_issue(raw)
+                    index[raw["number"]] = _slim_issue(raw)
 
     def _comments(self, number: int) -> list:
         return [{"id": c.get("node_id"), "databaseId": c.get("id"),
@@ -830,9 +903,11 @@ class GitHubRest(GitHub):
                                          f"?per_page=100")]
 
     def issue_view(self, number: int) -> dict:
-        node = self._node(self._issue(number))
+        raw = self._issue(number)
+        node = self._node(raw)
+        count = raw.get("comments")
         return {**{k: node[k] for k in ("number", "title", "labels", "body", "state")},
-                "comments": self._comments(number)}
+                "comments": [] if count == 0 else self._comments(number)}
 
     def issue_edit(self, number: int, add_labels: list = (), remove_labels: list = (),
                    add_assignees: list = (), remove_assignees: list = ()):
@@ -853,6 +928,9 @@ class GitHubRest(GitHub):
                           method=method)
 
     def issue_node_id(self, number: int) -> str:
+        held = self._held_issue(number)
+        if held and held.get("node_id"):
+            return held["node_id"]
         return self._api(f"repos/{self.repo}/issues/{number}", "--jq", ".node_id").strip()
 
     def issue_fields(self, number: int) -> dict:
@@ -997,6 +1075,12 @@ class GitHubRest(GitHub):
         return {k: view.get(k) for k in wanted}
 
     def _prs_for_branch(self, branch: str, state: str) -> list:
+        """Read once per process per (branch, state) until a write may change it."""
+        if (branch, state) not in self._prs:
+            self._prs[(branch, state)] = self._read_prs_for_branch(branch, state)
+        return self._prs[(branch, state)]
+
+    def _read_prs_for_branch(self, branch: str, state: str) -> list:
         rest_state = "closed" if state == "merged" else state
         items = self._api_items(f"repos/{self.repo}/pulls?head={self._owner}:{branch}"
                                 f"&state={rest_state}&per_page=100")

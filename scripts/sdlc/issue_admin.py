@@ -9,7 +9,7 @@ from .config import (
     KNOWN_ISSUE_TYPES, PIPELINE, PRIORITY_ALIASES, PRIORITY_FIELD_ID, PRIORITY_OPTION_IDS, REPO,
     Runner,
 )
-from .github import GhError, GitHub, GitHubRest, WorkItemProvider, _default_runner
+from .github import GhError, GitHub, GitHubRest, WorkItemProvider, _default_runner, _parallel
 from .units import (
     classify_unit_from_issue, doc_root_for, epic_base, is_epic, is_epic_legacy,
     is_epic_standing, is_initiative, issue_type, label_names, pipeline_status,
@@ -215,8 +215,8 @@ def cmd_list_needs_human(gh: GitHub) -> dict:
     comment: `{"needs_human": [{issue, title, reason}]}`."""
     issues = [i for i in gh.issue_list() if i["state"] == "OPEN" and pipeline_status(i) == "needs-human"]
     result = []
-    for issue in issues:
-        detail = gh.issue_view(issue["number"])
+    details = _parallel(gh.issue_view, [i["number"] for i in issues])
+    for issue, detail in zip(issues, details):
         reason = None
         for c in reversed(detail.get("comments", [])):
             m = _NEEDS_HUMAN_REASON.search(c.get("body", ""))

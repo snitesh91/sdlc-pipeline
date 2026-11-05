@@ -23,7 +23,9 @@ from .evidence import _NEEDS_HUMAN_REASON, integration_base, integration_base_in
 from .run_state import _run_state_dir, record_terminal_unit
 from .plugin_version import worktree_path_for_branch
 from .worktrees import (
-    _docker_cleanup_enabled, _landed, _run_retry_transient, cmd_release_review_worktree,
+    _docker_cleanup_enabled, _landed, _remote_heads, _remote_heads_shared,
+    _run_retry_transient,
+    cmd_release_review_worktree,
     docker_sweep, release_detached_dev_worktree, release_worktree, unit_docker_prefix,
     worktree_entries,
 )
@@ -116,7 +118,14 @@ def cmd_mark_issue_closed(gh: GitHub, issue: int) -> dict:
 
 
 def _remote_head(repo_path: str, branch: str, runner: Runner) -> Optional[str]:
-    """`origin/<branch>`'s head, read live from origin (`ls-remote`); None when absent."""
+    """`origin/<branch>`'s head, read from origin (`ls-remote`; the clone's shared listing when
+    fetch dedupe is on, refreshed once a write may move origin); None when absent."""
+    if _remote_heads_shared(runner):
+        for line in _remote_heads(repo_path, runner).splitlines():
+            sha, _, ref = line.partition("\t")
+            if ref.strip() == f"refs/heads/{branch}":
+                return sha.strip()
+        return None
     out = _run_retry_transient(["git", "-C", repo_path, "ls-remote", "origin",
                                 f"refs/heads/{branch}"], runner).strip()
     return out.split()[0] if out else None
@@ -366,8 +375,7 @@ def present_units(repo_path: str, runner: Runner = _default_runner) -> set:
     units = set()
     local = runner(["git", "-C", repo_path, "for-each-ref", "--format=%(refname:short)",
                     "refs/heads/"])
-    remote = _run_retry_transient(["git", "-C", repo_path, "ls-remote", "--heads", "origin"],
-                                  runner)
+    remote = _remote_heads(repo_path, runner)
     names = local.split() + [line.split("refs/heads/", 1)[1] for line in remote.splitlines()
                              if "refs/heads/" in line]
     units.update(u for u in map(_unit_of_branch, names) if u)

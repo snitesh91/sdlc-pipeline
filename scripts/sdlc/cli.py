@@ -10,7 +10,7 @@ from .config import (
     DESIGN_LANE_PARALLELISM, DEV_LANE_PARALLELISM, PR_REVIEW_PARALLELISM, RETIRED_ROLES,
     STAGE_OPTION_IDS, TOKEN_ENV, TOKEN_PATH,
 )
-from .github import GhError, GitHubRest, _FOCUS, get_work_item_provider
+from .github import GhError, GitHubRest, _CLOSED_WALK, _FOCUS, get_work_item_provider
 from .units import PLACEMENTS, PlacementMismatch, cmd_doc_root, cmd_initiative_profile
 from .evidence import LOCAL_CI_SUITES, REVIEW_ROLES
 from .epic_close import (
@@ -70,6 +70,10 @@ from .composites import (
 # Argument names that carry issue numbers (never a PR, line, limit or confidence).
 _FOCUS_ARGS = ("issue", "epic", "number", "initiative", "parent", "lld_task", "waits_on",
                "skip_epic", "dep", "by", "blocks", "blocked_by")
+
+
+# Commands that read fewer closed sub-issues than the default (`_CLOSED_WALK`).
+_CLOSED_WALK_BY_COMMAND = {"list-needs-human": "none", "check-epics-closeable": "childless"}
 
 
 def _focus_numbers(args) -> set:
@@ -817,6 +821,7 @@ def main(argv: Optional[list] = None) -> int:
     args = parser.parse_args(argv)
     _FOCUS.clear()
     _FOCUS.update(_focus_numbers(args))
+    _CLOSED_WALK[0] = _CLOSED_WALK_BY_COMMAND.get(args.command, "all")
     refusal = comment_cap_refusal(args)
     if refusal:
         print(json.dumps(refusal))

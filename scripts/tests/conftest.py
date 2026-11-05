@@ -64,5 +64,7 @@ def _no_issue_focus():
     """`main` records the issue numbers a command names; no test may inherit another's."""
     import sdlc_next
     getattr(sdlc_next, "_FOCUS", set()).clear()
+    sdlc_next._CLOSED_WALK[0] = "all"
     yield
     getattr(sdlc_next, "_FOCUS", set()).clear()
+    sdlc_next._CLOSED_WALK[0] = "all"

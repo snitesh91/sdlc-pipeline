@@ -208,11 +208,11 @@ def test_an_empty_page_and_a_spurious_empty_peek_do_not_end_the_listing():
     assert len(GitHubRest(runner=runner).issue_list()) == 201
 
 
-def test_a_genuine_short_last_page_ends_the_listing_with_two_peeks():
-    """Positive control: a real last page costs two empty-page peeks, no refetch."""
+def test_a_genuine_short_last_page_ends_the_listing_with_one_peek():
+    """Positive control (v0.4.3): a real non-empty last page costs one empty-page peek."""
     runner = Runner(pages={1: _full(1), 2: [_issue(101)]})
     assert len(GitHubRest(runner=runner).issue_list()) == 101
-    assert [p for _, path, p in runner.calls if "state=open" in path] == [1, 2, 3, 3]
+    assert [p for _, path, p in runner.calls if "state=open" in path] == [1, 2, 3]
 
 
 # --- open-arch-revision keeps every --blocks ----------------------------------------------
