@@ -195,7 +195,7 @@ python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<proj
 - Issue tracking sits behind a `WorkItemProvider` interface, and GitHub is the only
   implementation, a REST client on the laptop and in the cloud; only PR ready-for-review and
   review threads differ by placement (`references/cloud-mode.md`, "GitHub access in the
-  cloud"). `SDLC_GITHUB_API=graphql` selects the old GraphQL client. Code hosting is GitHub.
+  cloud"). Code hosting is GitHub.
 
 ## Running the tests
 

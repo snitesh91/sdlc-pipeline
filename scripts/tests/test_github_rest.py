@@ -123,17 +123,18 @@ def cloud(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
 
 
-@pytest.mark.parametrize("env, cls", [
-    ({}, GitHubRest),
-    ({"CLAUDE_CODE_REMOTE": "true"}, GitHubRest),
-    ({"SDLC_GITHUB_API": "graphql"}, GitHub),
-    ({"CLAUDE_CODE_REMOTE": "true", "SDLC_GITHUB_API": "GraphQL"}, GitHub),
-    ({"SDLC_GITHUB_API": "rest"}, GitHubRest),
-])
-def test_rest_is_the_provider_everywhere_unless_graphql_is_forced(monkeypatch, env, cls):
+@pytest.mark.parametrize("env", [{}, {"CLAUDE_CODE_REMOTE": "true"}, {"SDLC_GITHUB_API": "rest"}])
+def test_rest_is_the_only_provider(monkeypatch, env):
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    assert type(s.get_work_item_provider(runner=RestRunner({}))) is cls
+    assert type(s.get_work_item_provider(runner=RestRunner({}))) is GitHubRest
+
+
+@pytest.mark.parametrize("value", ["graphql", "GraphQL"])
+def test_the_retired_graphql_client_is_refused(monkeypatch, value):
+    monkeypatch.setenv("SDLC_GITHUB_API", value)
+    with pytest.raises(GhError, match="retired in v0.4.3"):
+        s.get_work_item_provider(runner=RestRunner({}))
 
 
 def test_an_invalid_sdlc_github_api_is_an_error(monkeypatch):
@@ -144,8 +145,8 @@ def test_an_invalid_sdlc_github_api_is_an_error(monkeypatch):
 
 def test_github_api_reports_the_client_and_its_signal(monkeypatch):
     assert s.github_api() == {"api": "rest", "signal": "default"}
-    monkeypatch.setenv("SDLC_GITHUB_API", "graphql")
-    assert s.github_api() == {"api": "graphql", "signal": "SDLC_GITHUB_API"}
+    monkeypatch.setenv("SDLC_GITHUB_API", "rest")
+    assert s.github_api() == {"api": "rest", "signal": "SDLC_GITHUB_API"}
 
 
 def test_every_graphql_or_gh_subcommand_method_is_overridden():

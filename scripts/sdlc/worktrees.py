@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Callable, Optional, Union
 
 from .config import PIPELINE, Runner, issue_branch
-from .github import GhError, GitHub, _default_runner
+from .github import GhError, GitHub, _default_runner, _is_real_runner
 from .evidence import integration_base, unit_branch
 from .plugin_version import worktree_path, worktree_path_for_branch
 
@@ -55,13 +55,35 @@ def _common_git_dir(path: str) -> str:
 def _fetch_origin(path: str, runner: Runner):
     """`git fetch origin`, once per clone per process until something pushes: worktrees share
     one ref store, so a second fetch moments later only re-reads the same refs."""
-    key = _common_git_dir(path) if _fetch_dedupe_enabled() and runner is _default_runner \
+    key = _common_git_dir(path) if _fetch_dedupe_enabled() and _is_real_runner(runner) \
         else None
     if key is not None and _FETCHED.get(key) == _PUSH_GENERATION[0]:
         return ""
     out = _run_retry_transient(["git", "-C", path, "fetch", "origin"], runner)
     if key is not None:
         _FETCHED[key] = _PUSH_GENERATION[0]
+    return out
+
+
+# Common git dir -> (push generation, `git ls-remote --heads origin` output) this process.
+_REMOTE_HEADS: dict = {}
+
+
+def _remote_heads_shared(runner: Runner) -> bool:
+    """Whether `_remote_heads` caches (the `_fetch_origin` dedupe rule)."""
+    return _fetch_dedupe_enabled() and _is_real_runner(runner)
+
+
+def _remote_heads(path: str, runner: Runner) -> str:
+    """`git ls-remote --heads origin`, once per clone per process until something may have
+    moved origin (the `_fetch_origin` rule): one listing serves every branch lookup."""
+    key = _common_git_dir(path) if _remote_heads_shared(runner) else None
+    held = _REMOTE_HEADS.get(key) if key is not None else None
+    if held is not None and held[0] == _PUSH_GENERATION[0]:
+        return held[1]
+    out = _run_retry_transient(["git", "-C", path, "ls-remote", "--heads", "origin"], runner)
+    if key is not None:
+        _REMOTE_HEADS[key] = (_PUSH_GENERATION[0], out)
     return out
 
 

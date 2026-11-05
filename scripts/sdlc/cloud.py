@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from .config import CLOUD_SESSIONS, GATE_PENDING_STATUSES, PIPELINE, Runner, issue_branch
-from .github import GhError, GitHub, WorkItemProvider, _default_runner, strip_proxy_footer
+from .github import (
+    GhError, GitHub, WorkItemProvider, _default_runner, strip_proxy_footer, with_scan,
+)
 from .units import (
     PLACEMENTS, _issue_info_lookup, cloud_label, current_stage, doc_root_for, epic_base_in,
     has_label, is_epic, is_epic_legacy, is_initiative, local_task_numbers, pipeline_status,
@@ -395,6 +397,7 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
     launchable once they cleared and waits on them until then, GitHub activity or not; one that
     recorded none waits for new GitHub activity. Launchable Epics with an ended session are also
     in `relaunch`. Every other open candidate is in `waiting` with a reason."""
+    all_issues = with_scan(gh, all_issues, "cloud")  # running and settled cloud Epics, repo-wide
     by_number = {i["number"]: i for i in all_issues}
     comments = {} if comments is None else comments
 

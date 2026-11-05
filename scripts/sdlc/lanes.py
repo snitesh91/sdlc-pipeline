@@ -8,7 +8,9 @@ from .config import (
     GATE_PENDING_STATUSES, MAX_TASKS_PER_RUN, PRODUCT_WIP_CAP, Runner, issue_branch,
     issue_number_from_branch,
 )
-from .github import GhError, GitHub, WorkItemProvider, _default_runner
+from .github import (
+    GhError, GitHub, WorkItemProvider, _default_runner, focus_issues, with_scan,
+)
 from .units import (
     current_stage, effective_gates, in_scope, is_epic, is_epic_architected, is_epic_legacy,
     is_epic_standing, pipeline_status, placement_scope, product_gate_pending,
@@ -41,8 +43,11 @@ def dev_lane_slots(gh: GitHub, repo_path: str, epic: int, all_issues: list,
     parked or blocked. Other epics' worktrees hold no slot: they are `excluded_other_epic`, or
     `cross_epic` (overlap check only) under `parallelism.crossEpicFootprintCheck`."""
     cap = DEV_LANE_PARALLELISM if cap is None else cap
-    by_number = {i["number"]: i for i in all_issues}
     active = active_worktree_branches(repo_path, runner=runner)
+    by_number = {i["number"]: i for i in all_issues}
+    held = {issue_number_from_branch(b) for b in active} - {None}
+    if held - by_number.keys():  # other Epics' worktrees: read those units too
+        by_number = {i["number"]: i for i in focus_issues(gh, held)}
     holders, stale, other = {}, [], []
     for branch in sorted(active):
         number = issue_number_from_branch(branch)
@@ -231,9 +236,10 @@ def cmd_list_design_ready(gh: GitHub, repo_path: str, epic: int, limit: Optional
                        f"\"epic\") -- pass the epic's own issue number, not a child issue's")
     scope = placement_scope(epic, by_number.get, all_issues)
     # An auto-passing Gate A never queues on the human, so it is exempt from the WIP cap.
-    product_headroom = (product_wip_headroom(all_issues)
+    gates = with_scan(gh, all_issues, "gate")  # the Gate A queue is repo-wide
+    product_headroom = (product_wip_headroom(gates)
                         if effective_gates(epic_issue)["requiresHumanGateA"] else None)
-    product_cap = {"limit": PRODUCT_WIP_CAP, "pending": product_gate_pending(all_issues)}
+    product_cap = {"limit": PRODUCT_WIP_CAP, "pending": product_gate_pending(gates)}
     base = {"design_ready": [], "count": 0, "eligible_total": 0, "active_count": 0,
             "active_branches": [], "limit": limit, "slots_available": 0, "epic": epic,
             "skipped": [], "stale_worktrees": [], "product_cap": product_cap}

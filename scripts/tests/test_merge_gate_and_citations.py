@@ -7,6 +7,13 @@ import pytest
 import sdlc_next as s
 from tests.test_sdlc_next import (ScriptedRunner, _script_terminal_fields, _NO_UNIT_WORKTREE, _clean_pipeline_comments,
                                   _issue, _list_argv, _list_response)
+from tests.listed_github import graphql_listing  # noqa: E402,F401
+
+
+@pytest.fixture(autouse=True)
+def _graphql_listing(graphql_listing):
+    """These tests script the base client's whole-repo listing (`tests/listed_github.py`)."""
+
 
 
 # ---- citations: every malformed input is reported, never raised ----

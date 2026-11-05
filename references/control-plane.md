@@ -2,7 +2,7 @@
 
 Use these directly only when no composite (SKILL.md, "Deterministic control plane") fits.
 
-- Issue reads are scoped to the unit, from a per-process index with no disk cache: every open issue, plus the closed ones a unit reaches (sub-issues of an open or named parent, parents, numbers the command names). A missing closed issue is fetched by number.
+- Issue reads are scoped to the unit, from a per-process index with no disk cache. A command that names an issue reads only its tree: the issue, its parent chain, the root's sub-issues (open and closed); it lists no open issues. One that names none lists only what it needs: open Epics (`check-epics-closeable`), or every open issue for `list-needs-human` and an unscoped `audit-issues` (issue fields have no REST filter). The Gate A queue and cloud Epics are read repo-wide only when a decision needs them. Independent reads run in parallel.
 - A short or empty GitHub page mid-list is refetched. One that stays short fails the command (exit 1); it never returns a truncated list.
 - `git fetch origin` runs once per clone per process until something pushes or writes (`SDLC_FETCH_DEDUPE=off` disables it).
 

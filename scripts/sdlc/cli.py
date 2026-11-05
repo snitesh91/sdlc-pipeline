@@ -10,7 +10,9 @@ from .config import (
     DESIGN_LANE_PARALLELISM, DEV_LANE_PARALLELISM, PR_REVIEW_PARALLELISM, RETIRED_ROLES,
     STAGE_OPTION_IDS, TOKEN_ENV, TOKEN_PATH,
 )
-from .github import GhError, GitHubRest, _FOCUS, get_work_item_provider
+from .github import (
+    GhError, GitHubRest, _CLOSED_WALK, _FOCUS, _LISTING, get_work_item_provider, kind_filter,
+)
 from .units import PLACEMENTS, PlacementMismatch, cmd_doc_root, cmd_initiative_profile
 from .evidence import LOCAL_CI_SUITES, REVIEW_ROLES
 from .epic_close import (
@@ -70,6 +72,14 @@ from .composites import (
 # Argument names that carry issue numbers (never a PR, line, limit or confidence).
 _FOCUS_ARGS = ("issue", "epic", "number", "initiative", "parent", "lld_task", "waits_on",
                "skip_epic", "dep", "by", "blocks", "blocked_by")
+
+
+# Commands naming no issue that read less than every open issue and all their closed
+# sub-issues (`_LISTING`, `_CLOSED_WALK`). `list-needs-human` and an unscoped `audit-issues`
+# list every open issue: Pipeline Status and Priority/Effort are issue fields, which REST
+# list filters cannot match.
+_CLOSED_WALK_BY_COMMAND = {"list-needs-human": "none", "check-epics-closeable": "childless"}
+_LISTING_BY_COMMAND = {"check-epics-closeable": lambda: [kind_filter("epic")]}
 
 
 def _focus_numbers(args) -> set:
@@ -839,6 +849,8 @@ def main(argv: Optional[list] = None) -> int:
     args = parser.parse_args(argv)
     _FOCUS.clear()
     _FOCUS.update(_focus_numbers(args))
+    _CLOSED_WALK[0] = _CLOSED_WALK_BY_COMMAND.get(args.command, "all")
+    _LISTING[0] = _LISTING_BY_COMMAND.get(args.command, lambda: [""])()
     refusal = comment_cap_refusal(args)
     if refusal:
         print(json.dumps(refusal))

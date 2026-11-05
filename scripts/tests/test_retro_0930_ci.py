@@ -15,6 +15,13 @@ CHECKS_ARGV = ("gh", "pr", "checks", "42", "--repo", "owner/repo",
 FILES_ARGV = ("gh", "api", "--paginate", "repos/owner/repo/pulls/42/files", "--jq", ".[].filename")
 VIEW_ARGV = ("gh", "pr", "view", "42", "--repo", "owner/repo",
              "--json", "comments,headRefOid,baseRefName")
+from tests.listed_github import graphql_listing  # noqa: E402,F401
+
+
+@pytest.fixture(autouse=True)
+def _graphql_listing(graphql_listing):
+    """These tests script the base client's whole-repo listing (`tests/listed_github.py`)."""
+
 
 
 def _link(run, job=None):
