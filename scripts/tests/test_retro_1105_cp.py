@@ -370,3 +370,71 @@ def test_a_laptop_or_non_cloud_suite_epic_pr_has_no_marker(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
     created, labels = _cloud_close(monkeypatch, True)
     assert s.CI_LOCAL_MARKER not in created[0]["body"] and labels == []
+
+
+# ---- re-review round 3 ----
+
+def test_a_version_pattern_that_no_longer_matches_is_reported(monkeypatch):
+    """Regression: a pattern that stopped matching skipped the check silently."""
+    out = _versioned(monkeypatch, {
+        ("epic-9", "shared/policy/version.ts"): "export const VERSION = 3;\n",
+        ("main", "shared/policy/version.ts"): _VERSION.format("2026-11-04"),
+        ("epic-9", "web/policy/privacy.tsx"): "A",
+        ("main", "web/policy/privacy.tsx"): "B"})
+    assert len(out) == 1 and "versionPattern no match" in out[0]
+
+
+def test_a_reused_epic_pr_gets_the_ci_local_marker(monkeypatch):
+    """Regression: a PR opened before the marker existed never got it."""
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    monkeypatch.setattr(s, "required_workflows", lambda base=None: (_CLOUD_IT,))
+    gh = _epic([_marks()[0], _marks()[1]], pr=38)
+    edits = []
+    gh.pr_view = lambda n, fields="": {"comments": [], "headRefOid": "a" * 40, "body": "Old"}
+    gh.pr_edit_body = lambda n, body: edits.append((n, body))
+    gh.ensure_label = lambda label: None
+    gh.pr_add_label = lambda n, label: None
+    gh.pr_ready = lambda n: (_ for _ in ()).throw(LookupError("halt"))  # stop before merge
+    with pytest.raises(LookupError):
+        s.cmd_close_epic(gh, 9)
+    assert edits == [(38, f"Old\n\n{s.CI_LOCAL_MARKER}")]
+
+
+def _initiative_pr(monkeypatch, state="none"):
+    monkeypatch.setattr(s, "_initiative_branch_refusal",
+                        lambda gh, i, action: ({"title": "Init", "labels": []}, [9], None))
+    monkeypatch.setattr(s, "initiative_landing", lambda gh, i: {
+        "branch": "initiative-6", "landed": False, "state": state, "pr": 40})
+    monkeypatch.setattr(s, "cmd_sync_branch", lambda *a, **k: {"synced": True})
+    monkeypatch.setattr(s, "_initiative_pr_evidence", lambda *a: {})
+    monkeypatch.setattr(s, "required_workflows", lambda base=None: (_CLOUD_IT,))
+    created = []
+    gh = types.SimpleNamespace(pr_create=lambda **kw: created.append(kw) or 41,
+                               ensure_label=lambda label: None,
+                               pr_add_label=lambda n, label: None)
+    s.cmd_open_initiative_pr(gh, 6)
+    return created
+
+
+def test_a_cloud_initiative_pr_carries_the_ci_local_marker(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    assert s.CI_LOCAL_MARKER in _initiative_pr(monkeypatch)[0]["body"]
+
+
+def test_a_laptop_initiative_pr_has_no_marker(monkeypatch):
+    # Positive control.
+    assert s.CI_LOCAL_MARKER not in _initiative_pr(monkeypatch)[0]["body"]
+
+
+def test_initiative_close_suites_take_a_cloud_suite_only_cloud_stamped(monkeypatch):
+    """Regression: closeSuites accepted a laptop attestation for a cloud suite."""
+    monkeypatch.setattr(s, "CLOUD_ATTESTABLE_SUITES", frozenset({"it"}))
+    monkeypatch.setattr(s, "resolve_initiative_profile", lambda issue: {"closeSuites": ["it"]})
+    monkeypatch.setattr(s, "merge_gate_status", lambda *a: ("passed", []))
+    comments = [{"body": _ATTEST}]
+    gh = types.SimpleNamespace(
+        pr_view=lambda pr, f: {"headRefOid": "abc1234", "comments": comments},
+        pr_checks=lambda pr: [], pr_files=lambda pr: [])
+    assert s._initiative_pr_evidence(gh, {}, 40)["unattested_close_suites"] == ["it"]
+    comments[0] = {"body": f"{_ATTEST}\n{s.LOCAL_CI_CLOUD_MARKER}"}
+    assert s._initiative_pr_evidence(gh, {}, 40)["unattested_close_suites"] == []
