@@ -685,9 +685,11 @@ class GitHubRest(GitHub):
             # when the caller's count is reached, or when the next page is empty: one peek, or
             # two for an empty page of a `confirm_end` list (the glitch seen most). Page 1 is
             # confirmed only for `confirm_end` lists, to keep small reads at one request.
-            if expected is not None and held + len(batch) >= expected:
-                return True
-            if page == 1 and not confirm_end and expected is None:
+            if expected is not None:
+                # A known count is the end and nothing less is: a short page is refetched,
+                # and raises if it stays short.
+                return held + len(batch) >= expected
+            if page == 1 and not confirm_end:
                 return True
             if fetch(page + 1):
                 return False
