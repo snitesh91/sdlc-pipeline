@@ -79,6 +79,9 @@ The recorded wait drives the relaunch ("Initiative → cloud Epics"). Then Step 
   and Docker cleanup still run; `close-epic --clean-worktree` still cleans the epic worktree.
 - **e2e:** with no cloud e2e profile in the repo's cloud setup, make the e2e-test Task local
   instead of parking `needs-human`.
+- **e2e in a cloud session:** the e2e images must trust the agent-proxy CA. Use the repo's
+  committed opt-in for it (as its pre-PR check does); a missing one is a repo gap to report,
+  never a local patch. Never attest a run on an uncommitted tree; brief a cloud e2e run with this.
 - **Pushed work survives** a dead session (`agents/development.md`, "Working in the repo").
 
 ## GitHub access in the cloud

@@ -38,7 +38,7 @@ Check each claim the doc rests on: the surface exists and behaves as stated; the
 
 Default: one pass, yourself. Fan out only per `review-fanout.md`, "When each review stage fans out". Then dispatch one `general-purpose` `Agent` per axis, each prompt starting `AXIS: <axis-key>`, and follow that file's discipline. State axis coverage in the comment.
 
-Work these axes in sequence: criteria testability; **completeness ("what behaviour or state has no criterion?", mandatory)**; scope and decomposition; unstated assumptions; false claims about current behaviour. Run a **positive control** proving each check can fail before you trust a pass.
+Work these axes in sequence: criteria testability; **completeness ("what behaviour or state has no criterion?", mandatory)**; scope and decomposition; unstated assumptions; false claims about current behaviour; **visuals** (UI-facing work only: the `mockups/` set and the clickable demo exist, are linked, and match the text and the ASCII sketches; a missing set is blocking). Run a **positive control** proving each check can fail before you trust a pass.
 
 ## Severity
 

@@ -46,6 +46,7 @@ Start from `product.template.md`. Read the repo's worked-example IRD (`<requirem
 - Rank Open Questions by impact. Give each its reason and a default. Escalate a question that has no workable default.
 - Write each acceptance criterion as a user action and what the user then sees. A failing test must follow from it without reading code.
 - Leave the architecture-depth assessment to `architecture`.
+- UI-facing work: commit the `mockups/` set and the clickable demo, and link them from `product.md` (`design-doc-rules.md`, "UI-facing work ships visuals"). Draw only elements the product has or this doc adds.
 
 ## 5. Reconcile inputs
 
