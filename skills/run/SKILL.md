@@ -298,7 +298,7 @@ Its last line is `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "<o
 
 | `outcome` | Do |
 |---|---|
-| `done` / `clean` | `transition`, then the next stage. `pr-review` `clean` → `merge-pr <pr> --issue <n> --run-id "$RUN_ID"` |
+| `done` / `clean` | `transition`, then the next stage. `pr-review` `clean` → `merge-pr <pr> --issue <n> --run-id "$RUN_ID"`; a PR labelled `ci:local` first runs `references/cloud-mode.md`, "Task PR with `ci_local`" |
 | `done-with-concerns` (`development` only) | As `done`; start the `pr-review` brief with `Concern from development: <the result's concern>. Check it first.` |
 | `rework` | Print each blocking finding (what, `file:line`, owning stage), then route it (`references/rework.md`) |
 | `blocked` + `"fanout": "unavailable"`, review role | Launch one agent per axis from its briefs, resume the reviewer (`references/review-fanout.md`, "The orchestrator fans out for you") |

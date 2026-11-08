@@ -10,7 +10,9 @@ from .config import (
 )
 from .github import GhError, GitHub, _default_runner
 from .units import label_names
-from .evidence import REVIEW_ROLES, epic_branch, integration_base, last_transition_to
+from .evidence import (
+    REVIEW_ROLES, epic_branch, integration_base, last_transition_to, remote_session,
+)
 from .footprint import (
     _dev_pr_scope_refusal_reason, acknowledge_footprint_deviations, dev_pr_scope_offenders,
     lld_task_headings_dropped,
@@ -90,12 +92,18 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
     plain and then drafted (`draft_fallback`, `draft_warning` when that fails). A branch with
     no commits ahead of its base gets an empty commit first only with `allow_empty`
     (`empty_commit`), else the refusal names the flag. Returns `pr`, `created`."""
+    from .epic_close import CI_LOCAL_MARKER, _ci_local, _label_ci_local, _mark_ci_local
     branch = issue_branch(issue)
     existing = gh.pr_list_for_branch(branch)
     if existing:
         pr_number = existing[0]["number"]
+        marked = {}
+        # A PR opened by the laptop or another path: mark it now (base read only in the cloud).
+        if remote_session() and _ci_local(integration_base(gh, issue)):
+            _mark_ci_local(gh, pr_number)
+            marked = {"ci_local": True}
         if _dev_pr_comment_posted(gh, issue, pr_number):
-            return {"issue": issue, "pr": pr_number, "created": False,
+            return {"issue": issue, "pr": pr_number, "created": False, **marked,
                     "reason": f"PR #{pr_number} is already open on {branch} -- "
                               f"reusing it rather than opening a duplicate"}
         draft = _ensure_draft(gh, existing[0])
@@ -103,8 +111,11 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
         return {"issue": issue, "pr": pr_number, "created": False, "adopted": True,
                 "reason": f"PR #{pr_number} was already open on {branch} without this "
                           f"command's exit; adopted it (Stage pr-review, comment posted)",
-                **draft}
+                **draft, **marked}
     base = integration_base(gh, issue)
+    # A cloud PR into a base with `attestable: "cloud"` suites (a standing Epic's Task PR into
+    # main) runs its CI in session: the marker, on its own last line, skips the hosted jobs.
+    ci_local = _ci_local(base)
     # Refuse a diff that authors a design doc or another Task's footprint file before opening
     # the PR (development authors no design doc; deviations belong in the PR description).
     try:
@@ -119,10 +130,6 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
                 "offending_design_docs": offenders["design_docs"],
                 "offending_footprint_paths": offenders["foreign_footprint"],
                 "acknowledged_deviations": acknowledged}
-    from .epic_close import CI_LOCAL_MARKER, _ci_local, _label_ci_local
-    # A cloud PR into a base with `attestable: "cloud"` suites (a standing Epic's Task PR into
-    # main) runs its CI in session: the marker, on its own last line, skips the hosted jobs.
-    ci_local = _ci_local(base)
     pr_body = f"{body}\n\nCloses #{issue}" + (f"\n\n{CI_LOCAL_MARKER}" if ci_local else "")
     extra: dict = {}
 

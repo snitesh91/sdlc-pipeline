@@ -53,3 +53,20 @@ def test_a_cloud_relaunch_with_no_session_id_posts_no_marker(monkeypatch):
     result = s.cmd_launch_cloud_epic(gh, 2, runner=FakeGit(), claude=FakeClaude("Login required\n"))
     assert result["ok"] is False and "Login required" in result["output_tail"]
     assert not any("sdlc:cloud-session " in c for c in gh.comments_on(2))
+
+
+def test_a_reused_cloud_task_pr_into_main_gets_the_marker(monkeypatch):
+    """Review: a PR opened before (laptop, another path) returned before the marker check."""
+    monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
+    _offenders(monkeypatch)
+    monkeypatch.setattr(s, "integration_base", lambda gh, n: "main")
+    monkeypatch.setattr(s, "required_workflows", lambda base=None: (_CLOUD_IT,))
+    monkeypatch.setattr(s, "_dev_pr_comment_posted", lambda gh, n, pr: True)
+    gh = _MarkGh()
+    gh.pr_list_for_branch = lambda branch, state="open": [{"number": 7, "isDraft": True}]
+    edits = []
+    gh.pr_view = lambda pr, fields: {"body": "Old"}
+    gh.pr_edit_body = lambda pr, body: edits.append((pr, body))
+    result = s.cmd_open_dev_pr(gh, 10, "t", "Body", "s")
+    assert result["ci_local"] is True and edits == [(7, f"Old\n\n{s.CI_LOCAL_MARKER}")]
+    assert gh.labels == [(7, "ci:local")]
