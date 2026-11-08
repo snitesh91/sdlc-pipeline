@@ -28,7 +28,9 @@ brief.
   that a required workflow covers. The pipeline waits for that check (`merge-pr`,
   `close-epic`'s `awaiting_checks`). No stage runs it locally. Exception: a suite whose
   workflow does not run on that PR is listed in `close-epic`'s `unattested_suites`; run it
-  once on the PR head and `record-local-ci` it.
+  once on the PR head and `record-local-ci` it. In a cloud session, a PR marked
+  `<!-- sdlc:ci-local -->` runs its suites in session instead (`references/cloud-mode.md`,
+  "CI in a cloud run").
 - **The config must say so.** Each integration suite's `requiredWorkflows` entry carries
   `bases: ["main", "initiative-*"]` and `attestable: false`. Without `bases`, each Task PR into
   `epic-<n>` seems to owe the suite (`transition` holds, `suites.needed` asks): fix the config,

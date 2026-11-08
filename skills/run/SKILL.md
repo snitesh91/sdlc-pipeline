@@ -298,7 +298,7 @@ Its last line is `SDLC-RESULT: {"issue": <n>, "stage": "<stage>", "outcome": "<o
 
 | `outcome` | Do |
 |---|---|
-| `done` / `clean` | `transition`, then the next stage. `pr-review` `clean` → `merge-pr <pr> --issue <n> --run-id "$RUN_ID"` |
+| `done` / `clean` | `transition`, then the next stage. `pr-review` `clean` → `merge-pr <pr> --issue <n> --run-id "$RUN_ID"`; a PR labelled `ci:local` first runs `references/cloud-mode.md`, "Task PR with `ci_local`" |
 | `done-with-concerns` (`development` only) | As `done`; start the `pr-review` brief with `Concern from development: <the result's concern>. Check it first.` |
 | `rework` | Print each blocking finding (what, `file:line`, owning stage), then route it (`references/rework.md`) |
 | `blocked` + `"fanout": "unavailable"`, review role | Launch one agent per axis from its briefs, resume the reviewer (`references/review-fanout.md`, "The orchestrator fans out for you") |
@@ -355,7 +355,9 @@ doc is the whole deliverable, `open-gate` it even if waived, then `pass-gate <n>
 per run id. Also stop at a phase boundary once this run drove a unit: after a `finish-lld` that cut
 Tasks, and before the first `close-epic` (cloud: `--outcome context-reset`; `references/context-budget.md`).
 On `stop-at-cap` (or `stop_at_cap: true`), finish in-flight work and stop; do not call
-`next-action`/`list-parallel-ready` again. The next `/sdlc:run` resumes there. `resume`,
+`next-action`/`list-parallel-ready` again. The next `/sdlc:run` resumes there. A cloud session
+then hands over to a fresh one: `end-cloud-session <epic> --outcome context-reset`, then
+`launch-cloud-epic <epic> --relaunch`, then end (`references/cloud-mode.md`, "Handing over at the cap"). `resume`,
 `pass-gate`, `address-gate-feedback` and `in_flight` units are never capped;
 `close-issue --not-planned` never counts. The cap never changes Task carving or `blockedBy` order.
 
