@@ -18,7 +18,7 @@ from .units import (
     has_label, is_epic, is_epic_legacy, is_initiative, local_task_numbers, pipeline_status,
     resolve_initiative_profile, session_placement, task_local_reason, unit_placement,
 )
-from .evidence import epic_branch, find_gate_pr
+from .evidence import epic_branch, find_gate_pr, remote_session
 from .footprint import _footprint_prefix, find_footprint, footprint_overlaps, parse_task_headings
 from .worktrees import _fetch_origin, _is_ancestor
 from .lanes import footprint_collision
@@ -601,6 +601,13 @@ def cmd_launch_cloud_epic(gh: GitHub, epic: int, repo_path: str = ".", relaunch:
     sid, url = parsed["id"] or "unknown", parsed["url"] or "unknown"
     overlap = (" Launched with `--allow-overlap` (operator): its footprint was not checked "
                "against the other cloud Epics'." if allow_overlap else "")
+    if not parsed["id"] and remote_session():
+        # A cloud session relaunching its own Epic: leave its `context-reset` end marker the
+        # latest, so the laptop still sees the Epic as relaunch-ready.
+        tail = "\n".join(_ANSI_RE.sub("", output or "").strip().splitlines()[-10:])
+        return {**result, "ok": False, "output_tail": tail, "place": placed,
+                "reason": "claude --cloud printed no session id in this cloud session; no "
+                          "marker posted -- the laptop relaunches it (`cloud-status`)"}
     gh.issue_comment(epic,
         f"☁️ Cloud session launched for this Epic: {parsed['url'] or 'its URL was not reported'}"
         f".\n\nIt drives the Epic until it closes, asking the operator in session, then posts "

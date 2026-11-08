@@ -75,6 +75,16 @@ python3 "$SDLC" end-cloud-session <epic> --outcome <outcome> [--waits-on <n> ...
 
 The recorded wait drives the relaunch ("Initiative → cloud Epics"). Then Step 4.
 
+### Handing over at the cap
+
+`parallelism.maxTasksPerRun` caps one session's units. On `stop-at-cap`, finish in-flight
+work, then start the successor session yourself:
+
+1. `end-cloud-session <epic> --outcome context-reset` (frees this session's slot).
+2. `launch-cloud-epic <epic> --relaunch --repo-path <p>`. On `launched: true`, relay the url
+   and end. On `ok: false`, `refused` or an error, relay it and end: the laptop relaunches
+   the Epic from its `context-reset` marker (`cloud-status` → `relaunch_ready`).
+
 - **Cleanup:** `merge-pr`, `close-epic` and `prune-stale` release a closed unit's worktrees as
   on a laptop: a long run's merged trees (`node_modules` included) fill the disk. `prune-stale`
   also prunes the unused Docker build cache. Parking keeps the unit's tree for its resume, and
@@ -88,20 +98,29 @@ The recorded wait drives the relaunch ("Initiative → cloud Epics"). Then Step 
 
 ## CI in a cloud run
 
-A cloud session has no self-hosted runner; a PR's hosted jobs bill minutes. For a suite set
-`attestable: "cloud"` (`references/operations.md`, "Local-CI attestation"). It covers only the
-epic → `main` (or `initiative-*`) PR: Task PRs into `epic-<n>` run no full suites.
+A cloud session never uses the repo's runners. For a suite set `attestable: "cloud"`
+(`references/operations.md`, "Local-CI attestation"). It covers every PR the session opens into
+a base with such a suite: the epic → `main` (or `initiative-*`) PR, and a standing Epic's Task
+PR into `main`. Task PRs into `epic-<n>` run no full suites.
+
+`close-epic` and `open-dev-pr` put `<!-- sdlc:ci-local -->` on the PR body's last line and add
+the label `ci:local` for visibility (`open-dev-pr` returns `ci_local: true`). The repo's PR jobs
+gate on `if: ${{ !contains(github.event.pull_request.body, '<!-- sdlc:ci-local -->') }}`: the
+body is in the `opened` and `synchronize` payloads, a label added after creation is not.
+
+**Epic PR:**
 
 1. Before the second `close-epic` call, wait until no dev lane is in flight (full IT next to
    dev lanes exhausts the VM).
 2. In the epic worktree, run the repo's pre-PR command with its full integration scope
    (`pipeline.prePr.command` and the repo's IT flag).
-3. `close-epic` opens the epic PR with `<!-- sdlc:ci-local -->` in its body and adds the
-   label `ci:local` for visibility. The repo's PR jobs gate on
-   `if: ${{ !contains(github.event.pull_request.body, '<!-- sdlc:ci-local -->') }}`: the body
-   is in the `opened` and `synchronize` payloads, a label added after creation is not.
-4. `record-local-ci --pr <pr> --suite <suite> --sha <head>` for each suite that passed, then
+3. `record-local-ci --pr <pr> --suite <suite> --sha <head>` for each suite that passed, then
    call `close-epic` again.
+
+**Task PR with `ci_local`:** after `pr-review` records clean and before `merge-pr`, in the
+unit's worktree at the final head, run the pre-PR command with the IT flag, then
+`record-local-ci` each suite `pr-checks <pr>` lists as `missing`. Run one such IT at a time
+(the serial merge train); a failure is rework, as a failing check would be.
 
 ## GitHub access in the cloud
 

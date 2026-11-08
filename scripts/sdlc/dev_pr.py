@@ -119,7 +119,11 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
                 "offending_design_docs": offenders["design_docs"],
                 "offending_footprint_paths": offenders["foreign_footprint"],
                 "acknowledged_deviations": acknowledged}
-    pr_body = f"{body}\n\nCloses #{issue}"
+    from .epic_close import CI_LOCAL_MARKER, _ci_local, _label_ci_local
+    # A cloud PR into a base with `attestable: "cloud"` suites (a standing Epic's Task PR into
+    # main) runs its CI in session: the marker, on its own last line, skips the hosted jobs.
+    ci_local = _ci_local(base)
+    pr_body = f"{body}\n\nCloses #{issue}" + (f"\n\n{CI_LOCAL_MARKER}" if ci_local else "")
     extra: dict = {}
 
     def create() -> int:
@@ -156,6 +160,9 @@ def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,
         extra["empty_commit"] = _push_empty_commit(issue, repo_path, runner)
         pr_number = create()
     _finish_dev_pr(gh, issue, pr_number, summary)
+    if ci_local:
+        _label_ci_local(gh, pr_number)
+        extra["ci_local"] = True
     return {"issue": issue, "pr": pr_number, "created": True,
             **({"acknowledged_deviations": acknowledged} if acknowledged else {}), **extra}
 

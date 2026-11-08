@@ -355,7 +355,9 @@ doc is the whole deliverable, `open-gate` it even if waived, then `pass-gate <n>
 per run id. Also stop at a phase boundary once this run drove a unit: after a `finish-lld` that cut
 Tasks, and before the first `close-epic` (cloud: `--outcome context-reset`; `references/context-budget.md`).
 On `stop-at-cap` (or `stop_at_cap: true`), finish in-flight work and stop; do not call
-`next-action`/`list-parallel-ready` again. The next `/sdlc:run` resumes there. `resume`,
+`next-action`/`list-parallel-ready` again. The next `/sdlc:run` resumes there. A cloud session
+then hands over to a fresh one: `end-cloud-session <epic> --outcome context-reset`, then
+`launch-cloud-epic <epic> --relaunch`, then end (`references/cloud-mode.md`, "Handing over at the cap"). `resume`,
 `pass-gate`, `address-gate-feedback` and `in_flight` units are never capped;
 `close-issue --not-planned` never counts. The cap never changes Task carving or `blockedBy` order.
 
