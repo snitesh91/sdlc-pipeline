@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .config import (
-    DEV_LANE_PARALLELISM, GATE_PENDING_STATUSES, MAX_TASKS_PER_RUN, PIPELINE, PRODUCT_WIP_CAP,
+    DEV_LANE_PARALLELISM, GATE_PENDING_STATUSES, LABELS, MAX_TASKS_PER_RUN, PIPELINE, PRODUCT_WIP_CAP,
     PR_REVIEW_PARALLELISM, RESUME_LIVE_WINDOW_MINUTES, REVIEW_ENTRY_STAGES, Runner,
     issue_branch,
 )
@@ -57,10 +57,29 @@ def _epic_wait_reason(gh: GitHub, epic_issue: dict) -> Optional[str]:
     return f"blocked by {', '.join(f'#{n}' for n in blockers)}" if blockers else None
 
 
+def ensure_bugs_epic(gh: GitHub, all_issues: list, initiative: int) -> Optional[int]:
+    """Create the Initiative's standing Bugs Epic while it has an open cut Epic (never for one
+    whose Epics all closed). Idempotent: any standing child Epic, open or closed, counts.
+    Returns the new issue number, else None."""
+    kids = [i for i in all_issues if is_epic(i)
+            and (i.get("parent") or {}).get("number") == initiative]
+    if (not any(i["state"] == "OPEN" for i in kids)
+            or any(is_epic_standing(i) for i in kids)):
+        return None
+    from .issue_admin import cmd_create_issue  # issue_admin imports this module
+    title = next((i.get("title") for i in all_issues if i["number"] == initiative), "")
+    return cmd_create_issue(
+        gh, f"Bugs: {title}".strip(),
+        f"Deferred bugs of Initiative #{initiative} (`file-closing-delta <epic> --defer`); "
+        f"fixed before initiative close.", initiative, [LABELS["standing"]], "Epic").get("issue")
+
+
 def _initiative_epic_step(gh: GitHub, all_issues: list, initiative: int,
                           skip: list) -> Optional[dict]:
     """The Initiative loop's next move: `cut-phase-tasks` or `run-epic` for the lowest-numbered
-    open, unblocked cut Epic not in `skip`; None when no Epic can run."""
+    open, unblocked cut Epic not in `skip`; None when no Epic can run. First creates the
+    Bugs Epic (`ensure_bugs_epic`), reported as `bugs_epic_created`."""
+    created = ensure_bugs_epic(gh, all_issues, initiative)
     epics = sorted((i for i in all_issues if i["state"] == "OPEN" and is_epic(i)
                     and (i.get("parent") or {}).get("number") == initiative),
                    key=lambda i: i["number"])
@@ -69,7 +88,8 @@ def _initiative_epic_step(gh: GitHub, all_issues: list, initiative: int,
         n = e["number"]
         if n in skip or _epic_wait_reason(gh, e) or _bugs_epic_waits(by_number, e):
             continue
-        base = {"epic": n, "initiative": initiative, "unit": "epic"}
+        base = {"epic": n, "initiative": initiative, "unit": "epic",
+                **({"bugs_epic_created": created} if created else {})}
         if not is_epic_standing(e) and epic_lacks_phase_tasks(all_issues, n):
             return {"action": "cut-phase-tasks", **base,
                     "reason": f"Epic #{n} has no phase-Tasks: run `cut-phase-tasks {n} "

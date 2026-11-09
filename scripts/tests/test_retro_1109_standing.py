@@ -143,3 +143,37 @@ def test_land_epic_with_nothing_to_land_opens_no_pr():
 def test_land_epic_refuses_a_non_standing_epic_and_a_bugs_epic():
     assert s.cmd_land_epic(_initiative(), 9)["landed"] is False
     assert "close-epic" in s.cmd_land_epic(_initiative(), 8)["reason"]
+
+
+# --- the Bugs Epic is created by the Initiative loop -------------------------------------
+
+def _bare_initiative():
+    return FakeGh([{"number": 6, "labels": ["type:initiative"], "title": "Init"},
+                   {"number": 9, "labels": ["type:epic"], "parent": 6, "title": "Feature"}])
+
+
+def _bugs_epics(gh):
+    return [i for i in gh.issue_list() if (i.get("parent") or {}).get("number") == 6
+            and s.is_epic(i) and s.is_epic_standing(i)]
+
+
+def test_the_initiative_loop_creates_the_bugs_epic_once():
+    """Regression: an engineering-driven Initiative (no Product-Roadmap Task) gets its Bugs
+    Epic at the first next-action that cuts or runs Epics, and never a second one."""
+    gh = _bare_initiative()
+    step = s.decide_next_action(gh, 6)
+    assert step["epic"] == 9 and step["bugs_epic_created"] == _bugs_epics(gh)[0]["number"]
+    assert _bugs_epics(gh)[0]["title"] == "Bugs: Init"
+    again = s.decide_next_action(gh, 6)
+    assert "bugs_epic_created" not in again and len(_bugs_epics(gh)) == 1
+
+
+def test_no_bugs_epic_before_any_epic_is_cut_or_after_all_closed():
+    """Positive control: an Initiative with no cut Epic, or only closed ones, gets none."""
+    gh = FakeGh([{"number": 6, "labels": ["type:initiative"], "title": "Init"}])
+    s.decide_next_action(gh, 6)
+    assert _bugs_epics(gh) == []
+    gh = _bare_initiative()
+    gh.issues[9]["state"] = "CLOSED"
+    s.decide_next_action(gh, 6)
+    assert _bugs_epics(gh) == []
