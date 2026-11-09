@@ -5425,7 +5425,8 @@ def test_decide_next_action_initiative_gate_a_passed_epics_still_open():
     roadmap_task = _issue(41, parent=40, state="CLOSED")
     cut_epic = _issue(42, parent=40, labels=["type:epic"], state="OPEN")
     # Its Bugs Epic already exists (v0.4.5 creates one), so the loop creates nothing.
-    bugs = _issue(43, parent=40, labels=["type:epic", "epic:standing"], state="OPEN")
+    bugs = _issue(43, parent=40, labels=["type:epic", "epic:standing"], state="OPEN",
+                  body="<!-- sdlc:bugs-epic -->")
     runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative, roadmap_task,
                                                                   cut_epic, bugs])})
     gh = GitHub(runner=runner)

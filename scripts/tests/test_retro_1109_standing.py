@@ -23,7 +23,7 @@ def _initiative(*extra, labels=("type:initiative",)):
     return FakeGh([{"number": 6, "labels": list(labels), "title": "Init"},
                    {"number": 9, "labels": ["type:epic"], "parent": 6, "title": "Feature"},
                    {"number": 8, "labels": ["type:epic", STANDING], "parent": 6,
-                    "title": "Bugs: Init"},
+                    "title": "Bugs: Init", "body": f"Deferred.\n\n{s.BUGS_EPIC_MARKER}"},
                    *extra])
 
 
@@ -177,3 +177,28 @@ def test_no_bugs_epic_before_any_epic_is_cut_or_after_all_closed():
     gh.issues[9]["state"] = "CLOSED"
     s.decide_next_action(gh, 6)
     assert _bugs_epics(gh) == []
+
+
+def test_ordinary_standing_sibling_epics_are_not_the_bugs_epic():
+    """Regression (#5570): an Initiative whose child Epics are all `epic:standing` bug-area
+    Epics still gets its own marked Bugs Epic; those siblings run normally, never held back."""
+    gh = FakeGh([{"number": 6, "labels": ["type:initiative"], "title": "Init"},
+                 *({"number": n, "labels": ["type:epic", STANDING], "parent": 6,
+                    "title": f"Area {n}"} for n in (13, 14, 15))])
+    step = s.decide_next_action(gh, 6)
+    assert step["action"] == "run-epic" and step["epic"] == 13
+    created = step["bugs_epic_created"]
+    assert s.BUGS_EPIC_MARKER in gh.issues[created]["body"]
+    issues = {i["number"]: i for i in gh.issue_list()}
+    assert s.bugs_epic_of_in(issues, 6)["number"] == created
+    assert not s.bugs_epic_due(issues, issues[13])
+    assert "bugs_epic_created" not in s.decide_next_action(gh, 6)
+    out = s.cmd_file_closing_delta(gh, 13, "Bug: z", "body", defer=True)
+    assert out["parent"] == created
+
+
+def test_a_marked_bugs_epic_is_found_open_or_closed():
+    """Positive control: the marker alone identifies it, so a closed one is never re-created."""
+    gh = _initiative()
+    gh.issues[8]["state"] = "CLOSED"
+    assert "bugs_epic_created" not in s.decide_next_action(gh, 6)

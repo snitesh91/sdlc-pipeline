@@ -13,7 +13,8 @@ from .github import GhError, GitHub, WorkItemProvider, _default_runner, _utc_now
 from .units import (
     _parse_marker_ts, cloud_label, current_stage, default_stage, doc_root_for, effective_gates,
     epic_base, forget_initiative_hint, has_label, hint_doc_roots, in_scope, initiative_branch,
-    bugs_epic_due, is_epic, is_epic_architected, is_epic_legacy, is_epic_standing, is_initiative,
+    BUGS_EPIC_MARKER, bugs_epic_due, is_bugs_epic, is_epic, is_epic_architected, is_epic_legacy,
+    is_epic_standing, is_initiative,
     local_tasks_config_errors, pipeline_status, placement_scope, product_gate_pending,
     product_wip_headroom, resolve_initiative_profile, session_placement, sort_key,
     unit_initiative_profile,
@@ -59,19 +60,19 @@ def _epic_wait_reason(gh: GitHub, epic_issue: dict) -> Optional[str]:
 
 def ensure_bugs_epic(gh: GitHub, all_issues: list, initiative: int) -> Optional[int]:
     """Create the Initiative's standing Bugs Epic while it has an open cut Epic (never for one
-    whose Epics all closed). Idempotent: any standing child Epic, open or closed, counts.
-    Returns the new issue number, else None."""
+    whose Epics all closed). Idempotent: a child Epic with `BUGS_EPIC_MARKER`, open or closed,
+    counts. Returns the new issue number, else None."""
     kids = [i for i in all_issues if is_epic(i)
             and (i.get("parent") or {}).get("number") == initiative]
-    if (not any(i["state"] == "OPEN" for i in kids)
-            or any(is_epic_standing(i) for i in kids)):
+    if not any(i["state"] == "OPEN" for i in kids) or any(is_bugs_epic(i) for i in kids):
         return None
     from .issue_admin import cmd_create_issue  # issue_admin imports this module
     title = next((i.get("title") for i in all_issues if i["number"] == initiative), "")
     return cmd_create_issue(
         gh, f"Bugs: {title}".strip(),
         f"Deferred bugs of Initiative #{initiative} (`file-closing-delta <epic> --defer`); "
-        f"fixed before initiative close.", initiative, [LABELS["standing"]], "Epic").get("issue")
+        f"fixed before initiative close.\n\n{BUGS_EPIC_MARKER}", initiative,
+        [LABELS["standing"]], "Epic").get("issue")
 
 
 def _initiative_epic_step(gh: GitHub, all_issues: list, initiative: int,
@@ -102,9 +103,9 @@ def _initiative_epic_step(gh: GitHub, all_issues: list, initiative: int,
 
 
 def _bugs_epic_waits(by_number: dict, epic: dict) -> bool:
-    """An Initiative's standing Bugs Epic runs last: it waits while a sibling Epic is open."""
+    """An Initiative's Bugs Epic runs last: it waits while a sibling Epic is open."""
     parent = by_number.get((epic.get("parent") or {}).get("number")) or {}
-    return is_epic_standing(epic) and is_initiative(parent) and not bugs_epic_due(by_number, epic)
+    return is_bugs_epic(epic) and is_initiative(parent) and not bugs_epic_due(by_number, epic)
 
 
 def _open_epics_reason(gh: GitHub, cut_epics: list, skip: list, all_issues: list) -> str:

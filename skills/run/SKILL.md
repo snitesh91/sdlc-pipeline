@@ -66,7 +66,7 @@ task:       development -> [pr-review] -> auto-merge into epic-<n>
 - **Standing profile** (`epicLevelPhase: false`): RTB tasks only, no phase-Tasks, no human gate.
   Each child runs only the stages it needs ("Routing a standing child") and merges into
   `epic-<n>`. A long-lived standing Epic lands `epic-<n>` into `main` only when the operator
-  runs `land-epic <n>`; it stays open. An Initiative's standing Epic is its **Bugs Epic**: it
+  runs `land-epic <n>`; it stays open. An Initiative's **Bugs Epic** (body marker `<!-- sdlc:bugs-epic -->`): it
   runs after its sibling Epics close, then `close-epic` closes it into `initiative-<i>`
   (`references/initiatives.md`, "The Bugs Epic").
   **Legacy profile** (`driven: false`): skip it, Tasks included.

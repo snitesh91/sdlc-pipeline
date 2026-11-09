@@ -181,8 +181,9 @@ All other rework: `references/rework.md`.
   with `main`, opens or reuses its PR and merges it (a merge commit) once every required suite
   passes at its head; re-run it while it returns `landed: false` with a CI wait. The Epic stays
   open and `epic-<n>` lives on (re-cut from `main` if the merge deleted it). No exploratory
-  pass: the landing PR's full CI is the gate. An Initiative's standing Epic is its Bugs Epic
-  (`references/initiatives.md`, "The Bugs Epic"); `close-epic` closes it.
+  pass: the landing PR's full CI is the gate. Standing Epics under an Initiative close with
+  `close-epic` into `initiative-<i>`; its marked Bugs Epic runs last (`references/initiatives.md`,
+  "The Bugs Epic").
 - Design docs reach `epic-<n>` only through design PRs and `create-lld-tasks`' numbering
   commit. Never commit to it by hand or delete it while the Epic is open.
 - `next-action --sync-epic` merges `main` into it at run start, every third merge and when
