@@ -124,8 +124,8 @@ _PIPELINE_DEFAULTS = {
     # `retro`: an issue carrying it (the retro backlog) is never pipeline work.
     "labels": {"standing": "epic:standing", "legacy": "epic:legacy",
                "architected": "epic:architected", "gate": "sdlc:gate", "retro": "sdlc:retro"},
-    # `initiativePrefix`: the branch of an Initiative whose `initiativeProfiles` entry sets
-    # `branch: true` (its Epics integrate there, not into `main`).
+    # `initiativePrefix`: an Initiative's branch (its Epics integrate there, not into `main`)
+    # unless an `initiativeProfiles` entry sets `branch: false`.
     "branches": {"issuePrefix": "issue-", "epicPrefix": "epic-",
                  "initiativePrefix": "initiative-"},
     # `ephemeralPrefix`: throwaway tree for a branch no live worktree holds, since
@@ -255,13 +255,16 @@ _PROFILE_TOGGLE_DEFAULTS = {
     "driven": True,               # False = legacy: pipeline ignores the epic + children
     "epicLevelPhase": True,       # False = standing: each child runs its own full flow
     "childrenNeedArchitectedEpic": True,  # children gated on epic:architected
-    "closes": True,               # epic closes + has an integration branch
+    "closes": True,               # False = never closed by close-epic (standing): it still
+                                  # owns `epic-<n>`; `land-epic` lands it, or close-epic when
+                                  # it sits under an Initiative (its Bugs Epic)
 }
 
 
 # Fallbacks for an Initiative profile's toggles (and for an Initiative no profile matches).
 _INITIATIVE_PROFILE_DEFAULTS = {
-    "branch": False,      # True = `initiative-<i>`: its Epics cut from and close into it
+    "branch": True,       # `initiative-<i>`: its Epics cut from and close into it; a profile
+                          # with `branch: false` opts that Initiative out (Epics close into main)
     "testTasks": True,    # False = `lld` carves no Integration-test / e2e-test Tasks
     "deferSuites": [],    # suites close-epic does not demand of an Epic closing into the
                           # initiative branch; they gate the initiative -> main merge instead

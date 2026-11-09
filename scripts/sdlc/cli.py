@@ -18,7 +18,7 @@ from .evidence import LOCAL_CI_SUITES, REVIEW_ROLES
 from .epic_close import (
     INITIATIVE_VERIFICATION_OUTCOMES, cmd_check_initiative_closeable, cmd_close_epic,
     brief_close_epic, cmd_close_initiative, cmd_merge_initiative_pr, cmd_open_initiative_pr,
-    cmd_record_epic_verification, cmd_record_initiative_verification,
+    cmd_land_epic, cmd_record_epic_verification, cmd_record_initiative_verification,
 )
 from .gate_eval import cmd_check_gate
 from .next_action import cmd_list_ready_for_review, cmd_next_action
@@ -41,7 +41,8 @@ from .gates import (
     cmd_mark_feedback_received, cmd_merge_gate, cmd_pass_gate, cmd_pause_for_epic_regate,
     cmd_resolve_thread, cmd_skip_gate, cmd_waive_gate,
 )
-from .dev_pr import cmd_cite, cmd_open_dev_pr, cmd_verify_citations, cmd_verify_exit
+from .dev_pr import (cmd_cite, cmd_open_dev_pr, cmd_retarget_pr, cmd_verify_citations,
+                     cmd_verify_exit)
 from .checks import cmd_ci_failure_summary, cmd_merge_pr, cmd_pr_checks, cmd_rerun_checks, cmd_update_pr_body
 from .issue_ops import (
     cmd_close_issue, cmd_mark_blocked, cmd_mark_issue_closed, cmd_mark_needs_human,
@@ -456,7 +457,10 @@ def main(argv: Optional[list] = None) -> int:
                                                      a.body_file))
     p = sub.add_parser("rerun-checks")
     p.add_argument("pr", type=int)
-    p.set_defaults(func=lambda a: cmd_rerun_checks(get_work_item_provider(), a.pr))
+    p.add_argument("--failed-only", action="store_true",
+                   help="Re-run only the failed spec files (deflake), not the whole failed job")
+    p.set_defaults(func=lambda a: cmd_rerun_checks(get_work_item_provider(), a.pr,
+                                                   failed_only=a.failed_only))
     p = sub.add_parser("merge-pr")
     p.add_argument("pr", type=int)
     p.add_argument("--issue", type=int, required=True)
@@ -547,6 +551,17 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: (brief_close_epic if a.brief else (lambda r: r))(
         cmd_close_epic(get_work_item_provider(), a.epic, a.repo_path,
                        carry_forward=a.carry_forward, clean_worktree=a.clean_worktree)))
+    p = sub.add_parser("retarget-pr",
+                        help="Point an issue's open PR at its current integration base")
+    p.add_argument("issue", type=int)
+    p.add_argument("--repo-path", default=".")
+    p.set_defaults(func=lambda a: cmd_retarget_pr(get_work_item_provider(), a.issue,
+                                                  a.repo_path))
+    p = sub.add_parser("land-epic",
+                        help="Land a standing Epic's epic branch into main; the Epic stays open")
+    p.add_argument("epic", type=int)
+    p.add_argument("--repo-path", default=".")
+    p.set_defaults(func=lambda a: cmd_land_epic(get_work_item_provider(), a.epic, a.repo_path))
     p = sub.add_parser("record-epic-verification",
                         help="Record one half of an epic's closing verification")
     p.add_argument("epic", type=int)
@@ -650,10 +665,12 @@ def main(argv: Optional[list] = None) -> int:
                     help="High | Medium | Low (default: pipeline.issueDefaults.effort)")
     p.add_argument("--start", action="store_true",
                     help="Close-blocker lane (operator-authorised): stage development and start it")
+    p.add_argument("--defer", action="store_true",
+                    help="File it under the Initiative's Bugs Epic (fixed before initiative close)")
     p.add_argument("--repo-path", default=".", help="The shared main checkout")
     p.set_defaults(func=lambda a: cmd_file_closing_delta(
         get_work_item_provider(), a.epic, a.title, a.body, a.priority, a.effort, a.start,
-        a.repo_path))
+        a.repo_path, defer=a.defer))
     p = sub.add_parser("start-stage", help="worktree-add, then claim")
     p.add_argument("number", type=int)
     p.add_argument("--role", required=True, choices=sorted({*STAGE_OPTION_IDS, *RETIRED_ROLES}))

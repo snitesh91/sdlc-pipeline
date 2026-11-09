@@ -33,6 +33,15 @@ def _no_host_docker(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _initiative_branch_default_off(monkeypatch):
+    """v0.4.5 makes `initiative-<i>` the default. Most fakes predate it and model an Initiative
+    whose Epics close into main (and count its lookups), so tests run with the old default;
+    test_retro_1109_standing.py turns the shipped default back on."""
+    from sdlc.config import _INITIATIVE_PROFILE_DEFAULTS
+    monkeypatch.setitem(_INITIATIVE_PROFILE_DEFAULTS, "branch", False)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_doc_roots_cache():
     """Per-product doc roots are cached per process; no test may see another's."""
     import sdlc_next

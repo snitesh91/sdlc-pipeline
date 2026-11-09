@@ -158,7 +158,7 @@ def test_an_initiative_loop_in_a_local_session_skips_its_cloud_placed_epics():
                   {"number": 9, "labels": ["type:epic"], "parent": 6}])
     step = s._initiative_epic_step(gh, gh.issue_list(), 6, [])
     assert step["epic"] == 9
-    reason = s._open_epics_reason(gh, [i for i in gh.issue_list() if i["number"] == 8], [])
+    reason = s._open_epics_reason(gh, [i for i in gh.issue_list() if i["number"] == 8], [], gh.issue_list())
     assert "placed in the cloud" in reason
 
 

@@ -100,13 +100,14 @@ work, then start the successor session yourself:
 
 A cloud session never uses the repo's runners. For a suite set `attestable: "cloud"`
 (`references/operations.md`, "Local-CI attestation"). It covers every PR the session opens into
-a base with such a suite: the epic → `main` (or `initiative-*`) PR, and a standing Epic's Task
-PR into `main`. Task PRs into `epic-<n>` run no full suites.
+a base with such a suite: the epic → `main` (or `initiative-*`) PR, a `land-epic` PR and a
+parentless issue's PR into `main`. Task PRs into `epic-<n>` run no full suites.
 
 `close-epic` and `open-dev-pr` put `<!-- sdlc:ci-local -->` on the PR body's last line and add
 the label `ci:local` for visibility (`open-dev-pr` returns `ci_local: true`). The repo's PR jobs
-gate on `if: ${{ !contains(github.event.pull_request.body, '<!-- sdlc:ci-local -->') }}`: the
-body is in the `opened` and `synchronize` payloads, a label added after creation is not.
+gate on `if: ${{ !endsWith(github.event.pull_request.body, '<!-- sdlc:ci-local -->') }}`: the
+body is in the `opened` and `synchronize` payloads, a label added after creation is not. Never
+`contains`: a PR body that quotes the marker would skip every suite.
 
 **Epic PR:**
 

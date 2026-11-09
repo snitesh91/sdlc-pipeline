@@ -66,11 +66,11 @@ A hand-filed child must be a sub-issue of its Epic, or `next-action` never sees 
 
 Ordered array. `resolve_profile(epic)` returns the first entry whose `match` (`{ "label": "<name>" }` or `"*"`) holds. Toggles: `driven`, `epicLevelPhase` (`false` = standing), `childrenNeedArchitectedEpic`, `closes`, `gates` (`skipConfidenceThreshold`, `requiresHumanGateA`, `requiresHumanGateB`). Omitted toggles inherit the shipped defaults (`legacy`, `standing`, catch-all `default`); `gates` inherit `pipeline.gates`. A profile applies only to an issue `pipeline.classification` calls an Epic. Field reference: `sdlc.config.sample.json`.
 
-### `pipeline.initiativeProfiles` — Initiative behaviour by label (opt-in)
+### `pipeline.initiativeProfiles` — Initiative behaviour by label
 
-Ordered array, default `[]`; the first entry whose `match` is on the Initiative wins. With no match, the plain flow holds. A failed read while resolving it stops the step; it never falls back to a base. `initiative-<n>` is a pipeline branch only while `initiativeProfiles` is set. Toggles (`sdlc.config.sample.json`):
+Ordered array, default `[]`; the first entry whose `match` is on the Initiative wins. With no match, the defaults hold. A failed read while resolving it stops the step; it never falls back to a base. Toggles (`sdlc.config.sample.json`):
 
-- `branch` (`true` = `initiative-<i>`, `references/epics.md`, "Initiative branch").
+- `branch` (default `true` = `initiative-<i>`, `references/epics.md`, "Initiative branch"; `false` opts the Initiative out).
 - `testTasks` (`false` = no standing test Tasks).
 - `deferSuites`: suites `close-epic` does not demand into the initiative branch. `closeSuites`: suites `merge-initiative-pr` needs attested at its head.
 - `placement` (`cloud` | `local`): overrides `placement.initiativeEpics`.
@@ -135,6 +135,12 @@ This is a standing exception to any draft-PR rule in the operator's global `CLAU
 ## A check the runner failed
 
 `pr-checks` gives each failed check a `failure_excerpt` and `infra_suspect`, plus a top-level `infra_suspect` and `hint`. `merge-pr`'s refusal and `close-epic`'s `failing_checks` carry the same. On `infra_suspect`, get the runner fixed (operator or infra), then `rerun-checks <pr>`. Never send it back as code rework.
+
+## A flaky spec: re-run only the failed specs
+
+When a required suite fails on specs the diff cannot reach, run `rerun-checks <pr> --failed-only`, never a whole-job rerun. It reads the failed spec files from each red job's log, dispatches that workflow on the PR head branch with only those specs, and posts a `sdlc:deflake` marker on the PR. A workflow whose failure names no spec (setup, build) comes back in `not_deflakable`: read `ci-failure-summary`. The workflow needs a `workflow_dispatch` `specs` input and a `run-name` of `deflake: <specs>`.
+
+`pr-checks`, `merge-pr` and `close-epic` count the suite green once that dispatch passes on the same head; the check shows `(deflaked)` with its `deflaked_specs`. A new push needs a fresh run. File one flake `Bug` per deflaked spec (`references/rework.md`, "Where a finding this unit will not fix goes"), with the failing test, its error and the PR. A spec that fails its re-run is a real failure: route it as rework.
 
 ## Break-glass: local merge while the PR API is down
 

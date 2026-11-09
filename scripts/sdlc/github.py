@@ -267,6 +267,11 @@ class GitHub:
         self._run(["gh", "api", "-X", "PATCH", f"repos/{self.repo}/pulls/{number}",
                    "-f", f"body={body}"])
 
+    def pr_edit_base(self, number: int, base: str):
+        """Retarget a PR: REST `PATCH pulls/<n>` (`base`), like `pr_edit_body`."""
+        self._run(["gh", "api", "-X", "PATCH", f"repos/{self.repo}/pulls/{number}",
+                   "-f", f"base={base}"])
+
     def issue_create(self, title: str, body: str, labels: list) -> int:
         argv = ["gh", "api", f"repos/{self.repo}/issues", "-f", f"title={title}", "-f", f"body={body}"]
         for l in labels:
@@ -322,6 +327,20 @@ class GitHub:
     def run_rerun_failed(self, run_id: int) -> None:
         """Re-run only the failed (and cancelled) jobs of one Actions run."""
         self._run(["gh", "run", "rerun", str(run_id), "--failed", "--repo", self.repo])
+
+    def workflow_dispatch(self, workflow: str, ref: str, inputs: dict) -> None:
+        """Start a workflow_dispatch run of `workflow` (its name) on branch `ref`."""
+        argv = ["gh", "workflow", "run", workflow, "--ref", ref, "--repo", self.repo]
+        for k, v in inputs.items():
+            argv += ["-f", f"{k}={v}"]
+        self._run(argv)
+
+    def dispatch_runs(self, sha: str) -> list:
+        """The workflow_dispatch runs on commit `sha`: name, display_title, conclusion, url."""
+        out = self._run(["gh", "api", f"repos/{self.repo}/actions/runs?head_sha={sha}"
+                         f"&event=workflow_dispatch&per_page=100", "--jq",
+                         "[.workflow_runs[] | {name, display_title, conclusion, html_url}]"])
+        return json.loads(out or "[]")
 
     def pr_files(self, number: int) -> list:
         """Every changed path of a PR, via paginated REST `pulls/{n}/files`. `gh pr view
@@ -395,6 +414,12 @@ class GitHub:
         """Every PR (any state) whose head is `branch`: `number`, `state`, `headRefOid`."""
         out = self._run(["gh", "pr", "list", "--repo", self.repo, "--head", branch,
                           "--state", "all", "--json", "number,state,headRefOid"])
+        return json.loads(out)
+
+    def prs_into_branch(self, base: str) -> list:
+        """Open PRs whose base is `base`: `number`, `headRefName`."""
+        out = self._run(["gh", "pr", "list", "--repo", self.repo, "--base", base,
+                          "--state", "open", "--json", "number,headRefName"])
         return json.loads(out)
 
     def open_prs(self) -> list:
@@ -1169,6 +1194,11 @@ class GitHubRest(GitHub):
         return [{"number": p["number"], "state": self._pr_state(p),
                  "headRefOid": p["head"]["sha"]}
                 for p in self._prs_for_branch(branch, "all")]
+
+    def prs_into_branch(self, base: str) -> list:
+        return [{"number": p["number"], "headRefName": p["head"]["ref"]}
+                for p in self._api_items(f"repos/{self.repo}/pulls?state=open&base={base}"
+                                         f"&per_page=100")]
 
     def open_prs(self) -> list:
         return [{"number": p["number"], "headRefName": p["head"]["ref"], "title": p.get("title"),

@@ -20,7 +20,7 @@ from .footprint import (
 from .plugin_version import worktree_path
 from .worktrees import (
     BranchWorkspace, _registered_worktree, _run_retry_transient, _with_workspace, branch_lock,
-    resolve_repo_path,
+    ensure_integration_base, resolve_repo_path,
 )
 from .design_gates import design_doc_dir, design_phase_epic
 
@@ -79,6 +79,29 @@ def _ensure_draft(gh: GitHub, pr: dict) -> dict:
     except GhError as e:
         return {"draft_warning": f"PR #{pr['number']} is not a draft and converting it "
                                  f"failed ({e}); mark it draft by hand before review"}
+
+
+def cmd_retarget_pr(gh: GitHub, issue: int, repo_path: str = ".",
+                    runner: Runner = _default_runner) -> dict:
+    """Point `issue-<n>`'s open PR at the unit's current integration base (migration: a
+    standing child's PR opened into main before its Epic owned `epic-<n>`), standing that
+    base up first. Then `prepare-rework <n>` syncs the branch with it. Returns `retargeted`."""
+    prs = gh.pr_list_for_branch(issue_branch(issue))
+    if not prs:
+        return {"issue": issue, "retargeted": False,
+                "reason": f"no open PR from {issue_branch(issue)}"}
+    pr = prs[0]["number"]
+    base = integration_base(gh, issue)
+    old = gh.pr_view(pr, fields="baseRefName").get("baseRefName")
+    if old == base:
+        return {"issue": issue, "pr": pr, "base": base, "retargeted": False,
+                "reason": "already targets its integration base"}
+    ensure_integration_base(gh, repo_path, base, runner)
+    gh.pr_edit_base(pr, base)
+    gh.issue_comment(issue, f"↪️ Retargeted PR #{pr} from `{old}` to `{base}` (its integration "
+                            f"base). Run `prepare-rework {issue}` before its next merge.")
+    return {"issue": issue, "pr": pr, "from": old, "base": base, "retargeted": True,
+            "next": f"prepare-rework {issue}"}
 
 
 def cmd_open_dev_pr(gh: GitHub, issue: int, title: str, body: str, summary: str,

@@ -9,8 +9,9 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Optional, Union
 
-from .config import PIPELINE, Runner, issue_branch
+from .config import EPIC_BRANCH_PREFIX, PIPELINE, Runner, issue_branch
 from .github import GhError, GitHub, _default_runner, _is_real_runner
+from .units import epic_base
 from .evidence import integration_base, unit_branch
 from .plugin_version import worktree_path, worktree_path_for_branch
 
@@ -140,10 +141,7 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
     else:
         if base is None:
             base_branch = integration_base(gh, number, unit)
-            # A pre-existing Epic may have no branch yet; cut it before its child's.
-            if base_branch != "main" and not origin_branch_exists(repo_path, base_branch,
-                                                                   runner=runner):
-                ensure_branch_on_origin(repo_path, base_branch, runner=runner)
+            ensure_integration_base(gh, repo_path, base_branch, runner)
             base = f"origin/{base_branch}"
         _add_fresh_worktree(repo_path, path, branch, base, runner)
         if unit in ("epic", "initiative"):
@@ -155,6 +153,21 @@ def cmd_worktree_add(gh: GitHub, number: int, unit: str = "issue", repo_path: st
         synced = {}
     return _with_scratch({"created": True, "path": path, "branch": branch, "base": base,
                           "resumed": resumed, **synced})
+
+
+def ensure_integration_base(gh: GitHub, repo_path: str, base_branch: str,
+                            runner: Runner = _default_runner) -> None:
+    """Make a unit's integration base exist on origin. A pre-existing Epic (a standing one's
+    first child) may have no branch yet: cut it from its own base (`initiative-<i>`, stood
+    up first, or `main`)."""
+    if base_branch == "main" or origin_branch_exists(repo_path, base_branch, runner=runner):
+        return
+    cut_from = "main"
+    if base_branch.startswith(EPIC_BRANCH_PREFIX):
+        cut_from = epic_base(gh, int(base_branch[len(EPIC_BRANCH_PREFIX):]))
+        if cut_from != "main":
+            ensure_branch_on_origin(repo_path, cut_from, runner=runner)
+    ensure_branch_on_origin(repo_path, base_branch, base=cut_from, runner=runner)
 
 
 def _with_scratch(result: dict) -> dict:

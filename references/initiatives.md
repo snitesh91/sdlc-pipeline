@@ -40,6 +40,24 @@ and cut it into Epics:
   The Initiative loop reads only these edges.
 - Do not cut phase-Tasks by hand. The loop returns `cut-phase-tasks` for each Epic when it
   becomes runnable.
+- The Bugs Epic is created for you (next section).
+
+## The Bugs Epic
+
+Every Initiative has one Bugs Epic, a standing Epic whose body carries
+`<!-- sdlc:bugs-epic -->`. Only that marker identifies it: other standing child Epics are
+ordinary Epics. It holds the bugs any of its Epics
+find that can wait (`file-closing-delta <epic> --defer`; the fix-now-or-defer rule is in
+`references/epics.md`, "Finishing the close"). `next-action <initiative>` creates it
+(`Bugs: <initiative title>`, `bugs_epic_created`) at the first call that cuts or runs an Epic,
+engineering-driven Initiatives included. It never makes a second one: a marked child Epic, open
+or closed, counts. Never edit the marker out.
+
+- Its children branch from and merge into its `epic-<n>`, like any Epic's.
+- **It runs last.** The Initiative loop skips it while a sibling Epic is open.
+- Then `check-epics-closeable` flags it, and `close-epic` merges its `epic-<n>` into
+  `initiative-<i>` (exploratory pass included). An empty one just closes
+  (`nothing_to_land`). `close-initiative` refuses while it is open, like any cut Epic.
 
 ## Amending an approved `product.md`
 
@@ -70,7 +88,7 @@ legacy ones. It returns `none` only when nothing is left.
 - An Epic whose loop ends open (gate, `needs-human`, blocked) is parked: pass `--skip-epic
   <epic>` (repeatable) to `next-action <initiative>` for the rest of the run. Never re-enter a
   parked Epic.
-- **Initiative branch** (`branch: true`): call `next-action <initiative> --run-id "$RUN_ID"
+- **Initiative branch** (the default): call `next-action <initiative> --run-id "$RUN_ID"
   --sync-epic`; its `epic_sync` keeps `initiative-<i>` current (`unit: initiative`; on
   `conflict` → `references/epics.md`, "Initiative branch").
 - `none` names each open Epic's state in `reason`. When every cut Epic is closed it says so:
@@ -80,14 +98,14 @@ legacy ones. It returns `none` only when nothing is left.
 
 When a `none` `reason` says every cut Epic is closed:
 
-0. **Initiative branch only** (`reason` names `open-initiative-pr`): run `open-initiative-pr
+0. **Initiative branch** (`reason` names `open-initiative-pr`): run `open-initiative-pr
    <initiative> --repo-path <p>`. It syncs `initiative-<i>`, opens or reuses its PR into
    `main`, and returns the `evidence` owed. Tell the operator the PR and the owed suites
    (`closeSuites`); they land as passing checks or `record-local-ci --pr <pr>` attestations.
    Then run `merge-initiative-pr <initiative>`. On `merged: false` act on `reason`
    (`behind_base` → re-run `open-initiative-pr` and re-attest) and stop until green. Never
    merge the PR by hand. Once merged, clear each `scaffolding` hit (fix it, or file it under
-   the standing backlog Epic).
+   the Bugs Epic, or the standing backlog Epic once the Initiative is closed).
 1. Delegate `sdlc:initiative-close`. It validates the delivered app against every requirement
    in `product.md` and records `record-initiative-verification --outcome met|unmet`.
 2. **All met** (`clean`) → `python3 "$SDLC" close-initiative <initiative>`.

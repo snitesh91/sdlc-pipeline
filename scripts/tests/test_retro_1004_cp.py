@@ -270,6 +270,9 @@ class _HandoffGh(_ChecksGh):
     def issue_view(self, n, *fields):
         return {"comments": [{"body": b} for b in self.comments]}
 
+    def issue_fields(self, n):
+        return {}
+
 
 def _check(name, bucket, job=None, workflow="Backend CI"):
     link = f"https://github.com/o/r/actions/runs/1/job/{job}" if job else ""

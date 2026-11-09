@@ -55,9 +55,21 @@ class ScriptedRunner:
         for prefix, response in self.prefix_responses.items():
             if tuple(argv[:len(prefix)]) == prefix:
                 return response
+        if key not in self.responses and argv[:3] == ["gh", "pr", "view"] \
+                and argv[-2:] == ["--json", "baseRefName"]:
+            return "{}"  # v0.4.5 merge-pr base check; these fakes do not model the PR base
+        if key not in self.responses and _is_epic_info_query(argv):
+            # v0.4.5: a non-phase gate reads its unit's parent; these fakes model parentless ones.
+            return json.dumps({"data": {"repository": {"issue": {
+                "issueType": None, "parent": None, "labels": {"nodes": []}}}}})
         if key not in self.responses:
             raise AssertionError(f"unexpected gh invocation: {argv}")
         return self.responses[key]
+
+
+def _is_epic_info_query(argv: list) -> bool:
+    return (argv[:4] == ["gh", "api", "graphql", "-f"] and len(argv) == 5
+            and "issueType { name }\n    parent { number }\n    labels" in argv[4])
 
 
 _NO_UNIT_WORKTREE = {("git", "-C", ".", "worktree", "list", "--porcelain"):
@@ -980,6 +992,8 @@ def test_handoff_to_pr_review_posts_marker_without_referencing_a_stage_doc():
                              "owner/repo", "--body")] = ""
     runner.prefix_responses[("gh", "issue", "view", "42")] = '{"comments": []}'
     runner.prefix_responses[("gh", "pr", "checks", "77")] = "[]"
+    runner.prefix_responses[("gh", "api", "graphql")] = json.dumps(
+        {"data": {"repository": {"issue": {"issueFieldValues": {"nodes": []}}}}})
     gh = GitHub(runner=runner)
     summary = "142 passed, 0 failed.\n\n### Acceptance criteria coverage\n| AC | test |"
     result = cmd_handoff_to_pr_review(gh, 42, 77, summary)
@@ -2070,11 +2084,11 @@ def test_pass_gate_reconciles_comments_and_reclaims_next_stage():
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
         stage_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
         status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
+        # Parentless (v0.4.5: a standing child's gate reconciles with epic-<n>), so #9 is
+        # not a phase-Task, reconciles with main and claims onward.
         epic_check_argv: json.dumps({"data": {"repository": {"issue": {
-            "issueType": {"name": "Task"}, "parent": {"number": 92}, "labels": {"nodes": []},
+            "issueType": {"name": "Task"}, "parent": None, "labels": {"nodes": []},
         }}}}),
-        # The parent is a standing epic, so #9 is not a phase-Task and claims onward.
-        **dict([_epic_check(92, labels=("epic:standing",))]),
     })
     gh_runner.prefix_responses = {
         ("gh", "issue", "comment", "9"): "",
@@ -5415,7 +5429,11 @@ def test_decide_next_action_initiative_gate_a_passed_epics_still_open():
     initiative = _issue(40, labels=["type:initiative"])
     roadmap_task = _issue(41, parent=40, state="CLOSED")
     cut_epic = _issue(42, parent=40, labels=["type:epic"], state="OPEN")
-    runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative, roadmap_task, cut_epic])})
+    # Its Bugs Epic already exists (v0.4.5 creates one), so the loop creates nothing.
+    bugs = _issue(43, parent=40, labels=["type:epic", "epic:standing"], state="OPEN",
+                  body="<!-- sdlc:bugs-epic -->")
+    runner = ScriptedRunner({tuple(_list_argv()): _list_response([initiative, roadmap_task,
+                                                                  cut_epic, bugs])})
     gh = GitHub(runner=runner)
     runner.responses.update(_no_blockers_responses(42))
     result = decide_next_action(gh, 40)

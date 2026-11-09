@@ -397,7 +397,7 @@ def check_role(words: list, role: str):
     return None
 
 
-DEFAULT_BRANCH_PREFIXES = ("issue-", "epic-")
+DEFAULT_BRANCH_PREFIXES = ("issue-", "epic-", "initiative-")
 
 
 def operator_pr(args: list, prefixes=DEFAULT_BRANCH_PREFIXES) -> bool:
@@ -432,14 +432,10 @@ def operator_merge(args: list, prefixes=DEFAULT_BRANCH_PREFIXES) -> bool:
 
 
 def branch_prefixes(config: dict) -> tuple:
-    """`pipeline.branches` issue/epic prefixes, defaulting as sdlc_next.py does, plus the
-    initiative prefix only when `pipeline.initiativeProfiles` is configured."""
-    pipeline = config.get("pipeline") or {}
-    b = pipeline.get("branches") or {}
-    prefixes = (b.get("issuePrefix", "issue-"), b.get("epicPrefix", "epic-"))
-    if pipeline.get("initiativeProfiles"):
-        prefixes += (b.get("initiativePrefix", "initiative-"),)
-    return prefixes
+    """`pipeline.branches` issue/epic/initiative prefixes, defaulting as sdlc_next.py does."""
+    b = (config.get("pipeline") or {}).get("branches") or {}
+    return (b.get("issuePrefix", "issue-"), b.get("epicPrefix", "epic-"),
+            b.get("initiativePrefix", "initiative-"))
 
 
 def verdict(command: str, role: str = "", prefixes=DEFAULT_BRANCH_PREFIXES):

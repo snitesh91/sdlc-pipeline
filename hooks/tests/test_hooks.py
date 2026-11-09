@@ -333,13 +333,13 @@ def test_a_custom_initiative_prefix_counts_as_a_pipeline_branch(tmp_path):
     assert guard("gh pr create --head initiative-7 --title t", cwd) is None
 
 
-def test_without_initiative_profiles_an_initiative_branch_is_an_operator_branch(tmp_path):
-    """Positive control (v0.3.17): a repo without `initiativeProfiles` guards exactly the
-    v0.3.16 prefixes, so a main-thread PR/merge of `initiative-<n>` passes as it did."""
+def test_without_initiative_profiles_an_initiative_branch_is_still_a_pipeline_branch(tmp_path):
+    """v0.4.5: every Initiative owns `initiative-<n>` by default, so it is guarded with no
+    `initiativeProfiles`; an operator branch still passes (positive control)."""
     cwd = _git_repo(tmp_path / "noprof", {"repo": "o/r", "guard": {"mainThread": "always"}})
-    assert guard("gh pr merge initiative-7 --squash", cwd) is None
-    assert guard("gh pr create --head initiative-7 --title t", cwd) is None
+    assert "sdlc guard: " in guard("gh pr merge initiative-7 --squash", cwd)
     assert "sdlc guard: " in guard("gh pr merge epic-7 --squash", cwd)
+    assert guard("gh pr merge hotfix-7 --squash", cwd) is None
 
 
 @pytest.mark.parametrize("agent", ["sdlc:development", "sdlc:pr-review", "sdlc:lld"])

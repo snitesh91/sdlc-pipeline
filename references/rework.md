@@ -22,7 +22,9 @@ exception: it gets a fresh agent (`references/gates.md`, "Addressing gate feedba
 
 Fix everything found before merge inline. Put the residue on the issue that will act on it,
 in this order: the open sibling that owns the surface; the Epic, when it must be settled
-before close; the standing backlog Epic, for out-of-scope work. You file a new issue with
+before close (fix now); the Initiative's Bugs Epic, when it can wait
+(`file-closing-delta <epic> --defer`; `references/epics.md`, "Finishing the close"); the
+standing backlog Epic, for out-of-scope work. You file a new issue with
 `create-issue --parent <epic> --type Bug|Task`. Never leave it only on a closing PR or an
 issue about to close.
 

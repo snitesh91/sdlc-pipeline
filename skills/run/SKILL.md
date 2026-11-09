@@ -43,12 +43,13 @@ All under `${CLAUDE_PLUGIN_ROOT}/references/`.
 Every phase is **its own plain child issue** (a "phase-Task"): an Initiative's `product`, an
 Epic's `architecture` and `lld`. Never delegate a stage to the Initiative/Epic issue itself.
 
-- An Initiative's Product-Roadmap Task, a standing child and a parentless issue merge
-  `issue-<n>` → `main`.
-- **Every child of a non-standing Epic** branches from and merges into `epic-<n>`, which reaches
-  `main` once, at epic close. Under an Initiative whose label matches a
-  `pipeline.initiativeProfiles` entry with `branch: true`, `epic-<n>` closes into `initiative-<i>`,
-  which reaches `main` at initiative close (`references/epics.md`, "Initiative branch").
+- An Initiative's Product-Roadmap Task and a parentless issue merge `issue-<n>` → `main`. A
+  hotfix is a parentless issue: it is the only per-Task path into `main`.
+- **Every child of an Epic, standing or not,** branches from and merges into `epic-<n>`. Task
+  PRs into it run no full suites; `epic-<n>` → its base runs full CI. The base is the Epic's
+  Initiative's `initiative-<i>` (the default; an `initiativeProfiles` entry with `branch: false`
+  opts out), else `main`. `initiative-<i>` reaches `main` at initiative close
+  (`references/epics.md`, "The epic integration branch", "Initiative branch").
 
 ```
 initiative: Product-Roadmap Task (product -> product-review -> Gate A) -> cut Epics -> per Epic: cut-phase-tasks, run-epic
@@ -62,9 +63,12 @@ task:       development -> [pr-review] -> auto-merge into epic-<n>
   starts at its Architecture-phase Task; `architecture` returns `needs-human` when scope is unclear.
   An Initiative may wrap such Epics for grouping only: no Product-Roadmap Task, no `product.md`;
   `architecture` reads each Epic's scope.
-- **Standing profile** (`epicLevelPhase: false`): RTB tasks only, no phase-Tasks, no epic branch,
-  no human gate. Each child runs only the stages it needs ("Routing a standing child") and merges
-  into its integration base (`references/epics.md`, "The epic integration branch").
+- **Standing profile** (`epicLevelPhase: false`): RTB tasks only, no phase-Tasks, no human gate.
+  Each child runs only the stages it needs ("Routing a standing child") and merges into
+  `epic-<n>`. A long-lived standing Epic lands `epic-<n>` into `main` only when the operator
+  runs `land-epic <n>`; it stays open. An Initiative's **Bugs Epic** (body marker `<!-- sdlc:bugs-epic -->`): it
+  runs after its sibling Epics close, then `close-epic` closes it into `initiative-<i>`
+  (`references/initiatives.md`, "The Bugs Epic").
   **Legacy profile** (`driven: false`): skip it, Tasks included.
 - **Every Epic has two standing Tasks** (Integration-test, e2e-test) that run after every
   functional Task merges, unless its Initiative's profile sets `testTasks: false`.
@@ -135,7 +139,7 @@ a reference names it (conflict resolution, break-glass). Each command prints one
 object. **Exit 0** = a valid result, refusals included. **Exit 1** = failure: stop and report;
 never retry by hand. Classifier denial: `references/operations.md`, "Auto-mode classifier denies
 a composite". Run `merge-pr`, `finish-lld`, `start-stage`, `close-epic`, `cut-phase-tasks` and
-`open-initiative-pr` with `run_in_background`.
+`open-initiative-pr` with `run_in_background`. Run `land-epic` only when the operator asks.
 
 **Composites** run their steps in order, stop at the first failure and return `remaining_steps`.
 

@@ -374,7 +374,7 @@ def test_sync_epic_reports_a_conflict_once_then_pending_until_something_moves(re
 
 @pytest.mark.parametrize("gh, run_id, why", [
     (_epic_tree(), None, "no --run-id"),
-    (_epic_tree(epic_labels=("type:epic", "epic:standing")), "r", "not an open non-standing"),
+    (_epic_tree(epic_labels=("type:epic", "epic:legacy")), "r", "not an open driven Epic"),
     (_epic_tree(child_state="CLOSED"), "r", "close-epic reconciles"),
 ])
 def test_sync_epic_skips_without_touching_git(gh, run_id, why, runs):

@@ -125,6 +125,18 @@ def resolve_initiative_profile(initiative_issue: Optional[dict]) -> dict:
     return merged
 
 
+def initiative_branch_possible() -> bool:
+    """Whether any Initiative can own `initiative-<i>`: False only when a `"*"` profile opts
+    every Initiative out before any profile grants a branch. False lets callers skip lookups."""
+    default = _INITIATIVE_PROFILE_DEFAULTS["branch"]
+    for prof in PIPELINE["initiativeProfiles"] or []:
+        if prof.get("branch", default):
+            return True
+        if prof.get("match") == "*":
+            return False
+    return default
+
+
 def initiative_branch(initiative: int) -> str:
     """An opted-in Initiative's long-lived branch (default `initiative-<n>`)."""
     return f"{INITIATIVE_BRANCH_PREFIX}{initiative}"
@@ -142,6 +154,33 @@ def initiative_of_in(issues: dict, number: int) -> Optional[dict]:
             return entry
         n = (entry.get("parent") or {}).get("number")
     return None
+
+
+# Written into the Bugs Epic's body at creation; the only thing that marks it (other standing
+# child Epics of an Initiative are ordinary ones).
+BUGS_EPIC_MARKER = "<!-- sdlc:bugs-epic -->"
+
+
+def is_bugs_epic(issue: dict) -> bool:
+    return is_epic(issue) and BUGS_EPIC_MARKER in (issue.get("body") or "")
+
+
+def bugs_epic_of_in(issues: dict, initiative: int) -> Optional[dict]:
+    """The Initiative's open Bugs Epic (body marker), or None."""
+    found = [i for i in issues.values() if i["state"] == "OPEN" and is_bugs_epic(i)
+             and (i.get("parent") or {}).get("number") == initiative]
+    return min(found, key=lambda i: i["number"]) if found else None
+
+
+def bugs_epic_due(issues: dict, epic: dict) -> bool:
+    """`epic` is its Initiative's Bugs Epic and every other cut Epic is closed: it runs, and
+    closes, only then."""
+    initiative = (epic.get("parent") or {}).get("number")
+    if not is_bugs_epic(epic) or not is_initiative(issues.get(initiative) or {}):
+        return False
+    return not any(i["state"] != "CLOSED" and is_epic(i) and i["number"] != epic["number"]
+                   and (i.get("parent") or {}).get("number") == initiative
+                   for i in issues.values())
 
 
 def epic_initiative_branch_in(issues: dict, epic: int) -> Optional[str]:
@@ -164,10 +203,10 @@ def epic_base_in(issues: dict, epic: int) -> str:
 
 
 def epic_base(gh: "WorkItemProvider", epic: int, issues: Optional[list] = None) -> str:
-    """`epic_base_in` that looks nothing up while no `initiativeProfiles` entry sets
-    `branch`, so a repo without that opt-in makes exactly the calls it made before. A failed
-    issue-list read raises: it never falls back to `main` (nor to a branch)."""
-    if not any(prof.get("branch") for prof in PIPELINE["initiativeProfiles"] or []):
+    """`epic_base_in`, reading the issue list when `issues` is not given; `main`, looking
+    nothing up, when no Initiative can own a branch. A failed issue-list read raises: it never
+    falls back to `main` (nor to a branch)."""
+    if not initiative_branch_possible():
         return "main"
     return epic_base_in({i["number"]: i for i in (issues if issues is not None
                                                   else gh.issue_list())}, epic)
@@ -175,8 +214,9 @@ def epic_base(gh: "WorkItemProvider", epic: int, issues: Optional[list] = None) 
 
 def unit_initiative_profile(gh: Optional["WorkItemProvider"], number: int) -> dict:
     """The resolved Initiative profile governing unit `number` (`initiative`: its number or
-    None), read up its ancestry; the defaults, looking nothing up, without the opt-in."""
-    if not PIPELINE["initiativeProfiles"] or number is None:
+    None), read up its ancestry; the defaults, looking nothing up, for no unit or when no
+    profile is configured and no Initiative can own a branch."""
+    if number is None or not (PIPELINE["initiativeProfiles"] or initiative_branch_possible()):
         return {**resolve_initiative_profile(None), "initiative": None}
     gh = gh or get_work_item_provider()
     chain, n = [], int(number)

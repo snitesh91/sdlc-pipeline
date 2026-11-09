@@ -56,10 +56,11 @@ def test_integration_base_keeps_an_initiatives_roadmap_task_and_parentless_issue
 
 
 @pytest.mark.parametrize("stage", ["architecture", "development", None])
-def test_integration_base_keeps_a_standing_epics_child_on_main_at_every_stage(stage):
+def test_integration_base_keeps_a_standing_epics_child_on_its_epic_branch_at_every_stage(stage):
+    """v0.4.5: a standing Epic owns `epic-<n>` too."""
     gh = _tree({"number": 10, "labels": ["type:task"], "parent": 9, "stage": stage},
                epic_labels=("type:epic", "epic:standing"))
-    assert s.integration_base(gh, 10) == "main"
+    assert s.integration_base(gh, 10) == "epic-9"
 
 
 def test_worktree_add_cuts_a_phase_task_from_the_epic_branch_creating_it_when_absent(repo):
@@ -529,7 +530,7 @@ def test_transition_never_opens_a_design_pr_for_a_standing_child(repo):
     result = s.cmd_transition(gh, 10, "arch-review", repo_path=wt)
 
     assert result["completed_steps"] == ["verify-exit", "sync-branch", "start-comment"]
-    assert result["steps"]["sync-branch"]["base"] == "main"
+    assert result["steps"]["sync-branch"]["base"] == "epic-9"
     assert gh.prs == {}
 
 

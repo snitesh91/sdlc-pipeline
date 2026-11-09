@@ -20,21 +20,23 @@ def _standing_tree(opt_in=True):
                    {"number": 12, "labels": ["type:task"], "parent": 9, "stage": "development"}])
 
 
-# --- 1. a standing Epic's child bases on its Initiative's branch ------------------------
+# --- 1. a standing Epic's child bases on its Epic's branch (v0.4.5) ----------------------
 
-def test_a_standing_child_under_an_initiative_branch_integrates_there(opted_in):
-    assert s.integration_base(_standing_tree(), 12) == "initiative-6"
+def test_a_standing_child_integrates_into_its_epic_branch_either_way(opted_in):
+    assert s.integration_base(_standing_tree(), 12) == "epic-9"
+    assert s.integration_base(_standing_tree(opt_in=False), 12) == "epic-9"
+    # ...and the standing Epic itself closes into its Initiative's branch, or main.
+    assert s.integration_base(_standing_tree(), 9, "epic") == "initiative-6"
+    assert s.integration_base(_standing_tree(opt_in=False), 9, "epic") == "main"
 
 
-def test_a_standing_child_without_the_opt_in_stays_on_main(opted_in):
-    """Positive control."""
-    assert s.integration_base(_standing_tree(opt_in=False), 12) == "main"
-
-
-def test_worktree_add_cuts_a_standing_child_from_the_initiative_branch(repo, opted_in):
+def test_worktree_add_cuts_a_standing_epics_branch_from_the_initiative_branch(repo, opted_in):
+    from tests.test_v2_phase_tasks import _advance_origin, _origin_file
+    s.ensure_branch_on_origin(str(repo), "initiative-6")
+    _advance_origin(repo, "initiative-6", "earlier.txt", "on the initiative branch\n")
     result = s.cmd_worktree_add(_standing_tree(), 12, repo_path=str(repo))
-    assert result["base"] == "origin/initiative-6"
-    assert _exists_on_origin(repo, "initiative-6")
+    assert result["base"] == "origin/epic-9"
+    assert _origin_file(repo, "epic-9", "earlier.txt") == "on the initiative branch\n"
 
 
 # --- 2. merge-pr closes a unit merged into a non-default base ---------------------------
@@ -52,8 +54,8 @@ def test_merge_pr_closes_a_standing_child_merged_into_the_initiative_branch(opte
 
 
 def test_merge_pr_leaves_closing_a_main_merge_to_github(opted_in, monkeypatch):
-    """Positive control: on the default branch `Closes #n` closes it."""
-    gh = _standing_tree(opt_in=False)
+    """Positive control: on the default branch (a parentless hotfix) `Closes #n` closes it."""
+    gh = FakeGh([{"number": 12, "labels": ["type:task"], "stage": "development"}])
     out = _finalize(gh, monkeypatch, s.integration_base(gh, 12))
     assert out["issue_closed"] is False and gh.issues[12]["state"] == "OPEN"
 
@@ -217,10 +219,11 @@ def _gate_pr_base(gh, issue):
     return next(pr["baseRefName"] for pr in gh.prs.values() if pr["headRefName"] == f"issue-{issue}")
 
 
-def test_a_standing_childs_gate_under_an_initiative_branch_targets_it(opted_in):
-    assert _gate_pr_base(_standing_tree(), 12) == "initiative-6"
+def test_a_standing_childs_gate_targets_its_epic_branch(opted_in):
+    assert _gate_pr_base(_standing_tree(), 12) == "epic-9"
+    assert _gate_pr_base(_standing_tree(opt_in=False), 12) == "epic-9"
 
 
-def test_a_standing_childs_gate_without_the_opt_in_targets_main(opted_in):
+def test_a_parentless_issues_gate_targets_main(opted_in):
     """Positive control."""
-    assert _gate_pr_base(_standing_tree(opt_in=False), 12) == "main"
+    assert _gate_pr_base(FakeGh([{"number": 12, "labels": ["type:task"]}]), 12) == "main"

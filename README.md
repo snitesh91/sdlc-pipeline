@@ -181,13 +181,15 @@ python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<proj
   `record-cloud-session` registers one started by hand.
   `merge-gate --operator-confirmed` merges a gate PR, only when the operator says to.
 - **Engineering-driven**: a bare Epic with its scope in the body starts at architecture.
-- Each non-standing Epic owns a branch `epic-<n>`, created eagerly, and **every child branches
-  from it**. Its `architecture` and `lld` run as their own phase-Tasks that author
+- Every Epic owns a branch `epic-<n>`, standing ones included, and **every child branches
+  from it**; `epic-<n>` reaches its base (the Initiative's `initiative-<i>` by default, else
+  `main`) with full CI. A long-lived standing Epic lands with `land-epic` and stays open. For a
+  non-standing Epic: Its `architecture` and `lld` run as their own phase-Tasks that author
   `<docRoot>/epic-<n>/architecture.md` / `lld.md` directly; a design PR `issue-<n>` →
   `epic-<n>` carries each through review. The pipeline merges it on a clean review
   (`lld-review` always; `arch-review` above the skip threshold, else the human at Gate B);
   `finish-lld` then creates the Tasks. Every Epic also gets Integration-test and e2e-test
-  standing Tasks. Product-Roadmap Tasks and standing children still gate into `main`.
+  standing Tasks. Product-Roadmap Tasks and parentless issues (hotfixes) gate into `main`.
 - Tasks run `development` → `pr-review` → auto-merge into the epic branch. The epic closes
   after an exploratory pass (the pipeline never runs the full e2e suite; the e2e-test Task
   authors and runs only the Epic's new specs), and an Initiative closes after a PM-style
