@@ -323,6 +323,20 @@ class GitHub:
         """Re-run only the failed (and cancelled) jobs of one Actions run."""
         self._run(["gh", "run", "rerun", str(run_id), "--failed", "--repo", self.repo])
 
+    def workflow_dispatch(self, workflow: str, ref: str, inputs: dict) -> None:
+        """Start a workflow_dispatch run of `workflow` (its name) on branch `ref`."""
+        argv = ["gh", "workflow", "run", workflow, "--ref", ref, "--repo", self.repo]
+        for k, v in inputs.items():
+            argv += ["-f", f"{k}={v}"]
+        self._run(argv)
+
+    def dispatch_runs(self, sha: str) -> list:
+        """The workflow_dispatch runs on commit `sha`: name, display_title, conclusion, url."""
+        out = self._run(["gh", "api", f"repos/{self.repo}/actions/runs?head_sha={sha}"
+                         f"&event=workflow_dispatch&per_page=100", "--jq",
+                         "[.workflow_runs[] | {name, display_title, conclusion, html_url}]"])
+        return json.loads(out or "[]")
+
     def pr_files(self, number: int) -> list:
         """Every changed path of a PR, via paginated REST `pulls/{n}/files`. `gh pr view
         --json files` caps at 100 and `gh pr diff` 406s past 20k lines; this feeds the
