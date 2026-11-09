@@ -13,7 +13,7 @@ from .github import GhError, GitHub, WorkItemProvider, _default_runner, _utc_now
 from .units import (
     _parse_marker_ts, cloud_label, current_stage, default_stage, doc_root_for, effective_gates,
     epic_base, forget_initiative_hint, has_label, hint_doc_roots, in_scope, initiative_branch,
-    is_epic, is_epic_architected, is_epic_legacy, is_epic_standing, is_initiative,
+    bugs_epic_due, is_epic, is_epic_architected, is_epic_legacy, is_epic_standing, is_initiative,
     local_tasks_config_errors, pipeline_status, placement_scope, product_gate_pending,
     product_wip_headroom, resolve_initiative_profile, session_placement, sort_key,
     unit_initiative_profile,
@@ -64,9 +64,10 @@ def _initiative_epic_step(gh: GitHub, all_issues: list, initiative: int,
     epics = sorted((i for i in all_issues if i["state"] == "OPEN" and is_epic(i)
                     and (i.get("parent") or {}).get("number") == initiative),
                    key=lambda i: i["number"])
+    by_number = {i["number"]: i for i in all_issues}
     for e in epics:
         n = e["number"]
-        if n in skip or _epic_wait_reason(gh, e):
+        if n in skip or _epic_wait_reason(gh, e) or _bugs_epic_waits(by_number, e):
             continue
         base = {"epic": n, "initiative": initiative, "unit": "epic"}
         if not is_epic_standing(e) and epic_lacks_phase_tasks(all_issues, n):
@@ -80,12 +81,21 @@ def _initiative_epic_step(gh: GitHub, all_issues: list, initiative: int,
     return None
 
 
-def _open_epics_reason(gh: GitHub, cut_epics: list, skip: list) -> str:
+def _bugs_epic_waits(by_number: dict, epic: dict) -> bool:
+    """An Initiative's standing Bugs Epic runs last: it waits while a sibling Epic is open."""
+    parent = by_number.get((epic.get("parent") or {}).get("number")) or {}
+    return is_epic_standing(epic) and is_initiative(parent) and not bugs_epic_due(by_number, epic)
+
+
+def _open_epics_reason(gh: GitHub, cut_epics: list, skip: list, all_issues: list) -> str:
     """The Initiative `none` reason for open Epics that cannot run: each one's actual state."""
     open_epics = sorted((i for i in cut_epics if i["state"] != "CLOSED"),
                         key=lambda i: i["number"])
+    by_number = {i["number"]: i for i in all_issues}
     states = [f"#{e['number']} " + ("parked this run" if e["number"] in skip
-                                     else _epic_wait_reason(gh, e) or "runnable")
+                                     else _epic_wait_reason(gh, e)
+                                     or ("the Bugs Epic: waits for its sibling Epics"
+                                         if _bugs_epic_waits(by_number, e) else "runnable"))
               for e in open_epics]
     closed = len(cut_epics) - len(open_epics)
     return (f"{len(open_epics)} cut Epic(s) open, none runnable now: {'; '.join(states)}"
@@ -269,7 +279,7 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                 result["reason"] = _cloud_epics_reason(cloud_survey, cut_epics)
                 result["cloud"] = cloud_survey
             elif cut_epics:
-                result["reason"] = _open_epics_reason(gh, cut_epics, skip_epics)
+                result["reason"] = _open_epics_reason(gh, cut_epics, skip_epics, all_issues)
             elif roadmap_tasks and all(i["state"] == "CLOSED" for i in roadmap_tasks):
                 result["reason"] = ("Product-Roadmap Task closed -- cut Epics from the "
                                     "approved product.md next (references/initiatives.md, \"Cutting Epics "
@@ -445,10 +455,10 @@ def _origin_sha(repo_path: str, branch: str, runner: Runner) -> Optional[str]:
 
 def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: str = ".",
                      runner: Runner = _default_runner, issues: Optional[list] = None) -> dict:
-    """Keep a non-standing Epic's `epic-<n>` from rotting against `main`: `sync-branch <epic>
+    """Keep an Epic's `epic-<n>` (standing ones too) from rotting against its base: `sync-branch <epic>
     --unit epic` on this run-id's first call, after `EPIC_SYNC_EVERY_MERGES` terminal units
     since the last sync, or when `origin/main` moved since then (run-state `epic_sync`).
-    Skipped (`skipped`) without a run id, for anything but an open non-standing Epic with open
+    Skipped (`skipped`) without a run id, for anything but an open driven Epic with open
     children (at close `close-epic` reconciles), or before `epic-<n>` exists. A conflict is
     posted once per (`main`, epic head) pair and then reported `pending` until either moves.
     Never raises: an operational failure comes back as `error`."""
@@ -459,9 +469,9 @@ def sync_epic_if_due(gh: GitHub, epic: int, run_id: Optional[str], repo_path: st
         entry = next((i for i in issues if i["number"] == epic), None)
         if entry is not None and is_initiative(entry):
             return sync_initiative_if_due(gh, entry, run_id, repo_path, runner)
-        if (entry is None or not is_epic(entry) or is_epic_standing(entry)
+        if (entry is None or not is_epic(entry)
                 or is_epic_legacy(entry) or entry["state"] != "OPEN"):
-            return {"skipped": f"#{epic} is not an open non-standing Epic -- no epic branch "
+            return {"skipped": f"#{epic} is not an open driven Epic -- no epic branch "
                                f"to keep current"}
         if not any(i["state"] == "OPEN" and (i.get("parent") or {}).get("number") == epic
                    and not is_epic(i) for i in issues):
@@ -552,8 +562,8 @@ def sync_initiative_if_due(gh: GitHub, entry: dict, run_id: str, repo_path: str 
     initiative head) pair, then `pending`, as `sync_epic_if_due` does."""
     n = entry["number"]
     if not resolve_initiative_profile(entry)["branch"]:
-        return {"skipped": f"Initiative #{n} has no initiative branch (no `initiativeProfiles` "
-                           f"entry with `branch: true` matches it)"}
+        return {"skipped": f"Initiative #{n} has no initiative branch (an `initiativeProfiles` "
+                           f"entry with `branch: false` opts it out)"}
     if entry["state"] != "OPEN":
         return {"skipped": f"Initiative #{n} is closed"}
     branch = initiative_branch(n)

@@ -18,7 +18,7 @@ from .evidence import LOCAL_CI_SUITES, REVIEW_ROLES
 from .epic_close import (
     INITIATIVE_VERIFICATION_OUTCOMES, cmd_check_initiative_closeable, cmd_close_epic,
     brief_close_epic, cmd_close_initiative, cmd_merge_initiative_pr, cmd_open_initiative_pr,
-    cmd_record_epic_verification, cmd_record_initiative_verification,
+    cmd_land_epic, cmd_record_epic_verification, cmd_record_initiative_verification,
 )
 from .gate_eval import cmd_check_gate
 from .next_action import cmd_list_ready_for_review, cmd_next_action
@@ -547,6 +547,11 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: (brief_close_epic if a.brief else (lambda r: r))(
         cmd_close_epic(get_work_item_provider(), a.epic, a.repo_path,
                        carry_forward=a.carry_forward, clean_worktree=a.clean_worktree)))
+    p = sub.add_parser("land-epic",
+                        help="Land a standing Epic's epic branch into main; the Epic stays open")
+    p.add_argument("epic", type=int)
+    p.add_argument("--repo-path", default=".")
+    p.set_defaults(func=lambda a: cmd_land_epic(get_work_item_provider(), a.epic, a.repo_path))
     p = sub.add_parser("record-epic-verification",
                         help="Record one half of an epic's closing verification")
     p.add_argument("epic", type=int)
@@ -650,10 +655,12 @@ def main(argv: Optional[list] = None) -> int:
                     help="High | Medium | Low (default: pipeline.issueDefaults.effort)")
     p.add_argument("--start", action="store_true",
                     help="Close-blocker lane (operator-authorised): stage development and start it")
+    p.add_argument("--defer", action="store_true",
+                    help="File it under the Initiative's Bugs Epic (fixed before initiative close)")
     p.add_argument("--repo-path", default=".", help="The shared main checkout")
     p.set_defaults(func=lambda a: cmd_file_closing_delta(
         get_work_item_provider(), a.epic, a.title, a.body, a.priority, a.effort, a.start,
-        a.repo_path))
+        a.repo_path, defer=a.defer))
     p = sub.add_parser("start-stage", help="worktree-add, then claim")
     p.add_argument("number", type=int)
     p.add_argument("--role", required=True, choices=sorted({*STAGE_OPTION_IDS, *RETIRED_ROLES}))

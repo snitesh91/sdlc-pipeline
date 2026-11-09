@@ -144,6 +144,24 @@ def initiative_of_in(issues: dict, number: int) -> Optional[dict]:
     return None
 
 
+def bugs_epic_of_in(issues: dict, initiative: int) -> Optional[dict]:
+    """The Initiative's Bugs Epic: its lowest-numbered open standing child Epic, or None."""
+    found = [i for i in issues.values() if i["state"] == "OPEN" and is_epic(i)
+             and (i.get("parent") or {}).get("number") == initiative and is_epic_standing(i)]
+    return min(found, key=lambda i: i["number"]) if found else None
+
+
+def bugs_epic_due(issues: dict, epic: dict) -> bool:
+    """`epic` is a standing Epic under an Initiative (its Bugs Epic) whose other cut Epics are
+    all closed: it runs, and closes, only then."""
+    initiative = (epic.get("parent") or {}).get("number")
+    if not is_initiative(issues.get(initiative) or {}):
+        return False
+    return not any(i["state"] != "CLOSED" and is_epic(i) and not is_epic_standing(i)
+                   and (i.get("parent") or {}).get("number") == initiative
+                   for i in issues.values())
+
+
 def epic_initiative_branch_in(issues: dict, epic: int) -> Optional[str]:
     """`initiative-<i>` when `epic`'s parent is an Initiative whose profile sets `branch`,
     else None. Only the direct parent counts: an Epic is a native sub-issue of its Initiative."""
@@ -164,19 +182,16 @@ def epic_base_in(issues: dict, epic: int) -> str:
 
 
 def epic_base(gh: "WorkItemProvider", epic: int, issues: Optional[list] = None) -> str:
-    """`epic_base_in` that looks nothing up while no `initiativeProfiles` entry sets
-    `branch`, so a repo without that opt-in makes exactly the calls it made before. A failed
+    """`epic_base_in`, reading the issue list when `issues` is not given. A failed
     issue-list read raises: it never falls back to `main` (nor to a branch)."""
-    if not any(prof.get("branch") for prof in PIPELINE["initiativeProfiles"] or []):
-        return "main"
     return epic_base_in({i["number"]: i for i in (issues if issues is not None
                                                   else gh.issue_list())}, epic)
 
 
 def unit_initiative_profile(gh: Optional["WorkItemProvider"], number: int) -> dict:
     """The resolved Initiative profile governing unit `number` (`initiative`: its number or
-    None), read up its ancestry; the defaults, looking nothing up, without the opt-in."""
-    if not PIPELINE["initiativeProfiles"] or number is None:
+    None), read up its ancestry; the defaults, looking nothing up, for no unit."""
+    if number is None:
         return {**resolve_initiative_profile(None), "initiative": None}
     gh = gh or get_work_item_provider()
     chain, n = [], int(number)

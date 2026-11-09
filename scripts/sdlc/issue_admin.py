@@ -11,7 +11,7 @@ from .config import (
 )
 from .github import GhError, GitHub, GitHubRest, WorkItemProvider, _default_runner, _parallel
 from .units import (
-    classify_unit_from_issue, doc_root_for, epic_base, is_epic, is_epic_legacy,
+    bugs_epic_due, classify_unit_from_issue, doc_root_for, epic_base, is_epic, is_epic_legacy,
     is_epic_standing, is_initiative, issue_type, label_names, pipeline_status,
 )
 from .evidence import (
@@ -375,18 +375,22 @@ _EPIC_CLOSEABLE_MARKER = "<!-- epic-closeable-checklist-posted -->"
 
 
 def cmd_check_epics_closeable(gh: GitHub) -> dict:
-    """For each open non-standing epic with every child closed, post a one-time
+    """For each open closeable epic (non-standing, or an Initiative's standing Bugs Epic once
+    its sibling Epics closed) with every child closed, post a one-time
     closing checklist and assign the human; never closes the epic. Idempotent via
     `_EPIC_CLOSEABLE_MARKER`. Returns `closeable_epics`, and `needs_phase_tasks`: Epics whose
     children are all closed but that never had both phase-Tasks and are not architected (closed
     superseded children only, or an Epic that predates phase-Tasks) -- listed, not notified, so
     the orchestrator decides: `cut-phase-tasks`, or close it by hand."""
     all_issues = gh.issue_list()
-    open_epics = [i for i in all_issues if i["state"] == "OPEN" and is_epic(i) and not is_epic_standing(i)]
+    by_number = {i["number"]: i for i in all_issues}
+    open_epics = [i for i in all_issues if i["state"] == "OPEN" and is_epic(i)
+                  and (not is_epic_standing(i) or bugs_epic_due(by_number, i))]
     results, needs_phase_tasks = [], []
     for epic in open_epics:
         children = [i for i in all_issues if i.get("parent") and i["parent"]["number"] == epic["number"]]
-        if not children or any(c["state"] != "CLOSED" for c in children):
+        if any(c["state"] != "CLOSED" for c in children) or not (
+                children or is_epic_standing(epic)):
             continue
         # Closed superseded children are not a finished Epic: it still owes its phase-Tasks.
         if epic_lacks_phase_tasks(all_issues, epic["number"]):

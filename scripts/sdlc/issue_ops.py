@@ -358,8 +358,6 @@ def _unit_of_branch(branch: Optional[str]) -> Optional[tuple]:
     if not m:
         return None
     unit = "epic" if m.group("epic") else "initiative" if m.group("initiative") else "issue"
-    if unit == "initiative" and not PIPELINE["initiativeProfiles"]:
-        return None  # without the opt-in an `initiative-<n>` branch is not the pipeline's
     return (unit, int(m.group("n")))
 
 

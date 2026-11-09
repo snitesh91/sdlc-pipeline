@@ -171,12 +171,18 @@ finder unless its work depends on the corrected text. A drift that changes an
 All other rework: `references/rework.md`.
 
 ## The epic integration branch
-- A non-standing Epic owns `epic-<n>`, created from `main` on first need. **Its Tasks branch
-  from and merge into it.** At close it takes one merge from `origin/main` and merges to its
-  base once.
-- **Straight into `main`:** standing children, parentless issues, Product-Roadmap Tasks. A
-  standing Epic under an initiative branch sends its children to `initiative-<i>`. `integration_base()` decides from the native
-  parent, never a label or branch name.
+- **Every Epic owns `epic-<n>`, standing ones included**, created from its base on first need.
+  **Its children branch from and merge into it**, with no full suites on the Task PR. At close
+  it takes one merge from its base and merges into it once, with full CI.
+- **Straight into `main`:** parentless issues (the hotfix path) and Product-Roadmap Tasks.
+  `integration_base()` decides from the native parent, never a label or branch name.
+- **Standing Epics:** a long-lived one with no Initiative (an RTB backlog) never closes. Run
+  `land-epic <n> --repo-path <p>` only when the operator asks. Each call reconciles `epic-<n>`
+  with `main`, opens or reuses its PR and merges it (a merge commit) once every required suite
+  passes at its head; re-run it while it returns `landed: false` with a CI wait. The Epic stays
+  open and `epic-<n>` lives on (re-cut from `main` if the merge deleted it). No exploratory
+  pass: the landing PR's full CI is the gate. An Initiative's standing Epic is its Bugs Epic
+  (`references/initiatives.md`, "The Bugs Epic"); `close-epic` closes it.
 - Design docs reach `epic-<n>` only through design PRs and `create-lld-tasks`' numbering
   commit. Never commit to it by hand or delete it while the Epic is open.
 - `next-action --sync-epic` merges `main` into it at run start, every third merge and when
@@ -184,9 +190,9 @@ All other rework: `references/rework.md`.
 - When `pipeline.stack.enabled`, run `provision-epic-stack <n>` at first touch
   (`references/parallelism.md`, "Per-epic isolated stack").
 
-## Initiative branch (opt-in)
-An Initiative whose label matches a `pipeline.initiativeProfiles` entry with `branch: true`
-owns `initiative-<i>`. Without it, Epics close into `main`.
+## Initiative branch (default)
+Every Initiative owns `initiative-<i>`. An `initiativeProfiles` entry with `branch: false` opts
+one out; its Epics then close into `main`.
 
 - **Its Epics cut from, sync with and close into `initiative-<i>`** (`close-epic` result
   `base`). Each Epic closes on its own.
@@ -277,8 +283,9 @@ profile it is a local Task (`references/cloud-mode.md`, "A cloud run").
 - **Blocker / Critical** (a re-confirmed failure on a surface this epic moved, or **any**
   access-boundary failure, 5xx, crash or data-integrity problem): a `Bug` child of **the
   epic**, `unstaged`, blocking close. Route it by hand.
-- **Normal / Low** (unmapped surface, flake, unchanged pre-existing failures): file it on the
-  standing backlog epic.
+- **Normal / Low** (unmapped surface, flake, unchanged pre-existing failures): under an
+  Initiative, `file-closing-delta <epic> --defer` (its Bugs Epic); else file it on the standing
+  backlog epic.
 - **Architecture drift with no defect:** never blocks close. Correct the doc or file it on the
   backlog epic.
 
@@ -299,11 +306,17 @@ through its phase-Tasks or a revision.
 untracked output before a reconcile or the merge, and refuses on a tracked change
 (`worktree_clean.tracked_changes`).
 
-**Every manual-testing finding is its own `Bug` child:** `file-closing-delta <epic> --title ..
---body .. [--priority P] [--effort E] [--start]` (`--start` = close-blocker lane). Closing waits
-for it.
+**Every manual-testing finding is its own `Bug`:** `file-closing-delta <epic> --title ..
+--body .. [--priority P] [--effort E] [--start | --defer]`. `--start` = close-blocker lane.
+`--defer` files it under the Initiative's Bugs Epic instead.
 
-**Standing epics never get this check.**
+**Fix now or defer, for every bug an Epic finds in its own code** (development, review, test
+Tasks, the exploratory pass). Decide it yourself; never ask the operator:
+- **Fix now** (a `Bug` child of this Epic, closing waits for it) when the bug blocks one of
+  the Epic's own Tasks, its close, or one of its acceptance criteria, or is Blocker/Critical.
+- **Defer** (`--defer`) otherwise, when the Epic has an Initiative with a Bugs Epic.
+
+**Standing epics never get this check**, except an Initiative's Bugs Epic at its close.
 
 ## Epic board Status
 

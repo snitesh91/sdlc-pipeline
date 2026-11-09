@@ -146,7 +146,7 @@ REVIEW_ROLES = frozenset({"product-review", "arch-review", "lld-review", "pr-rev
 
 
 def epic_branch(epic: int) -> str:
-    """The long-lived integration branch for a non-standing Epic (default `epic-<n>`)."""
+    """The long-lived integration branch every Epic owns (default `epic-<n>`)."""
     return f"{EPIC_BRANCH_PREFIX}{epic}"
 
 
@@ -163,10 +163,10 @@ PHASE_TASK_STAGES = frozenset({"architecture", "arch-review", "lld", "lld-review
 
 
 def integration_base(gh: "GitHub", issue: int, unit: str = "issue") -> str:
-    """Branch this unit integrates into: `epic-<parent>` for every child of a non-standing
-    Epic (phase-Tasks included); for an Epic, its opted-in Initiative's `initiative-<i>`
-    (`epic_base`); for a standing Epic's child, that Epic's base; else `main` (initiatives,
-    parentless issues, Initiative children)."""
+    """Branch this unit integrates into: `epic-<parent>` for every child of an Epic, standing
+    or not (phase-Tasks included); for an Epic, its Initiative's `initiative-<i>`
+    (`epic_base`); else `main` (initiatives, parentless issues -- the hotfix path --, and an
+    Initiative's Product-Roadmap Task)."""
     if unit == "initiative":
         return "main"
     if unit == "epic":
@@ -192,9 +192,6 @@ def integration_base_in(issues: dict, issue: int) -> str:
                 and resolve_initiative_profile(parent_entry)["branch"]):
             return initiative_branch(parent_number)
         return "main"
-    if parent_entry is not None and is_epic_standing(parent_entry):
-        # A standing Epic has no branch; its children land where the Epic itself would.
-        return epic_base_in(issues, parent_number)
     return epic_branch(parent_number)
 
 

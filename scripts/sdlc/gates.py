@@ -17,10 +17,8 @@ from .design_gates import _merge_design_pr_of, find_design_pr, git_reconcile_bra
 
 
 def _gate_base(gh: GitHub, issue: int) -> str:
-    """Where a non-phase gate PR merges: the unit's `integration_base` (a standing child under
-    an initiative branch); `main`, looking nothing up, while no profile sets `branch`."""
-    if not any(prof.get("branch") for prof in PIPELINE["initiativeProfiles"] or []):
-        return "main"
+    """Where a non-phase gate PR merges: the unit's `integration_base` (a standing child's
+    `epic-<n>`, an Initiative child's `initiative-<i>`, else `main`)."""
     return integration_base(gh, issue)
 
 

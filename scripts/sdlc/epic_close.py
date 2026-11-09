@@ -391,12 +391,16 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     fast-forwarded to origin (`epic_worktree`) and `pipeline.epicClose.prepare` runs there
     (`prepare`)."""
     detail = gh.issue_view(epic)
-    if not resolve_profile(detail)["closes"]:
-        return {"epic": epic, "merged": False,
-                "reason": f"epic profile '{resolve_profile(detail)['name']}' does not close "
-                          "(closes: false) -- no integration branch to merge"}
     branch = epic_branch(epic)
     all_issues = gh.issue_list()
+    # A standing Epic (closes: false) closes only under an Initiative (its Bugs Epic); a
+    # long-lived one lands with `land-epic` and stays open.
+    closes = resolve_profile(detail)["closes"]
+    if not closes and initiative_of_in({i["number"]: i for i in all_issues}, epic) is None:
+        return {"epic": epic, "merged": False,
+                "reason": f"epic profile '{resolve_profile(detail)['name']}' does not close "
+                          f"(closes: false) -- land `{branch}` with `land-epic {epic} "
+                          f"--repo-path <p>`; the Epic stays open"}
     children = [i for i in all_issues if i.get("parent") and i["parent"]["number"] == epic]
     # `main`, or -- for an Epic of an opted-in Initiative -- `initiative-<i>`: the target of
     # the reconcile and the epic PR. Suites the profile defers are not demanded here.
@@ -419,6 +423,10 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         return {"epic": epic, "merged": False, "open_children": open_children,
                 "reason": f"{len(open_children)} child issue(s) still open: "
                           f"{', '.join(f'#{n}' for n in open_children)}"}
+    if not children and not closes:
+        # An Initiative's Bugs Epic that never got a bug: nothing to land, just close it.
+        return _finish_epic_close(gh, epic, detail, None, children, all_issues, repo_path,
+                                  runner, {"nothing_to_land": True, **target}, base=base)
     cleaned: dict = {}
 
     def clean_refusal() -> Optional[dict]:
@@ -553,6 +561,71 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     return _finish_epic_close(gh, epic, None, pr_number, children, all_issues, repo_path,
                               runner, {**target, **evidence, **cleaned}, base=base)
 
+
+def cmd_land_epic(gh: GitHub, epic: int, repo_path: str = ".",
+                  runner: Runner = _default_runner) -> dict:
+    """Land a long-lived standing Epic's `epic-<n>` into `main` and keep the Epic open
+    (operator-run only). Each call: reconcile the branch with `main`, open or reuse its PR,
+    and merge it (a merge commit, so `epic-<n>` stays an ancestor of `main`) once every
+    required suite passes at its head; then re-create `epic-<n>` from `main` if the merge
+    deleted it. Returns `landed`; refusals and waits carry `reason`. No exploratory pass:
+    the landing PR's full CI is the gate."""
+    issues = {i["number"]: i for i in gh.issue_list()}
+    entry = issues.get(epic)
+    if entry is None or not is_epic(entry) or resolve_profile(entry)["closes"]:
+        return {"epic": epic, "landed": False,
+                "reason": f"#{epic} is not a standing Epic -- close-epic closes it"}
+    if initiative_of_in(issues, epic) is not None:
+        return {"epic": epic, "landed": False,
+                "reason": f"#{epic} sits under an Initiative -- it closes into the initiative "
+                          f"branch with close-epic once its sibling Epics closed"}
+    branch, base = epic_branch(epic), "main"
+    existing = gh.pr_list_for_branch(branch)
+    if not existing and not gh.branch_commits(base, branch):
+        return {"epic": epic, "landed": False, "branch": branch,
+                "reason": f"`{branch}` holds nothing `{base}` lacks -- nothing to land"}
+    behind = gh.branch_behind_by(branch, base=base)
+    if behind:
+        try:
+            with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
+                git_reconcile_branch(ws.path, branch, base=base, runner=runner)
+        except MergeConflict as e:
+            return {"epic": epic, "landed": False, "branch": branch, "conflict": True,
+                    "conflicting_files": e.files,
+                    "reason": f"`{branch}` conflicts with `origin/{base}` -- resolve it per "
+                              f"references/parallelism.md, \"Git-conflict handling\", push, "
+                              f"then re-run land-epic"}
+    ci_local = _ci_local(base)
+    if existing:
+        pr_number = existing[0]["number"]
+        if ci_local:
+            _mark_ci_local(gh, pr_number)
+    else:
+        pr_number = gh.pr_create(
+            base=base, head=branch, title=f"{entry['title']} — land `{branch}` (#{epic})",
+            body=f"Lands the merged children of standing Epic #{epic} into `{base}`. "
+                 f"The Epic stays open." + (f"\n\n{CI_LOCAL_MARKER}" if ci_local else ""),
+            draft=True)
+        if ci_local:
+            _label_ci_local(gh, pr_number)
+    if behind:
+        return {"epic": epic, "landed": False, "pr": pr_number, "reconciled": behind,
+                "reason": f"picked up {behind} commit(s) from {base} -- wait for PR "
+                          f"#{pr_number}'s CI, then re-run land-epic"}
+    children = [i for i in issues.values() if (i.get("parent") or {}).get("number") == epic]
+    evidence = _close_epic_evidence(gh, epic, branch, children, pr_number, True, base)
+    missing = evidence.pop("_missing_workflows")
+    if missing:
+        return {"epic": epic, "landed": False, "pr": pr_number, "checks": "missing-checks",
+                "awaiting_checks": evidence["awaiting_checks"],
+                "reason": f"PR #{pr_number} required suites unsatisfied at the epic head: "
+                          f"{', '.join(missing)} -- re-run land-epic once CI is green"}
+    gh.pr_ready(pr_number)
+    gh.pr_merge(pr_number, method="merge")
+    recut = ensure_branch_on_origin(repo_path, branch, runner=runner)
+    gh.issue_comment(epic, f"🛬 Landed `{branch}` into `{base}` (PR #{pr_number}). The Epic "
+                           f"stays open; its next children branch from `{branch}` again.")
+    return {"epic": epic, "landed": True, "pr": pr_number, "branch": branch, "branch_state": recut}
 
 CI_LOCAL_LABEL = "ci:local"
 # In the PR body from creation, so the `opened` payload already carries it (a label cannot:
@@ -810,14 +883,11 @@ def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
     and, for an Initiative with an initiative branch, that branch reached `main`
     (`initiative_landing`); otherwise `reason` (and `open_epics` / `initiative_branch`).
     Whatever its labels now say, it also refuses while `initiative-<i>` holds work `main`
-    lacks (`unlanded_commits`), e.g. Epics closed into it before its label was removed. That
-    check runs only while some `initiativeProfiles` entry sets `branch` (no call otherwise:
-    without one the control plane never closes an Epic into an initiative branch)."""
+    lacks (`unlanded_commits`), e.g. Epics closed into it before a profile opted it out."""
     initiative_issue, state = _initiative_epics_state(gh, initiative)
     if "epics" not in state:
         return state
-    if not resolve_initiative_profile(initiative_issue)["branch"] and any(
-            prof.get("branch") for prof in PIPELINE["initiativeProfiles"] or []):
+    if not resolve_initiative_profile(initiative_issue)["branch"]:
         stray = initiative_unlanded_commits(gh, initiative)
         if stray:
             branch = initiative_branch(initiative)
@@ -825,9 +895,9 @@ def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
                     "initiative_branch": {"branch": branch, "landed": False},
                     "unlanded_commits": len(stray),
                     "reason": f"`{branch}` holds {len(stray)}{'+' if len(stray) >= 250 else ''} "
-                              f"commit(s) not on main, but #{initiative} no longer matches an "
-                              f"`initiativeProfiles` entry with `branch: true` (its label was "
-                              f"removed?) -- restore the label, then `open-initiative-pr "
+                              f"commit(s) not on main, but an `initiativeProfiles` entry with "
+                              f"`branch: false` now opts #{initiative} out -- drop that "
+                              f"opt-out, then `open-initiative-pr "
                               f"{initiative} --repo-path <p>` and `merge-initiative-pr "
                               f"{initiative}`; or land (or deliberately delete) the branch by "
                               f"hand, then re-run"}
@@ -890,8 +960,7 @@ def cmd_close_initiative(gh: GitHub, initiative: int, repo_path: str = ".",
         return {"initiative": initiative, "closed": False, "missing_verification": missing,
                 "reason": f"closing verification incomplete: {'; '.join(missing)}"}
     extra: dict = {}
-    if (PIPELINE["initiativeProfiles"]
-            and resolve_initiative_profile(gh.issue_epic_info(initiative))["branch"]):
+    if resolve_initiative_profile(gh.issue_epic_info(initiative))["branch"]:
         extra["scaffolding"] = initiative_scaffolding(gh, initiative, repo_path, runner)
     gh.issue_close(initiative)
     # Also set here so a repo without the `issues: closed` Action still ends correct.
@@ -906,9 +975,9 @@ def _initiative_branch_refusal(gh: GitHub, initiative: int, action: str) -> tupl
     if not resolve_initiative_profile(initiative_issue)["branch"]:
         return initiative_issue, [], {
             "initiative": initiative, action: False,
-            "reason": f"Initiative #{initiative} has no initiative branch (no "
-                      f"`pipeline.initiativeProfiles` entry with `branch: true` matches its "
-                      f"labels) -- its Epics merged to main at their own close"}
+            "reason": f"Initiative #{initiative} has no initiative branch (an "
+                      f"`initiativeProfiles` entry with `branch: false` opts it out) -- its "
+                      f"Epics merged to main at their own close"}
     if "epics" not in state:
         return initiative_issue, [], {**{k: v for k, v in state.items() if k != "closeable"},
                                       action: False}

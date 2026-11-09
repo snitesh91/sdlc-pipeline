@@ -11,7 +11,8 @@ from .config import (
 from .github import GhError, GitHub, _default_runner, get_work_item_provider
 from .units import (
     _issue_info_lookup, check_placement, classify_unit_from_issue, current_stage, doc_root_for,
-    forget_initiative_hint, hint_doc_roots, is_epic, is_epic_standing, unit_initiative_profile,
+    bugs_epic_of_in, forget_initiative_hint, hint_doc_roots, initiative_of_in, is_epic,
+    is_epic_standing, unit_initiative_profile,
 )
 from .evidence import REVIEW_ROLES, integration_base, unit_branch
 from .run_state import _run_state_dir, note_in_flight, run_cap_reached, run_cap_state, run_completed
@@ -102,7 +103,7 @@ def _not_a_phased_epic(issues: dict, epic: int) -> Optional[str]:
     if not is_epic(entry):
         return f"#{epic} is not an Epic -- only a non-standing Epic has phase-Tasks"
     if is_epic_standing(entry):
-        return f"#{epic} is a standing epic -- it has no phase-Tasks or epic branch"
+        return f"#{epic} is a standing epic -- it has no phase-Tasks"
     return None
 
 
@@ -226,16 +227,28 @@ def cmd_open_arch_revision(gh: GitHub, epic: int, title: str, body: str,
 def cmd_file_closing_delta(gh: GitHub, epic: int, title: str, body: str,
                            priority: Optional[str] = None, effort: Optional[str] = None,
                            start: bool = False, repo_path: str = ".",
-                           runner: Runner = _default_runner) -> dict:
+                           runner: Runner = _default_runner, defer: bool = False) -> dict:
     """File a closing-run finding as a `Bug` child of a non-standing Epic. It stays `unstaged`
     (full lane) unless `start`, the operator-authorised close-blocker lane: then stage
-    `development` and `start-stage` it. Returns `delta_issue`."""
-    refusal = _not_a_phased_epic({i["number"]: i for i in gh.issue_list()}, epic)
+    `development` and `start-stage` it. `defer` files it under the Epic's Initiative's Bugs
+    Epic instead (fixed before initiative close). Returns `delta_issue` and `parent`."""
+    issues = {i["number"]: i for i in gh.issue_list()}
+    refusal = _not_a_phased_epic(issues, epic)
+    parent = epic
+    if defer:
+        initiative = initiative_of_in(issues, epic)
+        bugs = bugs_epic_of_in(issues, initiative["number"]) if initiative else None
+        refusal = ("--defer and --start conflict: a deferred bug waits for the Bugs Epic"
+                   if start else None if bugs else
+                   f"#{epic} has no Initiative with an open standing Bugs Epic -- file it "
+                   f"without --defer")
+        parent = bugs["number"] if bugs else epic
+        body = f"{body}\n\nDeferred from Epic #{epic}."
     if refusal:
         return {"epic": epic, "refused": True, "reason": refusal}
     seq = StepSequence()
     created = seq.run("create-issue", lambda: cmd_create_issue(
-        gh, title, body, epic, [], "Bug", priority, effort))
+        gh, title, body, parent, [], "Bug", priority, effort))
     number = (created or seq.steps.get("create-issue") or {}).get("issue")
     if created is None and number is not None and seq.failed_step == "create-issue":
         # create-issue left a half-made issue (a mid-create failure). Finish it in place with the
@@ -243,14 +256,14 @@ def cmd_file_closing_delta(gh: GitHub, epic: int, title: str, body: str,
         seq.failed_step, seq.ok, seq.error = None, True, None
         seq.completed.append("create-issue")
         created = seq.run("repair-issue", lambda: cmd_repair_issue(
-            gh, number, parent=epic, type_name="Bug", priority=priority, effort=effort))
+            gh, number, parent=parent, type_name="Bug", priority=priority, effort=effort))
     if start and created:
         seq.run("set-stage", lambda: cmd_set_stage(gh, number, "development"))
         seq.run("start-stage", lambda: cmd_start_stage(gh, number, "development", "issue",
                                                        repo_path, runner=runner))
     if start:
         seq.skip("set-stage", "start-stage")
-    return seq.report(epic=epic, delta_issue=number)
+    return seq.report(epic=epic, delta_issue=number, parent=parent)
 
 
 def cmd_finish_lld(gh: GitHub, lld_task: int, epic: int, repo_path: str = ".",
