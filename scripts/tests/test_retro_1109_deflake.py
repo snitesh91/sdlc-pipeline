@@ -87,8 +87,13 @@ def test_failed_only_reports_a_dispatch_error_and_posts_no_marker():
 
 # ---- apply_deflakes: the gate ----
 
-def _gh(runs):
+ONE_SPEC_LOG = _log("FAIL " + SPEC, "  ● plans a scan")
+
+
+def _gh(runs, logs=None):
     runner = ScriptedRunner({DISPATCH_RUNS_ARGV: json.dumps(runs)})
+    for job, out in (logs or {111: ONE_SPEC_LOG}).items():
+        runner.responses[_log_argv(job)] = out
     return s.GitHub(runner=runner), runner
 
 
@@ -98,6 +103,25 @@ def test_a_passing_deflake_run_counts_the_failing_suite_green():
     assert s.workflow_check_state(out, WF) == "passing"
     assert s.checks_status(out) == "passed"
     assert next(c for c in out if c["workflow"] == WF)["deflaked_specs"] == [SPEC]
+
+
+def test_the_gate_ignores_the_marker_spec_list_and_rereads_the_red_logs():
+    # Review M1: a marker naming 1 of 2 failed specs plus a dispatch of that 1 spec.
+    gh, _ = _gh([_run(f"deflake: {SPEC}")], {111: RED_LOG})
+    assert s.workflow_check_state(s.apply_deflakes(gh, _red(), [_marker((SPEC,))], HEAD),
+                                  WF) == "failing"
+    gh, _ = _gh([_run(f"deflake: src/a.it-spec.ts {SPEC}")], {111: RED_LOG})
+    assert s.workflow_check_state(s.apply_deflakes(gh, _red(), [_marker((SPEC,))], HEAD),
+                                  WF) == "passing"
+
+
+def test_a_second_red_job_keeps_the_workflow_red_unless_covered():
+    red = _red() + [{"name": "Integration Tests 2", "bucket": "fail", "link": _link(11, 112),
+                     "workflow": WF}]
+    gh, _ = _gh([_run(f"deflake: {SPEC}")], {111: ONE_SPEC_LOG, 112: _log("FAIL src/z.it-spec.ts")})
+    assert s.workflow_check_state(s.apply_deflakes(gh, red, [_marker()], HEAD), WF) == "failing"
+    gh, _ = _gh([_run(f"deflake: {SPEC}")], {111: ONE_SPEC_LOG, 112: _log("npm ERR! build failed")})
+    assert s.workflow_check_state(s.apply_deflakes(gh, red, [_marker()], HEAD), WF) == "failing"
 
 
 @pytest.mark.parametrize("runs", [

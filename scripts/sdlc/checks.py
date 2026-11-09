@@ -587,19 +587,36 @@ def failed_specs(log: str) -> list:
                    if m})
 
 
+def _red_job_specs(gh, checks: list, workflow: str) -> Optional[set]:
+    """The spec files `workflow`'s red jobs failed, re-read from their logs; None when any
+    red job names no spec (setup, build) or its log cannot be read."""
+    specs = set()
+    for check in checks:
+        if check.get("workflow", "") != workflow or not _is_failed_check(check):
+            continue
+        _, job = _check_run_and_job(check)
+        try:
+            found = failed_specs(gh.job_failed_log(job)) if job is not None else []
+        except GhError:
+            found = []
+        if not found:
+            return None
+        specs.update(found)
+    return specs
+
+
 def apply_deflakes(gh, checks: list, comments: list, head: Optional[str]) -> list:
     """`checks` with each failing workflow that has a passing deflake on `head` counted as
-    passing: a `sdlc:deflake` marker (rerun-checks --failed-only) for that workflow and head,
-    and a successful workflow_dispatch run of it on that head whose title lists every
-    marked spec. Fetches nothing unless such a marker exists; never raises.
+    passing. A `sdlc:deflake` marker for that workflow and head is only the pointer (no
+    fetch without one); its spec list is ignored. The gate re-reads the red jobs' failed
+    specs and needs a successful workflow_dispatch run on `head` whose `deflake: <specs>`
+    title covers all of them. A red job naming no spec keeps the workflow red. Never raises.
     shortcut: a full rerun of the red run after the deflake is not re-checked; read run
     timestamps if that happens."""
-    wanted = {}
-    for c in comments or []:
-        for m in _DEFLAKE_MARKER.finditer(c.get("body") or ""):
-            if m.group(2) == (head or "").lower() and \
-                    workflow_check_state(checks, m.group(1)) == "failing":
-                wanted[m.group(1)] = m.group(3).split(",")
+    pointed = {m.group(1) for c in comments or []
+               for m in _DEFLAKE_MARKER.finditer(c.get("body") or "")
+               if m.group(2) == (head or "").lower()}
+    wanted = [w for w in sorted(pointed) if workflow_check_state(checks, w) == "failing"]
     if not wanted:
         return checks
     try:
@@ -607,16 +624,20 @@ def apply_deflakes(gh, checks: list, comments: list, head: Optional[str]) -> lis
     except GhError:
         return checks
     out = checks
-    for workflow, specs in wanted.items():
+    for workflow in wanted:
+        specs = _red_job_specs(gh, checks, workflow)
+        if not specs:
+            continue
         run = next((r for r in runs if r.get("name") == workflow
                     and r.get("conclusion") == "success"
                     and (r.get("display_title") or "").startswith(DEFLAKE_TITLE_PREFIX)
-                    and set(specs) <= set(r["display_title"][len(DEFLAKE_TITLE_PREFIX):].split())),
+                    and specs <= set(r["display_title"][len(DEFLAKE_TITLE_PREFIX):].split())),
                    None)
         if run:
             out = [c for c in out if c.get("workflow", "") != workflow] + [
                 {"name": f"{workflow} (deflaked)", "state": "SUCCESS", "bucket": "pass",
-                 "link": run.get("html_url", ""), "workflow": workflow, "deflaked_specs": specs}]
+                 "link": run.get("html_url", ""), "workflow": workflow,
+                 "deflaked_specs": sorted(specs)}]
     return out
 
 
