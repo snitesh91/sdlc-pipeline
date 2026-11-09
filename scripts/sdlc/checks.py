@@ -356,7 +356,7 @@ def pr_stale_attestations(gh: WorkItemProvider, issue: int, pr: int) -> dict:
     comments = view.get("comments", [])
     base_ref = view.get("baseRefName")
     changed = gh.pr_files(pr)
-    checks = effective_checks(gh, pr)
+    checks = apply_deflakes(gh, effective_checks(gh, pr), comments, head)
     fresh = local_ci_suites_attested(comments, head)
     latest = _latest_attested_sha_by_suite(comments)
     stale, carried, passed_by_check = [], [], []
@@ -501,8 +501,9 @@ def _infra_hint(pr_number: int) -> str:
 
 
 def cmd_pr_checks(gh: GitHub, pr_number: int) -> dict:
-    checks = effective_checks(gh, pr_number)
     view = gh.pr_view(pr_number, "comments,headRefOid,baseRefName")
+    checks = apply_deflakes(gh, effective_checks(gh, pr_number), view.get("comments", []),
+                            view.get("headRefOid"))
     files = gh.pr_files(pr_number)
     # An epic PR into its Initiative's branch owes no deferred suite, as in close-epic.
     deferred: tuple = ()
@@ -556,10 +557,97 @@ def cmd_update_pr_body(gh: GitHub, pr: int, body_file: str) -> dict:
     return {"pr": pr, "updated": True, "chars": len(body), "kept_closing_lines": kept}
 
 
-def cmd_rerun_checks(gh: GitHub, pr_number: int) -> dict:
+# ---- deflake: re-run only a red suite's failed spec files on the same head ----
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_FAILED_SPEC_RE = re.compile(r"^\s*FAIL\s+(\S+\.(?:it-spec|spec|test)\.[cm]?[jt]sx?)\b")
+_DEFLAKE_MARKER = re.compile(
+    r'<!-- sdlc:deflake workflow="([^"]+)" sha=([0-9a-f]{40}) specs=(\S+) -->')
+DEFLAKE_TITLE_PREFIX = "deflake: "
+
+
+def failed_specs(log: str) -> list:
+    """The spec files a Jest/Vitest log reports as `FAIL <path>`, sorted, de-duplicated."""
+    return sorted({m.group(1) for raw in log.splitlines()
+                   for m in [_FAILED_SPEC_RE.match(_LOG_PREFIX_RE.sub("", _ANSI_RE.sub("", raw)))]
+                   if m})
+
+
+def apply_deflakes(gh, checks: list, comments: list, head: Optional[str]) -> list:
+    """`checks` with each failing workflow that has a passing deflake on `head` counted as
+    passing: a `sdlc:deflake` marker (rerun-checks --failed-only) for that workflow and head,
+    and a successful workflow_dispatch run of it on that head whose title lists every
+    marked spec. Fetches nothing unless such a marker exists; never raises.
+    shortcut: a full rerun of the red run after the deflake is not re-checked; read run
+    timestamps if that happens."""
+    wanted = {}
+    for c in comments or []:
+        for m in _DEFLAKE_MARKER.finditer(c.get("body") or ""):
+            if m.group(2) == (head or "").lower() and \
+                    workflow_check_state(checks, m.group(1)) == "failing":
+                wanted[m.group(1)] = m.group(3).split(",")
+    if not wanted:
+        return checks
+    try:
+        runs = gh.dispatch_runs(head)
+    except GhError:
+        return checks
+    out = checks
+    for workflow, specs in wanted.items():
+        run = next((r for r in runs if r.get("name") == workflow
+                    and r.get("conclusion") == "success"
+                    and (r.get("display_title") or "").startswith(DEFLAKE_TITLE_PREFIX)
+                    and set(specs) <= set(r["display_title"][len(DEFLAKE_TITLE_PREFIX):].split())),
+                   None)
+        if run:
+            out = [c for c in out if c.get("workflow", "") != workflow] + [
+                {"name": f"{workflow} (deflaked)", "state": "SUCCESS", "bucket": "pass",
+                 "link": run.get("html_url", ""), "workflow": workflow, "deflaked_specs": specs}]
+    return out
+
+
+def _deflake_failed_specs(gh: GitHub, pr_number: int) -> dict:
+    """`rerun-checks --failed-only`: per failing workflow, dispatch it on the PR's head branch
+    with only the spec files its red jobs failed, and record a `sdlc:deflake` marker on the
+    PR. A workflow whose failure names no spec file (setup, build) is `not_deflakable`."""
+    view = gh.pr_view(pr_number, "headRefOid,headRefName")
+    head, ref = view.get("headRefOid"), view.get("headRefName")
+    specs, unparsed = {}, set()
+    for check in gh.pr_checks(pr_number):
+        if not _is_failed_check(check):
+            continue
+        workflow = check.get("workflow") or check.get("name") or "?"
+        _, job = _check_run_and_job(check)
+        try:
+            found = failed_specs(gh.job_failed_log(job)) if job is not None else []
+        except GhError:
+            found = []
+        if not found:
+            unparsed.add(workflow)
+        specs.setdefault(workflow, set()).update(found)
+    deflake, failed = [], []
+    for workflow in sorted(set(specs) - unparsed):
+        listed = sorted(specs[workflow])
+        try:
+            gh.workflow_dispatch(workflow, ref, {"specs": " ".join(listed)})
+            gh.pr_comment(pr_number, (
+                f"Deflake: re-running only the failed spec files of **{workflow}** on "
+                f"{(head or '')[:7]}: {', '.join(listed)}. When the re-run passes, merge-pr "
+                f"counts the suite green; file one flake Task per spec.\n\n"
+                f'<!-- sdlc:deflake workflow="{workflow}" sha={head} specs={",".join(listed)} -->'))
+            deflake.append({"workflow": workflow, "specs": listed})
+        except GhError as e:
+            failed.append({"workflow": workflow, "error": str(e)})
+    return {"pr": pr_number, "head": head, "deflake": deflake,
+            "not_deflakable": sorted(unparsed), "failed": failed, "nothing_to_rerun": not specs}
+
+
+def cmd_rerun_checks(gh: GitHub, pr_number: int, failed_only: bool = False) -> dict:
     """Re-run the failed/cancelled jobs of every Actions run behind the PR head's failed
     checks (`gh run rerun <run> --failed`, once per run). A rerun that errors is reported in
-    `failed`, never raised; only failing to resolve the PR raises."""
+    `failed`, never raised; only failing to resolve the PR raises. `failed_only`: re-run
+    only the failed spec files instead (`_deflake_failed_specs`)."""
+    if failed_only:
+        return _deflake_failed_specs(gh, pr_number)
     head = gh.pr_view(pr_number, "headRefOid").get("headRefOid")
     runs = []
     for check in gh.pr_checks(pr_number):
@@ -625,7 +713,7 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
     # merge fail, never land a commit whose checks were not the ones read below.
     view = gh.pr_view(pr_number, "comments,headRefOid")
     head = view.get("headRefOid")
-    checks = effective_checks(gh, pr_number)
+    checks = apply_deflakes(gh, effective_checks(gh, pr_number), view.get("comments", []), head)
     files = gh.pr_files(pr_number)
     # `base` (integration_base) is the PR's base branch -- no extra field fetch needed.
     status, missing = merge_gate_status(files, checks, view.get("comments", []), head, base)

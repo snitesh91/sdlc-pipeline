@@ -456,7 +456,10 @@ def main(argv: Optional[list] = None) -> int:
                                                      a.body_file))
     p = sub.add_parser("rerun-checks")
     p.add_argument("pr", type=int)
-    p.set_defaults(func=lambda a: cmd_rerun_checks(get_work_item_provider(), a.pr))
+    p.add_argument("--failed-only", action="store_true",
+                   help="Re-run only the failed spec files (deflake), not the whole failed job")
+    p.set_defaults(func=lambda a: cmd_rerun_checks(get_work_item_provider(), a.pr,
+                                                   failed_only=a.failed_only))
     p = sub.add_parser("merge-pr")
     p.add_argument("pr", type=int)
     p.add_argument("--issue", type=int, required=True)

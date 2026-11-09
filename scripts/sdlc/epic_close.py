@@ -153,6 +153,7 @@ def _epic_suite_evidence(gh, branch: str, children: list, epic_files: list,
         # A reconcile merge whose incoming files miss a suite's paths keeps that suite's
         # earlier pass (merge-pr's carry rule), so an independent main never re-requires CI.
         checks = effective_checks(gh, epic_pr) if carry_forward else gh.pr_checks(epic_pr)
+        checks = apply_deflakes(gh, checks, view.get("comments", []), view.get("headRefOid"))
     chain = None
     suites, unattested, awaiting, missing, breaks, carried = {}, [], [], [], {}, set()
     for spec in required_workflows(base):
@@ -994,7 +995,7 @@ def _initiative_pr_evidence(gh: GitHub, initiative_issue: dict, pr: int) -> dict
     view = gh.pr_view(pr, "comments,headRefOid")
     head = view.get("headRefOid")
     comments = view.get("comments", [])
-    checks = gh.pr_checks(pr)
+    checks = apply_deflakes(gh, gh.pr_checks(pr), comments, head)
     files = gh.pr_files(pr)
     status, missing = merge_gate_status(files, checks, comments, head, "main")
     attested = local_ci_suites_attested(comments, head)
@@ -1127,7 +1128,8 @@ from .design_gates import MergeConflict, cmd_sync_branch, git_reconcile_branch  
 from .checks import (  # noqa: E402
     CLOUD_ATTESTABLE_SUITES, _MISSING_WORKFLOW_HINT, _is_failed_check,
     _latest_attested_sha_by_suite, _suite_reattest_needed, _with_uncovered,
-    _workflow_applies_to_base, _workflow_covers, effective_checks, enrich_failed_checks,
+    _workflow_applies_to_base, _workflow_covers, apply_deflakes, effective_checks,
+    enrich_failed_checks,
     merge_gate_status, required_workflows, suite_not_attestable, touches_pipeline_config,
     workflow_check_state,
 )
