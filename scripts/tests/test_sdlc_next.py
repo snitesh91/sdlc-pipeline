@@ -989,6 +989,8 @@ def test_handoff_to_pr_review_posts_marker_without_referencing_a_stage_doc():
                              "owner/repo", "--body")] = ""
     runner.prefix_responses[("gh", "issue", "view", "42")] = '{"comments": []}'
     runner.prefix_responses[("gh", "pr", "checks", "77")] = "[]"
+    runner.prefix_responses[("gh", "api", "graphql")] = json.dumps(
+        {"data": {"repository": {"issue": {"issueFieldValues": {"nodes": []}}}}})
     gh = GitHub(runner=runner)
     summary = "142 passed, 0 failed.\n\n### Acceptance criteria coverage\n| AC | test |"
     result = cmd_handoff_to_pr_review(gh, 42, 77, summary)

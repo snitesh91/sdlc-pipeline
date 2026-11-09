@@ -59,6 +59,10 @@ def cmd_handoff_to_pr_review(gh: GitHub, issue: int, pr: int, summary: str) -> d
              for key, src in (("checks_pending", "pending"), ("infra_suspect", "infra_suspect"))
              if states and states[src]}
     text = f"✅ Development complete. PR #{pr} is queued for `pr-review`.\n\n{summary.strip()}"
+    # A rework round re-entered via `set-stage development` has no open-dev-pr to move the
+    # Stage on; development's exit owns it, posted or already_posted (#5315).
+    if _stage_and_status(gh, issue)[0] == "development":
+        gh.set_stage_field(issue, "pr-review")
     if _handoff_already_posted(gh, issue, text):
         return {"issue": issue, "pr": pr, "queued_for": "pr-review", "already_posted": True, **extra}
     timestamp = _utc_now_marker()
@@ -283,8 +287,8 @@ def parked_for_epic_regate(gh: WorkItemProvider, issue: int) -> bool:
 def cmd_post_comment(gh: WorkItemProvider, issue: int, role: str, body_file: str) -> dict:
     """Post a stage's own comment on its unit, tagged with a `role-comment` marker that
     `subagent_stop` looks for. Refused unless `issue` is at the role's Stage and claimed
-    (in-progress, its gate open while the stage revises on feedback, or parked `todo` by
-    `pause-for-epic-regate`). Over the role's cap (2,000 chars; 6,000 for a review) nothing
+    (in-progress, its gate open while the stage revises on feedback, parked `todo` by
+    `pause-for-epic-regate`, or `todo` at Stage pr-review for `pr-review`). Over the role's cap (2,000 chars; 6,000 for a review) nothing
     is posted: `refused` with the length and the cap."""
     if role not in POST_COMMENT_ROLES:
         raise GhError(f"role must be one of {POST_COMMENT_ROLES}, got {role!r}")
@@ -306,8 +310,10 @@ def cmd_post_comment(gh: WorkItemProvider, issue: int, role: str, body_file: str
                           f"control plane never truncates or splits a comment"}
     stage, status = _stage_and_status(gh, issue)
     stages = POST_COMMENT_STAGES.get(role, (role,))
+    # pr-review never claims: `transition` leaves its unit `todo` at Stage pr-review (#5573).
     claimed = status in ("in-progress", *GATE_PENDING_STATUSES) or (
-        status == "todo" and stage in stages and parked_for_epic_regate(gh, issue))
+        status == "todo" and stage in stages
+        and (role == "pr-review" or parked_for_epic_regate(gh, issue)))
     if stage not in stages or not claimed:
         raise GhError(f"#{issue} is at Stage {stage!r} / status {status!r}, not claimed at "
                       f"{role!r} -- post-comment only serves the stage that holds the claim")

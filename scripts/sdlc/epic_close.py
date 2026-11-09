@@ -654,9 +654,10 @@ def _label_ci_local(gh, pr: int) -> None:
 
 def _mark_ci_local(gh, pr: int) -> None:
     """A reused PR opened without the marker: add it to the body (the next push's
-    `synchronize` payload carries it), then label it."""
-    body = gh.pr_view(pr, "body").get("body") or ""
-    if CI_LOCAL_MARKER not in body:
+    `synchronize` payload carries it), then label it. The repo's gate is `endsWith`, so
+    only a marker on the body's last line counts; a quoted one mid-body does not."""
+    body = (gh.pr_view(pr, "body").get("body") or "").rstrip()
+    if not body.endswith(CI_LOCAL_MARKER):
         gh.pr_edit_body(pr, f"{body}\n\n{CI_LOCAL_MARKER}".lstrip())
         _label_ci_local(gh, pr)
 
