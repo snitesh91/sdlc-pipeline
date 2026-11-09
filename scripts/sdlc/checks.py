@@ -444,25 +444,40 @@ def enrich_failed_checks(gh, checks: list) -> bool:
     return any_suspect
 
 
-# Lines of a failed-step log that name a failure; everything else (install, build chatter) is dropped.
+# Test-runner failure markers only: a passing test's logger ERROR line is not a failure (#5273).
+# jest `●` test headers (not `● Console`), `Tests: N failed`, jest/vitest/playwright FAIL and
+# cross lines, assertion diffs, and the step's `##[error]` line.
 _FAILURE_LINE_RE = re.compile(
-    r"\bFAIL(ED)?\b|✕|✗|●|\berror\b|assert|Expected|Received|\bexpect\(|Traceback|"
-    r"Exception|exit code [1-9]|ENOSPC|Timeout", re.IGNORECASE)
+    r"●(?! Console)|^\s*Tests?:.*\b\d+ failed|^\s*(FAIL|✕|✗|×|✘)\s|^\s*\d+\) \[|"
+    r"^\s*(Expected|Received)\b|##\[error\]|ENOSPC")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _LOG_PREFIX_RE = re.compile(r"^[^\t]*\t[^\t]*\t(?:\d{4}-\d\d-\d\dT[\d:.]+Z ?)?")
+_FALLBACK_TAIL_LINES = 10
 CI_SUMMARY_LINES_PER_JOB = 25
 CI_SUMMARY_CHAR_CAP = 4000
 
 
 def _failure_lines(log: str) -> list:
     """The failure-naming lines of a `--log-failed` log, job/step/timestamp prefix stripped,
-    de-duplicated in order."""
-    seen, out = set(), []
+    de-duplicated in order.
+    When no test-runner line matches (a `##[error]` line alone names no test), the failing
+    step's name and its last 10 lines follow."""
+    seen, out, tail, step = set(), [], [], None
     for raw in log.splitlines():
+        raw = _ANSI_RE.sub("", raw)
         line = _LOG_PREFIX_RE.sub("", raw).rstrip()
-        if line.strip() and _FAILURE_LINE_RE.search(line) and line not in seen:
+        if not line.strip():
+            continue
+        parts = raw.split("\t")
+        step = parts[1] if len(parts) > 2 else step
+        tail = (tail + [line[:300]])[-_FALLBACK_TAIL_LINES:]
+        if _FAILURE_LINE_RE.search(line) and line not in seen:
             seen.add(line)
             out.append(line[:300])
-    return out
+    if not tail or any("##[error]" not in l for l in out):
+        return out
+    return out + [f"(no test-runner failure line; failing step: {step or 'unknown'}, "
+                  f"last lines)"] + [l for l in tail if l not in seen]
 
 
 def cmd_ci_failure_summary(gh: GitHub, pr_number: int) -> dict:

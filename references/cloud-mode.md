@@ -105,8 +105,9 @@ PR into `main`. Task PRs into `epic-<n>` run no full suites.
 
 `close-epic` and `open-dev-pr` put `<!-- sdlc:ci-local -->` on the PR body's last line and add
 the label `ci:local` for visibility (`open-dev-pr` returns `ci_local: true`). The repo's PR jobs
-gate on `if: ${{ !contains(github.event.pull_request.body, '<!-- sdlc:ci-local -->') }}`: the
-body is in the `opened` and `synchronize` payloads, a label added after creation is not.
+gate on `if: ${{ !endsWith(github.event.pull_request.body, '<!-- sdlc:ci-local -->') }}`: the
+body is in the `opened` and `synchronize` payloads, a label added after creation is not. Never
+`contains`: a PR body that quotes the marker would skip every suite.
 
 **Epic PR:**
 
