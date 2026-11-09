@@ -16,7 +16,8 @@ from .github import (
 )
 from .units import (
     PLACEMENTS, classify_unit_from_issue, cloud_label, cloud_skips_local_cleanup, current_stage,
-    epic_base_in, has_label, is_epic, is_initiative, label_names, local_label, pipeline_status,
+    epic_base_in, has_label, initiative_branch_possible, is_epic, is_initiative, label_names,
+    local_label, pipeline_status,
     sort_key, task_local_reason,
 )
 from .evidence import _NEEDS_HUMAN_REASON, integration_base, integration_base_in, unit_branch
@@ -358,6 +359,8 @@ def _unit_of_branch(branch: Optional[str]) -> Optional[tuple]:
     if not m:
         return None
     unit = "epic" if m.group("epic") else "initiative" if m.group("initiative") else "issue"
+    if unit == "initiative" and not initiative_branch_possible():
+        return None  # every Initiative opted out: an `initiative-<n>` branch is not the pipeline's
     return (unit, int(m.group("n")))
 
 

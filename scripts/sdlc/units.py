@@ -125,6 +125,18 @@ def resolve_initiative_profile(initiative_issue: Optional[dict]) -> dict:
     return merged
 
 
+def initiative_branch_possible() -> bool:
+    """Whether any Initiative can own `initiative-<i>`: False only when a `"*"` profile opts
+    every Initiative out before any profile grants a branch. False lets callers skip lookups."""
+    default = _INITIATIVE_PROFILE_DEFAULTS["branch"]
+    for prof in PIPELINE["initiativeProfiles"] or []:
+        if prof.get("branch", default):
+            return True
+        if prof.get("match") == "*":
+            return False
+    return default
+
+
 def initiative_branch(initiative: int) -> str:
     """An opted-in Initiative's long-lived branch (default `initiative-<n>`)."""
     return f"{INITIATIVE_BRANCH_PREFIX}{initiative}"
@@ -182,16 +194,20 @@ def epic_base_in(issues: dict, epic: int) -> str:
 
 
 def epic_base(gh: "WorkItemProvider", epic: int, issues: Optional[list] = None) -> str:
-    """`epic_base_in`, reading the issue list when `issues` is not given. A failed
-    issue-list read raises: it never falls back to `main` (nor to a branch)."""
+    """`epic_base_in`, reading the issue list when `issues` is not given; `main`, looking
+    nothing up, when no Initiative can own a branch. A failed issue-list read raises: it never
+    falls back to `main` (nor to a branch)."""
+    if not initiative_branch_possible():
+        return "main"
     return epic_base_in({i["number"]: i for i in (issues if issues is not None
                                                   else gh.issue_list())}, epic)
 
 
 def unit_initiative_profile(gh: Optional["WorkItemProvider"], number: int) -> dict:
     """The resolved Initiative profile governing unit `number` (`initiative`: its number or
-    None), read up its ancestry; the defaults, looking nothing up, for no unit."""
-    if number is None:
+    None), read up its ancestry; the defaults, looking nothing up, for no unit or when no
+    profile is configured and no Initiative can own a branch."""
+    if number is None or not (PIPELINE["initiativeProfiles"] or initiative_branch_possible()):
         return {**resolve_initiative_profile(None), "initiative": None}
     gh = gh or get_work_item_provider()
     chain, n = [], int(number)

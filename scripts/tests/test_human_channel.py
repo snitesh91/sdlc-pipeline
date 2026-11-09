@@ -81,11 +81,12 @@ def test_record_operator_answer_refuses_empty_and_oversized_text(monkeypatch):
 # --- approve-gate --------------------------------------------------------------------------------
 
 def _standing_gate(repo):
-    """A standing child #91 at an open Gate B (`issue-91` -> main), PR labelled sdlc:gate."""
+    """A standing child #91 at an open Gate B (`issue-91` -> epic-90), PR labelled sdlc:gate."""
     gh = GateGh([{"number": 90, "labels": ["type:epic", "epic:standing"]},
                  {"number": 91, "labels": ["type:task"], "parent": 90, "stage": "architecture",
                   "status": "in-progress"}])
     gh.repo = repo
+    _push_doc_branch(repo, "epic-90", "epic-90.txt", "standing epic branch\n")
     _push_doc_branch(repo, "issue-91", f"{DOC}/issue-91/architecture.md", "# arch\n")
     pr = s.cmd_open_gate(gh, str(repo), 91, "Fix it", "architecture.md", "development",
                          "x")["gate_pr"]

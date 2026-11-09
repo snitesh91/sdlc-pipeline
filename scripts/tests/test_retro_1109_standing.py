@@ -14,6 +14,8 @@ OPT_OUT = {"name": "plain", "match": {"label": "initiative:plain"}, "branch": Fa
 @pytest.fixture(autouse=True)
 def runs_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("SDLC_RUNS_DIR", str(tmp_path / "runs"))
+    from sdlc.config import _INITIATIVE_PROFILE_DEFAULTS
+    monkeypatch.setitem(_INITIATIVE_PROFILE_DEFAULTS, "branch", True)  # the shipped default
     monkeypatch.setitem(s.PIPELINE, "initiativeProfiles", [OPT_OUT])
 
 

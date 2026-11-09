@@ -297,7 +297,7 @@ def test_open_gate_refuses_when_the_design_pr_was_never_opened(repo):
         s.cmd_open_gate(gh, str(repo), 10, "t", "architecture.md", "development", "x")
 
 
-def test_open_gate_still_opens_a_main_pr_for_a_roadmap_task_and_a_standing_child(repo):
+def test_open_gate_opens_a_main_pr_for_a_roadmap_task_and_an_epic_pr_for_a_standing_child(repo):
     gh = FakeGh([{"number": 6, "labels": ["type:initiative"]},
                  {"number": 7, "labels": ["type:task"], "parent": 6, "stage": "product"},
                  {"number": 90, "labels": ["type:epic", "epic:standing"]},
@@ -309,9 +309,9 @@ def test_open_gate_still_opens_a_main_pr_for_a_roadmap_task_and_a_standing_child
                               "architecture", "x")
     standing = s.cmd_open_gate(gh, str(repo), 91, "Fix it", "architecture.md", "development", "x")
 
-    assert (roadmap["base"], standing["base"]) == ("main", "main")
-    assert {gh.prs[roadmap["gate_pr"]]["baseRefName"],
-            gh.prs[standing["gate_pr"]]["baseRefName"]} == {"main"}
+    assert (roadmap["base"], standing["base"]) == ("main", "epic-90")
+    assert (gh.prs[roadmap["gate_pr"]]["baseRefName"],
+            gh.prs[standing["gate_pr"]]["baseRefName"]) == ("main", "epic-90")
     assert f"{DOC}/issue-91/architecture.md" in gh.comments_on(91)[-1]
 
 

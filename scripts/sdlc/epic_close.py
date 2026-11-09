@@ -7,7 +7,8 @@ from typing import Callable, Optional
 from .config import PIPELINE, Runner, all_doc_roots, issue_branch
 from .github import GhError, GitHub, _default_runner, _utc_now_marker
 from .units import (
-    epic_base, initiative_branch, initiative_of_in, is_epic, is_initiative,
+    epic_base, initiative_branch, initiative_branch_possible, initiative_of_in, is_epic,
+    is_initiative,
     resolve_initiative_profile, resolve_profile,
 )
 from .evidence import (
@@ -887,7 +888,7 @@ def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
     initiative_issue, state = _initiative_epics_state(gh, initiative)
     if "epics" not in state:
         return state
-    if not resolve_initiative_profile(initiative_issue)["branch"]:
+    if not resolve_initiative_profile(initiative_issue)["branch"] and initiative_branch_possible():
         stray = initiative_unlanded_commits(gh, initiative)
         if stray:
             branch = initiative_branch(initiative)
@@ -895,9 +896,10 @@ def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
                     "initiative_branch": {"branch": branch, "landed": False},
                     "unlanded_commits": len(stray),
                     "reason": f"`{branch}` holds {len(stray)}{'+' if len(stray) >= 250 else ''} "
-                              f"commit(s) not on main, but an `initiativeProfiles` entry with "
-                              f"`branch: false` now opts #{initiative} out -- drop that "
-                              f"opt-out, then `open-initiative-pr "
+                              f"commit(s) not on main, but #{initiative} no longer resolves to "
+                              f"an initiative branch (its profile label was removed, or a "
+                              f"`branch: false` profile opts it out) -- restore the label or "
+                              f"drop the opt-out, then `open-initiative-pr "
                               f"{initiative} --repo-path <p>` and `merge-initiative-pr "
                               f"{initiative}`; or land (or deliberately delete) the branch by "
                               f"hand, then re-run"}
@@ -960,7 +962,8 @@ def cmd_close_initiative(gh: GitHub, initiative: int, repo_path: str = ".",
         return {"initiative": initiative, "closed": False, "missing_verification": missing,
                 "reason": f"closing verification incomplete: {'; '.join(missing)}"}
     extra: dict = {}
-    if resolve_initiative_profile(gh.issue_epic_info(initiative))["branch"]:
+    if (initiative_branch_possible()
+            and resolve_initiative_profile(gh.issue_epic_info(initiative))["branch"]):
         extra["scaffolding"] = initiative_scaffolding(gh, initiative, repo_path, runner)
     gh.issue_close(initiative)
     # Also set here so a repo without the `issues: closed` Action still ends correct.

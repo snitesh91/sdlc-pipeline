@@ -55,9 +55,18 @@ class ScriptedRunner:
         for prefix, response in self.prefix_responses.items():
             if tuple(argv[:len(prefix)]) == prefix:
                 return response
+        if key not in self.responses and _is_epic_info_query(argv):
+            # v0.4.5: a non-phase gate reads its unit's parent; these fakes model parentless ones.
+            return json.dumps({"data": {"repository": {"issue": {
+                "issueType": None, "parent": None, "labels": {"nodes": []}}}}})
         if key not in self.responses:
             raise AssertionError(f"unexpected gh invocation: {argv}")
         return self.responses[key]
+
+
+def _is_epic_info_query(argv: list) -> bool:
+    return (argv[:4] == ["gh", "api", "graphql", "-f"] and len(argv) == 5
+            and "issueType { name }\n    parent { number }\n    labels" in argv[4])
 
 
 _NO_UNIT_WORKTREE = {("git", "-C", ".", "worktree", "list", "--porcelain"):
@@ -2070,11 +2079,11 @@ def test_pass_gate_reconciles_comments_and_reclaims_next_stage():
         node_id_argv: json.dumps({"data": {"repository": {"issue": {"id": "ISSUE_9"}}}}),
         stage_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
         status_mutation_argv: json.dumps({"data": {"updateIssueFieldValue": {"issue": {"number": 9}}}}),
+        # Parentless (v0.4.5: a standing child's gate reconciles with epic-<n>), so #9 is
+        # not a phase-Task, reconciles with main and claims onward.
         epic_check_argv: json.dumps({"data": {"repository": {"issue": {
-            "issueType": {"name": "Task"}, "parent": {"number": 92}, "labels": {"nodes": []},
+            "issueType": {"name": "Task"}, "parent": None, "labels": {"nodes": []},
         }}}}),
-        # The parent is a standing epic, so #9 is not a phase-Task and claims onward.
-        **dict([_epic_check(92, labels=("epic:standing",))]),
     })
     gh_runner.prefix_responses = {
         ("gh", "issue", "comment", "9"): "",

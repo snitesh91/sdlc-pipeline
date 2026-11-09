@@ -5,7 +5,7 @@ import re
 from typing import Callable, Optional
 
 from .config import (
-    EPIC_BRANCH_PREFIX, GATE_PENDING_STATUSES, ISSUE_BRANCH_PREFIX, PIPELINE,
+    EPIC_BRANCH_PREFIX, GATE_PENDING_STATUSES, INITIATIVE_BRANCH_PREFIX, ISSUE_BRANCH_PREFIX, PIPELINE,
     PIPELINE_STATUS_FIELD_NAMES, Runner, STAGE_AFTER_GATE, issue_branch,
 )
 from .github import GhError, GitHub, _default_runner, _utc_now_marker
@@ -18,7 +18,10 @@ from .design_gates import _merge_design_pr_of, find_design_pr, git_reconcile_bra
 
 def _gate_base(gh: GitHub, issue: int) -> str:
     """Where a non-phase gate PR merges: the unit's `integration_base` (a standing child's
-    `epic-<n>`, an Initiative child's `initiative-<i>`, else `main`)."""
+    `epic-<n>`, an Initiative child's `initiative-<i>`, else `main`); a parentless issue's is
+    `main` with no issue-list read."""
+    if not gh.issue_epic_info(issue).get("parent"):
+        return "main"
     return integration_base(gh, issue)
 
 
@@ -329,12 +332,15 @@ def _match_open_gate(gh: GitHub, pr: dict, pr_number: int) -> tuple:
         raise _NotAGate(f"PR #{pr_number} head branch {pr.get('headRefName')!r} is not "
                          f"an issue-<n> branch")
     issue_number = int(m.group("issue_n"))
+    # main, or an integration branch: a design PR's or a standing child's `epic-<n>`, or an
+    # Initiative child's `initiative-<i>`. The marker check below pins the exact PR.
+    base = pr.get("baseRefName") or ""
+    if base != "main" and not base.startswith((EPIC_BRANCH_PREFIX, INITIATIVE_BRANCH_PREFIX)):
+        raise _NotAGate(f"PR #{pr_number} base is {base!r}, not main or an integration branch")
     design = _DESIGN_PR_BODY_MARKER.search(pr.get("body") or "")
-    if pr.get("baseRefName") != "main" and not (
-            design and int(design.group(2)) == issue_number
-            and (pr.get("baseRefName") or "").startswith(EPIC_BRANCH_PREFIX)):
-        raise _NotAGate(f"PR #{pr_number} base is {pr.get('baseRefName')!r}, not main or the "
-                        f"epic branch of a design PR")
+    if design and int(design.group(2)) != issue_number:
+        raise _NotAGate(f"PR #{pr_number}'s design-pr marker names #{design.group(2)}, not "
+                        f"#{issue_number}")
 
     if _CLOSES_ISSUE_RE.search(pr.get("body") or ""):
         raise _NotAGate(f"PR #{pr_number} body contains 'Closes #' -- this is the "
