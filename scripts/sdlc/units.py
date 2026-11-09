@@ -156,20 +156,29 @@ def initiative_of_in(issues: dict, number: int) -> Optional[dict]:
     return None
 
 
+# Written into the Bugs Epic's body at creation; the only thing that marks it (other standing
+# child Epics of an Initiative are ordinary ones).
+BUGS_EPIC_MARKER = "<!-- sdlc:bugs-epic -->"
+
+
+def is_bugs_epic(issue: dict) -> bool:
+    return is_epic(issue) and BUGS_EPIC_MARKER in (issue.get("body") or "")
+
+
 def bugs_epic_of_in(issues: dict, initiative: int) -> Optional[dict]:
-    """The Initiative's Bugs Epic: its lowest-numbered open standing child Epic, or None."""
-    found = [i for i in issues.values() if i["state"] == "OPEN" and is_epic(i)
-             and (i.get("parent") or {}).get("number") == initiative and is_epic_standing(i)]
+    """The Initiative's open Bugs Epic (body marker), or None."""
+    found = [i for i in issues.values() if i["state"] == "OPEN" and is_bugs_epic(i)
+             and (i.get("parent") or {}).get("number") == initiative]
     return min(found, key=lambda i: i["number"]) if found else None
 
 
 def bugs_epic_due(issues: dict, epic: dict) -> bool:
-    """`epic` is a standing Epic under an Initiative (its Bugs Epic) whose other cut Epics are
-    all closed: it runs, and closes, only then."""
+    """`epic` is its Initiative's Bugs Epic and every other cut Epic is closed: it runs, and
+    closes, only then."""
     initiative = (epic.get("parent") or {}).get("number")
-    if not is_initiative(issues.get(initiative) or {}):
+    if not is_bugs_epic(epic) or not is_initiative(issues.get(initiative) or {}):
         return False
-    return not any(i["state"] != "CLOSED" and is_epic(i) and not is_epic_standing(i)
+    return not any(i["state"] != "CLOSED" and is_epic(i) and i["number"] != epic["number"]
                    and (i.get("parent") or {}).get("number") == initiative
                    for i in issues.values())
 

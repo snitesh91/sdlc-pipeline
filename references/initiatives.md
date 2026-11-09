@@ -40,18 +40,18 @@ and cut it into Epics:
   The Initiative loop reads only these edges.
 - Do not cut phase-Tasks by hand. The loop returns `cut-phase-tasks` for each Epic when it
   becomes runnable.
-- **Cut the Bugs Epic with the others** (next section).
+- The Bugs Epic is created for you (next section).
 
 ## The Bugs Epic
 
-Every Initiative has one standing Epic, its Bugs Epic. It holds the bugs any of its Epics
+Every Initiative has one Bugs Epic, a standing Epic whose body carries
+`<!-- sdlc:bugs-epic -->`. Only that marker identifies it: other standing child Epics are
+ordinary Epics. It holds the bugs any of its Epics
 find that can wait (`file-closing-delta <epic> --defer`; the fix-now-or-defer rule is in
-`references/epics.md`, "Finishing the close"). Create it when you cut the Epics:
-
-```bash
-python3 "$SDLC" create-issue --parent <initiative-n> --type Epic --title "Bugs: <initiative title>" \
-  --body "Deferred bugs of Initiative #<i>; fixed before initiative close." --label epic:standing
-```
+`references/epics.md`, "Finishing the close"). `next-action <initiative>` creates it
+(`Bugs: <initiative title>`, `bugs_epic_created`) at the first call that cuts or runs an Epic,
+engineering-driven Initiatives included. It never makes a second one: a marked child Epic, open
+or closed, counts. Never edit the marker out.
 
 - Its children branch from and merge into its `epic-<n>`, like any Epic's.
 - **It runs last.** The Initiative loop skips it while a sibling Epic is open.
