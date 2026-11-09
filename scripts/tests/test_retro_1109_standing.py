@@ -202,3 +202,61 @@ def test_a_marked_bugs_epic_is_found_open_or_closed():
     gh = _initiative()
     gh.issues[8]["state"] = "CLOSED"
     assert "bugs_epic_created" not in s.decide_next_action(gh, 6)
+
+
+# --- review fixes (shipped branch default on, via the autouse fixture) ---------------------
+
+def _rtb_child_with_main_pr():
+    """#5264-shaped: a standing child whose PR was opened into main before v0.4.5."""
+    gh = FakeGh([{"number": 30, "labels": ["type:epic", STANDING], "title": "RTB"},
+                 {"number": 31, "labels": ["type:task"], "parent": 30, "stage": "development",
+                  "status": "in-progress"}])
+    pr = gh.pr_create(base="main", head="issue-31", title="t", body="Closes #31")
+    return gh, pr
+
+
+def test_merge_pr_refuses_a_pr_whose_base_is_not_the_integration_base():
+    """Regression (B1): the PR into main would have squashed with epic-30's (empty) suites."""
+    gh, pr = _rtb_child_with_main_pr()
+    out = s.cmd_merge_pr(gh, pr, 31)
+    assert out["merged"] is False and out["pr_base"] == "main" and out["base"] == "epic-30"
+    assert "retarget-pr 31" in out["reason"] and gh.merges == []
+
+
+def test_retarget_pr_points_the_pr_at_its_epic_branch(monkeypatch):
+    """Positive control: retarget-pr stands the base up and moves the PR; then merge-pr gets
+    past the base check (it stops later, on the missing pipeline evidence)."""
+    import sdlc.dev_pr as dev_pr
+    gh, pr = _rtb_child_with_main_pr()
+    stood_up = []
+    monkeypatch.setattr(dev_pr, "ensure_integration_base",
+                        lambda gh_, repo, base, runner: stood_up.append(base))
+    out = s.cmd_retarget_pr(gh, 31)
+    assert out["retargeted"] is True and gh.prs[pr]["baseRefName"] == "epic-30"
+    assert stood_up == ["epic-30"]
+    assert s.cmd_retarget_pr(gh, 31)["retargeted"] is False
+    assert "pr_base" not in s.cmd_merge_pr(gh, pr, 31)
+
+
+def test_land_epic_refuses_while_a_pr_targets_the_epic_branch():
+    """Regression (B2): merging epic-30 deletes it and retargets open child PRs to main."""
+    gh, calls = _rtb()
+    gh.prs_into_branch = lambda base: [{"number": 55, "headRefName": "issue-32"}]
+    out = s.cmd_land_epic(gh, 30, runner=lambda argv: "")
+    assert out["landed"] is False and out["open_prs"] == [55] and calls["merged"] == []
+
+
+def test_check_epics_closeable_flags_an_ordinary_standing_epic_under_an_initiative():
+    """Regression (M2, #5570): a bug-area standing Epic whose children closed gets a close path;
+    the marked Bugs Epic still waits for it."""
+    gh = _initiative({"number": 12, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
+    gh.issues[9]["labels"] = ["type:epic", STANDING]
+    out = s.cmd_check_epics_closeable(gh)
+    assert [e["epic"] for e in out["closeable_epics"]] == [9]
+
+
+def test_check_epics_closeable_never_flags_a_long_lived_standing_epic():
+    """Positive control: an RTB Epic with no Initiative lands, it never closes."""
+    gh = FakeGh([{"number": 30, "labels": ["type:epic", STANDING], "title": "RTB"},
+                 {"number": 31, "labels": ["type:task"], "parent": 30, "state": "CLOSED"}])
+    assert s.cmd_check_epics_closeable(gh)["closeable_epics"] == []

@@ -701,6 +701,14 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
         return _finalize_merged_pr(gh, pr_number, issue, repo_path, integration_base(gh, issue),
                                    gh.pr_files(pr_number), {"recovered": True}, run_id=run_id)
     base = integration_base(gh, issue)
+    pr_base = gh.pr_view(pr_number, fields="baseRefName").get("baseRefName")
+    if pr_base and pr_base != base:
+        # e.g. a standing child's PR opened into main before v0.4.5 gave its Epic `epic-<n>`.
+        return {"pr": pr_number, "issue": issue, "merged": False, "pr_base": pr_base,
+                "base": base,
+                "reason": f"PR #{pr_number} targets `{pr_base}` but #{issue} integrates into "
+                          f"`{base}` -- run `retarget-pr {issue} --repo-path <p>`, then "
+                          f"`prepare-rework {issue}` and re-run merge-pr"}
     behind = gh.branch_behind_by(issue_branch(issue), base=base)
     carried_forward = {}
     if behind:

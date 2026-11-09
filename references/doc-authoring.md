@@ -27,7 +27,7 @@ A design stage commits its doc on branch `issue-<n>` at one path. An Epic's arch
 - Anchor a citation to a heading, an exact test title or a grep-able quote. A line number is only a hint. In a shipped doc, use the quote alone.
 - Cite only files you opened in this session.
 - Before you resolve a doc from a branch, run `git fetch origin`. State the ref you used.
-- See a branch's changes with `git diff origin/<base>...<branch>` (three dots). `<base>` is `epic-<e>` for a child of a non-standing Epic, else `main`.
+- See a branch's changes with `git diff origin/<base>...<branch>` (three dots). `<base>` is `epic-<e>` for a child of any Epic, standing or not, else `main` (`integration_base`).
 - A stale citation in a doc about to merge is a real finding.
 - After `sync-branch` brings in a sibling's files that your doc cites, re-check those citations.
 - Run "Attribution is falsifiable" (`references/stage-playbooks.md`) before every handoff.

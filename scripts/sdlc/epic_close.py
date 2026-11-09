@@ -582,6 +582,14 @@ def cmd_land_epic(gh: GitHub, epic: int, repo_path: str = ".",
                 "reason": f"#{epic} sits under an Initiative -- it closes into the initiative "
                           f"branch with close-epic once its sibling Epics closed"}
     branch, base = epic_branch(epic), "main"
+    # The merge deletes `epic-<n>` (delete_branch_on_merge) and GitHub retargets open child
+    # PRs to main: land only between children.
+    into = sorted(p["number"] for p in gh.prs_into_branch(branch))
+    if into:
+        return {"epic": epic, "landed": False, "branch": branch, "open_prs": into,
+                "reason": f"{len(into)} open PR(s) target `{branch}`: "
+                          f"{', '.join(f'#{n}' for n in into)} -- merge or close them, then "
+                          f"re-run land-epic"}
     existing = gh.pr_list_for_branch(branch)
     if not existing and not gh.branch_commits(base, branch):
         return {"epic": epic, "landed": False, "branch": branch,

@@ -41,7 +41,8 @@ from .gates import (
     cmd_mark_feedback_received, cmd_merge_gate, cmd_pass_gate, cmd_pause_for_epic_regate,
     cmd_resolve_thread, cmd_skip_gate, cmd_waive_gate,
 )
-from .dev_pr import cmd_cite, cmd_open_dev_pr, cmd_verify_citations, cmd_verify_exit
+from .dev_pr import (cmd_cite, cmd_open_dev_pr, cmd_retarget_pr, cmd_verify_citations,
+                     cmd_verify_exit)
 from .checks import cmd_ci_failure_summary, cmd_merge_pr, cmd_pr_checks, cmd_rerun_checks, cmd_update_pr_body
 from .issue_ops import (
     cmd_close_issue, cmd_mark_blocked, cmd_mark_issue_closed, cmd_mark_needs_human,
@@ -550,6 +551,12 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: (brief_close_epic if a.brief else (lambda r: r))(
         cmd_close_epic(get_work_item_provider(), a.epic, a.repo_path,
                        carry_forward=a.carry_forward, clean_worktree=a.clean_worktree)))
+    p = sub.add_parser("retarget-pr",
+                        help="Point an issue's open PR at its current integration base")
+    p.add_argument("issue", type=int)
+    p.add_argument("--repo-path", default=".")
+    p.set_defaults(func=lambda a: cmd_retarget_pr(get_work_item_provider(), a.issue,
+                                                  a.repo_path))
     p = sub.add_parser("land-epic",
                         help="Land a standing Epic's epic branch into main; the Epic stays open")
     p.add_argument("epic", type=int)
