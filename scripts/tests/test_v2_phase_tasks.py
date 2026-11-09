@@ -190,6 +190,13 @@ class FakeGh:
         return [{"number": n, **p} for n, p in self.prs.items()
                 if p.get("headRefName") == branch and p.get("state", "OPEN") == "OPEN"]
 
+    def prs_into_branch(self, base):
+        return [{"number": n, "headRefName": p.get("headRefName")} for n, p in self.prs.items()
+                if p.get("baseRefName") == base and p.get("state", "OPEN") == "OPEN"]
+
+    def pr_edit_base(self, n, base):
+        self.prs[n]["baseRefName"] = base
+
     def pr_heads_for_branch(self, branch):
         """Every PR on `branch`, any state; a merged one keeps the head it merged at."""
         return [{"number": n, "state": p.get("state", "OPEN"), "headRefOid": p.get("headRefOid")}

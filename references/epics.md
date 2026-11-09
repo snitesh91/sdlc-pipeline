@@ -181,8 +181,11 @@ All other rework: `references/rework.md`.
   with `main`, opens or reuses its PR and merges it (a merge commit) once every required suite
   passes at its head; re-run it while it returns `landed: false` with a CI wait. The Epic stays
   open and `epic-<n>` lives on (re-cut from `main` if the merge deleted it). No exploratory
-  pass: the landing PR's full CI is the gate. Standing Epics under an Initiative close with
-  `close-epic` into `initiative-<i>`; its marked Bugs Epic runs last (`references/initiatives.md`,
+  pass: the landing PR's full CI is the gate. It refuses while an open PR targets `epic-<n>`;
+  land between children. **Migration:** a standing child's PR opened into `main` before
+  v0.4.5 is refused by `merge-pr`; run `retarget-pr <n> --repo-path <p>`, then `prepare-rework <n>`. Standing Epics under an Initiative close with
+  `close-epic` into `initiative-<i>` once their children closed (`check-epics-closeable` flags
+  them); its marked Bugs Epic runs last (`references/initiatives.md`,
   "The Bugs Epic").
 - Design docs reach `epic-<n>` only through design PRs and `create-lld-tasks`' numbering
   commit. Never commit to it by hand or delete it while the Epic is open.

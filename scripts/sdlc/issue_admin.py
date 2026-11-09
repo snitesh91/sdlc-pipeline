@@ -11,8 +11,8 @@ from .config import (
 )
 from .github import GhError, GitHub, GitHubRest, WorkItemProvider, _default_runner, _parallel
 from .units import (
-    bugs_epic_due, classify_unit_from_issue, doc_root_for, epic_base, is_epic, is_epic_legacy,
-    is_epic_standing, is_initiative, issue_type, label_names, pipeline_status,
+    bugs_epic_due, classify_unit_from_issue, doc_root_for, epic_base, is_bugs_epic, is_epic,
+    is_epic_legacy, is_epic_standing, is_initiative, issue_type, label_names, pipeline_status,
 )
 from .evidence import (
     _DESIGN_REVIEW_OUTCOME_MARKER, _NEEDS_HUMAN_REASON, _PR_REVIEW_OUTCOME_MARKER,
@@ -375,8 +375,9 @@ _EPIC_CLOSEABLE_MARKER = "<!-- epic-closeable-checklist-posted -->"
 
 
 def cmd_check_epics_closeable(gh: GitHub) -> dict:
-    """For each open closeable epic (non-standing, or an Initiative's standing Bugs Epic once
-    its sibling Epics closed) with every child closed, post a one-time
+    """For each open closeable epic (non-standing; a standing Epic under an Initiative --
+    its Bugs Epic only once its sibling Epics closed) with every child closed (a Bugs Epic
+    may have none), post a one-time
     closing checklist and assign the human; never closes the epic. Idempotent via
     `_EPIC_CLOSEABLE_MARKER`. Returns `closeable_epics`, and `needs_phase_tasks`: Epics whose
     children are all closed but that never had both phase-Tasks and are not architected (closed
@@ -384,16 +385,22 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
     the orchestrator decides: `cut-phase-tasks`, or close it by hand."""
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
-    open_epics = [i for i in all_issues if i["state"] == "OPEN" and is_epic(i)
-                  and (not is_epic_standing(i) or bugs_epic_due(by_number, i))]
+    def closes_here(i: dict) -> bool:
+        if not is_epic_standing(i):
+            return True
+        if not is_initiative(by_number.get((i.get("parent") or {}).get("number")) or {}):
+            return False  # a long-lived standing Epic lands with land-epic, never closes
+        return not is_bugs_epic(i) or bugs_epic_due(by_number, i)
+
+    open_epics = [i for i in all_issues if i["state"] == "OPEN" and is_epic(i) and closes_here(i)]
     results, needs_phase_tasks = [], []
     for epic in open_epics:
         children = [i for i in all_issues if i.get("parent") and i["parent"]["number"] == epic["number"]]
         if any(c["state"] != "CLOSED" for c in children) or not (
-                children or is_epic_standing(epic)):
+                children or is_bugs_epic(epic)):
             continue
         # Closed superseded children are not a finished Epic: it still owes its phase-Tasks.
-        if epic_lacks_phase_tasks(all_issues, epic["number"]):
+        if not is_epic_standing(epic) and epic_lacks_phase_tasks(all_issues, epic["number"]):
             needs_phase_tasks.append(epic["number"])
             continue
         detail = gh.issue_view(epic["number"])

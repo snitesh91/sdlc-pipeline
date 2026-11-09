@@ -267,6 +267,11 @@ class GitHub:
         self._run(["gh", "api", "-X", "PATCH", f"repos/{self.repo}/pulls/{number}",
                    "-f", f"body={body}"])
 
+    def pr_edit_base(self, number: int, base: str):
+        """Retarget a PR: REST `PATCH pulls/<n>` (`base`), like `pr_edit_body`."""
+        self._run(["gh", "api", "-X", "PATCH", f"repos/{self.repo}/pulls/{number}",
+                   "-f", f"base={base}"])
+
     def issue_create(self, title: str, body: str, labels: list) -> int:
         argv = ["gh", "api", f"repos/{self.repo}/issues", "-f", f"title={title}", "-f", f"body={body}"]
         for l in labels:
@@ -395,6 +400,12 @@ class GitHub:
         """Every PR (any state) whose head is `branch`: `number`, `state`, `headRefOid`."""
         out = self._run(["gh", "pr", "list", "--repo", self.repo, "--head", branch,
                           "--state", "all", "--json", "number,state,headRefOid"])
+        return json.loads(out)
+
+    def prs_into_branch(self, base: str) -> list:
+        """Open PRs whose base is `base`: `number`, `headRefName`."""
+        out = self._run(["gh", "pr", "list", "--repo", self.repo, "--base", base,
+                          "--state", "open", "--json", "number,headRefName"])
         return json.loads(out)
 
     def open_prs(self) -> list:
@@ -1169,6 +1180,11 @@ class GitHubRest(GitHub):
         return [{"number": p["number"], "state": self._pr_state(p),
                  "headRefOid": p["head"]["sha"]}
                 for p in self._prs_for_branch(branch, "all")]
+
+    def prs_into_branch(self, base: str) -> list:
+        return [{"number": p["number"], "headRefName": p["head"]["ref"]}
+                for p in self._api_items(f"repos/{self.repo}/pulls?state=open&base={base}"
+                                         f"&per_page=100")]
 
     def open_prs(self) -> list:
         return [{"number": p["number"], "headRefName": p["head"]["ref"], "title": p.get("title"),

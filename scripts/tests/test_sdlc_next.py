@@ -55,6 +55,9 @@ class ScriptedRunner:
         for prefix, response in self.prefix_responses.items():
             if tuple(argv[:len(prefix)]) == prefix:
                 return response
+        if key not in self.responses and argv[:3] == ["gh", "pr", "view"] \
+                and argv[-2:] == ["--json", "baseRefName"]:
+            return "{}"  # v0.4.5 merge-pr base check; these fakes do not model the PR base
         if key not in self.responses and _is_epic_info_query(argv):
             # v0.4.5: a non-phase gate reads its unit's parent; these fakes model parentless ones.
             return json.dumps({"data": {"repository": {"issue": {
