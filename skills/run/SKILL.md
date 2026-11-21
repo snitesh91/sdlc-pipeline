@@ -31,7 +31,7 @@ All under `${CLAUDE_PLUGIN_ROOT}/references/`.
 | `epics.md` | Profiles, phase-Tasks, footprints, deviation, epic close, board status |
 | `operations.md` | Token/repo access, issue fields, auto-merge, local-CI attestation, auto-mode denials |
 | `continuous-mode.md` | Unattended looping |
-| `cloud-mode.md` | `placement_mismatch`; cloud hand-off, a cloud run, its GitHub access; `humanChannel: "session"`; `launch-cloud-epics`, `cloud-status` |
+| `cloud-mode.md` | Every cloud session (read "Cloud-first runs" at start); `placement_mismatch`; cloud hand-off, a cloud run, its GitHub access; `humanChannel: "session"`; `launch-cloud-epics`, `cloud-status` |
 | `control-plane.md` | Any command not in the Composites table |
 | `initiatives.md` | Driving an Initiative |
 | `retro.md` | Parking a finding; running a retro |
@@ -174,9 +174,12 @@ an Initiative run and a run of its Epic. Link every Epic and Task as a native su
 ## Placement
 
 A cloud session drives only cloud-placed Epics; a local session the rest, plus a cloud Epic's
-local Tasks (`localLabel`). On `placement_mismatch`, stop, relay its `hint`, start nothing. A
-cloud run asks in session and keeps working; it ends only when nothing can move
-(`references/cloud-mode.md`, "A cloud run").
+local Tasks (`localLabel`). **In a cloud session, before Step 1, run
+`record-cloud-session <n> --self`**: it places the unit and registers the session. The session
+then launches every other session the run needs itself; no laptop takes part
+(`references/cloud-mode.md`, "Cloud-first runs"). On `placement_mismatch`, stop, relay its
+`hint`, start nothing. A cloud run asks in session and keeps working; it ends only when nothing
+can move ("A cloud run").
 
 ## What you decide, and what you take to the operator
 
@@ -221,7 +224,7 @@ python3 "$SDLC" next-action <epic> --run-id "$RUN_ID" --sync-epic
 | `finish-lld` | `finish-lld <issue> --epic <epic> --repo-path <p>` |
 | `cut-phase-tasks` | `cut-phase-tasks <epic> --repo-path <p>`, then Step 1 |
 | `run-epic` | Run that Epic's Step 1–3 loop inline, same run-id, then Step 1 on the Initiative |
-| `launch-cloud-epics` | `launch-cloud-epic <epic>` for each in `epics`, then Step 1 |
+| `launch-cloud-epics` | `launch-cloud-epic <epic>` for each in `epics` (on `launch_in_session`: `references/cloud-mode.md`, "Cloud-first runs"), then Step 1 |
 | `stop-at-cap` | Finish in-flight units, then stop ("Stop at the run cap") |
 | `none` | Route `unstaged` children, run the end checks, then Step 4 |
 | `skip` | Legacy Epic: quote `reason`, then Step 4 |

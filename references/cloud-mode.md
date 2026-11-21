@@ -19,8 +19,9 @@ and closes ("Cloud-first runs").
   work in session (IRD, Gate A, Epic cut), then launches one session per Epic ("Initiative →
   cloud Epics"). It never waits for them: end `waiting-epic --waits-on <open Epics>`.
 - **A cloud Epic run that closes its Epic** runs `cloud-status <initiative>` before it ends:
-  launch each `launchable` Epic; on `all_closed`, launch the Initiative (`prompt`
-  `/sdlc:run <initiative>`, then `record-cloud-session <initiative> --session …`) so it closes.
+  launch each `launchable` Epic; on `all_closed`, when the Initiative carries the cloud label,
+  launch it (`prompt` `/sdlc:run <initiative>`, then `record-cloud-session <initiative>
+  --session …`) so it closes.
   This relay replaces the laptop's watch.
 - **Laptop-only work** (a real phone, an emulator, Stage, a host the cloud denies) goes to a
   separate local standing Epic under the same Initiative, never to a local Task inside a
@@ -100,7 +101,7 @@ python3 "$SDLC" end-cloud-session <epic> --outcome <outcome> [--waits-on <n> ...
 | `waiting-epic` | only another Epic unblocks it | required: that Epic |
 | `waiting-local` | `none` says `waiting_local`: only local Tasks remain | default: the open local Tasks |
 | `stopped` | stopped by the operator, or anything else | — |
-| `context-reset` | a phase-boundary stop to shed context (`context-budget.md`); relaunch-ready at once | — |
+| `context-reset` | the run cap ("Handing over at the cap"); relaunch-ready at once | — |
 | `abandoned` | laptop only, for a dead session ("Status and stalls") | — |
 
 The recorded wait drives the relaunch ("Initiative → cloud Epics"). Then Step 4.
