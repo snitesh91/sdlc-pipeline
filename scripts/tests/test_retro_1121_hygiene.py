@@ -150,3 +150,13 @@ def test_prune_stale_reports_a_roomy_host_disk_without_a_warning(repo, monkeypat
     _, result = _prune_with_free(repo, monkeypatch, 200)
 
     assert not any("host disk low" in w for w in result.get("warnings", []))
+
+
+def test_a_run_that_reached_none_releases_the_epic(runs, monkeypatch):
+    gh = _tree()
+    _next_action(gh, "run-a")
+    monkeypatch.setattr(s.next_action, "decide_next_action", lambda *a, **kw: {"action": "none"})
+    _next_action(gh, "run-a")
+    monkeypatch.undo()
+    monkeypatch.setenv("SDLC_RUNS_DIR", os.path.dirname(run_state._run_state_path(9)))
+    assert _next_action(gh, "run-b").get("refused") is None

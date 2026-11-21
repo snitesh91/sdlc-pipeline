@@ -169,7 +169,7 @@ unit's worktree at the final head, run the pre-PR command with the IT flag, then
   control plane strips it on read.
 - **Review threads:** ids read `ccr:<pr>:<comment-id>`; pass them to `resolve-thread` unchanged.
 - **Branch deletes:** the proxy refuses them. Enable the repo's auto-delete of head branches;
-  otherwise a leftover branch comes back as a `warnings` line.
+  the control plane then leaves merged heads to GitHub.
 - **Draft PRs:** `open-dev-pr` recovers a draft create the proxy answers with no body. Relay a
   `draft_warning`: the PR must be a draft before review.
 - **Hand-run `gh`:** read with `gh api` GETs, never `gh issue view` / `gh pr view`. Write only

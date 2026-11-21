@@ -27,6 +27,7 @@ from .epic_close import initiative_landing
 from .gate_eval import evaluate_gate
 from .run_state import (
     _write_run_state, config_drift, note_in_flight, other_live_run, read_run_state,
+    release_run,
     run_cap_reached,
     run_cap_state, run_completed,
 )
@@ -644,6 +645,8 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     result = decide_next_action(gh, args.epic, run_id=run_id,
                                 skip_epics=getattr(args, "skip_epic", None),
                                 repo_path=repo_path, all_issues=issues, scope=scope)
+    if result.get("action") == "none":
+        release_run(args.epic)
     # Read liveness before note_in_flight re-stamps this run onto the unit.
     liveness = (_resume_liveness(gh, args.epic, result["issue"])
                 if result.get("action") == "resume" else {})

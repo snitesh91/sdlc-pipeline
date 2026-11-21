@@ -76,6 +76,14 @@ def other_live_run(epic: int, run_id: Optional[str]) -> Optional[dict]:
     return state if age < RESUME_LIVE_WINDOW_MINUTES * 60 else None
 
 
+def release_run(epic: int) -> None:
+    """Drop this machine's hold on `epic`: its run reached `none`, so a new run may start."""
+    try:
+        os.utime(_run_state_path(epic), (0, 0))
+    except OSError:
+        pass
+
+
 def note_in_flight(epic: int, run_id: Optional[str], units: dict) -> None:
     """Record units ({issue: stage}) this run handed out, until `record_terminal_unit`."""
     if not run_id or not units:
