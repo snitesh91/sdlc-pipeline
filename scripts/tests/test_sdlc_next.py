@@ -5524,7 +5524,8 @@ def test_an_unmet_initiative_verification_is_not_closing_evidence():
 def test_record_initiative_verification_posts_marked_comment(outcome):
     from sdlc_next import GitHub, cmd_record_initiative_verification
     runner = ScriptedRunner()
-    runner.prefix_responses = {("gh", "issue", "comment", "40"): ""}
+    runner.prefix_responses = {("gh", "issue", "comment", "40"): "",
+                               ("gh", "pr", "list"): "[]"}
     gh = GitHub(runner=runner)
     result = cmd_record_initiative_verification(
         gh, 40, "Every requirement in product.md checked live.", outcome)
