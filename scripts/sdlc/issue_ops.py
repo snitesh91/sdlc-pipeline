@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 import time
 from typing import Callable, Optional
 
@@ -152,10 +154,9 @@ def _cleanup_remote_branch(gh: GitHub, repo_path: str, branch: str, runner: Runn
                           f"unmerged work is kept"}
     if dry_run:
         return {"deleted": False, "head": head, "would_delete": True}
-    if (cloud_skips_local_cleanup()
-            and any(p.get("state") == "MERGED" and p.get("headRefOid") == head for p in listed)
+    if (any(p.get("state") == "MERGED" and p.get("headRefOid") == head for p in listed)
             and getattr(gh, "auto_deletes_head_branches", bool)()):
-        # The cloud proxy refuses ref deletes (403); GitHub drops a merged PR's head itself.
+        # GitHub drops a merged PR's head itself; the local ref is only stale.
         return {"deleted": False, "head": head, "skipped": "repo auto-deletes merged heads"}
     try:
         gh.delete_branch(branch)
@@ -500,6 +501,9 @@ def cmd_prune_stale(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] =
     if stale_trees:
         result["initiative_close_trees"] = [
             _remove_verifier_tree(repo_path, n, path, runner, dry_run) for n, path in stale_trees]
+    result["host_disk"] = _host_disk(repo_path, runner)
+    if result["host_disk"].get("warning"):
+        result.setdefault("warnings", []).append(result["host_disk"]["warning"])
     if not dry_run:
         steps = [("worktree_pruned", ["git", "-C", repo_path, "worktree", "prune"]),
                  ("fetch_pruned", ["git", "-C", repo_path, "fetch", "--prune", "origin"])]
@@ -514,6 +518,38 @@ def cmd_prune_stale(gh: GitHub, repo_path: str = ".", runner: Optional[Runner] =
                 result[key] = False
                 result[f"{key}_error"] = str(exc)
     return result
+
+
+HOST_DISK_WARN_GB = 30
+
+
+def _host_disk(repo_path: str, runner: Runner) -> dict:
+    """Free space on the filesystem holding `worktrees.root` (`free_gb`, a `warning` under
+    `HOST_DISK_WARN_GB`) and the ten largest linked worktrees (`worktrees`: path, `gb`)."""
+    root = PIPELINE["worktrees"]["root"]
+    out: dict = {"root": root}
+    try:
+        out["free_gb"] = round(shutil.disk_usage(root).free / 1e9, 1)
+    except OSError as exc:
+        return {**out, "error": str(exc)}
+    sizes = []
+    try:
+        entries = worktree_entries(repo_path, runner)[1:]
+    except GhError:
+        entries = []
+    for e in entries:
+        try:
+            kb = int(subprocess.run(["du", "-sk", e["path"]], capture_output=True, text=True,
+                                    timeout=120).stdout.split()[0])
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+            continue
+        sizes.append({"path": e["path"], "gb": round(kb * 1024 / 1e9, 1)})
+    out["worktrees"] = sorted(sizes, key=lambda w: -w["gb"])[:10]
+    if out["free_gb"] < HOST_DISK_WARN_GB:
+        out["warning"] = (f"host disk low: {out['free_gb']} GB free on {root} (under "
+                          f"{HOST_DISK_WARN_GB} GB) -- release the largest worktrees before "
+                          f"starting more lanes")
+    return out
 
 
 def _initiative_close_trees(repo_path: str, runner: Runner) -> dict:

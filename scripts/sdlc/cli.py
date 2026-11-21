@@ -126,6 +126,9 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--sync-epic", action="store_true",
                     help="Non-standing Epic with --run-id: sync epic-<n> with main first when "
                          "due (run start, every 3 merges, main moved); result in `epic_sync`")
+    p.add_argument("--take-over", action="store_true",
+                    help="Operator's word only: drive the Epic although another run id held "
+                         "it within the live window")
     p.set_defaults(func=lambda a: cmd_next_action(get_work_item_provider(), a))
     p = sub.add_parser("list-ready-for-review",
                         help="Children whose handed-off draft PR awaits review this round")
