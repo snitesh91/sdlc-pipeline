@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -20,6 +21,10 @@ from .config import (
 
 class GhError(RuntimeError):
     pass
+
+
+_HTTP_5XX_RE = re.compile(r"HTTP 50[234]")
+_API_RETRY_DELAYS = (1, 3)
 
 
 def _utc_now_marker() -> str:
@@ -336,10 +341,12 @@ class GitHub:
         self._run(argv)
 
     def dispatch_runs(self, sha: str) -> list:
-        """The workflow_dispatch runs on commit `sha`: name, display_title, conclusion, url."""
+        """Every Actions run on commit `sha` (the dispatched ones and the runs they re-run):
+        name, display_title, conclusion, url, event and workflow file path."""
         out = self._run(["gh", "api", f"repos/{self.repo}/actions/runs?head_sha={sha}"
-                         f"&event=workflow_dispatch&per_page=100", "--jq",
-                         "[.workflow_runs[] | {name, display_title, conclusion, html_url}]"])
+                         f"&per_page=100", "--jq",
+                         "[.workflow_runs[] | {name, display_title, conclusion, html_url, "
+                         "event, path}]"])
         return json.loads(out or "[]")
 
     def pr_files(self, number: int) -> list:
@@ -683,8 +690,16 @@ class GitHubRest(GitHub):
     # --- REST plumbing ---------------------------------------------------------------
 
     def _api(self, path: str, *args: str, method: Optional[str] = None) -> str:
+        """`gh api`; a read retries a transient 502/503/504 (a write never: it may have landed)."""
         argv = ["gh", "api"] + (["-X", method] if method else []) + [path, *args]
-        return self._run(argv)
+        read = (method or "GET") == "GET" and not any(a in self._MUTATING_FLAGS for a in args)
+        for delay in (*_API_RETRY_DELAYS, None):
+            try:
+                return self._run(argv)
+            except GhError as e:
+                if not read or delay is None or not _HTTP_5XX_RE.search(str(e)):
+                    raise
+                time.sleep(delay)
 
     def _api_json(self, path: str, *args: str, method: Optional[str] = None):
         out = self._api(path, *args, method=method)

@@ -355,7 +355,7 @@ def _epic_close_prepare(worktree: Optional[dict], shell: Optional[Callable]) -> 
     if not worktree or not worktree.get("path") or not worktree.get("synced_to_origin"):
         return {"command": command, "ok": False, "ran": False,
                 "reason": "no epic worktree at origin's head -- `worktree-add <epic> --unit "
-                          "epic`, then re-run close-epic (or run the command there yourself)"}
+                          "epic`, then re-run prepare-epic-tree"}
     try:
         output = (shell or _default_shell)(command, worktree["path"])
     except GhError as exc:
@@ -363,6 +363,18 @@ def _epic_close_prepare(worktree: Optional[dict], shell: Optional[Callable]) -> 
                 "error": str(exc)[-2000:]}
     return {"command": command, "ok": True, "ran": True, "path": worktree["path"],
             "output_tail": (output or "")[-500:]}
+
+
+def cmd_prepare_epic_tree(epic: int, repo_path: str = ".", runner: Runner = _default_runner,
+                          shell: Optional[Callable] = None) -> dict:
+    """Ready the exploratory pass's tree: fast-forward the epic's live worktree to origin,
+    then run `pipeline.epicClose.prepare` there. close-epic never installs anything."""
+    tree = _refresh_epic_worktree(epic_branch(epic), repo_path, runner)
+    out = {"epic": epic, **({"epic_worktree": tree} if tree else {})}
+    prepared = _epic_close_prepare(tree, shell)
+    if prepared:
+        return {**out, "prepare": prepared}
+    return {**out, "prepare_warning": _PREPARE_UNSET_WARNING}
 
 
 def _sync_initiative_for_close(gh: GitHub, repo_path: str, initiative: int,
@@ -379,7 +391,8 @@ def _sync_initiative_for_close(gh: GitHub, repo_path: str, initiative: int,
 
 def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                     runner: Runner = _default_runner, carry_forward: bool = True,
-                    clean_worktree: bool = False, shell: Optional[Callable] = None) -> dict:
+                    clean_worktree: bool = False, shell: Optional[Callable] = None,
+                    operator_override: Optional[str] = None) -> dict:
     """Reconcile the epic branch with `main` (first call, then stop), or merge it once
     closing evidence is recorded (second call). Returns `merged`; refusals carry `reason`.
     Two calls because verification must run between the two merges. Idempotent: once the
@@ -389,9 +402,14 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     and refuses the call when the tree holds tracked changes (`worktree_clean`).
     Every result carries the resolved `base`. While verification is still owed (the calls
     before the exploratory pass): an Epic closing into `initiative-<i>` first merges `main`
-    into it (`initiative_sync`; a conflict refuses the call), the epic's live worktree is
-    fast-forwarded to origin (`epic_worktree`) and `pipeline.epicClose.prepare` runs there
-    (`prepare`)."""
+    into it (`initiative_sync`; a conflict refuses the call) and the epic's live worktree is
+    fast-forwarded to origin (`epic_worktree`). It never installs dependencies
+    (`prepare-epic-tree` does). A reconcile whose delta leaves the evidence valid goes on to
+    the merge gate in the same call (`base_moved`), so sibling Epics closing into one base
+    need no agreed order. `operator_override` (the operator's reason) merges past unsatisfied
+    required suites only, and records the reason on the Epic."""
+    if operator_override is not None and not operator_override.strip():
+        raise GhError("--operator-override needs --reason \"<why>\"")
     detail = gh.issue_view(epic)
     branch = epic_branch(epic)
     all_issues = gh.issue_list()
@@ -461,15 +479,12 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                                     f"--unit initiative`'s tree, push, then re-run close-epic"}
 
     def ready_tree() -> dict:
-        """The exploratory pass's tree: fast-forwarded, then prepared."""
+        """The exploratory pass's tree, fast-forwarded; `prepare-epic-tree` installs."""
         tree = _refresh_epic_worktree(branch, repo_path, runner)
-        out = {"epic_worktree": tree} if tree else {}
-        prepared = _epic_close_prepare(tree, shell)
-        if prepared:
-            return {**out, "prepare": prepared}
-        if tree:
-            out["prepare_warning"] = _PREPARE_UNSET_WARNING
-        return out
+        if not tree:
+            return {}
+        return {"epic_worktree": tree,
+                "next": f"prepare-epic-tree {epic} --repo-path <p> before the exploratory pass"}
 
     behind = gh.branch_behind_by(branch, base=base)
     skipped = _reconcile_skippable(gh, branch, base, behind) if carry_forward else None
@@ -495,21 +510,25 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
         timestamp = _utc_now_marker()
         gh.issue_comment(epic,
             f"🔄 Reconciled `{branch}` with `origin/{base}` ({behind} commit(s) picked up). "
-            f"Closing verification must now run against **this** tree — the exploratory pass. "
-            f"Evidence recorded before this point describes a "
-            f"different tree and will not be accepted.\n\n"
+            f"Closing evidence recorded before this point counts only when the commits picked "
+            f"up leave the files it tested untouched; otherwise the exploratory pass re-runs "
+            f"against **this** tree.\n\n"
             f"<!-- epic-reconciled: {epic} @ {timestamp} -->")
         existing = gh.pr_list_for_branch(branch)
         evidence = _close_epic_evidence(gh, epic, branch, children,
                                         existing[0]["number"] if existing else None, carry_forward,
                                         base, deferred)
-        evidence.pop("_missing_workflows")
-        return _with_workspace(
-            {"epic": epic, "merged": False, "branch": branch, "reconciled": behind, **target,
-             **evidence, **cleaned, **ready_tree(),
-             "reason": f"picked up {behind} commit(s) from {base} -- run the exploratory pass "
-                       f"against the reconciled branch, then re-run close-epic"},
-            ws)
+        target.update(reconciled=behind, base_moved=True)
+        if evidence.get("missing_verification"):
+            evidence.pop("_missing_workflows")
+            return _with_workspace(
+                {"epic": epic, "merged": False, "branch": branch, **target,
+                 **evidence, **cleaned, **ready_tree(),
+                 "reason": f"picked up {behind} commit(s) from {base} -- run the exploratory "
+                           f"pass against the reconciled branch, then re-run close-epic"},
+                ws)
+        # The delta left the evidence valid: go on to the merge gate at the new head.
+        verifying = False
     existing = gh.pr_list_for_branch(branch)
     if verifying:
         evidence = _close_epic_evidence(gh, epic, branch, children,
@@ -548,7 +567,13 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     evidence = _close_epic_evidence(gh, epic, branch, children, pr_number, carry_forward,
                                     base, deferred)
     missing_workflows = evidence.pop("_missing_workflows")
-    if missing_workflows:
+    if missing_workflows and operator_override:
+        gh.issue_comment(epic,
+            f"⚠️ Operator override: merging PR #{pr_number} past unsatisfied required suites "
+            f"({', '.join(missing_workflows)}). Reason: {operator_override.strip()}")
+        target["operator_override"] = {"reason": operator_override.strip(),
+                                       "skipped": missing_workflows}
+    elif missing_workflows:
         return {"epic": epic, "merged": False, "pr": pr_number, "checks": "missing-checks",
                 **target, **evidence,
                 "reason": f"PR #{pr_number} required suites unsatisfied at the epic head "
@@ -622,12 +647,13 @@ def cmd_land_epic(gh: GitHub, epic: int, repo_path: str = ".",
         return {"epic": epic, "landed": False, "pr": pr_number, "reconciled": behind,
                 "reason": f"picked up {behind} commit(s) from {base} -- wait for PR "
                           f"#{pr_number}'s CI, then re-run land-epic"}
-    children = [i for i in issues.values() if (i.get("parent") or {}).get("number") == epic]
-    evidence = _close_epic_evidence(gh, epic, branch, children, pr_number, True, base)
-    missing = evidence.pop("_missing_workflows")
+    view = gh.pr_view(pr_number, "comments,headRefOid")
+    comments, head = view.get("comments", []), view.get("headRefOid")
+    checks = apply_deflakes(gh, effective_checks(gh, pr_number), comments, head)
+    missing = missing_required_workflows(gh.pr_files(pr_number), checks, comments, head, base)
     if missing:
         return {"epic": epic, "landed": False, "pr": pr_number, "checks": "missing-checks",
-                "awaiting_checks": evidence["awaiting_checks"],
+                "awaiting_checks": missing,
                 "reason": f"PR #{pr_number} required suites unsatisfied at the epic head: "
                           f"{', '.join(missing)} -- re-run land-epic once CI is green"}
     gh.pr_ready(pr_number)
@@ -713,7 +739,7 @@ def _versioned_file_collisions(gh, branch: str, base: str, repo_path: str,
 
 
 def brief_close_epic(result: dict) -> dict:
-    """`close-epic --brief`: the same result with each bulky list or map reduced to what the
+    """close-epic's default output: the same result with each bulky list or map reduced to what the
     orchestrator acts on -- counts, suite names and failing check names."""
     out = dict(result)
     if "evidence" in out:
@@ -1139,7 +1165,7 @@ from .checks import (  # noqa: E402
     _latest_attested_sha_by_suite, _suite_reattest_needed, _with_uncovered,
     _workflow_applies_to_base, _workflow_covers, apply_deflakes, effective_checks,
     enrich_failed_checks,
-    merge_gate_status, required_workflows, suite_not_attestable, touches_pipeline_config,
+    merge_gate_status, missing_required_workflows, required_workflows, suite_not_attestable, touches_pipeline_config,
     workflow_check_state,
 )
 from .issue_ops import (  # noqa: E402

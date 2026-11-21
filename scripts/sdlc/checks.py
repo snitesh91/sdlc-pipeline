@@ -628,8 +628,11 @@ def apply_deflakes(gh, checks: list, comments: list, head: Optional[str]) -> lis
         specs = _red_job_specs(gh, checks, workflow)
         if not specs:
             continue
-        run = next((r for r in runs if r.get("name") == workflow
-                    and r.get("conclusion") == "success"
+        # A `run-name` replaces a run's `name`, so the workflow file identifies it.
+        paths = {r.get("path") for r in runs
+                 if r.get("name") == workflow and r.get("event") != "workflow_dispatch"}
+        run = next((r for r in runs if r.get("event") == "workflow_dispatch"
+                    and r.get("path") in paths and r.get("conclusion") == "success"
                     and (r.get("display_title") or "").startswith(DEFLAKE_TITLE_PREFIX)
                     and specs <= set(r["display_title"][len(DEFLAKE_TITLE_PREFIX):].split())),
                    None)

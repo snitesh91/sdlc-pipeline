@@ -18,6 +18,7 @@ from .evidence import LOCAL_CI_SUITES, REVIEW_ROLES
 from .epic_close import (
     INITIATIVE_VERIFICATION_OUTCOMES, cmd_check_initiative_closeable, cmd_close_epic,
     brief_close_epic, cmd_close_initiative, cmd_merge_initiative_pr, cmd_open_initiative_pr,
+    cmd_prepare_epic_tree,
     cmd_land_epic, cmd_record_epic_verification, cmd_record_initiative_verification,
 )
 from .gate_eval import cmd_check_gate
@@ -546,11 +547,22 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--clean-worktree", action="store_true",
                     help="Before a reconcile or the merge, discard the closing run's untracked "
                          "output from the epic worktree; refuses on tracked changes")
-    p.add_argument("--brief", action="store_true",
-                    help="Counts in place of the evidence, file and cleanup lists")
-    p.set_defaults(func=lambda a: (brief_close_epic if a.brief else (lambda r: r))(
+    p.add_argument("--brief", action="store_true", help="The default; accepted for old calls")
+    p.add_argument("--full", action="store_true",
+                    help="The evidence, file and cleanup lists in place of counts")
+    p.add_argument("--operator-override", action="store_true",
+                    help="Operator only: merge past unsatisfied required suites (never open "
+                         "children, a conflict or missing verification); needs --reason")
+    p.add_argument("--reason", default=None, help="Why the operator overrides; recorded on the Epic")
+    p.set_defaults(func=lambda a: ((lambda r: r) if a.full else brief_close_epic)(
         cmd_close_epic(get_work_item_provider(), a.epic, a.repo_path,
-                       carry_forward=a.carry_forward, clean_worktree=a.clean_worktree)))
+                       carry_forward=a.carry_forward, clean_worktree=a.clean_worktree,
+                       operator_override=(a.reason or "") if a.operator_override else None)))
+    p = sub.add_parser("prepare-epic-tree",
+                        help="Fast-forward the epic worktree and run epicClose.prepare in it")
+    p.add_argument("epic", type=int)
+    p.add_argument("--repo-path", default=".")
+    p.set_defaults(func=lambda a: cmd_prepare_epic_tree(a.epic, a.repo_path))
     p = sub.add_parser("retarget-pr",
                         help="Point an issue's open PR at its current integration base")
     p.add_argument("issue", type=int)

@@ -181,7 +181,7 @@ All other rework: `references/rework.md`.
   with `main`, opens or reuses its PR and merges it (a merge commit) once every required suite
   passes at its head; re-run it while it returns `landed: false` with a CI wait. The Epic stays
   open and `epic-<n>` lives on (re-cut from `main` if the merge deleted it). No exploratory
-  pass: the landing PR's full CI is the gate. It refuses while an open PR targets `epic-<n>`;
+  pass: the landing PR's full CI is the gate, read from that PR alone. It refuses while an open PR targets `epic-<n>`;
   land between children. **Migration:** a standing child's PR opened into `main` before
   v0.4.5 is refused by `merge-pr`; run `retarget-pr <n> --repo-path <p>`, then `prepare-rework <n>`. Standing Epics under an Initiative close with
   `close-epic` into `initiative-<i>` once their children closed (`check-epics-closeable` flags
@@ -224,8 +224,9 @@ the doc). An Epic with no phase-Tasks and no `epic:architected` goes to `needs_p
 
 **`close-epic <n>` is two calls. Every refusal is a structured exit-0 result.**
 
-1. First call: refuses on `open_children`. When `epic-<n>` is behind `origin/main` it
-   reconciles and stops (`reconciled`); a conflict returns `conflict: true` and
+1. First call: refuses on `open_children`. When `epic-<n>` is behind its base it
+   reconciles (`reconciled`, `base_moved`). It stops there only when the commits picked up
+   stale the evidence; otherwise the same call goes on to the merge gate. A conflict returns `conflict: true` and
    `conflicting_files` (exit 0; resolve it per `references/parallelism.md`, "Git-conflict
    handling"), unless everything `main` gained is in the
    carry-forward set and untouched by the epic (`reconcile_skipped`). Every result carries
@@ -246,6 +247,15 @@ the doc). An Epic with no phase-Tasks and no `epic:architected` goes to `needs_p
    (`cleanup`, `children_cleanup`, `run_state`, `stack`; `recovered: true` on an
    already-merged epic).
 
+- **Sibling Epics closing into one base need no agreed order.** Each `close-epic` call
+  reconciles with whatever merged first; on `base_moved` just act on the result and call again.
+- **Output is brief** (counts and names). Add `--full` only to triage `evidence_breaks` or to
+  brief a re-pass that needs the file list.
+- **Operator override** (the operator's word only): `close-epic <n> --operator-override
+  --reason "<why>"` merges past unsatisfied required suites and records the reason on the
+  Epic. It never passes open children, a conflict, `missing_verification` or
+  `version_collisions`.
+
 **Evidence carry-forward:** the exploratory record survives a delta that touches only
 `pipeline.epicClose.evidenceCarryForward.paths` (default `**/*.md`, `docs/**`, `<docRoot>/**`)
 and is under 300 files, or a delta of files the epic itself never changed against its base
@@ -265,9 +275,11 @@ scoped to those files.
 - Preflight the machine first (`references/parallelism.md`, "Resource cap — serialize
   suite-heavy stages").
 - Run it in the epic worktree (`worktree-add <n> --unit epic`) and name `close-epic`'s `base`
-  in the brief. `close-epic` runs `pipeline.epicClose.prepare` there first (`ok: false` → fix
-  it). Unset `prepare` returns `prepare_warning`: run the dependency install yourself. A pass
-  `blocked` on missing dependencies: install, then resume it.
+  in the brief. `close-epic` installs nothing: before each pass run `prepare-epic-tree <n>
+  --repo-path <p>` in the background. It fast-forwards the tree and runs
+  `pipeline.epicClose.prepare` (`ok: false` → fix it; unset → `prepare_warning`: run the
+  dependency install yourself). A pass `blocked` on missing dependencies: install, then
+  resume it.
 - It also runs `lld.md`'s `## Epic-close checks`. **The pipeline never runs the full e2e
   suite**; `record-epic-verification --kind e2e` never gates.
 - **You** record it: `record-epic-verification <n> --kind exploratory --summary "..."
