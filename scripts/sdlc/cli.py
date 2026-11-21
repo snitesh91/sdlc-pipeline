@@ -18,6 +18,7 @@ from .evidence import LOCAL_CI_SUITES, REVIEW_ROLES
 from .epic_close import (
     INITIATIVE_VERIFICATION_OUTCOMES, cmd_check_initiative_closeable, cmd_close_epic,
     brief_close_epic, cmd_close_initiative, cmd_merge_initiative_pr, cmd_open_initiative_pr,
+    cmd_prepare_epic_tree,
     cmd_land_epic, cmd_record_epic_verification, cmd_record_initiative_verification,
 )
 from .gate_eval import cmd_check_gate
@@ -65,7 +66,7 @@ from .stack import cmd_provision_epic_stack, cmd_teardown_epic_stack
 from .composites import (
     ADVANCE_FROM, ADVANCE_TO, EVIDENCE_CAP, HANDOFF_CAP, _open_gate_cli, cmd_advance_standing,
     cmd_cut_phase_tasks, cmd_file_closing_delta, cmd_finish_gate_feedback, cmd_finish_lld,
-    cmd_open_arch_revision, cmd_prepare_rework, cmd_skip_pr_review, cmd_start_stage,
+    cmd_open_arch_revision, cmd_prepare_rework, cmd_start_stage,
     cmd_transition, comment_cap_refusal,
 )
 
@@ -94,12 +95,6 @@ def _focus_numbers(args) -> set:
     return out
 
 
-def _pr_add_label(gh: GitHubRest, pr: int, label: str) -> dict:
-    gh.ensure_label(label)
-    gh.pr_add_label(pr, label)
-    return {"pr": pr, "label": label, "added": True}
-
-
 def main(argv: Optional[list] = None) -> int:
     if not os.environ.get("GITHUB_TOKEN"):
         sources = " or ".join(([f"tokenEnv (${TOKEN_ENV})"] if TOKEN_ENV else [])
@@ -126,6 +121,9 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--sync-epic", action="store_true",
                     help="Non-standing Epic with --run-id: sync epic-<n> with main first when "
                          "due (run start, every 3 merges, main moved); result in `epic_sync`")
+    p.add_argument("--take-over", action="store_true",
+                    help="Operator's word only: drive the Epic although another run id held "
+                         "it within the live window")
     p.set_defaults(func=lambda a: cmd_next_action(get_work_item_provider(), a))
     p = sub.add_parser("list-ready-for-review",
                         help="Children whose handed-off draft PR awaits review this round")
@@ -196,11 +194,6 @@ def main(argv: Optional[list] = None) -> int:
                     help="File with the run's captured output (tail is embedded)")
     p.set_defaults(func=lambda a: cmd_record_local_ci(get_work_item_provider(), a.pr, a.suite, a.sha,
                                                        a.command, a.output))
-    p = sub.add_parser("pr-add-label",
-                        help="Add a label to a PR (e.g. ci:local on a cloud epic PR)")
-    p.add_argument("pr", type=int)
-    p.add_argument("label")
-    p.set_defaults(func=lambda a: _pr_add_label(get_work_item_provider(), a.pr, a.label))
     p = sub.add_parser("record-design-review",
                         help="Record an arch-review/lld-review outcome on the unit")
     p.add_argument("issue", type=int)
@@ -238,7 +231,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("issue", type=int)
     p.add_argument("--to", required=True, help=f"One of {', '.join(ROUTE_TARGETS)}")
     p.add_argument("--reason", required=True, help=f"One line, <= {ROUTE_REASON_CAP} chars")
-    p.add_argument("--from", dest="frm", default=None, choices=list(STANDING_FLOW[:-1]),
+    p.add_argument("--from", dest="frm", default=None, choices=list(STANDING_FLOW),
                    help="The stage that just ran (never reported as skipped)")
     p.set_defaults(func=lambda a: cmd_route(get_work_item_provider(), a.issue, a.to, a.reason,
                                             finished=a.frm))
@@ -546,11 +539,22 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--clean-worktree", action="store_true",
                     help="Before a reconcile or the merge, discard the closing run's untracked "
                          "output from the epic worktree; refuses on tracked changes")
-    p.add_argument("--brief", action="store_true",
-                    help="Counts in place of the evidence, file and cleanup lists")
-    p.set_defaults(func=lambda a: (brief_close_epic if a.brief else (lambda r: r))(
+    p.add_argument("--brief", action="store_true", help="The default; accepted for old calls")
+    p.add_argument("--full", action="store_true",
+                    help="The evidence, file and cleanup lists in place of counts")
+    p.add_argument("--operator-override", action="store_true",
+                    help="Operator only: merge past unsatisfied required suites (never open "
+                         "children, a conflict or missing verification); needs --reason")
+    p.add_argument("--reason", default=None, help="Why the operator overrides; recorded on the Epic")
+    p.set_defaults(func=lambda a: ((lambda r: r) if a.full else brief_close_epic)(
         cmd_close_epic(get_work_item_provider(), a.epic, a.repo_path,
-                       carry_forward=a.carry_forward, clean_worktree=a.clean_worktree)))
+                       carry_forward=a.carry_forward, clean_worktree=a.clean_worktree,
+                       operator_override=(a.reason or "") if a.operator_override else None)))
+    p = sub.add_parser("prepare-epic-tree",
+                        help="Fast-forward the epic worktree and run epicClose.prepare in it")
+    p.add_argument("epic", type=int)
+    p.add_argument("--repo-path", default=".")
+    p.set_defaults(func=lambda a: cmd_prepare_epic_tree(a.epic, a.repo_path))
     p = sub.add_parser("retarget-pr",
                         help="Point an issue's open PR at its current integration base")
     p.add_argument("issue", type=int)
@@ -588,8 +592,9 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--outcome", required=True, choices=list(INITIATIVE_VERIFICATION_OUTCOMES),
                    help="met = every requirement validated; unmet blocks close-initiative")
     p.add_argument("--summary", required=True)
+    p.add_argument("--sha", default=None, help="The commit the verification ran on")
     p.set_defaults(func=lambda a: cmd_record_initiative_verification(
-        get_work_item_provider(), a.initiative, a.summary, a.outcome))
+        get_work_item_provider(), a.initiative, a.summary, a.outcome, a.sha))
     p = sub.add_parser("check-initiative-closeable",
                         help="Whether every Epic of the Initiative is closed (and its initiative "
                              "branch, if any, merged to main)")
@@ -707,16 +712,6 @@ def main(argv: Optional[list] = None) -> int:
                     help="Any path inside the repository (the unit's worktree when it has one)")
     p.set_defaults(func=lambda a: cmd_advance_standing(
         get_work_item_provider(), a.issue, a.frm, a.to, a.reason, a.repo_path))
-    p = sub.add_parser("skip-pr-review",
-                        help="Standing child: verify-exit -> route --to merge -> merge-pr")
-    p.add_argument("issue", type=int)
-    p.add_argument("--pr", type=int, required=True)
-    p.add_argument("--reason", required=True, help=f"One line, <= {ROUTE_REASON_CAP} chars")
-    p.add_argument("--run-id", default=None, help="Book the terminal-unit count under this run")
-    p.add_argument("--repo-path", default=None,
-                    help="The shared main checkout (merge-pr releases the unit's worktree)")
-    p.set_defaults(func=lambda a: cmd_skip_pr_review(
-        get_work_item_provider(), a.issue, a.pr, a.reason, a.run_id, a.repo_path))
     p = sub.add_parser("finish-gate-feedback",
                         help="transition, then mark-feedback-addressed on ready")
     p.add_argument("issue", type=int)
@@ -828,9 +823,12 @@ def main(argv: Optional[list] = None) -> int:
                                                         a.repo_path, a.relaunch,
                                                         allow_overlap=a.allow_overlap))
     p = sub.add_parser("record-cloud-session",
-                        help="Register a cloud session started by hand on an Epic")
+                        help="Register a cloud session on an Epic or Initiative")
     p.add_argument("epic", type=int)
-    p.add_argument("--session", required=True, help="Its claude.ai/code url or session_... id")
+    which = p.add_mutually_exclusive_group(required=True)
+    which.add_argument("--session", default=None, help="Its claude.ai/code url or session_... id")
+    which.add_argument("--self", dest="own", action="store_true",
+                       help="This cloud session (CLAUDE_CODE_REMOTE_SESSION_ID)")
     p.add_argument("--note", default=None, help="One line for the operator")
     p.set_defaults(func=lambda a: cmd_record_cloud_session(get_work_item_provider(), a.epic,
                                                            a.session, a.note))
@@ -838,7 +836,8 @@ def main(argv: Optional[list] = None) -> int:
                         help="Stamp the live cloud session's heartbeat on its Epic")
     p.add_argument("epic", type=int)
     p.add_argument("--state", default="working", choices=list(HEARTBEAT_STATES),
-                    help="asking: waiting on the operator's in-session answer (never stalled)")
+                    help="asking: on the operator's in-session answer; waiting: on purpose "
+                         "(both stall only after the longer bound)")
     p.set_defaults(func=lambda a: cmd_cloud_heartbeat(get_work_item_provider(), a.epic,
                                                       a.state, force=True))
     p = sub.add_parser("cloud-status",

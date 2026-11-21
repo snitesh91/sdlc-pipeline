@@ -258,7 +258,7 @@ def test_close_epic_sweeps_the_epic_and_its_childrens_branches(repo, tmp_path, m
     gh.pr_view = lambda n, fields="": {"comments": [], "headRefOid": "abc"}
     gh.pr_files = lambda n: []
     gh.pr_ready = lambda n: None
-    gh.pr_merge = lambda n: None
+    gh.pr_merge = lambda n, **kw: None
 
     result = s.cmd_close_epic(gh, 9, repo_path=str(repo), runner=s._default_runner)
 

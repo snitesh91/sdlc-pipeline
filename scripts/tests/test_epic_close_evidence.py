@@ -232,7 +232,8 @@ def test_the_cli_flag_turns_carry_forward_off(monkeypatch, capsys):
     monkeypatch.setattr(s, "get_work_item_provider", lambda: "GH")
     seen = {}
     monkeypatch.setattr(s, "cmd_close_epic",
-                        lambda gh, epic, repo_path=".", carry_forward=True, clean_worktree=False:
+                        lambda gh, epic, repo_path=".", carry_forward=True, clean_worktree=False,
+                        operator_override=None:
                         seen.update(carry_forward=carry_forward, clean=clean_worktree)
                         or {"ok": True})
     assert s.main(["close-epic", "9", "--no-carry-forward"]) == 0

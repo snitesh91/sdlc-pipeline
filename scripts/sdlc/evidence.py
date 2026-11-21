@@ -223,27 +223,15 @@ def last_pr_review_outcome(comments: list) -> Optional[tuple]:
     return found
 
 
-def routed_past_pr_review(comments: list) -> bool:
-    """Whether this round (since the latest `development->pr-review` handoff) was routed
-    straight to merge by `route --to merge`."""
-    handoff = last_transition_to(comments, "pr-review")
-    routed = last_transition_to(comments, "merge", _STAGE_ROUTE_MARKER)
-    return handoff is not None and routed is not None and routed > handoff
-
-
 def missing_pipeline_evidence(comments: list) -> list:
     """Problems blocking merge: a missing pr-review handoff, or a pr-review outcome that is
-    missing, older than the latest handoff, or not `clean` -- a round routed past `pr-review`
-    (`route --to merge`) needs no outcome: the recorded route is its evidence. Empty = mergeable."""
+    missing, older than the latest handoff, or not `clean`. Empty = mergeable."""
     problems = []
     handoff = last_transition_to(comments, "pr-review")
     if handoff is None:
         problems.append("no `development->pr-review` handoff marker (run "
                         "`handoff-to-pr-review <issue> --pr <pr> --summary ...`)")
     outcome = last_pr_review_outcome(comments)
-    reviewed = outcome is not None and handoff is not None and outcome[0] > handoff
-    if not reviewed and routed_past_pr_review(comments):
-        return problems
     if outcome is None:
         problems.append("no `pr-review` outcome recorded (run "
                         "`record-pr-review <issue> --pr <pr> --outcome clean|rework`)")

@@ -27,7 +27,7 @@ from .design_gates import (
 from .lld_tasks import cmd_add_blocked_by, cmd_create_lld_tasks, task_type_name
 from .gates import _profile_for_issue, cmd_mark_feedback_addressed
 from .dev_pr import cmd_verify_exit
-from .checks import cmd_merge_pr, pr_stale_attestations
+from .checks import pr_stale_attestations
 from .issue_ops import cmd_close_issue
 from .cloud import cloud_heartbeat_quietly
 from .issue_admin import cmd_create_issue, cmd_repair_issue
@@ -231,18 +231,20 @@ def cmd_file_closing_delta(gh: GitHub, epic: int, title: str, body: str,
     """File a closing-run finding as a `Bug` child of a non-standing Epic. It stays `unstaged`
     (full lane) unless `start`, the operator-authorised close-blocker lane: then stage
     `development` and `start-stage` it. `defer` files it under the Epic's Initiative's Bugs
-    Epic instead (fixed before initiative close). Returns `delta_issue` and `parent`."""
+    Epic instead (fixed before initiative close), or directly under the Initiative when it
+    has none. Returns `delta_issue` and `parent`."""
     issues = {i["number"]: i for i in gh.issue_list()}
     refusal = _not_a_phased_epic(issues, epic)
     parent = epic
     if defer:
         initiative = initiative_of_in(issues, epic)
         bugs = bugs_epic_of_in(issues, initiative["number"]) if initiative else None
+        home = bugs or (initiative if initiative and initiative["state"] == "OPEN" else None)
         refusal = ("--defer and --start conflict: a deferred bug waits for the Bugs Epic"
-                   if start else None if bugs else
-                   f"#{epic} has no Initiative with an open standing Bugs Epic -- file it "
-                   f"without --defer")
-        parent = bugs["number"] if bugs else epic
+                   if start else None if home else
+                   f"#{epic} has no open Initiative to hold a deferred bug -- file it without "
+                   f"--defer")
+        parent = home["number"] if home else epic
         body = f"{body}\n\nDeferred from Epic #{epic}."
     if refusal:
         return {"epic": epic, "refused": True, "reason": refusal}
@@ -367,7 +369,8 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
     # delegates a child onto a base branch that isn't there yet -- a live worktree is fast-forwarded.
     if unit == "issue" and not seq.stopped:
         integ = integration_base(gh, number)
-        if integ != "main":
+        # A direct child of an Initiative integrates into `initiative-<i>`: no Epic tree.
+        if integ.startswith(EPIC_BRANCH_PREFIX):
             epic_no = int(integ[len(EPIC_BRANCH_PREFIX):])
             seq.run("epic-worktree", lambda: cmd_worktree_add(
                 gh, epic_no, unit="epic", repo_path=repo_path, runner=runner),
@@ -461,8 +464,7 @@ def cmd_advance_standing(gh: GitHub, issue: int, frm: str, to: str, reason: str,
     if frm not in ADVANCE_FROM:
         raise GhError(f"--from must be one of {', '.join(ADVANCE_FROM)}")
     if to not in ADVANCE_TO:
-        raise GhError(f"--to must be one of {', '.join(ADVANCE_TO)} -- skipping pr-review "
-                      f"is `skip-pr-review`")
+        raise GhError(f"--to must be one of {', '.join(ADVANCE_TO)}")
     seq = StepSequence()
     if frm != "none":
         seq.run("transition", lambda: cmd_transition(
@@ -475,23 +477,6 @@ def cmd_advance_standing(gh: GitHub, issue: int, frm: str, to: str, reason: str,
         failed=lambda r: r.get("failed_step") is not None)
     return seq.report(issue=issue, **{"from": frm}, to=to, routed=bool(routed),
                       path=(started or {}).get("path"), claimed=bool(started))
-
-
-def cmd_skip_pr_review(gh: GitHub, issue: int, pr: int, reason: str,
-                       run_id: Optional[str] = None, repo_path: Optional[str] = None,
-                       runner: Runner = _default_runner) -> dict:
-    """Merge a standing child's PR without `pr-review`: `verify-exit --expect-stage pr-review
-    --pr` (handoff marker, PR scope) -> `route --to merge` (its marker is the merge evidence;
-    refused after a `pr-review` rework bounce) -> `merge-pr`. Returns `merged` plus the steps."""
-    seq = StepSequence()
-    seq.run("verify-exit", lambda: cmd_verify_exit(gh, repo_path, issue, "pr-review", pr,
-                                                   runner=runner))
-    seq.run("route", lambda: cmd_route(gh, issue, "merge", reason),
-            failed=lambda r: not r.get("routed"))
-    merged = seq.run("merge-pr", lambda: cmd_merge_pr(gh, pr, issue, repo_path or ".",
-                                                     run_id=run_id),
-                     failed=lambda r: not r.get("merged"))
-    return seq.report(issue=issue, pr=pr, merged=bool(merged))
 
 
 def cmd_finish_gate_feedback(gh: GitHub, issue: int, expect_stage: str,
@@ -569,7 +554,6 @@ COMMENT_CAPS = {
     "resolve-thread": ("reply", HANDOFF_CAP),
     "route": ("reason", ROUTE_REASON_CAP),
     "advance-standing": ("reason", ROUTE_REASON_CAP),
-    "skip-pr-review": ("reason", ROUTE_REASON_CAP),
     "close-issue": ("reason", HANDOFF_CAP),
     "end-cloud-session": ("note", ROUTE_REASON_CAP),
     "record-cloud-session": ("note", ROUTE_REASON_CAP),

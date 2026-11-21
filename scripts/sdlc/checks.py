@@ -231,8 +231,14 @@ def missing_required_workflows(changed_files: list, checks: list,
 def _pr_deferred_suites(gh: WorkItemProvider, head_ref: Optional[str],
                         base_ref: Optional[str]) -> tuple:
     """The Initiative profile's `deferSuites` for an epic PR `epic-<n>` -> `initiative-<i>`
-    (what close-epic defers to the initiative -> main merge), else `()`."""
+    (what close-epic defers to the initiative -> main merge), else `()`. A Task PR
+    `issue-<n>` -> `initiative-<i>` defers every base-scoped suite the initiative PR into
+    `main` owes, like one into `epic-<n>`."""
     head, base = _unit_of_branch(head_ref), _unit_of_branch(base_ref)
+    if head and head[0] == "issue" and base and base[0] == "initiative":
+        # A suite scoped to `initiative-*` alone never runs on the initiative PR: owed here.
+        return tuple(w["suite"] for w in required_workflows(base_ref)
+                     if w["bases"] and _workflow_applies_to_base(w, "main"))
     if not (head and head[0] == "epic" and base and base[0] == "initiative"):
         return ()
     try:
@@ -360,9 +366,10 @@ def pr_stale_attestations(gh: WorkItemProvider, issue: int, pr: int) -> dict:
     fresh = local_ci_suites_attested(comments, head)
     latest = _latest_attested_sha_by_suite(comments)
     stale, carried, passed_by_check = [], [], []
+    deferred = _pr_deferred_suites(gh, issue_branch(issue), base_ref)
     for spec in required_workflows(base_ref):
         suite = spec.get("suite")
-        if not suite or suite_not_attestable(suite):
+        if not suite or suite_not_attestable(suite) or suite in deferred:
             continue
         if not _workflow_applies_to_base(spec, base_ref):
             continue
@@ -573,7 +580,6 @@ def cmd_update_pr_body(gh: GitHub, pr: int, body_file: str) -> dict:
 
 
 # ---- deflake: re-run only a red suite's failed spec files on the same head ----
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _FAILED_SPEC_RE = re.compile(r"^\s*FAIL\s+(\S+\.(?:it-spec|spec|test)\.[cm]?[jt]sx?)\b")
 _DEFLAKE_MARKER = re.compile(
     r'<!-- sdlc:deflake workflow="([^"]+)" sha=([0-9a-f]{40}) specs=(\S+) -->')
@@ -628,8 +634,11 @@ def apply_deflakes(gh, checks: list, comments: list, head: Optional[str]) -> lis
         specs = _red_job_specs(gh, checks, workflow)
         if not specs:
             continue
-        run = next((r for r in runs if r.get("name") == workflow
-                    and r.get("conclusion") == "success"
+        # A `run-name` replaces a run's `name`, so the workflow file identifies it.
+        paths = {r.get("path") for r in runs
+                 if r.get("name") == workflow and r.get("event") != "workflow_dispatch"}
+        run = next((r for r in runs if r.get("event") == "workflow_dispatch"
+                    and r.get("path") in paths and r.get("conclusion") == "success"
                     and (r.get("display_title") or "").startswith(DEFLAKE_TITLE_PREFIX)
                     and specs <= set(r["display_title"][len(DEFLAKE_TITLE_PREFIX):].split())),
                    None)
@@ -668,7 +677,7 @@ def _deflake_failed_specs(gh: GitHub, pr_number: int) -> dict:
             gh.pr_comment(pr_number, (
                 f"Deflake: re-running only the failed spec files of **{workflow}** on "
                 f"{(head or '')[:7]}: {', '.join(listed)}. When the re-run passes, merge-pr "
-                f"counts the suite green; file one flake Task per spec.\n\n"
+                f"counts the suite green; file one flake Bug per spec.\n\n"
                 f'<!-- sdlc:deflake workflow="{workflow}" sha={head} specs={",".join(listed)} -->'))
             deflake.append({"workflow": workflow, "specs": listed})
         except GhError as e:
@@ -760,7 +769,8 @@ def cmd_merge_pr(gh: GitHub, pr_number: int, issue: int, repo_path: str = ".",
     checks = apply_deflakes(gh, effective_checks(gh, pr_number), view.get("comments", []), head)
     files = gh.pr_files(pr_number)
     # `base` (integration_base) is the PR's base branch -- no extra field fetch needed.
-    status, missing = merge_gate_status(files, checks, view.get("comments", []), head, base)
+    status, missing = merge_gate_status(files, checks, view.get("comments", []), head, base,
+                                        _pr_deferred_suites(gh, issue_branch(issue), base))
     if status != "passed":
         detail = f" (no passing check or fresh local-ci attestation from: {', '.join(missing)})" if missing else ""
         hint = f" {_MISSING_WORKFLOW_HINT}" if status == "missing-checks" and missing else ""

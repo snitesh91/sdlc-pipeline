@@ -4,9 +4,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from typing import Optional
 
-from .config import CONFIG, MAX_TASKS_PER_RUN, PIPELINE, Runner, _find_config
+from .config import (
+    CONFIG, MAX_TASKS_PER_RUN, PIPELINE, RESUME_LIVE_WINDOW_MINUTES, Runner, _find_config,
+)
 from .github import GhError, WorkItemProvider, _default_runner, _utc_now_marker
 
 
@@ -49,6 +52,38 @@ def _write_run_state(epic: int, state: dict) -> None:
     os.makedirs(_run_state_dir(), exist_ok=True)
     with open(_run_state_path(epic), "w") as f:
         json.dump(state, f)
+
+
+def other_live_run(epic: int, run_id: Optional[str]) -> Optional[dict]:
+    """The run-state of another run that holds `epic` on this machine: a different run id,
+    another session, not closed, and its file written within the resume live window. The
+    caller's own run refreshes its file's mtime instead, so a long stage keeps the lock."""
+    state = read_run_state(epic)
+    if not run_id or state is None or state.get("closed"):
+        return None
+    path = _run_state_path(epic)
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if state.get("run_id") == run_id or (session and state.get("session_id") == session):
+        try:
+            os.utime(path)
+        except OSError:
+            pass
+        return None
+    try:
+        age = time.time() - os.path.getmtime(path)
+    except OSError:
+        return None
+    return state if age < RESUME_LIVE_WINDOW_MINUTES * 60 else None
+
+
+def release_run(epic: int) -> None:
+    """Drop this machine's hold on `epic`: its run reached `none`, so a new run may start."""
+    # Just past the live window, never 0: the hooks' run guard and `prune-stale` read this mtime.
+    old = time.time() - RESUME_LIVE_WINDOW_MINUTES * 60 - 1
+    try:
+        os.utime(_run_state_path(epic), (old, old))
+    except OSError:
+        pass
 
 
 def note_in_flight(epic: int, run_id: Optional[str], units: dict) -> None:

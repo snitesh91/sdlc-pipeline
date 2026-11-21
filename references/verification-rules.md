@@ -63,6 +63,16 @@ brief.
 - **Any run:** run a truncating suite only against a database whose name ends in `_test`.
   Rebuild `dist` when the diff changes compiled code.
 
+## Local stack only
+
+- Every check during Initiative and Epic development runs on the local stack: Task verification,
+  the exploratory pass, `## Epic-close checks`, `initiative-close`. Use the repo's local stack,
+  integration tests, local e2e and provider test doubles.
+- No Task criterion, Epic-close check or close gate names Stage, a store or a real device.
+- **A check that needs a Stage deploy, a store release or a real device is a release Task.** File
+  it under the product's standing backlog Epic (`create-issue --parent <standing epic> --type
+  Task`); with many, one release Epic holds them. It never blocks an Epic's or Initiative's close.
+
 ## Establish a number by running the thing
 
 - **Run the rule; do not model it with a regex.** Apply the change in a scratch copy, run the

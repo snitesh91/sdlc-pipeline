@@ -29,7 +29,7 @@ from .issue_ops import _first_line, cmd_place
 # --- Initiative -> cloud Epics ------------------------------------------------------------
 
 # `waiting-local`: only local Tasks (`placement_scope`) remain; a laptop run takes them.
-# `context-reset`: the run stopped at a phase boundary to shed context; relaunch-ready at once.
+# `context-reset`: the run stopped at its cap to shed context; relaunch-ready at once.
 CLOUD_SESSION_OUTCOMES = ("closed", "waiting-human", "waiting-epic", "waiting-local", "stopped",
                           "abandoned", "context-reset")
 
@@ -38,7 +38,8 @@ CLOUD_SESSION_OUTCOMES = ("closed", "waiting-human", "waiting-epic", "waiting-lo
 HEARTBEAT_MIN_SECONDS = 300
 
 
-HEARTBEAT_STATES = ("working", "asking")
+# `asking`: on the operator's in-session answer; `waiting`: on purpose, for something it recorded.
+HEARTBEAT_STATES = ("working", "asking", "waiting")
 
 
 _CLOUD_SESSION_MARKER = re.compile(r"<!--\s*sdlc:cloud-session\s+([^>]*?)\s*-->")
@@ -69,7 +70,7 @@ NUDGES_BEFORE_ESCALATION = 2
 
 
 def initiative_epics_placement(initiative: Optional[dict] = None) -> str:
-    """Where a laptop Initiative run's Epics run: the matching `initiativeProfiles` entry's
+    """Where an Initiative run's Epics run: the matching `initiativeProfiles` entry's
     `placement`, else `pipeline.placement.initiativeEpics`."""
     key, value = "pipeline.placement.initiativeEpics", PIPELINE["placement"].get("initiativeEpics")
     own = resolve_initiative_profile(initiative)["placement"] if initiative else None
@@ -502,7 +503,8 @@ def cloud_epic_survey(gh, all_issues: list, candidates: list, repo_path: str = "
                 if hit:
                     reason = hit
         sync = None
-        if reason is None and not allow_overlap:
+        # A relaunch continues work that already ran against the same settled Epics.
+        if reason is None and not allow_overlap and not relaunch:
             sync = settled_overlap(n)
             reason = (sync or {}).get("reason")
         if reason:
@@ -572,6 +574,11 @@ def cmd_launch_cloud_epic(gh: GitHub, epic: int, repo_path: str = ".", relaunch:
     all_issues = gh.issue_list()
     by_number = {i["number"]: i for i in all_issues}
     issue = by_number.get(epic)
+    if issue is not None and is_initiative(issue) and remote_session():
+        # A cloud Initiative session at the run cap hands over the same way an Epic's does.
+        return {"epic": epic, "launched": False, "launch_in_session": True,
+                "prompt": f"/sdlc:run {epic}",
+                "then": f"record-cloud-session {epic} --session <new session id or url>"}
     if issue is None or not is_epic(issue):
         raise GhError(f"#{epic} is not an Epic -- launch-cloud-epic takes an Epic number")
     result = {"epic": epic, "launched": False}
@@ -592,7 +599,14 @@ def cmd_launch_cloud_epic(gh: GitHub, epic: int, repo_path: str = ".", relaunch:
     placed = cmd_place(gh, epic, "cloud", repo_path=repo_path, runner=runner)
     if placed.get("refused"):
         return {**result, "refused": True, "reason": placed["reason"], "place": placed}
-    argv = ["claude", "--cloud", f"/sdlc:run {epic}"]
+    prompt = f"/sdlc:run {epic}"
+    if remote_session():
+        # The container's `claude` CLI is not logged in: the session itself starts the successor.
+        return {**result, "launch_in_session": True, "prompt": prompt, "place": placed,
+                "then": f"record-cloud-session {epic} --session <new session id or url>",
+                "reason": "start a cloud session on this repo with `prompt` using the session's "
+                          "own session-creation tool, then record it"}
+    argv = ["claude", "--cloud", prompt]
     try:
         output = claude(argv)
     except ClaudeTimeout as e:
@@ -601,13 +615,6 @@ def cmd_launch_cloud_epic(gh: GitHub, epic: int, repo_path: str = ".", relaunch:
     sid, url = parsed["id"] or "unknown", parsed["url"] or "unknown"
     overlap = (" Launched with `--allow-overlap` (operator): its footprint was not checked "
                "against the other cloud Epics'." if allow_overlap else "")
-    if not parsed["id"] and remote_session():
-        # A cloud session relaunching its own Epic: leave its `context-reset` end marker the
-        # latest, so the laptop still sees the Epic as relaunch-ready.
-        tail = "\n".join(_ANSI_RE.sub("", output or "").strip().splitlines()[-10:])
-        return {**result, "ok": False, "output_tail": tail, "place": placed,
-                "reason": "claude --cloud printed no session id in this cloud session; no "
-                          "marker posted -- the laptop relaunches it (`cloud-status`)"}
     gh.issue_comment(epic,
         f"☁️ Cloud session launched for this Epic: {parsed['url'] or 'its URL was not reported'}"
         f".\n\nIt drives the Epic until it closes, asking the operator in session, then posts "
@@ -660,7 +667,7 @@ def _epic_cloud_status(gh, epic: int, by_number: dict, all_issues: list, comment
     stall_minutes = PIPELINE["placement"].get("stallMinutes", 90)
     # A session asking the operator in session is waiting on them: it stalls only after a
     # longer bound, so one that died mid-question still frees its slot.
-    asking = live and (session or {}).get("state") == "asking"
+    asking = live and (session or {}).get("state") in ("asking", "waiting")
     bound = stall_minutes * (PIPELINE["placement"].get("askingStallFactor", 6) if asking else 1)
     stalled = is_open and live and idle is not None and idle >= bound
     waits = (session_waits(gh, session, by_number, epic=epic)
@@ -699,7 +706,10 @@ def cmd_cloud_status(gh, number: int, repo_path: str = ".", runner: Runner = _de
                or _cloud_placed(e, by_number)]
     rows = [_epic_cloud_status(gh, e["number"], by_number, all_issues, comments[e["number"]],
                                open_prs, now) for e in tracked]
+    own = (latest_cloud_session(gh.issue_view(number).get("comments", []))
+           if is_initiative(issue) else None)
     result = {"number": number, "kind": "initiative" if is_initiative(issue) else "epic",
+              **({"session": own} if own else {}),
               "now": _iso(now), "stall_minutes": PIPELINE["placement"].get("stallMinutes", 90),
               "epics": rows,
               "not_in_cloud": [e["number"] for e in epics if e not in tracked]}
@@ -707,6 +717,7 @@ def cmd_cloud_status(gh, number: int, repo_path: str = ".", runner: Runner = _de
     if is_initiative(issue):
         result["all_closed"] = bool(epics) and all(e["state"] == "CLOSED" for e in epics)
         attention = attention or result["all_closed"]
+        result["cloud"] = _cloud_placed(issue, by_number)
         if initiative_epics_placement(issue) == "cloud":
             survey = cloud_epic_survey(gh, all_issues, [e["number"] for e in epics],
                                        repo_path=repo_path, runner=runner, comments=comments,
@@ -740,6 +751,11 @@ def cmd_nudge_cloud_epic(gh, epic: int, force: bool = False,
     if not status["stalled"] and not force:
         return {**result, "reason": f"not stalled (idle {status['idle_minutes']} min, threshold "
                                     f"{PIPELINE['placement'].get('stallMinutes', 90)})"}
+    if remote_session():
+        # The container's `claude` CLI is not logged in: it cannot reach another session.
+        return {**result, "refused": True,
+                "reason": f"nudge-cloud-epic runs on the laptop only -- tell the operator "
+                          f"(session {session.get('url')})"}
     sid = session.get("id")
     if status["nudges_since_activity"] >= NUDGES_BEFORE_ESCALATION or not sid or sid == "unknown":
         return {**result, "escalate": True,
@@ -765,14 +781,13 @@ def cmd_end_cloud_session(gh: WorkItemProvider, epic: int, outcome: str,
                           note: Optional[str] = None, waits_on: Optional[list] = None) -> dict:
     """Post the end marker for the Epic's latest cloud session (id `unknown` when none was
     launched through `launch-cloud-epic`). Idempotent on an already-ended session. The marker
-    records what the session waits on (`waits=`), so the laptop relaunches it once that clears
+    records what the session waits on (`waits=`), so a later run relaunches it once that clears
     (`session_waits`): `waiting-epic` needs `waits_on` (the Epics it waits for); `waiting-human`
     takes `waits_on` or defaults to the Epic's open units parked on the operator (needs-human,
     an open gate)."""
     if outcome not in CLOUD_SESSION_OUTCOMES:
         raise GhError(f"--outcome must be one of {', '.join(CLOUD_SESSION_OUTCOMES)}")
-    if not is_epic(gh.issue_epic_info(epic)):
-        raise GhError(f"#{epic} is not an Epic")
+    _require_session_unit(gh, epic)
     waits = sorted({int(w) for w in (waits_on or [])})
     if outcome == "waiting-epic":
         if not waits:
@@ -802,20 +817,34 @@ def cmd_end_cloud_session(gh: WorkItemProvider, epic: int, outcome: str,
             **({"waits": waits} if waits else {})}
 
 
-def cmd_record_cloud_session(gh: WorkItemProvider, epic: int, session: str,
+def own_session_id() -> str:
+    """This cloud session's id as `session_...` ("" outside a cloud session)."""
+    sid = os.environ.get("CLAUDE_CODE_REMOTE_SESSION_ID", "").strip()
+    return "session_" + sid[len("cse_"):] if sid.startswith("cse_") else sid
+
+
+def _require_session_unit(gh, number: int) -> None:
+    info = gh.issue_epic_info(number)
+    if not (is_epic(info) or is_initiative(info)):
+        raise GhError(f"#{number} is not an Epic or Initiative")
+
+
+def cmd_record_cloud_session(gh: WorkItemProvider, epic: int, session: Optional[str],
                              note: Optional[str] = None) -> dict:
-    """Register a cloud session the operator started by hand (`claude --cloud`, the claude.ai
-    UI) on `epic`: the cloud label if missing, then the launch marker (`manual=1`), so
+    """Register a cloud session started outside `launch-cloud-epic` (the claude.ai UI, another
+    session's tool, or this session itself when `session` is None) on `epic` or an Initiative: the cloud label if missing, then the launch marker (`manual=1`), so
     `cloud-status`, the cap and the stall checks see it. `session` is its url or `session_...`
     id. Refuses (exit 0) while another session is live on the Epic; the same id is a no-op."""
-    if not is_epic(gh.issue_epic_info(epic)):
-        raise GhError(f"#{epic} is not an Epic")
-    parsed = parse_cloud_launch(session)
+    _require_session_unit(gh, epic)
+    parsed = parse_cloud_launch(own_session_id() if session is None else session)
     if not parsed["id"]:
-        raise GhError(f"--session {session!r} names no session_... id or claude.ai/code url")
+        raise GhError(f"--session {session!r} names no session_... id or claude.ai/code url"
+                      if session is not None else
+                      "--self needs CLAUDE_CODE_REMOTE_SESSION_ID (a cloud session)")
     view = gh.issue_view(epic)
     latest = latest_cloud_session(view.get("comments", []))
-    if latest and not latest["ended"]:
+    # A launch that printed no id left `id=unknown`: the real session may claim it.
+    if latest and not latest["ended"] and latest["id"] not in (None, "unknown"):
         if latest["id"] == parsed["id"]:
             return {"epic": epic, "recorded": False, "already_recorded": True, "session": latest}
         return {"epic": epic, "recorded": False, "refused": True, "session": latest,
@@ -823,6 +852,17 @@ def cmd_record_cloud_session(gh: WorkItemProvider, epic: int, session: str,
                           f"(`end-cloud-session {epic} --outcome stopped`) before recording another"}
     labelled = cloud_label() in [(l.get("name") if isinstance(l, dict) else l)
                                  for l in view.get("labels", [])]
+    if not labelled and session is None:
+        # A cloud session placing a local unit itself must not take it from a live laptop run.
+        issues = gh.issue_list()
+        by_number = {i["number"]: i for i in issues}
+        busy = sorted(i["number"] for i in _descendants(issues, epic) if i["state"] == "OPEN"
+                      and pipeline_status(i) == "in-progress")
+        if busy and not (epic in by_number and _cloud_placed(by_number[epic], by_number)):
+            return {"epic": epic, "recorded": False, "refused": True, "in_progress": busy,
+                    "reason": f"#{epic} is placed local and {', '.join(f'#{n}' for n in busy)} "
+                              f"is in progress: a laptop run may be driving it. The operator "
+                              f"moves it with `place {epic} --where cloud`"}
     if not labelled:
         gh.ensure_label(cloud_label())
         gh.issue_edit(epic, add_labels=[cloud_label()])
@@ -851,7 +891,8 @@ def cmd_cloud_heartbeat(gh: WorkItemProvider, epic: int, state: str = "working",
                         now: Optional[datetime] = None, force: bool = False) -> dict:
     """Stamp `heartbeat=<now> state=<state>` into the live session's launch marker (an edit of
     that comment, never a new one); `cloud-status` judges a stall from it. `asking` marks a
-    session waiting on the operator's in-session answer (never `stalled`). The same state is
+    session waiting on the operator's in-session answer (it stalls only after the longer
+    bound). The same state is
     re-stamped at most every `HEARTBEAT_MIN_SECONDS` unless `force`."""
     if state not in HEARTBEAT_STATES:
         raise GhError(f"--state must be one of {', '.join(HEARTBEAT_STATES)}")

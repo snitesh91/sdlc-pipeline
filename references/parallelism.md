@@ -85,7 +85,7 @@ incumbent first.
 
 - **Preflight the machine before a stack-building stage** (a `development`/`pr-review` that
   needs a stack, the e2e-test Task, the exploratory pass, `initiative-close`): check `docker
-  system df`, VM disk (< ~80%) and free memory. Prune the build cache yourself (never a stage
+  system df`, VM disk (< ~80%), free memory and host disk (`prune-stale --dry-run` → `host_disk`; under 30 GB free, release the largest worktrees first). Prune the build cache yourself (never a stage
   agent) and stop stale stacks. A run with crash-class failures (`Page crashed`, `ENOSPC`,
   OOM) is an environment failure: fix and re-run, never record it.
 - Run at most one suite-heavy stage at a time per machine. Light stages may run alongside.
@@ -121,7 +121,7 @@ containers, cloud resources).
 - `finish-lld` / `create-lld-tasks` `conflict` → re-run. `merge-design-pr` / `skip-gate` /
   `waive-gate` / `merge-gate` `behind_base` → `sync-branch <n>`, then re-run. `review_stale`
   → re-run the review and `record-design-review`.
-- An `epic-<n>` ← `main` conflict has no stage agent. Resolve it in the epic worktree, or
+- An `epic-<n>` ← base conflict has no stage agent. Resolve it in the epic worktree, or
   dispatch one `development` agent for that reconcile. Re-check what no file conflict shows
   (pinned counts, moved specs, widened footprints). It runs only the specs the resolution
   touched.

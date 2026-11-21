@@ -125,6 +125,15 @@ def resolve_initiative_profile(initiative_issue: Optional[dict]) -> dict:
     return merged
 
 
+def initiative_profile_warnings() -> list:
+    """One line per `initiativeProfiles` entry that omits `branch`: the branch decision must
+    be stated, never read off a default."""
+    default = _INITIATIVE_PROFILE_DEFAULTS["branch"]
+    return [f"initiativeProfiles entry {prof.get('name')!r} omits `branch`: it gets "
+            f"branch={str(default).lower()} by default -- state `branch` explicitly"
+            for prof in PIPELINE["initiativeProfiles"] or [] if "branch" not in prof]
+
+
 def initiative_branch_possible() -> bool:
     """Whether any Initiative can own `initiative-<i>`: False only when a `"*"` profile opts
     every Initiative out before any profile grants a branch. False lets callers skip lookups."""
@@ -391,6 +400,8 @@ def cmd_initiative_profile(gh: Optional["WorkItemProvider"], number: int) -> dic
            **{k: prof[k] for k in _INITIATIVE_PROFILE_DEFAULTS}}
     if prof["branch"] and prof["initiative"] is not None:
         out["initiative_branch"] = initiative_branch(prof["initiative"])
+    if initiative_profile_warnings():
+        out["warnings"] = initiative_profile_warnings()
     return out
 
 

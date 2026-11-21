@@ -1,12 +1,11 @@
 # Continuous mode — unattended looping over one Initiative or Epic
 
 Enter only when the operator explicitly asks (e.g. "keep this running on epic 110"). It
-adds survival across unattended real time: `ScheduleWakeup` pacing and a fresh agent per
-unit so context stays bounded.
+paces the run with `ScheduleWakeup` and uses a fresh agent per unit, so context stays bounded.
 
 - **Laptop only.** A cloud run and the Initiative → cloud Epics orchestration never use this
   mode (`references/cloud-mode.md`).
-- **One Initiative or Epic per loop.** If the operator didn't name it, ask — never infer.
+- **One Initiative or Epic per loop.** If the operator did not name it, ask; never infer.
   An Initiative loop descends into its own Epics sequentially (`references/initiatives.md`, "The Initiative
   loop"); several Initiatives/Epics = several loops, one `ScheduleWakeup` chain each.
 - **On an Initiative, a cycle agent drives one unit:** on `run-epic` it takes that Epic's one

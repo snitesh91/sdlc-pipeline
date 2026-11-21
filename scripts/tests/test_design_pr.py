@@ -325,11 +325,7 @@ def test_a_human_merge_of_the_design_pr_closes_the_phase_task_through_auto_pass_
     assert result["ok"] is True and result["phase_task_complete"] is True
     assert gh.issues[10]["state"] == "CLOSED" and gh.issues[10]["status"] == "done"
     assert _origin_file(repo, "epic-9", f"{DOC}/epic-9/architecture.md") == "# arch\n"
-    # pass-gate reconciled the issue branch with its epic branch, not main (a merge commit
-    # past the merged PR head); the close still deleted the branch on origin and locally.
-    epic_tip = _git("rev-parse", "origin/epic-9", cwd=repo).strip()
-    deleted_head = result["cleanup"]["remote_branch"]["head"]
-    assert _git("merge-base", "--is-ancestor", epic_tip, deleted_head, cwd=repo) == ""
+    # pass-gate pushes nothing to the merged branch; the close deletes it on origin and locally.
     assert gh.deleted_branches == ["issue-10"]
     assert not _git("ls-remote", "--heads", "origin", "issue-10", cwd=repo).strip()
     assert not _git("branch", "--list", "issue-10", cwd=repo).strip()

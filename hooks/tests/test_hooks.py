@@ -557,8 +557,6 @@ ROLE_DENIED = [
     ("sdlc:initiative-close", CP + "close-initiative 1", "orchestrator"),
     ("sdlc:development", CP + "route 5 --to merge --reason r", "orchestrator"),
     # The 2026-09-23 composites are the orchestrator's: their steps are.
-    ("sdlc:development", CP + "skip-pr-review 5 --pr 9 --reason r", "orchestrator"),
-    ("sdlc:pr-review", CP + "skip-pr-review 5 --pr 9 --reason r", "orchestrator"),
     ("sdlc:product", CP + "advance-standing 5 --from product --to development --reason r",
      "orchestrator"),
     ("sdlc:architecture", CP + "finish-gate-feedback 5 --expect-stage architecture "
@@ -676,8 +674,8 @@ GOOD = 'HEAD: abc123 / PR #9\nDETAIL: https://x\nSDLC-RESULT: {"issue": 5, "stag
 @pytest.mark.parametrize("text", [
     GOOD,
     '`SDLC-RESULT: {"issue": 7, "stage": "pr-review", "outcome": "needs-human"}`',
-    'SDLC-RESULT: {"issue": 5, "stage": "development", "outcome": "done", "next": "merge", '
-    '"why": "pr-review not needed -- docs-only diff"}',
+    'SDLC-RESULT: {"issue": 5, "stage": "development", "outcome": "done", "next": "pr-review", '
+    '"why": "docs-only diff"}',
 ])
 def test_subagent_stop_passes(tmp_path, sdlc_repo, text):
     proc = stop(tmp_path, sdlc_repo, text)
@@ -1876,7 +1874,8 @@ def _token_start(tmp_path, config, env):
 
 def test_local_ambient_gh_token_exports_no_token_plumbing(tmp_path):
     content, ctx = _token_start(tmp_path, {"tokenEnv": "MY_GH_TOKEN"}, {"GH_TOKEN": "ghp_direnv"})
-    assert "GH_TOKEN" not in content and "token" not in ctx.lower()
+    # The rtk hint says "token saver" where rtk is missing (CI); it is not token plumbing.
+    assert "GH_TOKEN" not in content and "token" not in ctx.lower().replace("token saver", "")
 
 
 def test_cloud_ambient_gh_token_is_still_overridden_by_token_env(tmp_path):

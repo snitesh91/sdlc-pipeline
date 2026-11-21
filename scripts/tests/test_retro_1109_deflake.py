@@ -22,8 +22,12 @@ SPEC = "src/database/migrations/V68__LookupIndexes.it-spec.ts"
 RED_LOG = _log("\x1b[1m\x1b[31mFAIL\x1b[39m\x1b[22m " + SPEC, "  ● plans a scan",
                "FAIL src/a.it-spec.ts", "PASS src/b.it-spec.ts", "FAIL src/a.it-spec.ts")
 DISPATCH_RUNS_ARGV = ("gh", "api", f"repos/owner/repo/actions/runs?head_sha={HEAD}"
-                      f"&event=workflow_dispatch&per_page=100", "--jq",
-                      "[.workflow_runs[] | {name, display_title, conclusion, html_url}]")
+                      f"&per_page=100", "--jq",
+                      "[.workflow_runs[] | {name, display_title, conclusion, html_url, "
+                      "event, path}]")
+WF_PATH = ".github/workflows/kipsa-backend-it.yml"
+RED_RUN = {"name": WF, "display_title": "epic PR", "conclusion": "failure", "html_url": "r",
+           "event": "pull_request", "path": WF_PATH}
 
 
 def _marker(specs=(SPEC,), sha=HEAD, wf=WF):
@@ -37,7 +41,10 @@ def _red():
 
 
 def _run(title, conclusion="success", name=WF):
-    return {"name": name, "display_title": title, "conclusion": conclusion, "html_url": "u"}
+    """A dispatched run; `run-name` makes its `name` the title, so the path identifies it."""
+    path = WF_PATH if name == WF else ".github/workflows/other.yml"
+    return {"name": title, "display_title": title, "conclusion": conclusion, "html_url": "u",
+            "event": "workflow_dispatch", "path": path}
 
 
 def test_failed_specs_parses_jest_fail_lines_ansi_and_prefix_stripped():
@@ -91,7 +98,7 @@ ONE_SPEC_LOG = _log("FAIL " + SPEC, "  ● plans a scan")
 
 
 def _gh(runs, logs=None):
-    runner = ScriptedRunner({DISPATCH_RUNS_ARGV: json.dumps(runs)})
+    runner = ScriptedRunner({DISPATCH_RUNS_ARGV: json.dumps([RED_RUN, *runs])})
     for job, out in (logs or {111: ONE_SPEC_LOG}).items():
         runner.responses[_log_argv(job)] = out
     return s.GitHub(runner=runner), runner
@@ -151,7 +158,7 @@ def _merge(comments, runs):
     runner.responses[("gh", "pr", "view", "42", "--repo", "owner/repo",
                       "--json", "comments,headRefOid")] = json.dumps(
         {"comments": comments, "headRefOid": HEAD})
-    runner.responses[DISPATCH_RUNS_ARGV] = json.dumps(runs)
+    runner.responses[DISPATCH_RUNS_ARGV] = json.dumps([RED_RUN, *runs])
     return runner
 
 

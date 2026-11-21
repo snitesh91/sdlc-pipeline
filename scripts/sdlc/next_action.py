@@ -21,12 +21,13 @@ from .units import (
 )
 from .evidence import (
     _glob_matches, epic_branch, last_pr_review_outcome, last_transition_to,
-    routed_past_pr_review,
 )
 from .epic_close import initiative_landing
 from .gate_eval import evaluate_gate
 from .run_state import (
-    _write_run_state, config_drift, note_in_flight, read_run_state, run_cap_reached,
+    _write_run_state, config_drift, note_in_flight, other_live_run, read_run_state,
+    release_run,
+    run_cap_reached,
     run_cap_state, run_completed,
 )
 
@@ -288,10 +289,10 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                 result["initiative_branch"] = landing
                 result["reason"] = (
                     f"every cut Epic is closed -- `{landing['branch']}` must reach main first: "
-                    + (f"`merge-initiative-pr {epic}` once PR #{landing['pr']}'s evidence is "
-                       f"green" if landing["state"] == "open" else
-                       f"`open-initiative-pr {epic} --repo-path <p>`, then "
-                       f"`merge-initiative-pr {epic}` once its evidence is green")
+                    + ("" if landing["state"] == "open" else
+                       f"`open-initiative-pr {epic} --repo-path <p>`, then ")
+                    + f"verify the requirements on `origin/{landing['branch']}` "
+                      f"(initiative-close), then `merge-initiative-pr {epic}`"
                     + " (references/initiatives.md, \"Closing an Initiative\").")
             elif cut_epics and all(i["state"] == "CLOSED" for i in cut_epics):
                 result["reason"] = ("every cut Epic is closed -- ready for initiative-close "
@@ -382,11 +383,10 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
     if scope == "local-tasks":
         return none_result()  # Epic-level steps (cut, launch, Initiative loop) are the cloud's
     if (is_initiative(epic_issue) and epic_issue["state"] == "OPEN" and not deferred_by_run_cap
-            and initiative_epics_placement(epic_issue) == "cloud"
-            and session_placement()["placement"] == "local"):
-        # Each Epic runs in its own cloud session; this run only launches them.
+            and initiative_epics_placement(epic_issue) == "cloud"):
+        # Each Epic runs in its own cloud session; this run (laptop or cloud) only launches them.
         open_epics = [e["number"] for e in _initiative_epics(all_issues, epic)
-                      if e["state"] == "OPEN"]
+                      if e["state"] == "OPEN" and e["number"] not in skip_epics]
         if open_epics:
             cloud_survey.update(cloud_epic_survey(gh, all_issues, open_epics,
                                                   repo_path=repo_path, runner=runner))
@@ -622,12 +622,21 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     A `resume` also carries liveness hints (`_resume_liveness`). With `--sync-epic`,
     `sync_epic_if_due` runs first and its result is `epic_sync`. Refuses a unit placed
     on the other side (`check_placement`), then a plugin older than the run's last
-    (`plugin_version_guard`), before anything else runs."""
+    (`plugin_version_guard`), before anything else runs. A second run id while another
+    run holds the Epic (`other_live_run`) is refused unless `take_over`."""
     run_id = getattr(args, "run_id", None)
     repo_path = getattr(args, "repo_path", None) or "."
     issues = gh.issue_list()
     by_number = {i["number"]: i for i in issues}
     scope = placement_scope(args.epic, by_number.get, issues)
+    holder = None if getattr(args, "take_over", False) else other_live_run(args.epic, run_id)
+    if holder:
+        return {"action": "none", "epic": args.epic, "refused": True, "likely_live": True,
+                "run_id": holder.get("run_id"),
+                "reason": f"run {holder.get('run_id')} drove #{args.epic} on this machine within "
+                          f"the last {RESUME_LIVE_WINDOW_MINUTES} min -- two runs on one Epic "
+                          f"race. Start nothing; ask the operator, and pass `--take-over` only "
+                          f"on their word"}
     version = plugin_version_guard(gh, args.epic, by_number, repo_path=repo_path)
     drift = config_drift(args.epic, run_id)
     epic_sync = (sync_epic_if_due(gh, args.epic, run_id, repo_path, issues=issues)
@@ -635,6 +644,8 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     result = decide_next_action(gh, args.epic, run_id=run_id,
                                 skip_epics=getattr(args, "skip_epic", None),
                                 repo_path=repo_path, all_issues=issues, scope=scope)
+    if result.get("action") == "none" and run_id:  # a probe with no run id holds no lock
+        release_run(args.epic)
     # Read liveness before note_in_flight re-stamps this run onto the unit.
     liveness = (_resume_liveness(gh, args.epic, result["issue"])
                 if result.get("action") == "resume" else {})
@@ -686,10 +697,6 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
         if outcome is not None and outcome[0] > handoff:
             skipped.append({"issue": number, "reason": f"pr-review already recorded "
                                                         f"{outcome[1]!r} for this round"})
-            continue
-        if routed_past_pr_review(comments):
-            skipped.append({"issue": number, "reason": "routed past pr-review this round "
-                                                        "(`route --to merge`)"})
             continue
         branch = issue_branch(number)
         prs = gh.pr_list_for_branch(branch)

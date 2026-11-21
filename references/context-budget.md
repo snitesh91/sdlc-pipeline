@@ -1,6 +1,6 @@
 # Orchestrator context budget
 
-One Epic run reached about 461K tokens of orchestrator context (#4848, 2026-11-04). Most of it came from verbose updates, long handbacks, restated briefs, raw tool output and notification overhead. Each rule below targets one of those sources.
+One Epic run reached about 461K tokens of orchestrator context. Most of it came from verbose updates, long handbacks, restated briefs, raw tool output and notification overhead.
 
 ## Updates to the operator
 
@@ -21,7 +21,7 @@ The SubagentStop hook refuses a stage handback over 1,500 characters once; the a
 ## Never read raw output
 
 - A failing check: `python3 "$SDLC" ci-failure-summary <pr>` returns each failing job's failure lines only (at most 25 per job, 4,000 characters in total). Never `gh run view --log` into your context.
-- `close-epic --brief` reduces the evidence, file and cleanup lists to counts and names. Drop `--brief` only to brief an exploratory re-pass that needs the file list.
+- `close-epic` prints counts and names. Add `--full` only to brief an exploratory re-pass that needs the file list.
 - A reference file: `grep -n` the heading you need, then read that section only.
 
 ## Side requests go to a subagent
@@ -39,17 +39,8 @@ Keep only that reply. Do it inline only for one or two tool calls whose target y
 Each background notification costs about 300 tokens of fixed harness text.
 
 - Launch a batch of agents in one message.
-- Wait on one `Monitor` until-loop or one background command, never on stacked short sleep timers. Poll external state (CI) at the interval it changes, not every minute.
+- Wait on one `Monitor` until-loop or one background command, never on stacked short sleep timers. Poll CI at the interval it changes, not every minute. In the cloud, never poll across turns (`cloud-mode.md`, "A cloud run").
 - A stage agent sends `SDLC-RESULT` once, when its stage ends. An interim "still waiting" result is a defect: tell the agent to wait on one Monitor and finish.
-
-## Stop at a phase boundary
-
-Once this run has driven any unit, stop at the next phase boundary and report (Step 4):
-
-- after a `finish-lld` that cut the Epic's Tasks;
-- before the first `close-epic` call on a closeable Epic.
-
-The next `/sdlc:run <epic>` starts from GitHub with a clean context. A cloud run ends with `end-cloud-session <epic> --outcome context-reset`; that session is relaunch-ready at once (`cloud-status`, `next-action <initiative>`'s `cloud.relaunch`). Keep `parallelism.maxTasksPerRun` at about 5 so a long development phase also breaks into batches.
 
 ## After a container restart
 

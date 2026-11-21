@@ -18,7 +18,8 @@ COMMENT_ROLES = ("product", "architecture", "lld")
 # initiative-close return their findings report, and a fan-out hand-back carries its briefs.
 HANDBACK_CAP = 1_500
 UNCAPPED_ROLES = ("exploratory", "initiative-close")
-POST_COMMENT_RE = re.compile(r"post-comment\b.*--role[ =]+[\"']?(\w[\w-]*)")
+# DOTALL: a command wrapped with `\` continuations keeps `--role` on a later line.
+POST_COMMENT_RE = re.compile(r"post-comment\b.*?--role[ =]+[\"']?(\w[\w-]*)", re.DOTALL)
 
 
 def last_assistant_text(path: str):

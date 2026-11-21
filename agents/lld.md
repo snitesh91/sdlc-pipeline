@@ -15,7 +15,7 @@ First, read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`, `${CLAUDE_PLU
 | A proof sweep or a completeness claim | `references/verification-rules.md`, "Establish a number by running the thing" and "A completeness claim over a footprint is a sweep, not a list" |
 | A standing test Task | `references/verification-rules.md`, "Test scope" |
 | A piece that may deviate | `references/epics.md`, "Architecture deviation escalation" |
-| A `Placement: local` Task | `references/cloud-mode.md`, "Placement rules" |
+| A `Placement: local` Task | `references/cloud-mode.md`, "Cloud-first runs" |
 
 ## Rules
 
@@ -24,7 +24,7 @@ First, read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`, `${CLAUDE_PLU
 3. **Declare collision safety.** Make each Task's `## Footprint` complete enough for safe parallel work.
 4. **Carve the Tasks.** Write one section per Task. Do not create issues; the orchestrator does that after `lld-review`.
 5. **Author the design, not the code.** Commit `lld.md` only. Never restate `architecture.md`; point to its section. A fenced snippet is only for a contract, at most 15 lines. Never edit `architecture.md` or `product.md`.
-6. **Keep it short.** Aim for about 400 words per Task section. A section far over that often means the Task is too big: consider splitting it.
+6. **Keep it short.** Follow the length targets in `design-doc-rules.md`.
 
 ## First move: fits or deviates
 
@@ -67,7 +67,7 @@ Follow `epics.md`, "How to size the Tasks". Also:
 - Sequence a Task that needs another's design with `Depends on: <KEY>`.
 - A fragment that compiles only after a sibling lands is a mis-split dependency.
 - A Task whose design you cannot prove in one section is too big.
-- Mark a Task `Placement: local — <reason>` when its criteria need something a cloud session cannot reach (`cloud-mode.md`, "Placement rules").
+- Mark a Task `Placement: local — <reason>` only when your prompt says the operator asked for it. Other laptop-only work is a release Task (`cloud-mode.md`, "Cloud-first runs").
 
 ## The document
 
@@ -80,7 +80,7 @@ Each section covers:
 - Exact files and functions to touch, and what changes in each, one line each.
 - Which section of `architecture.md` it realises (a pointer, not a restatement), and any point where you interpret.
 - Task-local decisions, numbered.
-- Acceptance criteria from the Epic, unchanged or with the change stated. Each decision that keeps state or can fail gets a criterion for its failure, empty and repeat cases. A check that needs Stage or `main` goes under a non-Task `## Epic-close checks` heading.
+- Acceptance criteria from the Epic, unchanged or with the change stated. Each decision that keeps state or can fail gets a criterion for its failure, empty and repeat cases. A check that needs the whole Epic on its branch goes under a non-Task `## Epic-close checks` heading. It runs on the local stack; a check that needs Stage, a store or a real device is a release Task, never a criterion or an Epic-close check (`${CLAUDE_PLUGIN_ROOT}/references/verification-rules.md`, "Local stack only").
 - Honest risks.
 - Out of scope.
 - `## Footprint`.
@@ -90,7 +90,7 @@ Metadata lines, plain text, never in backticks, directly under the heading:
 - `Depends on: <KEY>, <KEY>` only for a real ordering need. Never quote a `Depends on:` line elsewhere in the section. `create-lld-tasks` makes the Tasks' `blockedBy` edges match these lines exactly, so an edge missing here is removed on the next run.
 - `Priority: Urgent|High|Medium|Low` and `Effort: High|Medium|Low`, optional. Any other value fails the whole run.
 - `Realises: #n, #m` when the Task delivers issues that already exist. Name every one. Never carve a pre-existing issue as its own section unless that issue is the Task.
-- `Placement: local — <reason>` when the Task must run on the laptop.
+- `Placement: local — <reason>` only on the operator's ask.
 
 **Footprint** (shape: `epics.md`, "How to size the Tasks"). One backticked path per bullet. List edited paths first, then run-only paths under `**Verify-only:**`. Include:
 

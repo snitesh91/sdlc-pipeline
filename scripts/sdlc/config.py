@@ -172,7 +172,7 @@ _PIPELINE_DEFAULTS = {
     "resume": {"liveWindowMinutes": 30},
     # An Epic (or its Initiative) carrying `cloudLabel` is driven only by a cloud session,
     # every other one only by a local session.
-    # `initiativeEpics`: "cloud" makes a laptop Initiative run launch each runnable Epic in its
+    # `initiativeEpics`: "cloud" makes an Initiative run launch each runnable Epic in its
     # own cloud session (`launch-cloud-epic`) instead of driving it; `stallMinutes`: a live
     # cloud Epic with no GitHub activity this long is `stalled` in `cloud-status`;
     # `askingStallFactor`: a session whose heartbeat says `asking` stalls only after
@@ -212,7 +212,7 @@ _PIPELINE_DEFAULTS = {
     # invalidating the exploratory evidence (`{docRoot}` expands to `docRoot`).
     "epicClose": {"auto": False,
                   "evidenceCarryForward": {"paths": ["**/*.md", "docs/**", "{docRoot}/**"]},
-                  # Shell command close-epic runs in the epic worktree before the
+                  # Shell command prepare-epic-tree runs in the epic worktree before the
                   # exploratory pass (e.g. a dependency install); "" = none.
                   "prepare": "",
                   # `[{versionFile, versionPattern, textPaths}]`: when a `textPaths` file

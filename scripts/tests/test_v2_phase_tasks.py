@@ -626,7 +626,7 @@ def test_close_epic_sets_the_terminal_fields_when_it_merges():
     gh.pr_view = lambda n, fields="": {"comments": [], "headRefOid": "abc"}
     gh.pr_files = lambda n: []
     gh.pr_ready = lambda n: None
-    gh.pr_merge = lambda n: merged.append(n)
+    gh.pr_merge = lambda n, **kw: merged.append(n)
 
     result = s.cmd_close_epic(gh, 9, runner=lambda argv: "")
 

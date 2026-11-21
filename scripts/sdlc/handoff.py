@@ -420,13 +420,13 @@ def cmd_set_stage(gh: GitHub, issue: int, stage: str) -> dict:
     return {"issue": issue, "stage": stage}
 
 
-# A standing child's full flow in order; `merge` means "skip pr-review". Only an authoring
-# stage (or `merge`) is a route target: a review always follows the stage it reviews.
+# A standing child's full flow in order. Only an authoring stage is a route target: a review
+# always follows the stage it reviews.
 STANDING_FLOW = ("product", "product-review", "architecture", "arch-review",
-                 "development", "pr-review", "merge")
+                 "development", "pr-review")
 
 
-ROUTE_TARGETS = ("product", "architecture", "development", "merge")
+ROUTE_TARGETS = ("product", "architecture", "development")
 
 
 ROUTE_REASON_CAP = 200
@@ -442,9 +442,8 @@ def _flow_index(stage: Optional[str]) -> Optional[int]:
 
 
 def route_refusal(parent: Optional[dict], stage: Optional[str], status: Optional[str],
-                  to: str, reason: str, pr_review_bounced: bool = False) -> Optional[str]:
-    """Why `route` must refuse moving a child of `parent` at `stage`/`status` to `to`, or None.
-    `pr_review_bounced`: a `pr-review` already asked for rework on this issue."""
+                  to: str, reason: str) -> Optional[str]:
+    """Why `route` must refuse moving a child of `parent` at `stage`/`status` to `to`, or None."""
     if parent is None or not is_epic(parent) or not is_epic_standing(parent):
         return "route is for a standing epic's child only -- stage anything else with set-stage"
     if to not in ROUTE_TARGETS:
@@ -458,11 +457,7 @@ def route_refusal(parent: Optional[dict], stage: Optional[str], status: Optional
         return f"a gate PR is open (Pipeline Status {status!r}) -- the human decides; route after it passes"
     at = _flow_index(stage)
     if at is None:
-        return f"Stage {stage!r} is not in the standing flow ({', '.join(STANDING_FLOW[:-1])})"
-    if to == "merge" and stage != "pr-review":
-        return "merge (skipping pr-review) needs development's PR open -- Stage must be PR Review"
-    if to == "merge" and pr_review_bounced:
-        return "pr-review already asked for rework on this issue -- never skip it after a bounce"
+        return f"Stage {stage!r} is not in the standing flow ({', '.join(STANDING_FLOW)})"
     if STANDING_FLOW.index(to) <= at:
         return f"route only moves forward from {stage!r} -- use set-stage to go back"
     return None
@@ -471,28 +466,24 @@ def route_refusal(parent: Optional[dict], stage: Optional[str], status: Optional
 def cmd_route(gh: GitHub, issue: int, to: str, reason: str,
               finished: Optional[str] = None) -> dict:
     """Route a standing epic's child ahead to `to`, skipping the stages between: Stage `to`
-    and Pipeline Status `todo` (no claim; `merge` leaves both), plus a `stage-route` marker.
+    and Pipeline Status `todo` (no claim), plus a `stage-route` marker.
     `finished`: the stage that just ran (a review leaves Stage on its authoring stage), so it
     is never named as skipped. Refuses (`routed: False`, exit 0) per `route_refusal`."""
     parent = gh.issue_epic_info(issue).get("parent")
     parent_info = gh.issue_epic_info(parent["number"]) if parent else None
     fields = gh.issue_fields(issue)
     stage = STAGE_FIELD_NAMES.get(fields.get("Stage"))
-    bounced = to == "merge" and any(
-        m.group(1) == "rework" for c in gh.issue_view(issue).get("comments", [])
-        for m in _PR_REVIEW_OUTCOME_MARKER.finditer(c.get("body", "")))
     refusal = route_refusal(parent_info, stage,
                             PIPELINE_STATUS_FIELD_NAMES.get(fields.get("Pipeline Status")),
-                            to, reason, pr_review_bounced=bounced)
+                            to, reason)
     if refusal:
         return {"issue": issue, "routed": False, "reason": refusal}
     at, frm = _flow_index(stage), stage or "pickup"
     if finished in STANDING_FLOW and STANDING_FLOW.index(finished) > at:
         at, frm = STANDING_FLOW.index(finished), finished
     skipped = list(STANDING_FLOW[at + 1:STANDING_FLOW.index(to)])
-    if to != "merge":
-        gh.set_stage_field(issue, to)
-        gh.set_pipeline_status_field(issue, "todo")
+    gh.set_stage_field(issue, to)
+    gh.set_pipeline_status_field(issue, "todo")
     skipping = f", skipping {', '.join(f'`{s}`' for s in skipped)}" if skipped else ""
     gh.issue_comment(issue, f"🔀 Routed `{frm}` → `{to}`{skipping}: {reason.strip()}\n\n"
                             f"<!-- stage-route: {frm}->{to} @ {_utc_now_marker()} -->")

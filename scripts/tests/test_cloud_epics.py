@@ -399,12 +399,12 @@ def test_a_local_mode_initiative_still_drives_its_epics():
     assert _next(_initiative(2, 3))["action"] == "cut-phase-tasks"
 
 
-def test_a_cloud_mode_initiative_in_a_cloud_session_drives_its_epics_inline(cloud_mode,
-                                                                          monkeypatch):
+def test_a_cloud_mode_initiative_in_a_cloud_session_launches_its_epics_too(cloud_mode,
+                                                                         monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
     gh = _initiative(2)
     gh.issues[1]["labels"].append(CLOUD)
-    assert _next(gh)["action"] == "cut-phase-tasks"
+    assert _next(gh)["action"] == "launch-cloud-epics"
 
 
 def test_with_every_epic_running_the_initiative_run_reports_and_ends(cloud_mode):
