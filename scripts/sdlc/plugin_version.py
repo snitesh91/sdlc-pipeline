@@ -12,7 +12,10 @@ from .config import (
     PR_REVIEW_PARALLELISM, REPO, Runner, TOKEN_ENV, TOKEN_PATH, _PARALLELISM, doc_root_rules,
 )
 from .github import GhError, GitHub, _default_runner, _utc_now_marker, github_api
-from .units import is_epic, is_initiative, local_tasks_config_errors, session_placement
+from .units import (
+    initiative_profile_warnings, is_epic, is_initiative, local_tasks_config_errors,
+    session_placement,
+)
 from .evidence import LOCAL_CI_SUITES
 
 
@@ -171,6 +174,8 @@ def cmd_show_config(runner: Runner = _default_runner) -> dict:
             "github_api": _github_api_or_error(),
             **({"config_errors": local_tasks_config_errors()}
                if local_tasks_config_errors() else {}),
+            **({"warnings": initiative_profile_warnings()}
+               if initiative_profile_warnings() else {}),
             **PIPELINE}
 
 

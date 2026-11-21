@@ -252,7 +252,8 @@ def dev_pr_scope_offenders(gh: WorkItemProvider, issue: int, changed_files: list
     # diff has no non-design-doc paths to check.
     non_doc = [p for p in changed_files if not p.startswith(design_prefix)]
     integ = integration_base(gh, issue) if non_doc else "main"
-    if integ != "main":
+    # Only an Epic has an lld.md; a direct child of an Initiative has no sibling footprints.
+    if integ.startswith(EPIC_BRANCH_PREFIX):
         epic_no = int(integ[len(EPIC_BRANCH_PREFIX):])
         try:
             lld = runner(["git", "-C", repo_path, "show",

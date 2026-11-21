@@ -43,7 +43,13 @@ def cmd_reparent_issue(gh: WorkItemProvider, issue: int, parent: int,
         return {**base, "moved": False, "already_parented": True}
     if old is not None:
         gh.remove_sub_issue(old, issue)
-    gh.add_sub_issue(parent, issue)
+    try:
+        gh.add_sub_issue(parent, issue)
+    except GhError:
+        # e.g. the new parent is at GitHub's sub-issue cap: never leave the issue parentless.
+        if old is not None:
+            gh.add_sub_issue(old, issue)
+        raise
     why = f" — {reason}" if reason else ""
     moved_from = f"from #{old} " if old is not None else ""
     gh.issue_comment(issue, f"🔀 Moved {moved_from}to #{parent}{why}.")
