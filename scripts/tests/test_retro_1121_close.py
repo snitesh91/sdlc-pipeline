@@ -96,6 +96,7 @@ def test_operator_override_never_passes_missing_verification_or_an_empty_reason(
 # --- brief is the default output --------------------------------------------------------
 
 def test_close_epic_prints_counts_unless_full(monkeypatch, capsys):
+    monkeypatch.setenv("GITHUB_TOKEN", "x")  # main() refuses to run without one
     monkeypatch.setattr(s, "get_work_item_provider", lambda: None)
     monkeypatch.setattr(s, "cmd_close_epic",
                         lambda *a, **k: {"epic": 7, "carried_forward_files": ["a", "b"]})

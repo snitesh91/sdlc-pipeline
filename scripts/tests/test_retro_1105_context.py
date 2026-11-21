@@ -70,6 +70,7 @@ def test_close_epic_brief_reduces_bulky_fields():
 
 
 def test_close_epic_brief_is_a_cli_flag(monkeypatch, capsys):
+    monkeypatch.setenv("GITHUB_TOKEN", "x")  # main() refuses to run without one
     big = {"epic": 7, "merged": False, "carried_forward_files": ["a", "b"]}
     monkeypatch.setattr(s, "get_work_item_provider", lambda: None)
     monkeypatch.setattr(s, "cmd_close_epic", lambda *a, **k: dict(big))
