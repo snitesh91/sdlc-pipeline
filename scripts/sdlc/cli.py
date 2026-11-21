@@ -830,7 +830,10 @@ def main(argv: Optional[list] = None) -> int:
     p = sub.add_parser("record-cloud-session",
                         help="Register a cloud session started by hand on an Epic")
     p.add_argument("epic", type=int)
-    p.add_argument("--session", required=True, help="Its claude.ai/code url or session_... id")
+    which = p.add_mutually_exclusive_group(required=True)
+    which.add_argument("--session", default=None, help="Its claude.ai/code url or session_... id")
+    which.add_argument("--self", dest="own", action="store_true",
+                       help="This cloud session (CLAUDE_CODE_REMOTE_SESSION_ID)")
     p.add_argument("--note", default=None, help="One line for the operator")
     p.set_defaults(func=lambda a: cmd_record_cloud_session(get_work_item_provider(), a.epic,
                                                            a.session, a.note))
@@ -838,7 +841,8 @@ def main(argv: Optional[list] = None) -> int:
                         help="Stamp the live cloud session's heartbeat on its Epic")
     p.add_argument("epic", type=int)
     p.add_argument("--state", default="working", choices=list(HEARTBEAT_STATES),
-                    help="asking: waiting on the operator's in-session answer (never stalled)")
+                    help="asking: on the operator's in-session answer; waiting: on purpose "
+                         "(both stall only after the longer bound)")
     p.set_defaults(func=lambda a: cmd_cloud_heartbeat(get_work_item_provider(), a.epic,
                                                       a.state, force=True))
     p = sub.add_parser("cloud-status",

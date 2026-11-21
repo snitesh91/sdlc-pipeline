@@ -1,7 +1,31 @@
 # Cloud mode — one Epic, one side
 
-`/sdlc:run <n>` runs on the laptop or in a Claude Code cloud session. The placement label
-decides which side owns an Epic; the two never work on the same Epic.
+`/sdlc:run <n>` runs in a Claude Code cloud session or on the laptop. The placement label
+decides which side owns an Epic; the two never work on the same Epic. A run needs no laptop: a
+cloud session registers itself, launches its Initiative's Epic sessions and its own successor,
+and closes ("Cloud-first runs").
+
+## Cloud-first runs
+
+- **First command of every cloud session:** `record-cloud-session <n> --self` (`<n>` is the
+  Initiative or Epic you drive). It places the unit in the cloud and posts this session's
+  marker; `already_recorded` is fine. On `refused` another session is live: stop and relay it.
+- **Starting a session from a cloud session:** `launch-cloud-epic` returns
+  `launch_in_session: true` with `prompt`. Find the session-creation tool (`ToolSearch`
+  "create session"), start a session on this repo with exactly `prompt`, then run
+  `record-cloud-session <epic> --session <new id or url>`. No such tool: relay `prompt` to the
+  operator, who starts it from claude.ai; never try `claude --cloud` in the container.
+- **A cloud Initiative run** (the Initiative carries the cloud label) does the Initiative's own
+  work in session (IRD, Gate A, Epic cut), then launches one session per Epic ("Initiative →
+  cloud Epics"). It never waits for them: end `waiting-epic --waits-on <open Epics>`.
+- **A cloud Epic run that closes its Epic** runs `cloud-status <initiative>` before it ends:
+  launch each `launchable` Epic; on `all_closed`, launch the Initiative (`prompt`
+  `/sdlc:run <initiative>`, then `record-cloud-session <initiative> --session …`) so it closes.
+  This relay replaces the laptop's watch.
+- **Laptop-only work** (a real phone, an emulator, Stage, a host the cloud denies) goes to a
+  separate local standing Epic under the same Initiative, never to a local Task inside a
+  cloud Epic: that Epic could not close from the cloud. Use a local Task only when the
+  operator asks.
 
 ## Placement rules
 
@@ -54,6 +78,12 @@ A cloud session drives its one Epic or Initiative through Steps 1–4 until the 
 - A wait parks only its unit. Dispatch every other runnable unit, then ask in session ("Human
   channel"; a gate: `references/gates.md`, "Deciding a gate in session"). Run
   `cloud-heartbeat <epic> --state asking` before a question.
+- **Never wait on a sibling Epic**, its close included: `close-epic` reconciles with the base
+  on each call, so close as soon as the Epic is closeable.
+- An idle session's VM pauses and drops background commands: never poll or self-schedule a
+  check-in. A wait you cannot avoid inside a turn (CI, a long suite) gets
+  `cloud-heartbeat <epic> --state waiting` first; anything longer ends the session with its
+  `waits`.
 - End only when nothing else can move (`none`, every question answered or deferred) or the
   operator says stop. With `"github"`, end at the first `none`.
 
@@ -77,13 +107,13 @@ The recorded wait drives the relaunch ("Initiative → cloud Epics"). Then Step 
 
 ### Handing over at the cap
 
-`parallelism.maxTasksPerRun` caps one session's units. On `stop-at-cap`, finish in-flight
-work, then start the successor session yourself:
+`parallelism.maxTasksPerRun` caps one session's units; it is the only stop that sheds context.
+On `stop-at-cap`, finish in-flight work, then start the successor session yourself:
 
 1. `end-cloud-session <epic> --outcome context-reset` (frees this session's slot).
-2. `launch-cloud-epic <epic> --relaunch --repo-path <p>`. On `launched: true`, relay the url
-   and end. On `ok: false`, `refused` or an error, relay it and end: the laptop relaunches
-   the Epic from its `context-reset` marker (`cloud-status` → `relaunch_ready`).
+2. `launch-cloud-epic <epic> --relaunch --repo-path <p>`, then start and record the session
+   ("Cloud-first runs"). On `refused` or an error, relay it and end: the Epic stays
+   `relaunch_ready` (`cloud-status`) for the operator or any later run.
 
 - **Cleanup:** `merge-pr`, `close-epic` and `prune-stale` release a closed unit's worktrees as
   on a laptop: a long run's merged trees (`node_modules` included) fill the disk. `prune-stale`
@@ -104,10 +134,12 @@ a base with such a suite: the epic → `main` (or `initiative-*`) PR, a `land-ep
 parentless issue's PR into `main`. Task PRs into `epic-<n>` run no full suites.
 
 `close-epic` and `open-dev-pr` put `<!-- sdlc:ci-local -->` on the PR body's last line and add
-the label `ci:local` for visibility (`open-dev-pr` returns `ci_local: true`). The repo's PR jobs
-gate on `if: ${{ !endsWith(github.event.pull_request.body, '<!-- sdlc:ci-local -->') }}`: the
-body is in the `opened` and `synchronize` payloads, a label added after creation is not. Never
-`contains`: a PR body that quotes the marker would skip every suite.
+the label `ci:local` for visibility (`open-dev-pr` returns `ci_local: true`). The proxy then
+appends its footer, so the repo's PR jobs skip when the body ends with the marker **or**
+contains the marker directly followed by the footer's opening
+(`<marker>\n\n---\n_Generated by [Claude Code](https://claude.ai/code`). The body is in the
+`opened` and `synchronize` payloads; a label added after creation is not. Never a bare
+`contains` of the marker: a PR body that quotes it would skip every suite.
 
 **Epic PR:**
 
@@ -164,37 +196,41 @@ session with `AskUserQuestion`. Never use `PushNotification` or `ScheduleWakeup`
 
 ## Initiative → cloud Epics
 
-With `pipeline.placement.initiativeEpics: "cloud"` (or the profile's `placement: "cloud"`), a
-laptop Initiative run keeps the Initiative's own work and gives each Epic its own cloud session.
+With `pipeline.placement.initiativeEpics: "cloud"` (or the profile's `placement: "cloud"`), an
+Initiative run, on the laptop or in the cloud, keeps the Initiative's own work and gives each
+Epic its own cloud session. With `"local"`, a cloud Initiative run drives its Epics inline.
 
 - `next-action <initiative>` returns `launch-cloud-epics` (`epics`). For each, run
-  `launch-cloud-epic <epic> --repo-path <p>`: it places the Epic, starts `claude --cloud
-  "/sdlc:run <epic>"` on a pseudo-terminal, and posts the session marker. Then call
-  `next-action <initiative>` again.
+  `launch-cloud-epic <epic> --repo-path <p>`: it places the Epic and, on a laptop, starts
+  `claude --cloud "/sdlc:run <epic>"` on a pseudo-terminal and posts the session marker (in a
+  cloud session: "Cloud-first runs"). Then call `next-action <initiative>` again.
 - **Launchable:** open, not legacy, not blocked, no live session, footprint disjoint from every
   live cloud Epic's (unknown footprints never count as disjoint;
   `pipeline.placement.softOverlapPaths` never overlap), within `parallelism.cloudSessions`
   (default 3). An ended Epic relaunches once its recorded `waits=` clears: the waited Epic
   closed (`waiting-epic`), or a waited unit closed, changed state, got a comment, or had its
   gate PR merged, reviewed or pushed. An end marker with no waits waits for new GitHub activity.
-  `--relaunch` overrides; `next-action`'s `cloud.relaunch` lists ready ones.
+  `--relaunch` overrides, and skips the overlap check against Epics whose session ended;
+  `next-action`'s `cloud.relaunch` lists ready ones.
 - **`--allow-overlap`** skips the footprint checks (marker `overlap=1`). Operator's word only.
-- **A session started by hand:** `record-cloud-session <epic> --session <url|session_…>` (adds the cloud label, posts the launch marker with `manual=1`).
+- **A session not started by `launch-cloud-epic`:** `record-cloud-session <n> --self` from
+  inside it, or `--session <url|session_…>` from outside (adds the cloud label, posts the launch
+  marker with `manual=1`). `<n>` is an Epic or an Initiative.
 - **Idempotent:** a live session is never relaunched (`already_running`). `ok: false` with
   `output_tail`: no session id printed; relay the tail.
 - **`none`** names each Epic's cloud state; report and end. Re-run `/sdlc:run <initiative>` to
   launch newly runnable Epics and, once all close, to close the Initiative
   (`references/initiatives.md`, "Closing an Initiative").
-- **Optional watch** (offer once at the end): a `Monitor` on
+- **Optional watch** (laptop only; offer once at the end): a `Monitor` on
   `until python3 "$SDLC" cloud-status <initiative> | grep -q '"attention": true'; do sleep 600; done`.
   When it fires, re-run `next-action <initiative>` and act on `cloud-status`.
 
 ### Markers
 
-Written on the Epic's issue only by these commands:
+Written on the Epic's issue (an Initiative's, for its own session) only by these commands:
 
 - `<!-- sdlc:cloud-session id=<session_…> url=<url> launched=<iso> [overlap=1] [manual=1]
-  [heartbeat=<iso> state=working|asking] -->`: `launch-cloud-epic` / `record-cloud-session`;
+  [heartbeat=<iso> state=working|asking|waiting] -->`: `launch-cloud-epic` / `record-cloud-session`;
   `cloud-heartbeat`, `start-stage` and `transition` refresh `heartbeat` / `state` (at most every
   5 minutes, never failing the step).
 - `<!-- sdlc:cloud-session-nudge id=… n=<k> at=<iso> -->`: `nudge-cloud-epic`.
@@ -215,9 +251,10 @@ python3 "$SDLC" nudge-cloud-epic <epic>
   `launch-cloud-epic <epic>`). An Initiative adds `launchable`, `waiting`, `all_closed`,
   `attention`.
 - `stalled`: live session, open Epic, idle ≥ `pipeline.placement.stallMinutes` (default 90), or
-  that × `askingStallFactor` (default 6) while `asking`. Read a stalled Epic's run log first;
+  that × `askingStallFactor` (default 6) while `asking` or `waiting`. Read a stalled Epic's run log first;
   end-mark a dead session.
-- `nudge-cloud-epic <epic>` sends `continue: /sdlc:run <epic>` to the session. After two
+- An Initiative's own session is in `cloud-status <initiative>` → `session`.
+- `nudge-cloud-epic <epic>` (laptop only) sends `continue: /sdlc:run <epic>` to the session. After two
   nudges with no activity it returns `escalate: true`: ask the operator with the session url.
   On "abandon": `end-cloud-session <epic> --outcome abandoned`, then `launch-cloud-epic <epic>
   --relaunch` for a fresh session.

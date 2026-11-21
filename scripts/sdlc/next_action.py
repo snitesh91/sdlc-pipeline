@@ -382,9 +382,8 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
     if scope == "local-tasks":
         return none_result()  # Epic-level steps (cut, launch, Initiative loop) are the cloud's
     if (is_initiative(epic_issue) and epic_issue["state"] == "OPEN" and not deferred_by_run_cap
-            and initiative_epics_placement(epic_issue) == "cloud"
-            and session_placement()["placement"] == "local"):
-        # Each Epic runs in its own cloud session; this run only launches them.
+            and initiative_epics_placement(epic_issue) == "cloud"):
+        # Each Epic runs in its own cloud session; this run (laptop or cloud) only launches them.
         open_epics = [e["number"] for e in _initiative_epics(all_issues, epic)
                       if e["state"] == "OPEN"]
         if open_epics:
