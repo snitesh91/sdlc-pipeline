@@ -226,6 +226,7 @@ python3 "$SDLC" next-action <epic> --run-id "$RUN_ID" --sync-epic
 | `run-epic` | Run that Epic's Step 1–3 loop inline, same run-id, then Step 1 on the Initiative |
 | `launch-cloud-epics` | `launch-cloud-epic <epic>` for each in `epics` (on `launch_in_session`: `references/cloud-mode.md`, "Cloud-first runs"), then Step 1 |
 | `stop-at-cap` | Finish in-flight units, then stop ("Stop at the run cap") |
+| `none` + `refused: true` | Another run holds this Epic. Start nothing, run no end check; relay `reason` and ask the operator (`--take-over` only on their word) |
 | `none` | Route `unstaged` children, run the end checks, then Step 4 |
 | `skip` | Legacy Epic: quote `reason`, then Step 4 |
 

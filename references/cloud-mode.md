@@ -9,12 +9,15 @@ and closes ("Cloud-first runs").
 
 - **First command of every cloud session:** `record-cloud-session <n> --self` (`<n>` is the
   Initiative or Epic you drive). It places the unit in the cloud and posts this session's
-  marker; `already_recorded` is fine. On `refused` another session is live: stop and relay it.
+  marker; `already_recorded` is fine. On `refused` another session, or a laptop run, holds
+  it: stop and relay `reason`.
 - **Starting a session from a cloud session:** `launch-cloud-epic` returns
   `launch_in_session: true` with `prompt`. Find the session-creation tool (`ToolSearch`
   "create session"), start a session on this repo with exactly `prompt`, then run
-  `record-cloud-session <epic> --session <new id or url>`. No such tool: relay `prompt` to the
-  operator, who starts it from claude.ai; never try `claude --cloud` in the container.
+  `record-cloud-session <epic> --session <new id or url>`. No such tool: never try
+  `claude --cloud` in the container. Relay each `prompt` to the operator once, to start from
+  claude.ai, and never call `launch-cloud-epic` for that Epic again in this run (pass
+  `--skip-epic <epic>` to `next-action <initiative>`).
 - **A cloud Initiative run** (the Initiative carries the cloud label) does the Initiative's own
   work in session (IRD, Gate A, Epic cut), then launches one session per Epic ("Initiative →
   cloud Epics"). It never waits for them: end `waiting-epic --waits-on <open Epics>`.
@@ -23,10 +26,10 @@ and closes ("Cloud-first runs").
   launch it (`prompt` `/sdlc:run <initiative>`, then `record-cloud-session <initiative>
   --session …`) so it closes.
   This relay replaces the laptop's watch.
-- **Laptop-only work** (a real phone, an emulator, Stage, a host the cloud denies) goes to a
-  separate local standing Epic under the same Initiative, never to a local Task inside a
-  cloud Epic: that Epic could not close from the cloud. Use a local Task only when the
-  operator asks.
+- **Laptop-only work** (a real phone, an emulator, Stage, a host the cloud denies) is a
+  release Task under the product's standing backlog Epic, which stays local-placed
+  (`references/verification-rules.md`, "Local stack only"). Never a local Task inside a cloud
+  Epic unless the operator asks: that Epic could not close from the cloud.
 
 ## Placement rules
 

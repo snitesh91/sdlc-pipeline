@@ -519,6 +519,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                                         existing[0]["number"] if existing else None, carry_forward,
                                         base, deferred)
         target.update(reconciled=behind, base_moved=True)
+        operator_override = None  # no suite ran on the reconciled head yet
         if evidence.get("missing_verification"):
             evidence.pop("_missing_workflows")
             return _with_workspace(
@@ -814,20 +815,24 @@ def _teardown_stack_after_close(epic: int) -> dict:
 
 
 _INITIATIVE_VERIFICATION_MARKER = re.compile(
-    r"<!--\s*initiative-verification:\s*(\w+):(\d+)(?:\s+outcome:(\w+))?\s*(?:@[^>]*?)?-->")
+    r"<!--\s*initiative-verification:\s*(\w+):(\d+)(?:\s+outcome:(\w+))?"
+    r"(?:\s+sha:(\w+))?\s*(?:@[^>]*?)?-->")
 
 
 INITIATIVE_VERIFICATION_OUTCOMES = ("met", "unmet")
 
 
-def missing_initiative_verification(comments: list) -> list:
-    """Problems with an Initiative's closing evidence: no `requirements` marker, or the latest
-    one recorded `unmet`. No ordering check: an Initiative has no branch of its own."""
-    latest = None
+def missing_initiative_verification(comments: list, head: Optional[str] = None) -> list:
+    """Problems with an Initiative's closing evidence: no `requirements` marker, the latest one
+    recorded `unmet`, or (with `head`, the initiative PR's) it verified another commit."""
+    latest = sha = None
     for c in comments:
         m = _INITIATIVE_VERIFICATION_MARKER.search(c.get("body", ""))
         if m:
-            latest = m.group(3) or "met"
+            latest, sha = m.group(3) or "met", m.group(4)
+    if latest == "met" and head and sha and not (head.startswith(sha) or sha.startswith(head)):
+        return [f"the `met` verification covered {sha[:10]}, but the PR head is {head[:10]} -- "
+                f"re-run initiative-close on the new head"]
     if latest is None:
         return ["no `requirements` closing-verification evidence (a PM-role pass "
                 "validating the delivered app against product.md was never recorded)"]
@@ -835,6 +840,17 @@ def missing_initiative_verification(comments: list) -> list:
         return ["the latest `requirements` verification recorded outcome `unmet` -- fix the "
                 "gaps it names, re-run initiative-close, and record a `met` outcome"]
     return []
+
+
+def _initiative_head_attr(gh, initiative: int) -> str:
+    """`sha:<head> ` of the Initiative's open PR into main ("" without one)."""
+    try:
+        landing = initiative_landing(gh, initiative)
+        if landing["state"] != "open":
+            return ""
+        return f"sha:{gh.pr_view(landing['pr'], 'headRefOid')['headRefOid']} "
+    except (GhError, KeyError, TypeError):
+        return ""
 
 
 def cmd_record_initiative_verification(gh: GitHub, initiative: int, summary: str,
@@ -849,7 +865,7 @@ def cmd_record_initiative_verification(gh: GitHub, initiative: int, summary: str
         f"🧪 Requirements validation — closing verification for #{initiative}: {verdict}. "
         f"{summary}\n\n"
         f"<!-- initiative-verification: requirements:{initiative} outcome:{outcome} "
-        f"@ {timestamp} -->")
+        f"{_initiative_head_attr(gh, initiative)}@ {timestamp} -->")
     return {"initiative": initiative, "kind": "requirements", "outcome": outcome,
             "recorded": True}
 
@@ -873,6 +889,14 @@ def _initiative_epics_state(gh: GitHub, initiative: int) -> tuple:
                                   "open_epics": open_epics,
                                   "reason": f"{len(open_epics)} cut Epic(s) still open: "
                                             f"{', '.join(f'#{n}' for n in open_epics)}"}
+    open_children = sorted(i["number"] for i in all_issues if i["state"] != "CLOSED"
+                           and (i.get("parent") or {}).get("number") == initiative
+                           and not is_epic(i))
+    if open_children:
+        return initiative_issue, {"initiative": initiative, "closeable": False,
+                                  "open_children": open_children,
+                                  "reason": f"{len(open_children)} direct child issue(s) still "
+                                            f"open: {', '.join(f'#{n}' for n in open_children)}"}
     return initiative_issue, {"epics": sorted(i["number"] for i in cut_epics)}
 
 
@@ -942,10 +966,10 @@ def cmd_check_initiative_closeable(gh: GitHub, initiative: int) -> dict:
     if resolve_initiative_profile(initiative_issue)["branch"]:
         landing = initiative_landing(gh, initiative)
         if not landing["landed"]:
-            step = (f"`merge-initiative-pr {initiative}` once its evidence is green"
-                    if landing["state"] == "open" else
-                    f"`open-initiative-pr {initiative} --repo-path <p>`, then "
-                    f"`merge-initiative-pr {initiative}` once its evidence is green")
+            verify = (f"verify the requirements on `origin/{landing['branch']}` "
+                      f"(initiative-close), then `merge-initiative-pr {initiative}`")
+            step = (verify if landing["state"] == "open" else
+                    f"`open-initiative-pr {initiative} --repo-path <p>`, then {verify}")
             return {"initiative": initiative, "closeable": False, "epics": state["epics"],
                     "initiative_branch": landing,
                     "reason": f"every cut Epic is closed, but `{landing['branch']}` has not "
@@ -1134,7 +1158,7 @@ def cmd_merge_initiative_pr(gh: GitHub, initiative: int, repo_path: str = ".",
                           + (f" ({_MISSING_WORKFLOW_HINT})" if evidence["missing_workflows"]
                              else "")}
     unverified = missing_initiative_verification(
-        gh.issue_view(initiative).get("comments", []))
+        gh.issue_view(initiative).get("comments", []), head=evidence["head"])
     if unverified:
         return {"initiative": initiative, "merged": False, "pr": pr,
                 "missing_initiative_verification": unverified,

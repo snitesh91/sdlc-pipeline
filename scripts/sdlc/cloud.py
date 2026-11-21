@@ -840,6 +840,17 @@ def cmd_record_cloud_session(gh: WorkItemProvider, epic: int, session: Optional[
                           f"(`end-cloud-session {epic} --outcome stopped`) before recording another"}
     labelled = cloud_label() in [(l.get("name") if isinstance(l, dict) else l)
                                  for l in view.get("labels", [])]
+    if not labelled and session is None:
+        # A cloud session placing a local unit itself must not take it from a live laptop run.
+        issues = gh.issue_list()
+        by_number = {i["number"]: i for i in issues}
+        busy = sorted(i["number"] for i in _descendants(issues, epic) if i["state"] == "OPEN"
+                      and pipeline_status(i) == "in-progress")
+        if busy and not (epic in by_number and _cloud_placed(by_number[epic], by_number)):
+            return {"epic": epic, "recorded": False, "refused": True, "in_progress": busy,
+                    "reason": f"#{epic} is placed local and {', '.join(f'#{n}' for n in busy)} "
+                              f"is in progress: a laptop run may be driving it. The operator "
+                              f"moves it with `place {epic} --where cloud`"}
     if not labelled:
         gh.ensure_label(cloud_label())
         gh.issue_edit(epic, add_labels=[cloud_label()])

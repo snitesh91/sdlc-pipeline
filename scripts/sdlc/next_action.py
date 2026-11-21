@@ -290,10 +290,10 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
                 result["initiative_branch"] = landing
                 result["reason"] = (
                     f"every cut Epic is closed -- `{landing['branch']}` must reach main first: "
-                    + (f"`merge-initiative-pr {epic}` once PR #{landing['pr']}'s evidence is "
-                       f"green" if landing["state"] == "open" else
-                       f"`open-initiative-pr {epic} --repo-path <p>`, then "
-                       f"`merge-initiative-pr {epic}` once its evidence is green")
+                    + ("" if landing["state"] == "open" else
+                       f"`open-initiative-pr {epic} --repo-path <p>`, then ")
+                    + f"verify the requirements on `origin/{landing['branch']}` "
+                      f"(initiative-close), then `merge-initiative-pr {epic}`"
                     + " (references/initiatives.md, \"Closing an Initiative\").")
             elif cut_epics and all(i["state"] == "CLOSED" for i in cut_epics):
                 result["reason"] = ("every cut Epic is closed -- ready for initiative-close "
