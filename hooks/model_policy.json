@@ -13,6 +13,15 @@
     "exploratory": "sonnet",
     "initiative-close": "opus"
   },
+  "tiers": {
+    "_comment": "A tiered role's model and effort come from the Task size the orchestrator puts in the prompt header (`EFFORT: Low|Medium|High`, else Medium). `replacement` is the context-reset replacement's (`REPLACEMENT: 1`), always a higher model family. pipeline.tiers.<role> overrides a role whole.",
+    "development": {
+      "Low":    {"model": "sonnet", "effort": "medium", "replacement": {"model": "opus", "effort": "medium"}},
+      "Medium": {"model": "sonnet", "effort": "high",   "replacement": {"model": "opus", "effort": "medium"}},
+      "High":   {"model": "opus",   "effort": "medium", "replacement": {"model": "fable", "effort": "medium"}}
+    }
+  },
+  "consult": {"model": "fable", "effort": "medium", "_comment": "An sdlc:dev-worker whose header carries `CONSULT: ux|security`: development's UI/UX or security guidance worker."},
   "explore": ["development", "lld", "architecture", "product"],
   "fanout": {
     "product-review": {"allowed": true, "maxChildren": 2, "model": "opus", "axisModels": {}},

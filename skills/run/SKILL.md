@@ -292,7 +292,9 @@ Never restate the agent file's rules. Template (`EPIC` is the Initiative/Epic yo
 > The 2–3 facts it cannot read (operator answers, prior findings). Under ~1,500 chars.
 
 Write the first line plain, with no backticks: the hooks parse it. SubagentStart adds
-`arch-review`'s `Skip threshold`.
+`arch-review`'s `Skip threshold`. For `development`, add `EFFORT: <Low|Medium|High>` from the
+Task's `Effort:` line in `lld.md` (omit when none), and `REPLACEMENT: 1` on its context-reset
+replacement: the hook picks the model and effort (`hooks/model_policy.json`, `tiers`).
 
 Note each agent's ID per role for resume-based rework (session only; drop it at the unit's
 stopping point). Send findings back with `SendMessage` yourself, never via a relay fork. Send

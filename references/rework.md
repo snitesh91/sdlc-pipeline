@@ -57,8 +57,8 @@ Each pairing (`arch-review` ↔ `architecture`, `pr-review` ↔ `development`,
 
 | Bounce | Action |
 |---|---|
-| Below `replaceAt` | Resume the pairing's tracked agent. |
-| At `replaceAt`, unresolved | Retire the incumbent. Dispatch a context-reset replacement. The counter does not reset. |
+| Below `replaceAt` | Resume the pairing's tracked agent. Start the message with `ultrathink` and ask it to think harder and check every edge case. |
+| At `replaceAt`, unresolved | Retire the incumbent. Dispatch a context-reset replacement with `REPLACEMENT: 1` in its header (a tiered role moves up a model family). The counter does not reset. |
 | Between the two | Resume the replacement. |
 | At `needsHumanAt`, unresolved | `mark-needs-human <n> --reason "..."` with the repeated pattern and what the replacement changed. Park. With `humanChannel: "session"`, ask first (`references/cloud-mode.md`, "Human channel"). |
 

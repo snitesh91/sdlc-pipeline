@@ -108,7 +108,8 @@ drives an unlinked issue. Unlink closed sub-issues, or rotate a standing epic be
 - **Two standing Tasks per Epic, Integration-test and e2e-test**, run after the functional
   Tasks and run only the specs they add (`references/verification-rules.md`, "Test scope").
   None under `testTasks: false` ("Initiative branch").
-- **`Priority:` / `Effort:`** are optional, else `pipeline.issueDefaults`.
+- **`Priority:`** is optional, else `pipeline.issueDefaults`. **`Effort:`** is always written;
+  it sets `development`'s model tier (`hooks/model_policy.json`, `tiers`).
 - **`Placement: local — <reason>`** only when the operator asks for a local Task. Other
   laptop-only work is a release Task (`references/cloud-mode.md`, "Cloud-first runs").
 - Ordering comes from Footprints and `blockedBy` edges, never prose. Use `mark-blocked` only

@@ -1006,7 +1006,7 @@ def forced_model(out):
 def test_agent_guard_forces_stage_model_and_keeps_other_fields(tmp_path, sdlc_repo):
     out = launch(sdlc_repo, tmp_path, "sdlc:development", model="opus")
     assert out["updatedInput"] == {"subagent_type": "sdlc:development", "model": "sonnet",
-                                   "prompt": "do it", "description": "d",
+                                   "effort": "high", "prompt": "do it", "description": "d",
                                    "run_in_background": True}
     assert forced_model(launch(sdlc_repo, tmp_path, "sdlc:pr-review", model=None)) == "opus"
     assert forced_model(launch(sdlc_repo, tmp_path, "sdlc:lld", model="sonnet")) == "opus"
@@ -1016,6 +1016,60 @@ def test_agent_guard_forces_stage_model_and_keeps_other_fields(tmp_path, sdlc_re
 def test_agent_guard_config_overrides_the_policy(tmp_path):
     repo = _policy_repo(tmp_path, {"models": {"development": "opus"}})
     assert forced_model(launch(repo, tmp_path, "sdlc:development", model="sonnet")) == "opus"
+
+
+def setting(out):
+    assert out["permissionDecision"] == "allow", out
+    return out["updatedInput"]["model"], out["updatedInput"].get("effort")
+
+
+@pytest.mark.parametrize("header,want", [
+    ("ROLE: development ISSUE: 5 EFFORT: Low", ("sonnet", "medium")),
+    ("ROLE: development ISSUE: 5 EFFORT: Medium", ("sonnet", "high")),
+    ("ROLE: development ISSUE: 5 EFFORT: High", ("opus", "medium")),
+    ("ROLE: development ISSUE: 5", ("sonnet", "high")),  # no size: Medium
+    ("ROLE: development ISSUE: 5 EFFORT: Huge", ("sonnet", "high")),
+    ("ROLE: development ISSUE: 5 EFFORT: Low REPLACEMENT: 1", ("opus", "medium")),
+    ("ROLE: development ISSUE: 5 EFFORT: Medium REPLACEMENT: 1", ("opus", "medium")),
+    ("ROLE: development ISSUE: 5 EFFORT: High REPLACEMENT: 1", ("fable", "medium")),
+])
+def test_agent_guard_development_tier_from_task_size(tmp_path, sdlc_repo, header, want):
+    assert setting(launch(sdlc_repo, tmp_path, "sdlc:development", model="haiku",
+                          prompt=header + "\nBuild it")) == want
+
+
+def test_agent_guard_replacement_must_move_up_a_family(tmp_path):
+    repo = _policy_repo(tmp_path, {"tiers": {"development": {"Medium": {
+        "model": "opus", "effort": "high", "replacement": {"model": "sonnet", "effort": "max"}}}}})
+    out = launch(repo, tmp_path, "sdlc:development", prompt="ROLE: development REPLACEMENT: 1\nx")
+    assert out["permissionDecision"] == "deny" and "higher model family" in \
+        out["permissionDecisionReason"]
+    # Positive control: the first round of the same tier launches.
+    assert setting(launch(repo, tmp_path, "sdlc:development",
+                          prompt="ROLE: development\nx")) == ("opus", "high")
+
+
+def test_agent_guard_untiered_when_config_pins_the_model(tmp_path):
+    repo = _policy_repo(tmp_path, {"models": {"development": "opus"}})
+    out = launch(repo, tmp_path, "sdlc:development", model="sonnet",
+                 prompt="ROLE: development EFFORT: Low\nx")
+    assert out["updatedInput"]["model"] == "opus" and "effort" not in out["updatedInput"]
+
+
+def test_agent_guard_consult_worker_runs_the_consult_model(tmp_path, sdlc_repo):
+    repo = _policy_repo(tmp_path, {"fanout": {"development": {
+        "allowed": True, "maxChildren": 2, "model": "sonnet"}}})
+    out = launch(repo, tmp_path, "sdlc:dev-worker", model="sonnet",
+                 parent=("dev9", "sdlc:development"), prompt="AXIS: ux CONSULT: ux\nAdvise")
+    assert setting(out) == ("fable", "medium")
+    # Orchestrator-launched consult worker too.
+    out = launch(sdlc_repo, tmp_path, "sdlc:dev-worker", model="sonnet",
+                 prompt="AXIS: auth ISSUE: 12 CONSULT: security\nAdvise")
+    assert setting(out) == ("fable", "medium")
+    # Positive control: a plain slice worker keeps the fan-out model and no effort.
+    out = launch(repo, tmp_path, "sdlc:dev-worker", model="opus",
+                 parent=("dev9", "sdlc:development"), prompt="AXIS: api\nBuild")
+    assert setting(out) == ("sonnet", None)
 
 
 def test_agent_guard_design_review_role_header(tmp_path, sdlc_repo):

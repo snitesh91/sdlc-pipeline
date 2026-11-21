@@ -56,7 +56,7 @@ Revert the probe with `git restore <file>`. The Bash guard denies a review role 
 | Pipeline Status | `Todo` / `In Progress` / `Awaiting Human Review` / `Feedback Received` / `Needs Human` / `Done` | `In Progress` = claimed by a live run. `Awaiting Human Review` / `Feedback Received` = gate-pending. `Needs Human` = operator decides. Blocked derives from `blockedBy`. |
 | Type | `Task` / `Bug` / `Feature` / `Epic` / `Initiative` | Mandatory. A defect is `Bug`, never a labelled `Task`. Routing ignores it. |
 | Priority | `Urgent` / `High` / `Medium` / `Low` | Empty = `Medium`. `Critical` / `Blocker` alias `Urgent`. Orders children. |
-| Effort | `High` / `Medium` / `Low` | Read by nothing. `High` alone never splits a Task; a footprint collision does (`references/epics.md`). |
+| Effort | `High` / `Medium` / `Low` | Sets `development`'s model tier via the lld `Effort:` line (`hooks/model_policy.json`, `tiers`). `High` alone never splits a Task; a footprint collision does (`references/epics.md`). |
 | `blockedBy` | native relationship | ≥ 1 open blocker = not eligible. Set with `mark-blocked <n> --dep <m>`. |
 | Assignee | native | Unassigned = agent-owned ("Assignee convention"). |
 

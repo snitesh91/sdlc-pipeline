@@ -108,6 +108,10 @@ pass/fail numbers.
   `main`). Check its plan with `--dry-run` first, if it has one. Run it once, on the final
   round before the push, not on every intermediate commit. Never add its integration option
   unless "Test scope" owes those specs or the whole suite. Fix until it exits 0.
+- **Scoped pre-PR runs between rounds:** when the repo's `AGENTS.md` documents partial runs of
+  that command (one app, some phases, some files or specs), use them after each green slice and
+  on a rework round for the phases that failed. A partial run is never the gate: the final round
+  still runs the command unfiltered. List each run, with its scope, in the handoff's Commands table.
 - **Comments in code** explain only a non-obvious why. No history, dates or issue numbers. A
   comment that states a guarantee names what it excludes.
 - **Git:** commit, checkout and push of your own `issue-<n>` are yours. `sync-branch` is the
@@ -131,6 +135,10 @@ slices with disjoint file sets:
   design lines and its tests. File sets must not overlap. Commit nothing for the slices. Hand
   back `blocked` with `"fanout": "unavailable", "slices": ["<slice>", ...]` in the
   `SDLC-RESULT`. The orchestrator runs the workers and resumes you as integrator.
+- **Consult worker:** when the change needs UI/UX or security judgement, launch one
+  `sdlc:dev-worker` with `AXIS: <topic> CONSULT: ux|security` (any Task size; it takes a
+  fan-out slot). Ask it a scoped question and name the files to read. It runs once; never
+  resume it for rework.
 - Below the bar, or when slices share files: work alone. Write "fan-out: unavailable, worked
   alone" in the handoff when the config allowed it but you had no `Agent` tool.
 
