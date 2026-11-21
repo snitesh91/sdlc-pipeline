@@ -238,7 +238,7 @@ python3 "$SDLC" next-action <epic> --run-id "$RUN_ID" --sync-epic
   `open-arch-revision`. `schema_touch` → confirm each app using that package has its migration, else route the gap to the owning unit.
 - **End checks on `none`:** `list-needs-human` (clear stale reasons), `check-epics-closeable`,
   `audit-issues --epic <n>` (`--initiative <n>`; run each `repair`, never re-create), `prune-stale`.
-- **A closeable epic with `pipeline.epicClose.auto` on:** `close-epic` → exploratory pass →
+- **A closeable epic with `pipeline.epicClose.auto` on:** `close-epic` → `prepare-epic-tree` → exploratory pass →
   record it only if clean → `close-epic --clean-worktree` (`references/epics.md`, "Epic closing").
   Escalate the cases in "What you decide". Off: report it.
 
