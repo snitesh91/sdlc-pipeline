@@ -98,21 +98,27 @@ legacy ones. It returns `none` only when nothing is left.
 
 When a `none` `reason` says every cut Epic is closed:
 
+Verify before the merge: an unmet requirement must never reach `main`.
+
 0. **Initiative branch** (`reason` names `open-initiative-pr`): run `open-initiative-pr
    <initiative> --repo-path <p>`. It syncs `initiative-<i>`, opens or reuses its PR into
    `main`, and returns the `evidence` owed. Tell the operator the PR and the owed suites
    (`closeSuites`); they land as passing checks or `record-local-ci --pr <pr>` attestations.
-   Then run `merge-initiative-pr <initiative>`. On `merged: false` act on `reason`
-   (`behind_base` → re-run `open-initiative-pr` and re-attest) and stop until green. Never
-   merge the PR by hand. Once merged, clear each `scaffolding` hit (fix it, or file it under
-   the Bugs Epic, or the standing backlog Epic once the Initiative is closed).
-1. Delegate `sdlc:initiative-close`. It validates the delivered app against every requirement
-   in `product.md` and records `record-initiative-verification --outcome met|unmet`.
-2. **All met** (`clean`) → `python3 "$SDLC" close-initiative <initiative>`.
-3. **Anything unmet** (`rework`) → file the gap (a Task against the owning Epic, or judge it
-   out of scope and say why), stop, and re-run from step 1 once fixed. When the owning Epic is
-   closed, file it without asking: a `Bug` under the standing backlog Epic
-   (`create-issue --parent <standing epic> --type Bug`) if one exists, else a new gap Epic under
-   the Initiative.
+   Do not merge yet.
+1. Delegate `sdlc:initiative-close`, naming the ref to verify: `origin/initiative-<i>` (the
+   open PR's head), or `origin/main` with no initiative branch. It validates the app against
+   every requirement in `product.md` and records `record-initiative-verification --outcome
+   met|unmet`. A requirement that needs Stage, a store or a real device is not unmet: file it
+   as a release Task (`references/verification-rules.md`, "Local stack only").
+2. **All met** (`clean`) → with an initiative branch, `merge-initiative-pr <initiative>`. On
+   `merged: false` act on `reason` (`behind_base` → re-run `open-initiative-pr`, re-attest, and
+   re-run step 1 when the sync brought code) and stop until green. Never merge the PR by hand.
+   Once merged, clear each `scaffolding` hit (fix it, or file it under the standing backlog
+   Epic). Then `python3 "$SDLC" close-initiative <initiative>`.
+3. **Anything unmet** (`rework`) → never merge. File the gap (a Task against the owning Epic, or
+   judge it out of scope and say why), stop, and re-run from step 0 once fixed. When the owning
+   Epic is closed, file it without asking: a `Bug` under the Bugs Epic while `initiative-<i>` is
+   open, else under the standing backlog Epic (`create-issue --parent <standing epic> --type
+   Bug`) if one exists, else a new gap Epic under the Initiative.
 
 No human gate here: Gate A already approved `product.md`.

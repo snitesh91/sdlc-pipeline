@@ -36,7 +36,7 @@ All under `${CLAUDE_PLUGIN_ROOT}/references/`.
 | `initiatives.md` | Driving an Initiative |
 | `retro.md` | Parking a finding; running a retro |
 | `history.md` | The incident behind a rule |
-| `context-budget.md` | Every run: updates, briefs, CI failures, side requests, waits, phase-boundary stops, a restart |
+| `context-budget.md` | Every run: updates, briefs, CI failures, side requests, waits, a restart |
 
 ## The lifecycle model
 
@@ -148,7 +148,6 @@ a composite". Run `merge-pr`, `finish-lld`, `start-stage`, `close-epic`, `cut-ph
 | `start-stage <n> --role <role> --run-id <id> [--unit epic] [--base <ref>]` | `worktree-add` → `claim`. Refuses `development` on a unit with an open PR (exit 0: `refused`, `reason`, `pr`; resume its agent, see the `resume` row) and at the run cap (`run-cap`, `stop_at_cap: true`) |
 | `transition <n> --expect-stage <s> [--pr <pr>] [--repo-path <p>] [--base <ref>]` | `verify-exit` → `sync-branch` → `open-design-pr` (phase-Task) → `start-comment` (review role) → `ready`, `stopped_at`, `handoff_marker_present`, `conflict`, design `pr`, `held` (no suite evidence — `references/operations.md`, "Local-CI attestation"), `skip_confidence_threshold` |
 | `advance-standing <n> --from none\|product\|product-review\|architecture\|arch-review --to product\|architecture\|development --reason "<one line>" [--repo-path <p>]` | `transition` → `route` → `start-stage` → `routed`, `path`, `claimed`, `failed_step`, `reason` |
-| `skip-pr-review <n> --pr <pr> --reason "<one line>" --run-id <id>` | `verify-exit` → `route --to merge` (refused after a `pr-review` bounce) → `merge-pr` → `merged`, `failed_step` (`behind_base` → `prepare-rework`, re-run) |
 | `finish-gate-feedback <n> --expect-stage product\|architecture --repo-path <unit worktree>` | `transition`, then `mark-feedback-addressed` on `ready` → `ready`, `pipeline_status`, `failed_step` |
 | `prepare-rework <n> [--unit epic] [--repo-path <p>]` | `worktree-add` → `sync-branch` → `path`, `head`, `conflict`, `conflicting_files`, `pr`, `suites.needed`, `suites.carried`, `suites.passed_by_check` (`needed`: `pending` = wait for CI; `missing` = resume `development` to run it and `record-local-ci`; an integration suite on a Task PR into `epic-<n>` = a config entry lacking `bases`: fix the config, never run it) |
 | `cut-phase-tasks <epic> [--arch-body TEXT] [--lld-body TEXT] --repo-path <p>` | `epic-<n>`, both phase-Tasks, LLD blocked by Architecture → `architecture_task`, `lld_task` |
@@ -346,8 +345,7 @@ After pickup and every `done`/`clean`, pick the next stage from the issue and th
 - `product`: an open product decision.
 - `architecture`: a new component or interface, a data-model, cross-module or external-API change, or an unclear approach.
 - `product-review` / `arch-review`: skip after a trivial artifact.
-- `pr-review`: the default. Skip (`skip-pr-review <n> --pr <pr> --reason "..." --run-id "$RUN_ID"`)
-  only for a trivially low-risk change; never after a bounce.
+- `pr-review`: always, as for any Task into `epic-<n>`. Never skip it, however small the change.
 
 Skip ahead with `advance-standing <n> --from <stage> --to <stage> --reason "<one line>"`. `route`
 only moves forward; for a late product decision, `set-stage <n> --stage product`. When the gate
@@ -355,10 +353,9 @@ doc is the whole deliverable, `open-gate` it even if waived, then `pass-gate <n>
 
 ### Stop at the run cap — reset your context between batches
 
-`parallelism.maxTasksPerRun` (0 = unlimited; keep it near 5) caps units driven to a terminal state
-per run id. Also stop at a phase boundary once this run drove a unit: after a `finish-lld` that cut
-Tasks, and before the first `close-epic` (cloud: `--outcome context-reset`; `references/context-budget.md`).
-On `stop-at-cap` (or `stop_at_cap: true`), finish in-flight work and stop; do not call
+`parallelism.maxTasksPerRun` (0 = unlimited) caps units driven to a terminal state per run id. It
+is the only stop: never stop at a phase boundary (after `finish-lld`, before `close-epic`) unless
+the operator asks. On `stop-at-cap` (or `stop_at_cap: true`), finish in-flight work and stop; do not call
 `next-action`/`list-parallel-ready` again. The next `/sdlc:run` resumes there. A cloud session
 then hands over to a fresh one: `end-cloud-session <epic> --outcome context-reset`, then
 `launch-cloud-epic <epic> --relaunch`, then end (`references/cloud-mode.md`, "Handing over at the cap"). `resume`,
