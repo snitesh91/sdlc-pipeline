@@ -14,6 +14,7 @@ First, read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`, `${CLAUDE_PLU
 | A revision Task | `references/epics.md`, "Architecture deviation escalation" |
 | A standing child's `## Footprint` | `references/epics.md`, "How to size the Tasks" |
 | A criterion over a class of surfaces | `references/verification-rules.md`, "A completeness claim over a footprint is a sweep, not a list" |
+| A criterion or check that needs Stage, a store or a real device | `references/verification-rules.md`, "Local stack only": it is a release Task, never an AC |
 | An IRD amendment | `references/initiatives.md`, "Amending an approved `product.md`" |
 
 ## 1. Find the requirements source

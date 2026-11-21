@@ -80,7 +80,7 @@ Each section covers:
 - Exact files and functions to touch, and what changes in each, one line each.
 - Which section of `architecture.md` it realises (a pointer, not a restatement), and any point where you interpret.
 - Task-local decisions, numbered.
-- Acceptance criteria from the Epic, unchanged or with the change stated. Each decision that keeps state or can fail gets a criterion for its failure, empty and repeat cases. A check that needs Stage or `main` goes under a non-Task `## Epic-close checks` heading.
+- Acceptance criteria from the Epic, unchanged or with the change stated. Each decision that keeps state or can fail gets a criterion for its failure, empty and repeat cases. A check that needs the whole Epic on its branch goes under a non-Task `## Epic-close checks` heading. It runs on the local stack; a check that needs Stage, a store or a real device is a release Task, never a criterion or an Epic-close check (`${CLAUDE_PLUGIN_ROOT}/references/verification-rules.md`, "Local stack only").
 - Honest risks.
 - Out of scope.
 - `## Footprint`.

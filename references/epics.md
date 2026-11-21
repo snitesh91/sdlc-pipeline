@@ -265,7 +265,7 @@ scoped to those files.
 - Preflight the machine first (`references/parallelism.md`, "Resource cap — serialize
   suite-heavy stages").
 - Run it in the epic worktree (`worktree-add <n> --unit epic`) and name `close-epic`'s `base`
-  in the brief. `close-epic` runs `pipeline.epicClose.prepare` there first (`ok: false` → fix
+  in the brief. For a standing Epic (`epicLevelPhase: false`) the brief also says `standing`. `close-epic` runs `pipeline.epicClose.prepare` there first (`ok: false` → fix
   it). Unset `prepare` returns `prepare_warning`: run the dependency install yourself. A pass
   `blocked` on missing dependencies: install, then resume it.
 - It also runs `lld.md`'s `## Epic-close checks`. **The pipeline never runs the full e2e

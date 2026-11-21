@@ -42,15 +42,6 @@ Each background notification costs about 300 tokens of fixed harness text.
 - Wait on one `Monitor` until-loop or one background command, never on stacked short sleep timers. Poll external state (CI) at the interval it changes, not every minute.
 - A stage agent sends `SDLC-RESULT` once, when its stage ends. An interim "still waiting" result is a defect: tell the agent to wait on one Monitor and finish.
 
-## Stop at a phase boundary
-
-Once this run has driven any unit, stop at the next phase boundary and report (Step 4):
-
-- after a `finish-lld` that cut the Epic's Tasks;
-- before the first `close-epic` call on a closeable Epic.
-
-The next `/sdlc:run <epic>` starts from GitHub with a clean context. A cloud run ends with `end-cloud-session <epic> --outcome context-reset`; that session is relaunch-ready at once (`cloud-status`, `next-action <initiative>`'s `cloud.relaunch`). Keep `parallelism.maxTasksPerRun` at about 5 so a long development phase also breaks into batches.
-
 ## After a container restart
 
 A restart can drop a background agent's completion notification, and the agent can then not be messaged. Before you brief a replacement, read the agent's final text from its transcript (`<session dir>/subagents/agent-<id>.jsonl`, the last assistant message; `tail` it, never read it whole). Act on its `SDLC-RESULT` if it has one. Otherwise brief a replacement per `rework.md`, "Replacing an agent that cannot be resumed".
