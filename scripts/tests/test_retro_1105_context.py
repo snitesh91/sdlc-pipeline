@@ -73,9 +73,10 @@ def test_close_epic_brief_is_a_cli_flag(monkeypatch, capsys):
     big = {"epic": 7, "merged": False, "carried_forward_files": ["a", "b"]}
     monkeypatch.setattr(s, "get_work_item_provider", lambda: None)
     monkeypatch.setattr(s, "cmd_close_epic", lambda *a, **k: dict(big))
-    s.main(["close-epic", "7", "--brief"])
-    assert json.loads(capsys.readouterr().out)["carried_forward_files"] == 2
-    s.main(["close-epic", "7"])
+    for argv in (["close-epic", "7", "--brief"], ["close-epic", "7"]):
+        s.main(argv)
+        assert json.loads(capsys.readouterr().out)["carried_forward_files"] == 2
+    s.main(["close-epic", "7", "--full"])
     assert json.loads(capsys.readouterr().out)["carried_forward_files"] == ["a", "b"]
 
 

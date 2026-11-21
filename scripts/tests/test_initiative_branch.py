@@ -373,6 +373,10 @@ def test_merge_initiative_pr_merges_with_the_evidence_and_unblocks_close(opted_i
     _initiative_pr(gh, checks=[_PASS],
                    comments=["<!-- local-ci: e2e:300 @ abcd0000 -->"])
 
+    unverified = s.cmd_merge_initiative_pr(gh, 6, runner=lambda argv: "")
+    assert unverified["merged"] is False and unverified["missing_initiative_verification"]
+    assert gh.merges == []
+    s.cmd_record_initiative_verification(gh, 6, "all met")
     result = s.cmd_merge_initiative_pr(gh, 6, runner=lambda argv: "")
 
     assert result["merged"] is True and gh.merges == [(300, False)]

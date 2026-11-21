@@ -138,7 +138,7 @@ This is a standing exception to any draft-PR rule in the operator's global `CLAU
 
 ## A flaky spec: re-run only the failed specs
 
-When a required suite fails on specs the diff cannot reach, run `rerun-checks <pr> --failed-only`, never a whole-job rerun. It reads the failed spec files from each red job's log, dispatches that workflow on the PR head branch with only those specs, and posts a `sdlc:deflake` marker on the PR. A workflow whose failure names no spec (setup, build) comes back in `not_deflakable`: read `ci-failure-summary`. The workflow needs a `workflow_dispatch` `specs` input and a `run-name` of `deflake: <specs>`.
+When a required suite fails on specs the diff cannot reach, run `rerun-checks <pr> --failed-only`, never a whole-job rerun. It reads the failed spec files from each red job's log, dispatches that workflow on the PR head branch with only those specs, and posts a `sdlc:deflake` marker on the PR. A workflow whose failure names no spec (setup, build) comes back in `not_deflakable`: read `ci-failure-summary`. The workflow needs a `workflow_dispatch` `specs` input and a `run-name` of `deflake: <specs>`; the gate matches the run to the suite by its workflow file.
 
 `pr-checks`, `merge-pr` and `close-epic` count the suite green once that dispatch passes on the same head; the check shows `(deflaked)` with its `deflaked_specs`. A new push needs a fresh run. File one flake `Bug` per deflaked spec (`references/rework.md`, "Where a finding this unit will not fix goes"), with the failing test, its error and the PR. A spec that fails its re-run is a real failure: route it as rework.
 

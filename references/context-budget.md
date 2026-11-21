@@ -21,7 +21,7 @@ The SubagentStop hook refuses a stage handback over 1,500 characters once; the a
 ## Never read raw output
 
 - A failing check: `python3 "$SDLC" ci-failure-summary <pr>` returns each failing job's failure lines only (at most 25 per job, 4,000 characters in total). Never `gh run view --log` into your context.
-- `close-epic --brief` reduces the evidence, file and cleanup lists to counts and names. Drop `--brief` only to brief an exploratory re-pass that needs the file list.
+- `close-epic` prints counts and names. Add `--full` only to brief an exploratory re-pass that needs the file list.
 - A reference file: `grep -n` the heading you need, then read that section only.
 
 ## Side requests go to a subagent

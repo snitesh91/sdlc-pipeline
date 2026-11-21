@@ -218,31 +218,36 @@ def test_close_epic_fast_forwards_a_stale_epic_worktree(repo):
     assert _head(wt) == _head(repo, "origin/epic-9")
     assert result["merged"] is False and result["base"] == "main"
     assert result["epic_worktree"]["behind_before"] == 1
-    assert "prepare" not in result          # nothing configured
-    assert "epicClose.prepare is unset" in result["prepare_warning"]
+    assert "prepare" not in result and "prepare-epic-tree 9" in result["next"]
+    assert "epicClose.prepare is unset" in s.cmd_prepare_epic_tree(
+        9, repo_path=str(repo))["prepare_warning"]
 
 
-def test_close_epic_runs_the_configured_prepare_in_the_epic_worktree(repo, monkeypatch):
+def test_prepare_epic_tree_runs_the_configured_prepare_and_close_epic_never_does(
+        repo, monkeypatch):
     monkeypatch.setitem(s.PIPELINE["epicClose"], "prepare", "echo installed > prepared.txt")
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
     wt = _epic_closing(repo, gh)
 
     result = s.cmd_close_epic(gh, 9, repo_path=str(repo))
+    assert "prepare" not in result and not (Path(wt) / "prepared.txt").exists()
+    assert result["missing_verification"]
 
+    result = s.cmd_prepare_epic_tree(9, repo_path=str(repo))
     assert result["prepare"]["ok"] is True and result["prepare"]["ran"] is True
     assert "prepare_warning" not in result
     assert (Path(wt) / "prepared.txt").read_text() == "installed\n"
     assert result["epic_worktree"]["behind_before"] == 0
 
 
-def test_close_epic_reports_prepare_without_an_epic_worktree(repo, monkeypatch):
+def test_prepare_epic_tree_reports_a_missing_epic_worktree(repo, monkeypatch):
     # Positive control: no live worktree -- nothing is fast-forwarded and prepare does not run.
     monkeypatch.setitem(s.PIPELINE["epicClose"], "prepare", "false")
     gh = _v2_tree({"number": 10, "labels": ["type:task"], "parent": 9, "state": "CLOSED"})
     _git_backed(gh, repo)
     _git("push", "-q", "origin", "origin/main:refs/heads/epic-9", cwd=repo)
 
-    result = s.cmd_close_epic(gh, 9, repo_path=str(repo))
+    result = s.cmd_prepare_epic_tree(9, repo_path=str(repo))
 
     assert "epic_worktree" not in result
     assert result["prepare"]["ran"] is False and result["prepare"]["ok"] is False
