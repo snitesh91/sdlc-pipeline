@@ -33,7 +33,7 @@ Shipped profiles: `legacy` (`driven:false`); `standing` (`epicLevelPhase`,
 ```
 Architecture-phase Task: architecture -> design PR -> arch-review -> merged into epic-<n> -> closed
 LLD-phase Task:          lld -> design PR -> lld-review -> finish-lld (merge PR, create Tasks, close)
-Task:                    development -> [pr-review] -> auto-merge into epic-<n> -> CLOSED
+Task:                    development -> pr-review -> auto-merge into epic-<n> -> CLOSED
 ```
 
 1. **Cut the phase-Tasks yourself** on `cut-phase-tasks` (SKILL.md, "Cutting an Epic's
@@ -99,8 +99,8 @@ drives an unlinked issue. Unlink closed sub-issues, or rotate a standing epic be
 - **`Depends on: <KEY>`**, only for real ordering. `create-lld-tasks` adds one `blockedBy`
   edge each, and on every re-run makes the edges between the Epic's Tasks match these lines
   exactly: it removes a sibling edge no line names (`edges_removed`), a hand-added one
-  included. Put any ordering edge between Tasks in `lld.md`'s `Depends on:`. An unparsable dependency is refused (`dependency_parse_warnings`) and
-  `finish-lld` stops: fix the line on `epic-<n>` and re-run.
+  included. An unparsable dependency is refused (`dependency_parse_warnings`) and `finish-lld`
+  stops: fix the line on `epic-<n>` and re-run.
 - **`Realises: #<n>, #<m>`**, only when the Task delivers existing issues. They are blocked on
   the Task and closed when its PR merges or `close-issue` closes it. A number that is not a
   pre-existing issue goes to `realises_failed`; an already-closed one is listed in `realises`
@@ -109,8 +109,8 @@ drives an unlinked issue. Unlink closed sub-issues, or rotate a standing epic be
   Tasks and run only the specs they add (`references/verification-rules.md`, "Test scope").
   None under `testTasks: false` ("Initiative branch").
 - **`Priority:` / `Effort:`** are optional, else `pipeline.issueDefaults`.
-- **`Placement: local — <reason>`** for a Task the cloud cannot run (`references/cloud-mode.md`,
-  "Placement rules").
+- **`Placement: local — <reason>`** only when the operator asks for a local Task. Other
+  laptop-only work is a release Task (`references/cloud-mode.md`, "Cloud-first runs").
 - Ordering comes from Footprints and `blockedBy` edges, never prose. Use `mark-blocked` only
   for a cross-epic dependency.
 
@@ -189,8 +189,8 @@ All other rework: `references/rework.md`.
   "The Bugs Epic").
 - Design docs reach `epic-<n>` only through design PRs and `create-lld-tasks`' numbering
   commit. Never commit to it by hand or delete it while the Epic is open.
-- `next-action --sync-epic` merges `main` into it at run start, every third merge and when
-  `main` moved (`epic_sync`).
+- `next-action --sync-epic` merges its base into it at run start, every third merge and when
+  the base moved (`epic_sync`).
 - When `pipeline.stack.enabled`, run `provision-epic-stack <n>` at first touch
   (`references/parallelism.md`, "Per-epic isolated stack").
 
@@ -201,7 +201,7 @@ one out; its Epics then close into `main`. Every entry states `branch`; `show-co
 
 - **A Task or Bug parented directly to the Initiative** (never its Product-Roadmap Task)
   branches from and merges into `initiative-<i>` through the normal Task flow. Its PR owes no
-  base-scoped suite; they run on the initiative PR.
+  suite that the initiative PR into `main` runs.
 
 - **Its Epics cut from, sync with and close into `initiative-<i>`** (`close-epic` result
   `base`). Each Epic closes on its own.
@@ -211,7 +211,7 @@ one out; its Epics then close into `main`. Every entry states `branch`; `show-co
 - `close-epic` into it skips the profile's `deferSuites` (`deferred_to_initiative`); they run
   on the initiative PR. `testTasks: false` drops both standing test Tasks.
 - **Into `main` once, after every cut Epic closed:** `references/initiatives.md`, "Closing an
-  Initiative", step 0. `close-initiative` refuses until it lands, and while
+  Initiative". `close-initiative` refuses until it lands, and while
   `origin/initiative-<i>` holds commits `main` lacks (`unlanded_commits`), even if the label
   was removed. Label removed mid-flight: restore the label, then `open-initiative-pr` /
   `merge-initiative-pr`, or land the branch. A later Epic closing into a re-created branch
@@ -223,7 +223,7 @@ you run the closing verification and, if clean, make the second `close-epic` cal
 
 `check-epics-closeable` (idempotent) posts a one-time checklist on each open epic whose
 children are **all** closed, and assigns the operator. It checks children, open dependents,
-and both docs on `epic-<n>` (`docs_missing_from_epic_branch`: merge the design PR that holds
+and, for a non-standing Epic, both docs on `epic-<n>` (`docs_missing_from_epic_branch`: merge the design PR that holds
 the doc). An Epic with no phase-Tasks and no `epic:architected` goes to `needs_phase_tasks`:
 `cut-phase-tasks` it, or report finished pre-phase-Task work to the operator.
 
@@ -297,8 +297,8 @@ manual-testing bug was filed, or the exploratory pass could not be obtained (rep
 close-ready pending it; never fabricate the record).
 
 **The e2e-test Task's specs run against a stack built from `epic-<n>`**, never the shared dev
-stack, and attest with `record-local-ci --suite e2e`. On a cloud Epic with no cloud e2e
-profile it is a local Task (`references/cloud-mode.md`, "A cloud run").
+stack, and attest with `record-local-ci --suite e2e`. On a cloud Epic:
+`references/cloud-mode.md`, "A cloud run".
 
 ### Triage new-spec and exploratory deltas
 
@@ -339,7 +339,8 @@ Tasks, the exploratory pass). Decide it yourself; never ask the operator:
   the Epic's own Tasks, its close, or one of its acceptance criteria, or is Blocker/Critical.
 - **Defer** (`--defer`) otherwise, when the Epic has an open Initiative.
 
-**Standing epics never get this check**, except an Initiative's Bugs Epic at its close.
+**A standing Epic closes, and gets this verification, only under an Initiative** ("The epic
+integration branch").
 
 ## Epic board Status
 

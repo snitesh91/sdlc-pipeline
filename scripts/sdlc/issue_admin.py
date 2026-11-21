@@ -419,11 +419,12 @@ def cmd_check_epics_closeable(gh: GitHub) -> dict:
         target = epic_base(gh, epic["number"], all_issues)
         # An open epic's docs live on its epic branch; `close-epic` carries them to main.
         branch = epic_branch(epic["number"])
-        doc_names = ("architecture.md", "lld.md")
+        # A standing Epic (an Initiative's Bugs Epic) has no Epic-level docs to check.
+        doc_names = () if is_epic_standing(epic) else ("architecture.md", "lld.md")
         epic_docs = f"{doc_root_for(epic['number'], gh)}/epic-{epic['number']}"
         missing_docs = [f"{epic_docs}/{name}" for name in doc_names
                         if not gh.path_on_ref(f"{epic_docs}/{name}", branch)]
-        docs_line = (
+        docs_line = "" if not doc_names else (
             f"- [ ] {len(missing_docs)} epic doc(s) never reached `{branch}` "
             f"({', '.join(f'`{d}`' for d in missing_docs)}) — merge their design PRs before "
             "closing, or they stay reachable only on an unmerged phase-Task branch and never "

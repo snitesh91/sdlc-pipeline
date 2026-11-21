@@ -54,7 +54,7 @@ Epic's `architecture` and `lld`. Never delegate a stage to the Initiative/Epic i
 ```
 initiative: Product-Roadmap Task (product -> product-review -> Gate A) -> cut Epics -> per Epic: cut-phase-tasks, run-epic
 epic:       Architecture-phase Task (architecture -> design PR -> arch-review -> merge: skip bar or Gate B) -> LLD-phase Task (lld -> design PR -> lld-review -> finish-lld)
-task:       development -> [pr-review] -> auto-merge into epic-<n>
+task:       development -> pr-review -> auto-merge into epic-<n>
 ```
 
 - `pipeline.classification` alone makes an issue an Epic (`references/epics.md`, "What makes an
@@ -104,7 +104,7 @@ Each phase-Task authors its doc at `<docRoot>/epic-<n>/architecture.md` / `lld.m
   then closes it. On `phase_task_complete: false`, fix the `reason` (e.g. `design_pr`
   `behind_base` → `sync-branch <n>`) and re-run.
 - **`lld-review` clean** (any confidence) → `finish-lld <lld-task-n> --epic <epic-n> --repo-path <p>`.
-  On `failed_step`, fix the cause and re-run it from the top. Never claim the new Tasks; go to Step 1.
+  On `failed_step`, fix the cause and re-run. Never claim the new Tasks; go to Step 1.
 - **Close a phase-Task only with `close-issue`, never `mark-issue-closed`.**
 
 Detail: `references/epics.md`, "How a non-standing Epic runs".
@@ -153,7 +153,7 @@ a composite". Run `merge-pr`, `finish-lld`, `start-stage`, `close-epic`, `cut-ph
 | `cut-phase-tasks <epic> [--arch-body TEXT] [--lld-body TEXT] --repo-path <p>` | `epic-<n>`, both phase-Tasks, LLD blocked by Architecture → `architecture_task`, `lld_task` |
 | `finish-lld <lld-task-n> --epic <e> --repo-path <p>` | `merge-design-pr` → `create-lld-tasks` → `merge-lld-doc` → `close-issue` → `completed_steps`, `failed_step`. Re-run from the top; never hand-run `remaining_steps` |
 | `open-arch-revision <epic> --title TEXT --body TEXT [--blocks N ...] --repo-path <p>` | Revision Task at `architecture`, worktree off `epic-<n>`, `blockedBy` per `--blocks` → `revision_task` |
-| `file-closing-delta <epic> --title TEXT --body TEXT [--priority P] [--effort E] [--start --repo-path <p>]` | A closing finding as a `Bug` child (Blocker/Critical → Urgent); `--start` (operator-authorised) also starts `development` → `delta_issue` |
+| `file-closing-delta <epic> --title TEXT --body TEXT [--priority P] [--effort E] [--defer] [--start --repo-path <p>]` | A closing finding as a `Bug` child (Blocker/Critical → Urgent); `--start` (operator-authorised) also starts `development` → `delta_issue` |
 
 The base comes from the native parent: `origin/epic-<n>`, `origin/initiative-<i>` for an Epic
 under an initiative branch, else `origin/main`. Every other command:
@@ -360,9 +360,9 @@ doc is the whole deliverable, `open-gate` it even if waived, then `pass-gate <n>
 `parallelism.maxTasksPerRun` (0 = unlimited) caps units driven to a terminal state per run id. It
 is the only stop: never stop at a phase boundary (after `finish-lld`, before `close-epic`) unless
 the operator asks. On `stop-at-cap` (or `stop_at_cap: true`), finish in-flight work and stop; do not call
-`next-action`/`list-parallel-ready` again. The next `/sdlc:run` resumes there. A cloud session
-then hands over to a fresh one: `end-cloud-session <epic> --outcome context-reset`, then
-`launch-cloud-epic <epic> --relaunch`, then end (`references/cloud-mode.md`, "Handing over at the cap"). `resume`,
+`next-action`/`list-parallel-ready` again. The next `/sdlc:run` resumes there (`--take-over` inside the lock window). A cloud session
+then hands over to a fresh one: `end-cloud-session <n> --outcome context-reset`, then
+`launch-cloud-epic <n> --relaunch`, then end (`references/cloud-mode.md`, "Handing over at the cap"). `resume`,
 `pass-gate`, `address-gate-feedback` and `in_flight` units are never capped;
 `close-issue --not-planned` never counts. The cap never changes Task carving or `blockedBy` order.
 

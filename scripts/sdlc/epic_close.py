@@ -391,7 +391,7 @@ def _sync_initiative_for_close(gh: GitHub, repo_path: str, initiative: int,
 
 def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
                     runner: Runner = _default_runner, carry_forward: bool = True,
-                    clean_worktree: bool = False, shell: Optional[Callable] = None,
+                    clean_worktree: bool = False,
                     operator_override: Optional[str] = None) -> dict:
     """Reconcile the epic branch with `main` (first call, then stop), or merge it once
     closing evidence is recorded (second call). Returns `merged`; refusals carry `reason`.
@@ -564,6 +564,8 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
             draft=True)
         if ci_local:
             _label_ci_local(gh, pr_number)
+    # Read before the evidence: a push after this point fails the merge instead of riding it.
+    head = gh.pr_view(pr_number, "headRefOid").get("headRefOid")
     # The PR's files, checks and attestations are the gate's inputs, so it must exist first.
     evidence = _close_epic_evidence(gh, epic, branch, children, pr_number, carry_forward,
                                     base, deferred)
@@ -585,7 +587,7 @@ def cmd_close_epic(gh: GitHub, epic: int, repo_path: str = ".",
     if refused:
         return {**refused, "pr": pr_number, **evidence}
     gh.pr_ready(pr_number)
-    gh.pr_merge(pr_number)
+    gh.pr_merge(pr_number, match_head=head)
     return _finish_epic_close(gh, epic, None, pr_number, children, all_issues, repo_path,
                               runner, {**target, **evidence, **cleaned}, base=base)
 
@@ -854,9 +856,10 @@ def _initiative_head_attr(gh, initiative: int) -> str:
 
 
 def cmd_record_initiative_verification(gh: GitHub, initiative: int, summary: str,
-                                       outcome: str = "met") -> dict:
+                                       outcome: str = "met", sha: Optional[str] = None) -> dict:
     """Post an Initiative's `requirements` closing-verification marker with its outcome;
-    `close-initiative` refuses while the latest one is `unmet`."""
+    `close-initiative` refuses while the latest one is `unmet`. `sha`: the commit the
+    verification ran on (default: the open PR's head now, which may have moved since)."""
     if outcome not in INITIATIVE_VERIFICATION_OUTCOMES:
         raise GhError(f"outcome must be one of {INITIATIVE_VERIFICATION_OUTCOMES}, got {outcome!r}")
     timestamp = _utc_now_marker()
@@ -865,7 +868,7 @@ def cmd_record_initiative_verification(gh: GitHub, initiative: int, summary: str
         f"🧪 Requirements validation — closing verification for #{initiative}: {verdict}. "
         f"{summary}\n\n"
         f"<!-- initiative-verification: requirements:{initiative} outcome:{outcome} "
-        f"{_initiative_head_attr(gh, initiative)}@ {timestamp} -->")
+        f"{f'sha:{sha} ' if sha else _initiative_head_attr(gh, initiative)}@ {timestamp} -->")
     return {"initiative": initiative, "kind": "requirements", "outcome": outcome,
             "recorded": True}
 

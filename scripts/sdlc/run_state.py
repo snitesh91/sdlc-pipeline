@@ -78,8 +78,10 @@ def other_live_run(epic: int, run_id: Optional[str]) -> Optional[dict]:
 
 def release_run(epic: int) -> None:
     """Drop this machine's hold on `epic`: its run reached `none`, so a new run may start."""
+    # Just past the live window, never 0: the hooks' run guard and `prune-stale` read this mtime.
+    old = time.time() - RESUME_LIVE_WINDOW_MINUTES * 60 - 1
     try:
-        os.utime(_run_state_path(epic), (0, 0))
+        os.utime(_run_state_path(epic), (old, old))
     except OSError:
         pass
 

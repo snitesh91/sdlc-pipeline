@@ -120,3 +120,25 @@ def test_self_registration_never_takes_a_local_unit_with_work_in_progress(cloud)
     # Positive control: the operator placed it, so the session registers.
     gh.issues[2]["labels"].append(CLOUD)
     assert s.cmd_record_cloud_session(gh, 2, None)["recorded"] is True
+
+
+def test_a_cloud_initiative_session_hands_over_at_the_cap(cloud):
+    out = s.cmd_launch_cloud_epic(_initiative(2), 1, relaunch=True, runner=FakeGit(),
+                                  claude=FakeClaude(LAUNCH_OUT))
+    assert out["launch_in_session"] is True and out["prompt"] == "/sdlc:run 1"
+
+
+def test_a_laptop_never_launches_an_initiative():
+    with pytest.raises(s.GhError, match="not an Epic"):
+        s.cmd_launch_cloud_epic(_initiative(2), 1, runner=FakeGit(), claude=FakeClaude(LAUNCH_OUT))
+
+
+def test_cloud_status_says_whether_the_initiative_is_cloud_placed():
+    gh = _initiative(2)
+    assert _status(gh, 1)["cloud"] is False
+    gh.issues[1]["labels"].append(CLOUD)
+    assert _status(gh, 1)["cloud"] is True
+
+
+def test_merge_is_no_route_target():
+    assert "merge" not in s.ROUTE_TARGETS and "merge" not in s.STANDING_FLOW

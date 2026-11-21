@@ -102,13 +102,13 @@ def cmd_pass_gate(gh: GitHub, repo_path: str, issue: int, gate_pr: int, stage: s
         raise GhError(f"--doc-only closes a standing child or parentless issue whose gate doc "
                       f"is its whole deliverable; #{issue} is "
                       f"{'a phase-Task (it closes on its own)' if parent else 'passed by CI'}")
-    # The gate merged into the unit's integration base, so reconcile the issue branch with that.
-    base = _gate_base(gh, issue)
     if parent is not None:
         # No reconcile: a push would recreate the branch GitHub deleted with the merged PR.
         return _complete_phase_task(
             gh, repo_path, issue, stage, parent,
             f"Human review confirmed for `{stage}.md` — merged via #{gate_pr}.", runner)
+    # The gate merged into the unit's integration base, so reconcile the issue branch with that.
+    base = _gate_base(gh, issue)
     with branch_lock(branch), BranchWorkspace(branch, repo_path, runner) as ws:
         git_reconcile_branch(ws.path, branch, base=base, runner=runner)
     if doc_only:

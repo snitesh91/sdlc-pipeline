@@ -27,7 +27,6 @@ ARGV = {
     "route": ["route", "5", "--to", "development", "--reason", "{text}"],
     "advance-standing": ["advance-standing", "5", "--from", "none", "--to", "development",
                          "--reason", "{text}"],
-    "skip-pr-review": ["skip-pr-review", "5", "--pr", "9", "--reason", "{text}"],
     "close-issue": ["close-issue", "5", "--not-planned", "--reason", "{text}"],
     "comment": ["comment", "5", "--body", "{text}"],
     "detach-epic": ["detach-epic", "9", "--reason", "{text}"],

@@ -121,7 +121,7 @@ containers, cloud resources).
 - `finish-lld` / `create-lld-tasks` `conflict` → re-run. `merge-design-pr` / `skip-gate` /
   `waive-gate` / `merge-gate` `behind_base` → `sync-branch <n>`, then re-run. `review_stale`
   → re-run the review and `record-design-review`.
-- An `epic-<n>` ← `main` conflict has no stage agent. Resolve it in the epic worktree, or
+- An `epic-<n>` ← base conflict has no stage agent. Resolve it in the epic worktree, or
   dispatch one `development` agent for that reconcile. Re-check what no file conflict shows
   (pinned counts, moved specs, widened footprints). It runs only the specs the resolution
   touched.

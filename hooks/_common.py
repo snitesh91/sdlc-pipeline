@@ -14,11 +14,11 @@ CONCERN_CAP = 200
 RESULT_PREFIX = "SDLC-RESULT:"
 RESULT_FORMAT = (RESULT_PREFIX + ' {"issue": <n>, "stage": "<stage>", "outcome": "'
                  + "|".join(OUTCOMES) + '"}')
-# A standing child's flow; an optional `"next"` recommends one of these (or `merge`,
-# skipping pr-review) with a `"why"` of at most WHY_CAP chars.
+# A standing child's flow; an optional `"next"` recommends one of these with a `"why"` of at
+# most WHY_CAP chars.
 STANDING_FLOW = ("product", "product-review", "architecture", "arch-review", "development",
                  "pr-review")
-NEXT_STAGES = STANDING_FLOW + ("merge",)
+NEXT_STAGES = STANDING_FLOW
 WHY_CAP = 120
 
 

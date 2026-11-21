@@ -68,15 +68,15 @@ sdlc.config.sample.json          config template
 6. Optional: a repo-specific `<docRoot>/<pipeline.docTemplates>/{product,architecture}.template.md`
    (default `_templates`) overrides the plugin's templates.
 7. Recommended: enable the repo setting **Settings → General → Automatically delete head
-   branches**. The pipeline still deletes each landed branch itself (an already-deleted one
-   is fine) and reports any deletion that fails in a `warnings` list.
+   branches**. The pipeline then leaves merged heads to GitHub. It reports any deletion that
+   fails in a `warnings` list.
 8. Start a run with `sdlc-run <initiative-or-epic-number> [claude args]`: it launches `claude`
    on the orchestrator model (`pipeline.orchestrator.model`, else the policy's) with `/sdlc:run <n>` (a skill's `model:` does not
    outlast its turn).
 
 **Upgrading**: bump the `ref` in `.claude/settings.json` and `SDLC_PIPELINE_REF` together,
-run `claude plugin marketplace update sdlc-pipeline`, and start a new session (when and where
-the pin is read: `references/operations.md`, "Plugin pin"). `show-config` → `plugin` reports
+install the tag, and start a new session (the commands, and when the pin is read:
+`references/operations.md`, "Plugin pin"). `show-config` → `plugin` reports
 the running version (manifest version, plus the HEAD sha of a git checkout).
 
 Repo-specific commands (lint, build, test, suite names, ports) belong in the driven repo's
@@ -125,15 +125,15 @@ them, and `python3 "$SDLC" show-config` prints the effective values.
 | `pipeline.productWip.maxGateAPending` | 5 | Open Gate A PRs allowed repo-wide |
 | `pipeline.escalation.replaceAt` / `.needsHumanAt` | 3 / 6 | Bounces before a context-reset replacement / `needs-human` |
 | `pipeline.continuous.cycleCap` | 8 | Merges per unattended run before pausing |
-| `pipeline.resume.liveWindowMinutes` | 30 | A `next-action` resume claimed sooner than this is flagged `likely_live` (another session may be driving it) |
+| `pipeline.resume.liveWindowMinutes` | 30 | A `next-action` resume claimed sooner than this is flagged `likely_live`; a second run id on an Epic is refused for this long (`--take-over`) |
 | `projectFields.issueFieldsRest` | none | Snapshot of the org's issue fields (`show-issue-fields` prints it). Required for cloud sessions: the GitHub proxy blocks org endpoints |
 | `pipeline.placement.cloudLabel` | `sdlc:cloud` | Label that hands an Epic (or its Initiative) to a cloud session — a local session never drives it, a cloud session drives nothing else (`references/cloud-mode.md`) |
-| `pipeline.placement.initiativeEpics` | `local` | `cloud`: a laptop Initiative run launches each runnable Epic in its own cloud session (`launch-cloud-epic`) instead of driving it (`references/cloud-mode.md`, "Initiative → cloud Epics") |
+| `pipeline.placement.initiativeEpics` | `local` | `cloud`: an Initiative run, laptop or cloud, launches each runnable Epic in its own cloud session (`launch-cloud-epic`) instead of driving it (`references/cloud-mode.md`, "Initiative → cloud Epics") |
 | `pipeline.initiativeProfiles[].placement` | unset | `cloud` / `local`: overrides `pipeline.placement.initiativeEpics` for the Initiatives that profile matches |
 | `pipeline.prePr.command` | `""` | Pre-PR check `development` runs green in its worktree, with `PRE_PR_BASE=origin/<PR base>` exported, before `open-dev-pr` (`agents/development.md`) |
 | `pipeline.retro.parkIssue` | unset | Open issue `park-finding` parks retro findings on (`references/retro.md`); issues labelled `pipeline.labels.retro` (`sdlc:retro`) are never pipeline work |
-| `pipeline.placement.stallMinutes` | 90 | A live cloud Epic idle this long (since its session's heartbeat, `cloud-heartbeat`, or its last GitHub activity) is `stalled` in `cloud-status`; a session asking the operator only after `stallMinutes` × `askingStallFactor` |
-| `pipeline.placement.askingStallFactor` | 6 | Multiplier on `stallMinutes` for a session whose heartbeat says `asking`, so a session that died mid-question still frees its cloud slot |
+| `pipeline.placement.stallMinutes` | 90 | A live cloud Epic idle this long (since its heartbeat or its last GitHub activity) is `stalled` in `cloud-status`; an `asking` or `waiting` session only after `stallMinutes` × `askingStallFactor` |
+| `pipeline.placement.askingStallFactor` | 6 | Multiplier on `stallMinutes` for a session whose heartbeat says `asking` or `waiting`, so a session that died there still frees its cloud slot |
 | `pipeline.placement.localLabel` | `sdlc:local` | Label (`place <task> --where local`) that keeps one Task of a cloud Epic on the laptop: the cloud session skips it, a laptop `/sdlc:run <epic>` drives only such Tasks |
 | `pipeline.placement.localTasks` | `[]` | Task kinds local with no label: `e2e-test`, `integration-test` (by title) or `label:<name>`; a cloud session ends `waiting-local` once only these remain |
 | `pipeline.placement.softOverlapPaths` | `[]` | fnmatch globs (e.g. a migrations index, a docs table) dropped from Epic footprints before `launch-cloud-epic`'s overlap check: overlap confined to them never holds a launch |
@@ -176,15 +176,15 @@ python3 scripts/sdlc_metrics.py backfill --projects-dir ~/.claude/projects/<proj
   `cut-phase-tasks` for the next runnable Epic that has none and `run-epic` to drive it, one Epic
   at a time under one run id and one `maxTasksPerRun` cap (`--skip-epic` parks a stalled one).
   With `pipeline.placement.initiativeEpics: cloud` it instead launches each runnable Epic in
-  its own claude.ai cloud session (`launch-cloud-epic`, watched with `cloud-status`). A session
-  records what it waits on when it ends, and the laptop relaunches it once that clears;
-  `record-cloud-session` registers one started by hand.
+  its own claude.ai cloud session (`launch-cloud-epic`, watched with `cloud-status`). A cloud
+  session registers itself (`record-cloud-session --self`) and starts its successor and the
+  next Epic sessions; no laptop takes part (`references/cloud-mode.md`, "Cloud-first runs").
   `merge-gate --operator-confirmed` merges a gate PR, only when the operator says to.
 - **Engineering-driven**: a bare Epic with its scope in the body starts at architecture.
 - Every Epic owns a branch `epic-<n>`, standing ones included, and **every child branches
   from it**; `epic-<n>` reaches its base (the Initiative's `initiative-<i>` by default, else
   `main`) with full CI. A long-lived standing Epic lands with `land-epic` and stays open. For a
-  non-standing Epic: Its `architecture` and `lld` run as their own phase-Tasks that author
+  non-standing Epic: its `architecture` and `lld` run as their own phase-Tasks that author
   `<docRoot>/epic-<n>/architecture.md` / `lld.md` directly; a design PR `issue-<n>` →
   `epic-<n>` carries each through review. The pipeline merges it on a clean review
   (`lld-review` always; `arch-review` above the skip threshold, else the human at Gate B);

@@ -20,7 +20,7 @@ def test_close_epic_never_runs_prepare_and_prepare_epic_tree_does(monkeypatch):
     monkeypatch.setitem(s.PIPELINE["epicClose"], "prepare", "npm ci")
     monkeypatch.setattr(s, "_refresh_epic_worktree", lambda *a, **k: dict(tree))
     shell = lambda command, cwd: ran.append((command, cwd)) or "ok"
-    result = s.cmd_close_epic(_epic([]), 9, shell=shell)
+    result = s.cmd_close_epic(_epic([]), 9)
     assert result["missing_verification"] and "prepare" not in result and not ran
     assert "prepare-epic-tree 9" in result["next"]
     # Positive control: the separate command installs.

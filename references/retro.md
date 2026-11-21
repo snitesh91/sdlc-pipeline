@@ -1,6 +1,6 @@
 # Retrospective (only when the operator asks)
 
-Between retros, park each friction finding as you see it — bouncing pairings (`pairing-counts`), docs too thin for the next stage, dead
+Between retros, park each friction finding as you see it: bouncing pairings (`pairing-counts`), docs too thin for the next stage, dead
 references, gates too strict or loose:
 
 ```bash
@@ -14,7 +14,7 @@ issues for findings yourself.
 
 When the operator runs the retro: read every comment on the park issue, and sweep recently
 merged units' handoff comments and docs for more. Fixes go to the **plugin repo**
-(`snitesh91/sdlc-pipeline`); **this file and its references are the primary fix target.**
+(`snitesh91/sdlc-pipeline`); **`skills/run/SKILL.md` and `references/*` are the primary fix target.**
 Present findings in chat and ask before editing. Once approved:
 
 1. In a clone of the plugin repo: `git checkout -B retro/<date> origin/main`, edit
@@ -25,7 +25,7 @@ Present findings in chat and ask before editing. Once approved:
    must pass (manifest version = tag). An unpushed edit is a failed retro. **A change to
    `scripts/` or `hooks/` must pass `(cd scripts && python3 -m pytest -q)` and
    `python3 -m pytest -q hooks/tests` before pushing.** A control-plane fix also gets a regression test plus a positive
-   control; run both against the pre-fix `sdlc_next.py` — the regression must go red,
+   control; run both against the pre-fix code — the regression must go red,
    the control must not.
 2. Reply on the park issue to each finding (`comment <park> --body`, linking it): `fixed
    (<tag>)`, `deferred` or `rejected`, with one line why.

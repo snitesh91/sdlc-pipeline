@@ -21,7 +21,6 @@ from .units import (
 )
 from .evidence import (
     _glob_matches, epic_branch, last_pr_review_outcome, last_transition_to,
-    routed_past_pr_review,
 )
 from .epic_close import initiative_landing
 from .gate_eval import evaluate_gate
@@ -387,7 +386,7 @@ def decide_next_action(gh: GitHub, epic: int, run_id: Optional[str] = None,
             and initiative_epics_placement(epic_issue) == "cloud"):
         # Each Epic runs in its own cloud session; this run (laptop or cloud) only launches them.
         open_epics = [e["number"] for e in _initiative_epics(all_issues, epic)
-                      if e["state"] == "OPEN"]
+                      if e["state"] == "OPEN" and e["number"] not in skip_epics]
         if open_epics:
             cloud_survey.update(cloud_epic_survey(gh, all_issues, open_epics,
                                                   repo_path=repo_path, runner=runner))
@@ -645,7 +644,7 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     result = decide_next_action(gh, args.epic, run_id=run_id,
                                 skip_epics=getattr(args, "skip_epic", None),
                                 repo_path=repo_path, all_issues=issues, scope=scope)
-    if result.get("action") == "none":
+    if result.get("action") == "none" and run_id:  # a probe with no run id holds no lock
         release_run(args.epic)
     # Read liveness before note_in_flight re-stamps this run onto the unit.
     liveness = (_resume_liveness(gh, args.epic, result["issue"])
@@ -698,10 +697,6 @@ def cmd_list_ready_for_review(gh: GitHub, epic: int, limit: Optional[int] = None
         if outcome is not None and outcome[0] > handoff:
             skipped.append({"issue": number, "reason": f"pr-review already recorded "
                                                         f"{outcome[1]!r} for this round"})
-            continue
-        if routed_past_pr_review(comments):
-            skipped.append({"issue": number, "reason": "routed past pr-review this round "
-                                                        "(`route --to merge`)"})
             continue
         branch = issue_branch(number)
         prs = gh.pr_list_for_branch(branch)

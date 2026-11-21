@@ -1,4 +1,4 @@
-"""2026-09-23 composites: advance-standing, skip-pr-review, finish-gate-feedback,
+"""2026-09-23 composites: advance-standing, finish-gate-feedback,
 prepare-rework, `next-action --sync-epic` and `close-epic --clean-worktree`.
 Each: the happy path, a stop at the first failure (later steps never run), and a
 building block's refusal passed through as the stop reason."""
@@ -12,8 +12,6 @@ import pytest
 import sdlc_next as s
 from tests.test_v2_phase_tasks import FakeGh, _advance_origin, _git, repo  # noqa: F401
 
-_HANDOFF = "<!-- stage-transition: development->pr-review @ 2026-09-18T00:00:00Z -->"
-_BOUNCE = "<!-- pr-review-outcome: rework:42 @ 2026-09-17T00:00:00Z -->"
 
 
 def _must_not_run(name):
@@ -127,60 +125,6 @@ def test_advance_standing_stops_when_start_stage_refuses(monkeypatch):
     assert result["failed_step"] == "start-stage" and result["claimed"] is False
     assert result["completed_steps"] == ["route"]
     assert gh.issues[9]["status"] == "todo"  # routed, never claimed
-
-
-# --- skip-pr-review -------------------------------------------------------------
-
-def test_skip_pr_review_verifies_routes_to_merge_and_merges(monkeypatch):
-    gh = _standing(stage="pr-review", status="in-progress", comments=[_HANDOFF])
-    merges = []
-    monkeypatch.setattr(s, "cmd_verify_exit", lambda gh_, rp, n, stage, pr, **k: {
-        "issue": n, "expected_stage_present": stage == "pr-review", "pr": pr})
-    monkeypatch.setattr(s, "cmd_merge_pr", lambda gh_, pr, n, rp, run_id=None: (
-        merges.append((pr, n, rp, run_id)), {"pr": pr, "merged": True})[1])
-
-    result = s.cmd_skip_pr_review(gh, 9, 42, "README typo", run_id="run-1")
-
-    assert result["ok"] is True and result["merged"] is True
-    assert result["completed_steps"] == ["verify-exit", "route", "merge-pr"]
-    assert merges == [(42, 9, ".", "run-1")]
-    assert "<!-- stage-route: pr-review->merge @ " in gh.comments_on(9)[-1]
-
-
-def test_skip_pr_review_stops_at_an_unverified_exit(monkeypatch):
-    gh = _standing(stage="pr-review", status="in-progress")
-    monkeypatch.setattr(s, "cmd_verify_exit", lambda *a, **k: {
-        "ok": False, "reason": "no handoff marker", "handoff_marker_present": False})
-    monkeypatch.setattr(s, "cmd_route", _must_not_run("route"))
-    monkeypatch.setattr(s, "cmd_merge_pr", _must_not_run("merge-pr"))
-
-    code, out = _cli(monkeypatch, gh, ["skip-pr-review", "9", "--pr", "42", "--reason", "x"])
-
-    assert code == 1 and out["failed_step"] == "verify-exit"
-    assert out["steps"]["verify-exit"]["handoff_marker_present"] is False
-
-
-def test_skip_pr_review_surfaces_the_bounce_refusal_and_never_merges(monkeypatch):
-    gh = _standing(stage="pr-review", status="in-progress", comments=[_BOUNCE, _HANDOFF])
-    monkeypatch.setattr(s, "cmd_verify_exit", lambda *a, **k: {"expected_stage_present": True})
-    monkeypatch.setattr(s, "cmd_merge_pr", _must_not_run("merge-pr"))
-
-    result = s.cmd_skip_pr_review(gh, 9, 42, "x")
-
-    assert (result["ok"], result["failed_step"], result["merged"]) == (True, "route", False)
-    assert "never skip it after a bounce" in result["reason"]
-
-
-def test_skip_pr_review_stops_on_a_behind_base_merge_refusal(monkeypatch):
-    gh = _standing(stage="pr-review", status="in-progress", comments=[_HANDOFF])
-    monkeypatch.setattr(s, "cmd_verify_exit", lambda *a, **k: {"expected_stage_present": True})
-    monkeypatch.setattr(s, "cmd_merge_pr", lambda *a, **k: {
-        "merged": False, "behind_base": 2, "reason": "branch is 2 commit(s) behind main"})
-
-    result = s.cmd_skip_pr_review(gh, 9, 42, "x")
-
-    assert (result["ok"], result["failed_step"]) == (True, "merge-pr")
-    assert result["steps"]["merge-pr"]["behind_base"] == 2
 
 
 # --- finish-gate-feedback -------------------------------------------------------

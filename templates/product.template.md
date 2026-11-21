@@ -60,10 +60,9 @@ Questions, which stays as "None". Delete this comment block before committing.
 ## User Experience
 
 <!-- Only for user-facing or operator-facing work. Each new or changed screen or message:
-     what the person sees at each step, empty and error states included. An ASCII mock-up
-     where layout matters. Describe what a message must convey; quote exact wording only
-     when the wording itself is the decision. Drop the section when nothing is
-     user-facing. -->
+     what the person sees at each step, empty and error states included, an ASCII mock-up
+     and links to the mockups/ set and demo. Describe what a message must convey; quote
+     exact wording only when the wording itself is the decision. -->
 
 ---
 

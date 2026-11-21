@@ -1,5 +1,5 @@
 {
-  "_comment": "Template config for the sdlc plugin. Copy it into the driven repo as `sdlc-pipeline.config.json` (at the root, `.config/` or `.claude/`) and replace every value below; the plugin ships no real config. Despite the `projectFields` name, none of this is a GitHub Projects-v2 board field -- every id here is one of GitHub's ORG-LEVEL custom Issue Types/Issue Fields (the same family: Settings -> Issue types / Issue fields for your org), automatically available on every repo in the org once created, no Projects-v2 board required at all. Look every id up once via `gh api graphql` introspection. See README.md.",
+  "_comment": "Template config for the sdlc plugin. Copy it into the driven repo as `sdlc-pipeline.config.json` (at the root, `.config/` or `.claude/`) and replace every value below; the plugin ships no real config. `projectFields` holds no Projects-v2 board field: every id is an org-level Issue Type or Issue Field (Settings -> Issue types / Issue fields). Look each id up once via `gh api graphql`. See README.md.",
   "repo": "owner/repo",
   "docRoot": "docs/sdlc",
   "tokenPath": "~/.github-token",
@@ -167,7 +167,7 @@
       "cycleCap": 8
     },
     "epicClose": {
-      "_comment": "`auto`: the orchestrator makes the second close-epic call itself. `evidenceCarryForward.paths`: globs a commit on epic-<n> after the tested head may touch without staling the exploratory record ({docRoot} expands to docRoot; the pipeline config file never carries forward). Widen it for fixture/evidence directories, never for source or tests. `prepare`: shell command close-epic runs in the epic worktree (fast-forwarded to origin first) on each call made before the exploratory pass, e.g. a dependency install; result in close-epic's `prepare`. Empty = none. `versionedFiles`: [{versionFile, versionPattern, textPaths}] -- when any file matching a `textPaths` glob differs between the base and the epic, the version `versionPattern` captures from `versionFile` (group 1 if any) must differ from the base's; close-epic refuses with `version_collisions` else.",
+      "_comment": "`auto`: the orchestrator makes the second close-epic call itself. `evidenceCarryForward.paths`: globs a commit on epic-<n> after the tested head may touch without staling the exploratory record ({docRoot} expands to docRoot; the pipeline config file never carries forward). Widen it for fixture/evidence directories, never for source or tests. `prepare`: shell command `prepare-epic-tree` runs in the epic worktree (fast-forwarded to origin first) before the exploratory pass, e.g. a dependency install; close-epic never runs it. Empty = none. `versionedFiles`: [{versionFile, versionPattern, textPaths}] -- when any file matching a `textPaths` glob differs between the base and the epic, the version `versionPattern` captures from `versionFile` (group 1 if any) must differ from the base's; close-epic refuses with `version_collisions` else.",
       "auto": false,
       "evidenceCarryForward": {
         "paths": ["**/*.md", "docs/**", "{docRoot}/**"]
@@ -176,7 +176,7 @@
       "versionedFiles": []
     },
     "placement": {
-      "_comment": "Cloud vs local sessions never drive the same Epic. An Epic carrying `cloudLabel` (or whose Initiative does) is driven only by a cloud session (CLAUDE_CODE_REMOTE, or SDLC_PLACEMENT=cloud), every other Epic only by a local one; `place <n> --where cloud|local` moves it. `initiativeEpics: cloud` makes a laptop Initiative run launch each runnable Epic in its own cloud session (`launch-cloud-epic`, at most `parallelism.cloudSessions`); `stallMinutes` is when `cloud-status` calls a quiet one stalled. `softOverlapPaths`: fnmatch globs (a migrations index, a docs table) whose footprint overlap never holds a launch. `localLabel` on a Task of a cloud Epic, or a `localTasks` match (\"e2e-test\", \"integration-test\" by title, \"label:<name>\"), keeps that Task on the laptop while the Epic stays in the cloud. See references/cloud-mode.md.",
+      "_comment": "Cloud vs local sessions never drive the same Epic. An Epic carrying `cloudLabel` (or whose Initiative does) is driven only by a cloud session (CLAUDE_CODE_REMOTE, or SDLC_PLACEMENT=cloud), every other Epic only by a local one; `place <n> --where cloud|local` moves it. `initiativeEpics: cloud` makes an Initiative run (laptop or cloud) launch each runnable Epic in its own cloud session (`launch-cloud-epic`, at most `parallelism.cloudSessions`); `stallMinutes` is when `cloud-status` calls a quiet one stalled. `softOverlapPaths`: fnmatch globs (a migrations index, a docs table) whose footprint overlap never holds a launch. `localLabel` on a Task of a cloud Epic, or a `localTasks` match (\"e2e-test\", \"integration-test\" by title, \"label:<name>\"), keeps that Task on the laptop while the Epic stays in the cloud. See references/cloud-mode.md.",
       "cloudLabel": "sdlc:cloud",
       "initiativeEpics": "local",
       "stallMinutes": 90,
@@ -195,7 +195,7 @@
       "parkIssue": null
     },
     "resume": {
-      "_comment": "A `next-action` resume claimed less than `liveWindowMinutes` ago is flagged `likely_live`: another session may still be driving it, so the orchestrator asks the operator before taking over.",
+      "_comment": "A `next-action` resume claimed less than `liveWindowMinutes` ago is flagged `likely_live`: the orchestrator asks the operator before taking over. A second run id on an Epic is refused for the same window (`next-action --take-over`).",
       "liveWindowMinutes": 30
     },
     "ci": {
@@ -215,7 +215,7 @@
       "task": {"field": "label", "value": "type:task"}
     },
     "docTemplates": "_templates",
-    "_initiativeProfiles_comment": "Per Initiative, ordered; the first entry whose `match` label is on the Initiative wins (no implied catch-all; unmatched Initiatives take the defaults). Toggles: `branch` (default true = the Initiative's Epics cut from, sync with and close into `initiative-<i>`, which reaches main once via open-initiative-pr / merge-initiative-pr; false opts the Initiative out), `testTasks` (false = lld carves no Integration-test / e2e-test Task), `deferSuites` (suites close-epic does not demand of an Epic closing into the initiative branch), `closeSuites` (suite keys merge-initiative-pr needs record-local-ci-attested at the initiative PR head), `placement` (\"cloud\"|\"local\": overrides `placement.initiativeEpics` for this Initiative). Example: [{\"name\": \"branched\", \"match\": {\"label\": \"initiative:branch\"}, \"testTasks\": false, \"deferSuites\": [\"backend-it\"], \"closeSuites\": [\"e2e\"]}]",
+    "_initiativeProfiles_comment": "Per Initiative, ordered; the first entry whose `match` label is on the Initiative wins (no implied catch-all; unmatched Initiatives take the defaults). Toggles: `branch` (state it in every entry; an omitted one defaults to true and warns; true = the Initiative's Epics cut from, sync with and close into `initiative-<i>`, which reaches main once via open-initiative-pr / merge-initiative-pr; false opts the Initiative out), `testTasks` (false = lld carves no Integration-test / e2e-test Task), `deferSuites` (suites close-epic does not demand of an Epic closing into the initiative branch), `closeSuites` (suite keys merge-initiative-pr needs record-local-ci-attested at the initiative PR head), `placement` (\"cloud\"|\"local\": overrides `placement.initiativeEpics`), `reviewDepth` (\"light\": single-pass reviews, no fan-out, no mutation probe). Example: [{\"name\": \"branched\", \"match\": {\"label\": \"initiative:branch\"}, \"branch\": true, \"testTasks\": false, \"deferSuites\": [\"backend-it\"], \"closeSuites\": [\"e2e\"]}]",
     "initiativeProfiles": [],
     "profiles": [
       {

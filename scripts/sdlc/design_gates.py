@@ -342,12 +342,19 @@ def cmd_open_gate(gh: GitHub, repo_path: Optional[str], issue: int, title: str, 
     _fetch_origin(repo_path, runner)
     sha = runner(["git", "-C", repo_path, "rev-parse", f"origin/{head}"]).strip()
     if epic is None:
-        pr_number = gh.pr_create(
-            base=base, head=head,
-            title=f"{title} — {doc} for review (#{issue})",
-            body=_GATE_PR_BODY.format(issue=issue, next_stage=next_stage),
-            draft=False,
-        )
+        try:
+            pr_number = gh.pr_create(
+                base=base, head=head,
+                title=f"{title} — {doc} for review (#{issue})",
+                body=_GATE_PR_BODY.format(issue=issue, next_stage=next_stage),
+                draft=False,
+            )
+        except GhError as e:
+            # A re-run after a failure past the create: reuse the gate PR it made.
+            existing = gh.pr_list_for_branch(head) if "already exists" in str(e) else []
+            if not existing:
+                raise
+            pr_number = existing[0]["number"]
     else:
         found = find_design_pr(gh.issue_view(issue).get("comments", []))
         if not found or found[0] != stage:

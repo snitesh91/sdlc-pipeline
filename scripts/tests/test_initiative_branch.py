@@ -179,7 +179,7 @@ def _closing(gh, files=(), checks=()):
     gh.pr_files = lambda n: list(files)
     gh.branch_commits = lambda base, head: []
     gh.pr_ready = lambda n: None
-    gh.pr_merge = lambda n: calls["merged"].append(n)
+    gh.pr_merge = lambda n, **kw: calls["merged"].append(n)
     return calls
 
 

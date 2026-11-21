@@ -18,7 +18,7 @@
 
 ## Auto-mode classifier denies a composite
 
-- The classifier can deny a heavy composite (e.g. `finish-lld`) even under a `Bash(python3 "$SDLC" *)` allow rule. You cannot override it yourself. Ask the operator to switch the session out of auto mode (or restart with `sdlc-run <n> --permission-mode default`), then re-run the command. Composites are idempotent.
+- The classifier can deny a heavy composite (e.g. `finish-lld`) even under a `Bash(python3 "$SDLC" *)` allow rule. Ask the operator to switch the session out of auto mode (or restart with `sdlc-run <n> --permission-mode default`), then re-run the command. Composites are idempotent.
 - A denied `git push` or `open-dev-pr` never parks a finished unit. Run the denied step from the main thread (or ask the operator to approve it), then resume the agent for its remaining exit actions. The operator can add the allow rules below.
 - When the main thread is denied too: `mark-needs-human <n> --reason "..." --classifier-denied <step> --run-id "$RUN_ID"`. The worktree is kept. The next run's `next-action` returns it as `resume` (`reason_code: classifier_denied`, `denied_step`): retry `denied_step` first. The run that parked it never resumes it.
 - A classifier **outage** (every state-changing call errors while reads work) is not a denial and not a stage failure. Resume the agent to retry its exit action once the classifier answers. Never re-run the stage. You may record a review's reported verdict yourself (SKILL.md, "After the subagent returns").
@@ -70,7 +70,7 @@ Ordered array. `resolve_profile(epic)` returns the first entry whose `match` (`{
 
 Ordered array, default `[]`; the first entry whose `match` is on the Initiative wins. With no match, the defaults hold. A failed read while resolving it stops the step; it never falls back to a base. Toggles (`sdlc.config.sample.json`):
 
-- `branch` (default `true` = `initiative-<i>`, `references/epics.md`, "Initiative branch"; `false` opts the Initiative out).
+- `branch` (default `true` = `initiative-<i>`, `references/epics.md`, "Initiative branch"; `false` opts the Initiative out). State it in every entry: an omitted one warns.
 - `testTasks` (`false` = no standing test Tasks).
 - `deferSuites`: suites `close-epic` does not demand into the initiative branch. `closeSuites`: suites `merge-initiative-pr` needs attested at its head.
 - `placement` (`cloud` | `local`): overrides `placement.initiativeEpics`.
@@ -105,7 +105,7 @@ Before any ad-hoc PR, list open PRs (`gh pr list --state open`; cloud: `gh api '
 This is a standing exception to any draft-PR rule in the operator's global `CLAUDE.md`, for PRs this pipeline opens. `development` opens a draft. After a clean `pr-review` and green CI, `merge-pr` marks it ready and squash-merges it. Human gates on product and architecture are separate.
 
 - **A phase-Task's design PR** merges inside `skip-gate`/`waive-gate`/`finish-lld`, or by the human at Gate B. `merge-pr` refuses a phase-Task. A gate PR the operator told you to merge: `merge-gate --operator-confirmed`.
-- Only the orchestrator merges, with `merge-pr`, after `pr-review` records clean. `merge-pr` does every post-merge write.
+- Only the orchestrator runs `merge-pr`. It does every post-merge write.
 - **A development PR authors no open Epic's design doc and touches no other Task's footprint.** `open-dev-pr` and `verify-exit` (`dev_pr_scope`) refuse it. A closed Epic's doc correction passes. An open Epic's design-doc path never passes as a deviation. A foreign-footprint path listed under `## Footprint deviations` passes as `acknowledged_deviations` for `pr-review` to judge. A design that must change needs an Architecture revision.
 - Never delete the per-issue docs folder after merge.
 - `merge-pr` is the only merge gate (no branch protection). It refuses on a non-passing check, a required suite with neither a passing check nor a fresh attestation, missing pipeline evidence (`missing_evidence`), or a stale base (`behind_base`: `references/parallelism.md`, "Git-conflict handling"). It pins the squash to the head SHA it read (`--match-head-commit`).

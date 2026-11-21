@@ -4,9 +4,9 @@
   standing child's or a parentless issue's. **Gate B** gates `architecture.md` after a clean
   `arch-review`: an Epic's Architecture-phase or revision Task's, a standing child's or a
   parentless issue's. Never gate an Epic or Initiative issue itself.
-- Each gate is one doc-only PR: `issue-<n>` → `main`, or for an Epic's phase-Task its design PR
-  `issue-<n>` → `epic-<n>` (raised by `transition`). Merging it is the approval; a review
-  comment is feedback to address first.
+- Each gate is one doc-only PR from `issue-<n>` into the unit's integration base (`main`, a
+  standing child's `epic-<n>`, an Initiative child's `initiative-<i>`). An Epic's phase-Task uses
+  its design PR (raised by `transition`). Merging it is the approval; address a review comment first.
 - The profile decides whether a gate needs a human ("Waived gates"). A standing child routed
   past a stage never reaches its gate.
 
@@ -37,7 +37,7 @@ cap. `in-progress` `product` units do not count.
 
 ## Opening a gate
 
-Open the gate yourself, never through a subagent. Open it once the doc is pushed to
+Open the gate yourself, never through a subagent, once the doc is pushed to
 `origin/issue-<n>`; for Gate B, once `arch-review` passed clean on that commit. Agents author
 docs on `issue-<n>` (at `epic-<n>/architecture.md` for an Epic's phase-Task), never on `epic-<n>`.
 
@@ -47,8 +47,7 @@ python3 "$SDLC" open-gate <n> --doc product.md --next-stage architecture \
   # --repo-path optional: the branch's live worktree is auto-resolved
 ```
 
-- UI-facing Gate A: name the `mockups/` set and the demo in `--summary`, with their paths, so
-  the operator sees the change at a glance.
+- UI-facing Gate A: name the `mockups/` set and the demo in `--summary`, with their paths.
 - `open-gate` owns the PR title, body, status and issue comment. You choose only `--summary`,
   `--doc` and `--next-stage` (A: `product.md` → `architecture`; B: `architecture.md` →
   `development`; a phase-Task needs `--next-stage` but ignores it). Pass no `--title`.
@@ -183,5 +182,5 @@ The profile's `gates.requiresHumanGateA` / `requiresHumanGateB` (default `true`;
 - Rework on `product` / `architecture` after its gate passed does not reopen the gate. A
   deviation from an Epic's design runs a fresh Gate B on a revision Task (`references/epics.md`,
   "Architecture deviation escalation").
-- Branch deletion: "Opening a gate", **Merging**; `epic-<n>`: `references/epics.md`, "The epic
+- Branch deletion: "Opening a gate"; `epic-<n>`: `references/epics.md`, "The epic
   integration branch".

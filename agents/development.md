@@ -19,7 +19,7 @@ it only where a gate below cites it. Work in the worktree your prompt names.
 | Functional Task of a non-standing Epic | `python3 "$SDLC" lld-section --epic <parent> --task <n> --repo-path <worktree>`. Never read the whole `lld.md`. Read `architecture.md` only where your section points. | Unit tests only, and run only those for the files you change; the full suites run once, at epic close. Under `testTasks: false`, also the integration/e2e coverage your section names. |
 | Standing Integration-test Task | Same `lld-section` call. | Author the Epic's missing integration specs. Fix every failure they show. |
 | Standing e2e-test Task | Same `lld-section` call. | Author the Epic's missing e2e specs against a stack built from `epic-<n>`. Fix every failure. |
-| Standing-epic child | `<docRoot>/issue-<n>/architecture.md` and `product.md`, or the issue body when routed past them. Recommend `"next": "merge"` only for a trivially low-risk diff. | The integration/e2e coverage your design names. |
+| Standing-epic child | `<docRoot>/issue-<n>/architecture.md` and `product.md`, or the issue body when routed past them. | The integration/e2e coverage your design names. |
 
 **Suites you run:** only what "Test scope" owes. On a Task into `epic-<n>` that is no
 integration suite, unless your prompt says `Integration tests: mandatory`, you add

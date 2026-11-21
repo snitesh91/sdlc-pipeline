@@ -232,10 +232,13 @@ def _pr_deferred_suites(gh: WorkItemProvider, head_ref: Optional[str],
                         base_ref: Optional[str]) -> tuple:
     """The Initiative profile's `deferSuites` for an epic PR `epic-<n>` -> `initiative-<i>`
     (what close-epic defers to the initiative -> main merge), else `()`. A Task PR
-    `issue-<n>` -> `initiative-<i>` defers every base-scoped suite, like one into `epic-<n>`."""
+    `issue-<n>` -> `initiative-<i>` defers every base-scoped suite the initiative PR into
+    `main` owes, like one into `epic-<n>`."""
     head, base = _unit_of_branch(head_ref), _unit_of_branch(base_ref)
     if head and head[0] == "issue" and base and base[0] == "initiative":
-        return tuple(w["suite"] for w in required_workflows(base_ref) if w["bases"])
+        # A suite scoped to `initiative-*` alone never runs on the initiative PR: owed here.
+        return tuple(w["suite"] for w in required_workflows(base_ref)
+                     if w["bases"] and _workflow_applies_to_base(w, "main"))
     if not (head and head[0] == "epic" and base and base[0] == "initiative"):
         return ()
     try:
@@ -577,7 +580,6 @@ def cmd_update_pr_body(gh: GitHub, pr: int, body_file: str) -> dict:
 
 
 # ---- deflake: re-run only a red suite's failed spec files on the same head ----
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _FAILED_SPEC_RE = re.compile(r"^\s*FAIL\s+(\S+\.(?:it-spec|spec|test)\.[cm]?[jt]sx?)\b")
 _DEFLAKE_MARKER = re.compile(
     r'<!-- sdlc:deflake workflow="([^"]+)" sha=([0-9a-f]{40}) specs=(\S+) -->')
@@ -675,7 +677,7 @@ def _deflake_failed_specs(gh: GitHub, pr_number: int) -> dict:
             gh.pr_comment(pr_number, (
                 f"Deflake: re-running only the failed spec files of **{workflow}** on "
                 f"{(head or '')[:7]}: {', '.join(listed)}. When the re-run passes, merge-pr "
-                f"counts the suite green; file one flake Task per spec.\n\n"
+                f"counts the suite green; file one flake Bug per spec.\n\n"
                 f'<!-- sdlc:deflake workflow="{workflow}" sha={head} specs={",".join(listed)} -->'))
             deflake.append({"workflow": workflow, "specs": listed})
         except GhError as e:

@@ -27,7 +27,7 @@ from .design_gates import (
 from .lld_tasks import cmd_add_blocked_by, cmd_create_lld_tasks, task_type_name
 from .gates import _profile_for_issue, cmd_mark_feedback_addressed
 from .dev_pr import cmd_verify_exit
-from .checks import cmd_merge_pr, pr_stale_attestations
+from .checks import pr_stale_attestations
 from .issue_ops import cmd_close_issue
 from .cloud import cloud_heartbeat_quietly
 from .issue_admin import cmd_create_issue, cmd_repair_issue
@@ -464,8 +464,7 @@ def cmd_advance_standing(gh: GitHub, issue: int, frm: str, to: str, reason: str,
     if frm not in ADVANCE_FROM:
         raise GhError(f"--from must be one of {', '.join(ADVANCE_FROM)}")
     if to not in ADVANCE_TO:
-        raise GhError(f"--to must be one of {', '.join(ADVANCE_TO)} -- skipping pr-review "
-                      f"is `skip-pr-review`")
+        raise GhError(f"--to must be one of {', '.join(ADVANCE_TO)}")
     seq = StepSequence()
     if frm != "none":
         seq.run("transition", lambda: cmd_transition(
@@ -478,23 +477,6 @@ def cmd_advance_standing(gh: GitHub, issue: int, frm: str, to: str, reason: str,
         failed=lambda r: r.get("failed_step") is not None)
     return seq.report(issue=issue, **{"from": frm}, to=to, routed=bool(routed),
                       path=(started or {}).get("path"), claimed=bool(started))
-
-
-def cmd_skip_pr_review(gh: GitHub, issue: int, pr: int, reason: str,
-                       run_id: Optional[str] = None, repo_path: Optional[str] = None,
-                       runner: Runner = _default_runner) -> dict:
-    """Merge a standing child's PR without `pr-review`: `verify-exit --expect-stage pr-review
-    --pr` (handoff marker, PR scope) -> `route --to merge` (its marker is the merge evidence;
-    refused after a `pr-review` rework bounce) -> `merge-pr`. Returns `merged` plus the steps."""
-    seq = StepSequence()
-    seq.run("verify-exit", lambda: cmd_verify_exit(gh, repo_path, issue, "pr-review", pr,
-                                                   runner=runner))
-    seq.run("route", lambda: cmd_route(gh, issue, "merge", reason),
-            failed=lambda r: not r.get("routed"))
-    merged = seq.run("merge-pr", lambda: cmd_merge_pr(gh, pr, issue, repo_path or ".",
-                                                     run_id=run_id),
-                     failed=lambda r: not r.get("merged"))
-    return seq.report(issue=issue, pr=pr, merged=bool(merged))
 
 
 def cmd_finish_gate_feedback(gh: GitHub, issue: int, expect_stage: str,
@@ -572,7 +554,6 @@ COMMENT_CAPS = {
     "resolve-thread": ("reply", HANDOFF_CAP),
     "route": ("reason", ROUTE_REASON_CAP),
     "advance-standing": ("reason", ROUTE_REASON_CAP),
-    "skip-pr-review": ("reason", ROUTE_REASON_CAP),
     "close-issue": ("reason", HANDOFF_CAP),
     "end-cloud-session": ("note", ROUTE_REASON_CAP),
     "record-cloud-session": ("note", ROUTE_REASON_CAP),

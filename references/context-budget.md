@@ -1,6 +1,6 @@
 # Orchestrator context budget
 
-One Epic run reached about 461K tokens of orchestrator context (#4848, 2026-11-04). Most of it came from verbose updates, long handbacks, restated briefs, raw tool output and notification overhead. Each rule below targets one of those sources.
+One Epic run reached about 461K tokens of orchestrator context. Most of it came from verbose updates, long handbacks, restated briefs, raw tool output and notification overhead.
 
 ## Updates to the operator
 
@@ -39,7 +39,7 @@ Keep only that reply. Do it inline only for one or two tool calls whose target y
 Each background notification costs about 300 tokens of fixed harness text.
 
 - Launch a batch of agents in one message.
-- Wait on one `Monitor` until-loop or one background command, never on stacked short sleep timers. Poll external state (CI) at the interval it changes, not every minute.
+- Wait on one `Monitor` until-loop or one background command, never on stacked short sleep timers. Poll CI at the interval it changes, not every minute. In the cloud, never poll across turns (`cloud-mode.md`, "A cloud run").
 - A stage agent sends `SDLC-RESULT` once, when its stage ends. An interim "still waiting" result is a defect: tell the agent to wait on one Monitor and finish.
 
 ## After a container restart

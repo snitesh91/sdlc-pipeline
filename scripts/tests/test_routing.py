@@ -48,32 +48,18 @@ def test_route_mid_flow_skips_only_the_stages_between():
     assert gh.issues[9]["stage"] == "architecture"
 
 
-def test_route_to_merge_keeps_the_pr_review_stage_and_skips_pr_review():
-    gh = _tree({"stage": "pr-review", "status": "in-progress", "comments": [_HANDOFF]})
-
-    result = s.cmd_route(gh, 9, "merge", "README typo fix.")
-
-    assert result["routed"] and result["skipped"] == ["pr-review"]
-    assert (gh.issues[9]["stage"], gh.issues[9]["status"]) == ("pr-review", "in-progress")
-    assert "<!-- stage-route: pr-review->merge @ " in gh.comments_on(9)[-1]
-
-
 @pytest.mark.parametrize("child, to, reason, refusal", [
     ({}, "arch-review", "x", "a review always follows its stage"),
     ({}, "testing", "x", "--to must be one of"),
-    ({}, "merge", "x", "Stage must be PR Review"),
     ({}, "development", "  ", "one non-empty line"),
     ({}, "development", "two\nlines", "one non-empty line"),
     ({"stage": "architecture"}, "product", "x", "only moves forward"),
     ({"stage": "development"}, "development", "x", "only moves forward"),
     ({"stage": "pr-review"}, "development", "x", "only moves forward"),
-    ({"stage": "development"}, "merge", "x", "Stage must be PR Review"),
     ({"stage": "lld"}, "development", "x", "not in the standing flow"),
     ({"stage": "product", "status": "awaiting-human-review"}, "architecture", "x",
      "a gate PR is open"),
-    ({"stage": "pr-review", "comments": [
-        "<!-- pr-review-outcome: rework:42 @ 2026-09-17T00:00:00Z -->", _HANDOFF]},
-     "merge", "x", "never skip it after a bounce"),
+    ({"stage": "pr-review"}, "merge", "x", "--to must be one of"),
 ])
 def test_route_refuses_without_touching_the_issue(child, to, reason, refusal):
     gh = _tree(child)
@@ -94,38 +80,20 @@ def test_route_refuses_a_non_standing_epics_child():
     assert gh.issues[9]["stage"] is None
 
 
-# --- merge evidence for a round routed past pr-review ------------------------
-
-def test_a_round_routed_past_pr_review_needs_no_review_outcome():
-    # Regression: merge-pr demanded a pr-review outcome the route had decided to skip.
-    comments = [{"body": _HANDOFF}, {"body": _ROUTE.format("pr-review->merge")}]
-    assert s.missing_pipeline_evidence(comments) == []
-
+# --- a route marker is never merge evidence ----------------------------------
 
 @pytest.mark.parametrize("bodies, problem", [
     ([_HANDOFF], "no `pr-review` outcome"),
-    # A route from an earlier round does not cover a newer handoff.
-    ([_ROUTE.format("pr-review->merge"), _HANDOFF], "no `pr-review` outcome"),
-    # A review that ran this round governs, route or not.
+    # A route marker never stands in for the review.
+    ([_HANDOFF, _ROUTE.format("pr-review->merge")], "no `pr-review` outcome"),
     ([_HANDOFF, "<!-- pr-review-outcome: rework:42 @ 2026-09-18T01:00:00Z -->",
       _ROUTE.format("pr-review->merge")], "`rework`, not `clean`"),
     ([_ROUTE.format("pr-review->merge")], "no `development->pr-review` handoff"),
 ])
-def test_merge_evidence_still_refuses_without_a_current_route_or_review(bodies, problem):
+def test_merge_evidence_needs_a_current_clean_review(bodies, problem):
     problems = s.missing_pipeline_evidence([{"body": b} for b in bodies])
     assert any(problem in p for p in problems)
 
-
-def test_the_review_pool_skips_a_pr_routed_past_pr_review():
-    gh = _tree({"stage": "pr-review", "comments": [_HANDOFF, _ROUTE.format("pr-review->merge")]})
-
-    result = s.cmd_list_ready_for_review(gh, 90)
-
-    assert result["ready_for_review"] == []
-    assert "routed past pr-review" in result["skipped"][0]["reason"]
-
-
-# --- waive-gate ---------------------------------------------------------------
 
 @pytest.mark.parametrize("stage, next_stage, review", [
     ("product", "architecture", "product-review"),

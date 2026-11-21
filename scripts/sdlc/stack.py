@@ -192,6 +192,16 @@ def cmd_teardown_epic_stack(epic: int, keep_data: bool = False,
         return {"epic": epic, "torn_down": False,
                 "reason": "pipeline.stack.enabled is false — pass --project/--profile "
                           "to tear down a hand-made stack"}
+    for flag, value in (("--project", project), ("--profile", profile)):
+        # Both reach `downCommand`, which runs through a shell.
+        if value and not re.fullmatch(r"[A-Za-z0-9][\w.-]*", value):
+            raise GhError(f"{flag} {value!r} is not a compose project/profile name "
+                          f"(letters, digits, `_`, `.`, `-`)")
+    if profile == s["baseProfile"]:
+        # Its env and secrets files are the base every epic profile is copied from.
+        return {"epic": epic, "torn_down": False, "refused": True, "profile": profile,
+                "reason": f"profile {profile!r} is pipeline.stack.baseProfile -- teardown would "
+                          f"delete its env and secrets files; stop that stack by hand"}
     lay = _stack_layout(epic, profile)
     if project:
         lay["project"] = project
