@@ -1874,7 +1874,8 @@ def _token_start(tmp_path, config, env):
 
 def test_local_ambient_gh_token_exports_no_token_plumbing(tmp_path):
     content, ctx = _token_start(tmp_path, {"tokenEnv": "MY_GH_TOKEN"}, {"GH_TOKEN": "ghp_direnv"})
-    assert "GH_TOKEN" not in content and "token" not in ctx.lower()
+    # The rtk hint says "token saver" where rtk is missing (CI); it is not token plumbing.
+    assert "GH_TOKEN" not in content and "token" not in ctx.lower().replace("token saver", "")
 
 
 def test_cloud_ambient_gh_token_is_still_overridden_by_token_env(tmp_path):
