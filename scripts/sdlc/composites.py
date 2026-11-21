@@ -231,18 +231,20 @@ def cmd_file_closing_delta(gh: GitHub, epic: int, title: str, body: str,
     """File a closing-run finding as a `Bug` child of a non-standing Epic. It stays `unstaged`
     (full lane) unless `start`, the operator-authorised close-blocker lane: then stage
     `development` and `start-stage` it. `defer` files it under the Epic's Initiative's Bugs
-    Epic instead (fixed before initiative close). Returns `delta_issue` and `parent`."""
+    Epic instead (fixed before initiative close), or directly under the Initiative when it
+    has none. Returns `delta_issue` and `parent`."""
     issues = {i["number"]: i for i in gh.issue_list()}
     refusal = _not_a_phased_epic(issues, epic)
     parent = epic
     if defer:
         initiative = initiative_of_in(issues, epic)
         bugs = bugs_epic_of_in(issues, initiative["number"]) if initiative else None
+        home = bugs or (initiative if initiative and initiative["state"] == "OPEN" else None)
         refusal = ("--defer and --start conflict: a deferred bug waits for the Bugs Epic"
-                   if start else None if bugs else
-                   f"#{epic} has no Initiative with an open standing Bugs Epic -- file it "
-                   f"without --defer")
-        parent = bugs["number"] if bugs else epic
+                   if start else None if home else
+                   f"#{epic} has no open Initiative to hold a deferred bug -- file it without "
+                   f"--defer")
+        parent = home["number"] if home else epic
         body = f"{body}\n\nDeferred from Epic #{epic}."
     if refusal:
         return {"epic": epic, "refused": True, "reason": refusal}
@@ -367,7 +369,8 @@ def cmd_start_stage(gh: GitHub, number: int, role: str, unit: str = "issue",
     # delegates a child onto a base branch that isn't there yet -- a live worktree is fast-forwarded.
     if unit == "issue" and not seq.stopped:
         integ = integration_base(gh, number)
-        if integ != "main":
+        # A direct child of an Initiative integrates into `initiative-<i>`: no Epic tree.
+        if integ.startswith(EPIC_BRANCH_PREFIX):
             epic_no = int(integ[len(EPIC_BRANCH_PREFIX):])
             seq.run("epic-worktree", lambda: cmd_worktree_add(
                 gh, epic_no, unit="epic", repo_path=repo_path, runner=runner),

@@ -196,7 +196,12 @@ All other rework: `references/rework.md`.
 
 ## Initiative branch (default)
 Every Initiative owns `initiative-<i>`. An `initiativeProfiles` entry with `branch: false` opts
-one out; its Epics then close into `main`.
+one out; its Epics then close into `main`. Every entry states `branch`; `show-config` and
+`initiative-profile` list an entry that omits it in `warnings`.
+
+- **A Task or Bug parented directly to the Initiative** (never its Product-Roadmap Task)
+  branches from and merges into `initiative-<i>` through the normal Task flow. Its PR owes no
+  base-scoped suite; they run on the initiative PR.
 
 - **Its Epics cut from, sync with and close into `initiative-<i>`** (`close-epic` result
   `base`). Each Epic closes on its own.
@@ -312,13 +317,14 @@ untracked output before a reconcile or the merge, and refuses on a tracked chang
 
 **Every manual-testing finding is its own `Bug`:** `file-closing-delta <epic> --title ..
 --body .. [--priority P] [--effort E] [--start | --defer]`. `--start` = close-blocker lane.
-`--defer` files it under the Initiative's Bugs Epic instead.
+`--defer` files it under the Initiative's Bugs Epic instead, or directly under the open
+Initiative when it has none.
 
 **Fix now or defer, for every bug an Epic finds in its own code** (development, review, test
 Tasks, the exploratory pass). Decide it yourself; never ask the operator:
 - **Fix now** (a `Bug` child of this Epic, closing waits for it) when the bug blocks one of
   the Epic's own Tasks, its close, or one of its acceptance criteria, or is Blocker/Critical.
-- **Defer** (`--defer`) otherwise, when the Epic has an Initiative with a Bugs Epic.
+- **Defer** (`--defer`) otherwise, when the Epic has an open Initiative.
 
 **Standing epics never get this check**, except an Initiative's Bugs Epic at its close.
 
