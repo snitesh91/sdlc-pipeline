@@ -50,8 +50,9 @@ def test_a_laptop_or_non_cloud_suite_task_pr_has_no_marker(monkeypatch):
 def test_a_cloud_relaunch_with_no_session_id_posts_no_marker(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_REMOTE", "true")
     gh = _initiative(2)
-    result = s.cmd_launch_cloud_epic(gh, 2, runner=FakeGit(), claude=FakeClaude("Login required\n"))
-    assert result["ok"] is False and "Login required" in result["output_tail"]
+    claude = FakeClaude("Login required\n")
+    result = s.cmd_launch_cloud_epic(gh, 2, runner=FakeGit(), claude=claude)
+    assert result["launch_in_session"] is True and claude.calls == []
     assert not any("sdlc:cloud-session " in c for c in gh.comments_on(2))
 
 
