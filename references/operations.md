@@ -89,7 +89,7 @@ Never close a dropped unit as completed. State why on the thread:
 ## Worktree release
 
 - Every release path (`close-issue`, `merge-pr`, `mark-blocked`, `mark-needs-human`, `close-epic`) first runs `pipeline.worktrees.releaseCommand` inside the tree, when set (e.g. `make it-down`). It runs only on a tree about to be removed. A failure is reported (`release_command.ok: false`), never fatal. A tree released without it leaves that env for you to tear down.
-- On a terminal unit, `merge-pr` and `close-issue` run `cleanup`: worktrees, then branches whose work landed (unmerged work is kept, `retained_local_branch`). `close-epic` does the same for the Epic and its children; `prune-stale` sweeps every closed unit.
+- On a terminal unit, `merge-pr` and `close-issue` run `cleanup`: worktrees, then branches whose work landed (unmerged work is kept, `retained_local_branch`). A merged PR's head is left to GitHub when the repo auto-deletes head branches (`skipped`). `close-epic` does the same for the Epic and its children; `prune-stale` sweeps every closed unit.
 - A failed deletion (not a keep) comes back as a top-level `warnings` list on `merge-pr`, `close-issue`, `close-epic`, `prune-stale` and their composites. Relay every line to the operator at once and again in Step 4; the operator removes the branch.
 
 ## Assignee convention

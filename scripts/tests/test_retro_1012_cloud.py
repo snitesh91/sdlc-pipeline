@@ -90,14 +90,6 @@ def test_cloud_skips_silently_when_a_merged_pr_has_the_branch_head(monkeypatch, 
     assert _remote_cleanup(monkeypatch, "abc")["skipped"] == "repo auto-deletes merged heads"
 
 
-def test_local_deletes_even_when_the_repo_auto_deletes_heads(repo):
-    gh = _real(_task(), repo)
-    gh.auto_deletes_head_branches = lambda: True
-    _worktree_with_doc(gh, repo, 5, "src/a.txt", "a\n")
-    result = s.cmd_merge_pr(gh, _merged_pr(gh), 5, repo_path=str(repo))
-    assert result["cleanup"]["remote_branch"]["deleted"] is True
-
-
 def test_cloud_prune_stale_releases_worktrees_and_prunes_origin(repo, cloud):
     gh = _real(_task(5), repo)
     wt5 = _worktree_with_doc(gh, repo, 5, "src/a.txt", "a\n")

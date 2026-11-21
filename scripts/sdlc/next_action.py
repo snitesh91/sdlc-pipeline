@@ -26,7 +26,8 @@ from .evidence import (
 from .epic_close import initiative_landing
 from .gate_eval import evaluate_gate
 from .run_state import (
-    _write_run_state, config_drift, note_in_flight, read_run_state, run_cap_reached,
+    _write_run_state, config_drift, note_in_flight, other_live_run, read_run_state,
+    run_cap_reached,
     run_cap_state, run_completed,
 )
 
@@ -621,12 +622,21 @@ def cmd_next_action(gh: GitHub, args) -> dict:
     A `resume` also carries liveness hints (`_resume_liveness`). With `--sync-epic`,
     `sync_epic_if_due` runs first and its result is `epic_sync`. Refuses a unit placed
     on the other side (`check_placement`), then a plugin older than the run's last
-    (`plugin_version_guard`), before anything else runs."""
+    (`plugin_version_guard`), before anything else runs. A second run id while another
+    run holds the Epic (`other_live_run`) is refused unless `take_over`."""
     run_id = getattr(args, "run_id", None)
     repo_path = getattr(args, "repo_path", None) or "."
     issues = gh.issue_list()
     by_number = {i["number"]: i for i in issues}
     scope = placement_scope(args.epic, by_number.get, issues)
+    holder = None if getattr(args, "take_over", False) else other_live_run(args.epic, run_id)
+    if holder:
+        return {"action": "none", "epic": args.epic, "refused": True, "likely_live": True,
+                "run_id": holder.get("run_id"),
+                "reason": f"run {holder.get('run_id')} drove #{args.epic} on this machine within "
+                          f"the last {RESUME_LIVE_WINDOW_MINUTES} min -- two runs on one Epic "
+                          f"race. Start nothing; ask the operator, and pass `--take-over` only "
+                          f"on their word"}
     version = plugin_version_guard(gh, args.epic, by_number, repo_path=repo_path)
     drift = config_drift(args.epic, run_id)
     epic_sync = (sync_epic_if_due(gh, args.epic, run_id, repo_path, issues=issues)

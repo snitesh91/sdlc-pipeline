@@ -140,7 +140,7 @@ python3 "$SDLC" pass-gate <n> \
 ```
 
 - It reconciles `issue-<n>` with the gate's base and claims the next stage: continue into that
-  stage. On a phase-Task it closes the Task: return to Step 1.
+  stage. On a phase-Task it only closes the Task (no reconcile, no push): return to Step 1.
 - A design PR a human merged before any gate opened: `next-action` returns `pass-gate` with it
   as `gate_pr` (`finish-lld` for an LLD-phase Task).
 - Pass `next-action`'s `issue`, `gate_pr` and `stage` verbatim. `--stage` is the approved doc's

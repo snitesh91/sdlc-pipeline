@@ -85,7 +85,7 @@ incumbent first.
 
 - **Preflight the machine before a stack-building stage** (a `development`/`pr-review` that
   needs a stack, the e2e-test Task, the exploratory pass, `initiative-close`): check `docker
-  system df`, VM disk (< ~80%) and free memory. Prune the build cache yourself (never a stage
+  system df`, VM disk (< ~80%), free memory and host disk (`prune-stale --dry-run` → `host_disk`; under 30 GB free, release the largest worktrees first). Prune the build cache yourself (never a stage
   agent) and stop stale stacks. A run with crash-class failures (`Page crashed`, `ENOSPC`,
   OOM) is an environment failure: fix and re-run, never record it.
 - Run at most one suite-heavy stage at a time per machine. Light stages may run alongside.
