@@ -229,6 +229,9 @@ _PIPELINE_DEFAULTS = {
     "orchestrator": {"model": (_MODEL_POLICY.get("orchestrator") or {}).get("model", "sonnet")},
     "models": _MODEL_POLICY.get("models", {}),
     "fanout": _MODEL_POLICY.get("fanout", {}),
+    "tiers": _MODEL_POLICY.get("tiers", {}),
+    "consult": _MODEL_POLICY.get("consult", {}),
+    "efforts": _MODEL_POLICY.get("efforts", {}),
     # {"initiative"|"epic"|"task": {"field": "issueType"|"label", "value": ...}};
     # empty means every issue classifies as "other" rather than a guess.
     "classification": {},

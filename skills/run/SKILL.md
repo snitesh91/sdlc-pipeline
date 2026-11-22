@@ -26,8 +26,9 @@ All under `${CLAUDE_PLUGIN_ROOT}/references/`.
 | `rework.md` | A review finding, a reported ambiguity, a possible valve trip, a replacement agent |
 | `stage-playbooks.md` | Delegating any stage (every stage agent reads it) |
 | `design-doc-rules.md` | `product.md`/`architecture.md` content; scope alignment |
-| `verification-rules.md` | Writing a `development`/`pr-review` brief or a reconcile ("Test scope") |
-| `review-fanout.md` | Review fan-out |
+| `test-scope.md` | Writing a `development`/`pr-review` brief or a reconcile |
+| `verification-rules.md` | How a claim is proven (sweeps, positive controls, local stack only) |
+| `review-rules.md` / `review-fanout.md` | Shared review rules / review fan-out |
 | `epics.md` | Profiles, phase-Tasks, footprints, deviation, epic close, board status |
 | `operations.md` | Token/repo access, issue fields, auto-merge, local-CI attestation, auto-mode denials |
 | `continuous-mode.md` | Unattended looping |
@@ -72,7 +73,7 @@ task:       development -> pr-review -> auto-merge into epic-<n>
   **Legacy profile** (`driven: false`): skip it, Tasks included.
 - **Every Epic has two standing Tasks** (Integration-test, e2e-test) that run after every
   functional Task merges, unless its Initiative's profile sets `testTasks: false`.
-- **Test scope** (`references/verification-rules.md`, "Test scope"): the whole integration suite
+- **Test scope** (`references/test-scope.md`): the whole integration suite
   runs once, as the epic PR's CI into `main`. The pipeline never runs the full e2e suite. Epic
   close needs the exploratory pass (`references/epics.md`, "Epic closing").
 - **`product-review` follows every `product`** unless a standing child is routed past it. Clean
@@ -131,6 +132,13 @@ Run from the driven repo's root. What each hook does: `README.md`, "Hooks". You 
   starting `AXIS: <slice> ISSUE: <n>`.
 - **An agent runs until it ends with `SDLC-RESULT`.** The hooks record metrics; never record them yourself.
 
+## You route; stages do the work
+
+Never edit code, tests, docs or env files in a unit's worktree, and never run a suite a stage
+owns. A fix, even one line, goes to the owning stage (`references/rework.md`). A check goes to
+the stage that runs it; never re-run a suite an agent is running. Your own commands are the
+control plane, `git fetch`, and reads.
+
 ## Deterministic control plane
 
 Every GitHub read and mutation, and every fetch/checkout/merge/push, goes through
@@ -185,6 +193,12 @@ can move ("A cloud run").
 
 - **During `development` and `pr-review`, apply the recommended fix yourself.**
 - **How you ask** follows `pipeline.humanChannel` (`references/cloud-mode.md`, "Human channel").
+- **Ask crisply.** Each question stands alone: one line of context (unit, what it blocks), the
+  question in plain words, and 2–4 options with the recommended one first and its trade-off in
+  a few words. No command names, field names or internal ids unless the operator needs them to
+  act. One decision per question.
+- **Report crisply.** Lead with the outcome in one sentence. Then only what the operator must
+  act on or know. Link evidence; never paste it.
 - **Escalate exactly three things:** a product or scope call, an amendment to a gate-approved
   doc, a valve trip (`mark-needs-human`). With `pipeline.epicClose.auto` on, also an epic close
   blocked by a Blocker/Critical delta, an open manual-testing bug, or a verification that could
@@ -281,7 +295,7 @@ Give the agent (by `gh` command for anything large; in the cloud a `gh api` GET)
 3. For `lld`: `architecture.md` is the source of truth; fits-vs-deviates comes first.
 4. Its worktree, with "use absolute paths or a standalone `cd`; never chain `cd <path> && …`; never touch the main
    checkout". For `development`, the test-env helper and `Integration tests: mandatory` only per
-   "Test scope"; never brief a whole-suite run "Test scope" does not owe. For `pr-review` and `initiative-close`, the repo root.
+   `references/test-scope.md`; never brief a whole-suite run it does not owe. For `pr-review` and `initiative-close`, the repo root.
 5. For a review: diff against `origin/` refs after `git fetch origin`.
 6. Prior art only you can read: export it to `<worktree>/.sdlc-scratch/prior-art/` and name each file in the prompt.
 
@@ -292,7 +306,9 @@ Never restate the agent file's rules. Template (`EPIC` is the Initiative/Epic yo
 > The 2–3 facts it cannot read (operator answers, prior findings). Under ~1,500 chars.
 
 Write the first line plain, with no backticks: the hooks parse it. SubagentStart adds
-`arch-review`'s `Skip threshold`.
+`arch-review`'s `Skip threshold`. For `development`, add `EFFORT: <Low|Medium|High>` from the
+Task's `Effort:` line in `lld.md` (omit when none), and `REPLACEMENT: 1` on its context-reset
+replacement: the hook picks the model and effort (`hooks/model_policy.json`, `tiers`).
 
 Note each agent's ID per role for resume-based rework (session only; drop it at the unit's
 stopping point). Send findings back with `SendMessage` yourself, never via a relay fork. Send
@@ -368,7 +384,7 @@ then hands over to a fresh one: `end-cloud-session <n> --outcome context-reset`,
 
 ## Step 4 — Report back to the user
 
-Summarise every unit touched, stages run, rework rounds and current state. For an Initiative run,
+Summarise every unit touched in one line each: stages run, rework rounds, current state. For an Initiative run,
 group by Epic (cut, run, parked, closed, blocked and on what) and end with the Initiative's own
 `none` reason. Above the fold: `needs-human` units with reasons; blocked units and their waits;
 rework findings; gate-pending units; merged PRs and closed issues; `warnings`, `uncovered_paths`

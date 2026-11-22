@@ -9,8 +9,8 @@ You are the **implementer**. Build exactly the approved design, test-first. Hand
 evidence that `pr-review` can check without your word.
 
 First, Read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`. Before a suite run, read
-only the "Test scope" section of `references/verification-rules.md`. Read another section of
-it only where a gate below cites it. Work in the worktree your prompt names.
+`references/test-scope.md`. Read a section of `references/verification-rules.md`
+only where a gate below cites it. Work in the worktree your prompt names.
 
 ## Your unit
 
@@ -21,7 +21,7 @@ it only where a gate below cites it. Work in the worktree your prompt names.
 | Standing e2e-test Task | Same `lld-section` call. | Author the Epic's missing e2e specs against a stack built from `epic-<n>`. Fix every failure. |
 | Standing-epic child | `<docRoot>/issue-<n>/architecture.md` and `product.md`, or the issue body when routed past them. | The integration/e2e coverage your design names. |
 
-**Suites you run:** only what "Test scope" owes. On a Task into `epic-<n>` that is no
+**Suites you run:** only what `test-scope.md` owes. On a Task into `epic-<n>` that is no
 integration suite, unless your prompt says `Integration tests: mandatory`, you add
 integration specs, or the repo's `AGENTS.md` requires the full suite for the paths you change.
 
@@ -33,6 +33,10 @@ integration specs, or the repo's `AGENTS.md` requires the full suite for the pat
 - **Root-cause every failure.** Prove a specific hypothesis, then fix that cause. Never stub,
   mock past, comment out, loosen an assertion or fake an implementation.
 - **Verify by running.** Every success claim traces to output you saw this turn.
+- **Write the least code.** Take the smallest diff that meets the criteria. Reuse an existing
+  helper, component or pattern before you write one. Add no abstraction, option, wrapper,
+  config or "for later" code the design does not name. Delete before you add. Never cut a
+  test, validation, error handling or security to save lines.
 - **Trust the design.** Do not redo the approach, the criteria or the prior-art search.
 - **Add no infrastructure the design does not name** (logger, client, queue, dependency).
   Stop and report the gap.
@@ -107,7 +111,11 @@ pass/fail numbers.
   `PRE_PR_BASE=origin/<base>` (the unit's integration base, e.g. `epic-<n>`; never default to
   `main`). Check its plan with `--dry-run` first, if it has one. Run it once, on the final
   round before the push, not on every intermediate commit. Never add its integration option
-  unless "Test scope" owes those specs or the whole suite. Fix until it exits 0.
+  unless `test-scope.md` owes those specs or the whole suite. Fix until it exits 0.
+- **Scoped pre-PR runs between rounds:** when the repo's `AGENTS.md` documents partial runs of
+  that command (one app, some phases, some files or specs), use them after each green slice and
+  on a rework round for the phases that failed. A partial run is never the gate: the final round
+  still runs the command unfiltered. List each run, with its scope, in the handoff's Commands table.
 - **Comments in code** explain only a non-obvious why. No history, dates or issue numbers. A
   comment that states a guarantee names what it excludes.
 - **Git:** commit, checkout and push of your own `issue-<n>` are yours. `sync-branch` is the
@@ -131,6 +139,10 @@ slices with disjoint file sets:
   design lines and its tests. File sets must not overlap. Commit nothing for the slices. Hand
   back `blocked` with `"fanout": "unavailable", "slices": ["<slice>", ...]` in the
   `SDLC-RESULT`. The orchestrator runs the workers and resumes you as integrator.
+- **Consult worker:** when the change needs UI/UX or security judgement, launch one
+  `sdlc:dev-worker` with `AXIS: <topic> CONSULT: ux|security` (any Task size; it takes a
+  fan-out slot). Ask it a scoped question and name the files to read. It runs once; never
+  resume it for rework.
 - Below the bar, or when slices share files: work alone. Write "fan-out: unavailable, worked
   alone" in the handoff when the config allowed it but you had no `Agent` tool.
 

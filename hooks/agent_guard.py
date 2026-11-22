@@ -3,7 +3,8 @@
 A stage agent gets `models.<role>`; a child launched by an `sdlc:<parent>` agent (a review
 axis, or a development worker when `pipeline.fanout.development` allows it) gets
 `fanout.<parent>` and is denied when that parent may not fan out, is out of slots, or the
-child is itself a stage. An `explore` role's read-only Explore search passes untouched.
+child is itself a stage. A `tiers` role also gets its Task size's model and effort, and a
+`CONSULT:` dev-worker gets `consult`. An `explore` role's read-only Explore search passes untouched.
 Policy: `_common.model_policy`.
 """
 import fcntl
@@ -20,6 +21,7 @@ WORKER_ROLES = ("development",)
 # The one agent type a worker role launches as a parallel worker (its own Bash guard role).
 WORKER_AGENT = "dev-worker"
 SLOT_TTL_S = 2 * 86400
+FAMILIES = ("haiku", "sonnet", "opus", "fable")
 RETRY_HINT = ("re-run this launch when any holder reports; work an axis yourself only when no "
               "holder is left to wait for")
 
@@ -29,12 +31,15 @@ def deny(reason: str) -> None:
          permissionDecisionReason="sdlc agent guard: " + reason)
 
 
-def set_model(tool_input: dict, model, warning: str = "", prompt: str = None) -> None:
-    """Replace only `model` (and `prompt`, when given); every other field of the call is kept.
-    A `warning` rides along as context even when the model already matches."""
+def set_model(tool_input: dict, model, warning: str = "", prompt: str = None,
+              effort: str = None) -> None:
+    """Replace only `model` (and `prompt` / `effort`, when given); every other field of the call
+    is kept. A `warning` rides along as context even when the model already matches."""
     fields, updates = {}, {}
     if model and tool_input.get("model") != model:
         updates["model"] = model
+    if effort and tool_input.get("effort") != effort:
+        updates["effort"] = effort
     if prompt is not None and prompt != tool_input.get("prompt"):
         updates["prompt"] = prompt
     if updates:
@@ -43,6 +48,29 @@ def set_model(tool_input: dict, model, warning: str = "", prompt: str = None) ->
         fields["additionalContext"] = "sdlc agent guard: " + warning
     if fields:
         emit("PreToolUse", permissionDecision="allow", **fields)
+
+
+def family(model) -> int:
+    """Rank of a model alias or id in FAMILIES; -1 when unknown."""
+    name = str(model or "").lower()
+    return next((i for i, f in enumerate(FAMILIES) if f in name), -1)
+
+
+def tier_setting(policy: dict, role: str, header: dict):
+    """`{model, effort}` for a `tiers` role from its `EFFORT:` size (else Medium), or the
+    size's `replacement` under `REPLACEMENT:`; None for an untiered role. Raises ValueError
+    when a replacement does not move up a model family."""
+    tiers = policy["tiers"].get(role)
+    if not isinstance(tiers, dict):
+        return None
+    tier = tiers.get(str(header.get("effort") or "").capitalize()) or tiers.get("Medium") or {}
+    if not header.get("replacement"):
+        return tier
+    replacement = tier.get("replacement") or {}
+    if family(replacement.get("model")) <= family(tier.get("model")):
+        raise ValueError(f"tiers.{role}: a replacement must run a higher model family than "
+                         f"{tier.get('model')!r}, not {replacement.get('model')!r}")
+    return replacement
 
 
 def design_review_role(prompt_role, policies: dict):
@@ -182,7 +210,10 @@ def main() -> int:
                 deny("start an sdlc:dev-worker prompt with `AXIS: <slice> ISSUE: <n>`: the "
                      "orchestrator launches one per slice brief development handed back.")
                 return 0
-            set_model(tool_input, (policy["fanout"].get("development") or {}).get("model"))
+            consult = policy["consult"] if header.get("consult") else {}
+            set_model(tool_input, consult.get("model")
+                      or (policy["fanout"].get("development") or {}).get("model"),
+                      effort=consult.get("effort"))
             return 0
         role = child
         if child == DESIGN_REVIEW:
@@ -191,7 +222,15 @@ def main() -> int:
                 deny("start the sdlc:design-review prompt with `ROLE: arch-review|lld-review "
                      "ISSUE: <n>`; the two roles run at different models.")
                 return 0
-        set_model(tool_input, policy["models"].get(role))
+        try:
+            tier = tier_setting(policy, role, header)
+        except ValueError as e:
+            deny(f"{e}; fix the config.")
+            return 0
+        if tier:
+            set_model(tool_input, tier.get("model"), effort=tier.get("effort"))
+        else:
+            set_model(tool_input, policy["models"].get(role), effort=policy["efforts"].get(role))
         return 0
     worker = parent in WORKER_ROLES and child == WORKER_AGENT
     if child and not worker:
@@ -238,8 +277,10 @@ def main() -> int:
         deny(f"{parent} may run at most {limit} fan-out children at once; {len(holders)} still "
              f"running. retry_after={retry}{suffix}")
         return 0
-    set_model(tool_input, (fanout.get("axisModels") or {}).get(header.get("axis"))
-              or fanout.get("model"), warning, review_child_prompt(launcher, data, tool_input))
+    consult = policy["consult"] if worker and header.get("consult") else {}
+    set_model(tool_input, consult.get("model")
+              or (fanout.get("axisModels") or {}).get(header.get("axis")) or fanout.get("model"),
+              warning, review_child_prompt(launcher, data, tool_input), consult.get("effort"))
     return 0
 
 

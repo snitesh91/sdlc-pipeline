@@ -194,6 +194,9 @@ session with `AskUserQuestion`. Never use `PushNotification` or `ScheduleWakeup`
   going" gets one more context-reset round.
 - **"Decide later on GitHub":** `mark-needs-human <n> --reason "<the question>"` and park.
 - **Stage agents never ask the operator**; they return questions in their handback.
+- **Never ask before a local command.** A cloud session runs in a disposable container. Run
+  builds, tests, installs, Docker and edits or commits in the unit's worktree without asking.
+  Outward-facing actions (deploys, infra applies, vendor calls, merges) keep their own rules.
 
 ## Initiative → cloud Epics
 

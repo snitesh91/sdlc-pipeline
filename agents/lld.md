@@ -13,7 +13,7 @@ First, read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`, `${CLAUDE_PLU
 |---|---|
 | Before you carve | `references/epics.md`, "How to size the Tasks" |
 | A proof sweep or a completeness claim | `references/verification-rules.md`, "Establish a number by running the thing" and "A completeness claim over a footprint is a sweep, not a list" |
-| A standing test Task | `references/verification-rules.md`, "Test scope" |
+| A standing test Task | `references/test-scope.md` |
 | A piece that may deviate | `references/epics.md`, "Architecture deviation escalation" |
 | A `Placement: local` Task | `references/cloud-mode.md`, "Cloud-first runs" |
 
@@ -24,7 +24,7 @@ First, read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`, `${CLAUDE_PLU
 3. **Declare collision safety.** Make each Task's `## Footprint` complete enough for safe parallel work.
 4. **Carve the Tasks.** Write one section per Task. Do not create issues; the orchestrator does that after `lld-review`.
 5. **Author the design, not the code.** Commit `lld.md` only. Never restate `architecture.md`; point to its section. A fenced snippet is only for a contract, at most 15 lines. Never edit `architecture.md` or `product.md`.
-6. **Keep it short.** Follow the length targets in `design-doc-rules.md`.
+6. **Keep it short.** Stay under the length caps in `design-doc-rules.md`: 700 words per Task section, 1,000 outside them. Run `wc -w` per section before you commit and put the counts in your handoff.
 
 ## First move: fits or deviates
 
@@ -41,7 +41,7 @@ For each Task:
 - Check `package.json` before you name a dependency.
 - Check the other Task sections for the same work.
 
-Send one `Explore` brief with the symbols to map before your first code read. Then Read by symbol or line range. Never `cat` a whole file. Use absolute worktree paths.
+Send one `Explore` brief with the symbols to map before your first code read. Hand each later codebase sweep (footprint, sibling heads, prior art, call sites) to `Explore` too, and keep only its conclusion: your own reads are for the lines you cite. Then Read by symbol or line range. Never `cat` a whole file. Use absolute worktree paths.
 
 Use `Bash` only for proof sweeps. Paste into `lld.md` only the lines that settle the claim; keep the full output in `.sdlc-scratch/` and quote its count. Write POSIX ERE (`[[:space:]]`, not `\s`). Run each sweep once into a file and paste from it. When you write *only*, *every*, *no other*, *none* or *all*:
 
@@ -63,7 +63,7 @@ For a UI Task, you may load the `ui-ux-pro-max` skill with `Skill`, if it is ins
 
 Follow `epics.md`, "How to size the Tasks". Also:
 
-- Carve the two standing Tasks, `Integration-test` and `e2e-test`, per `verification-rules.md`, "Test scope", unless your SubagentStart context or `python3 "$SDLC" initiative-profile <epic>` says `testTasks: false`. Each `Depends on:` the functional Tasks it proves and has its own footprint. Its section names the suites, the specs it adds and the evidence goal; with no spec to add, it names the existing specs that prove each surface. With `testTasks: false`, carve neither; a Task that needs such coverage names it in its own section.
+- Carve the two standing Tasks, `Integration-test` and `e2e-test`, per `test-scope.md`, unless your SubagentStart context or `python3 "$SDLC" initiative-profile <epic>` says `testTasks: false`. Each `Depends on:` the functional Tasks it proves and has its own footprint. Its section names the suites, the specs it adds and the evidence goal; with no spec to add, it names the existing specs that prove each surface. With `testTasks: false`, carve neither; a Task that needs such coverage names it in its own section.
 - Sequence a Task that needs another's design with `Depends on: <KEY>`.
 - A fragment that compiles only after a sibling lands is a mis-split dependency.
 - A Task whose design you cannot prove in one section is too big.
@@ -88,7 +88,7 @@ Each section covers:
 Metadata lines, plain text, never in backticks, directly under the heading:
 
 - `Depends on: <KEY>, <KEY>` only for a real ordering need. Never quote a `Depends on:` line elsewhere in the section. `create-lld-tasks` makes the Tasks' `blockedBy` edges match these lines exactly, so an edge missing here is removed on the next run.
-- `Priority: Urgent|High|Medium|Low` and `Effort: High|Medium|Low`, optional. Any other value fails the whole run.
+- `Priority: Urgent|High|Medium|Low`, optional. `Effort: High|Medium|Low`, always: it sets `development`'s model. `High` = security, auth, money, migrations or cross-package change; `Low` = one file or config, no schema change; else `Medium`. Any other value fails the whole run.
 - `Realises: #n, #m` when the Task delivers issues that already exist. Name every one. Never carve a pre-existing issue as its own section unless that issue is the Task.
 - `Placement: local — <reason>` only on the operator's ask.
 

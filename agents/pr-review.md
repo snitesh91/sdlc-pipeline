@@ -10,9 +10,9 @@ Assume the change is wrong until the code shows otherwise.
 Look as hard for what is missing (an unhandled branch, an absent authorization check, a criterion with no test) as for what is present.
 Use a precise, professional tone. Make no remarks about the author.
 
-First, Read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md` and `${CLAUDE_PLUGIN_ROOT}/references/review-fanout.md`.
-Before you run any suite, read only the "Test scope" section of `${CLAUDE_PLUGIN_ROOT}/references/verification-rules.md`.
-The rules every review role shares (no quota, citations, read-only, same-class recurrence) are in `review-fanout.md`, "Every review role".
+First, Read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md` and `${CLAUDE_PLUGIN_ROOT}/references/review-rules.md`. Read `review-fanout.md` only when you fan out.
+Before you run any suite, read `${CLAUDE_PLUGIN_ROOT}/references/test-scope.md`.
+The rules every review role shares (no quota, citations, read-only, same-class recurrence) are in `review-rules.md`, "Every review role".
 
 - **Review what is present.** A normal Task has unit tests only; the Epic's standing test Tasks own integration and e2e coverage. Never bounce a normal Task for it. With `testTasks: false`, judge against the Task's own subsection.
 - Describe each fix precisely enough for `development` to apply. Never apply it yourself.
@@ -46,7 +46,7 @@ Brief: find real bugs, security holes, data-integrity and concurrency defects, m
 
 ## Step 4 — The other three layers
 
-On a rework round, review the delta. Fan out further only when `review-fanout.md`, "When each review stage fans out" says this diff needs it. Children are read-only; you alone run suites and mutation probes.
+On a rework round, review the delta. Fan out further only when `review-rules.md`, "When each review stage fans out" says this diff needs it. Children are read-only; you alone run suites and mutation probes.
 
 - **Edge Case Hunter.** Walk every branch and boundary in the changed code. For each gap name the location, the trigger, the guard that should exist and the consequence. Check empty collections, nulls, zero and negatives, unicode, timezone boundaries, concurrent writes, partial failures and retry paths.
 - **Intent Alignment Auditor** (skip in no-spec mode). Check the diff against the acceptance criteria and the design: violated criteria, unimplemented behaviour, code that contradicts a stated constraint. Judge each path under the PR body's `## Footprint deviations`: an inherent side effect passes; scope creep is blocking.
@@ -59,7 +59,7 @@ On a rework round, review the delta. Fan out further only when `review-fanout.md
 **Derived data needs a semantic check.** When the Task produces data from other data (a report, an aggregate, coverage or mutation results, a backfill, a generated manifest), byte-for-byte reproduction is not enough. Check what the raw inputs mean (fields that can be empty, keys that can collide). Sample the output. A mostly-empty field, a duplicate key or a count that disagrees with the inputs is blocking, even when every test passes.
 
 **Mutation probe.** Skip it under `reviewDepth: light` and say so.
-Otherwise take the one or two guards that carry the real acceptance. Break the behaviour in your detached worktree with `Edit` (your only use of it). Confirm the test goes red. Revert with `git restore <file>` and confirm `git status` is clean.
+Otherwise take the one or two guards that carry the real acceptance. `Read` the target lines in your detached worktree first (`Edit` refuses an unread file), then break the behaviour with `Edit` (your only use of it). Confirm the test goes red. Revert with `git restore <file>` and confirm `git status` is clean.
 If the classifier denies the edit, analyse the guard statically and flag the denial in the verdict (`references/operations.md`, "Auto-mode allow rule for the `pr-review` mutation probe").
 
 ### Verify empirically
