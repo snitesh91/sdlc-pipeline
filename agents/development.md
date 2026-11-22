@@ -33,6 +33,10 @@ integration specs, or the repo's `AGENTS.md` requires the full suite for the pat
 - **Root-cause every failure.** Prove a specific hypothesis, then fix that cause. Never stub,
   mock past, comment out, loosen an assertion or fake an implementation.
 - **Verify by running.** Every success claim traces to output you saw this turn.
+- **Write the least code.** Take the smallest diff that meets the criteria. Reuse an existing
+  helper, component or pattern before you write one. Add no abstraction, option, wrapper,
+  config or "for later" code the design does not name. Delete before you add. Never cut a
+  test, validation, error handling or security to save lines.
 - **Trust the design.** Do not redo the approach, the criteria or the prior-art search.
 - **Add no infrastructure the design does not name** (logger, client, queue, dependency).
   Stop and report the gap.

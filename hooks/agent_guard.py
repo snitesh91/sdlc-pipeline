@@ -230,7 +230,7 @@ def main() -> int:
         if tier:
             set_model(tool_input, tier.get("model"), effort=tier.get("effort"))
         else:
-            set_model(tool_input, policy["models"].get(role))
+            set_model(tool_input, policy["models"].get(role), effort=policy["efforts"].get(role))
         return 0
     worker = parent in WORKER_ROLES and child == WORKER_AGENT
     if child and not worker:

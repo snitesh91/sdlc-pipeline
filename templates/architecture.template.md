@@ -2,7 +2,7 @@
 Template for <docRoot>/{epic,issue}-<n>/architecture.md: the HLD a human approves at
 Gate B and `lld` builds from. Rules: the sdlc plugin's references/design-doc-rules.md,
 "Document altitude". In short:
-  - Target length (guidance): about 1,500 words for an Epic, about 600 for a standing
+  - Length cap (`wc -w`; a review blocks over 1.5×): about 1,500 words for an Epic, about 600 for a standing
     child (Footprint and Implementation notes not counted). Keep it as short as the
     content allows; push code-level detail to lld.md.
   - The reader may not be a specialist. Explain each technical choice in plain words

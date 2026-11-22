@@ -110,11 +110,11 @@ def policy_file() -> dict:
 
 def model_policy(config: dict) -> dict:
     """hooks/model_policy.json with the config's `pipeline.models` / `fanout` / `tiers` /
-    `consult` merged over it per role, as sdlc_next.py's `show-config` reports it; `explore` as shipped."""
+    `consult` / `efforts` merged over it per role, as sdlc_next.py's `show-config` reports it; `explore` as shipped."""
     policy = policy_file()
     user = config.get("pipeline") if isinstance(config.get("pipeline"), dict) else {}
     merged = {key: {**(policy.get(key) or {}), **(user.get(key) or {})}
-              for key in ("models", "fanout", "tiers", "consult")}
+              for key in ("models", "fanout", "tiers", "consult", "efforts")}
     # A role the config pins in `models` but not in `tiers` runs untiered.
     for role in set(user.get("models") or {}) - set(user.get("tiers") or {}):
         merged["tiers"].pop(role, None)

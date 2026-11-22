@@ -68,7 +68,7 @@ Post the escalation as your handoff comment:
 Start from `architecture.template.md` and follow `design-doc-rules.md`. Also:
 
 - Write the Summary last, for a reader who reads only it and the diagram.
-- Aim for the target length in `design-doc-rules.md` (Footprint and Implementation notes excluded). Well over it, move detail down to `lld` or into a linked `decision-<slug>.md`.
+- Stay under the length cap in `design-doc-rules.md` (Footprint and Implementation notes excluded). Research widely; write only the decisions. Run `wc -w` before you commit and put the count in your handoff. Over the cap, move detail down to `lld` or into a linked `decision-<slug>.md`.
 
 - Do not invent decisions. A choice with one plausible option gets no table. If the doc is useful with every decision removed, write a short doc that says the design was never in question.
 - Include the data and control flow diagram, and one diagram per new boundary.
@@ -91,7 +91,7 @@ If your prompt says you replace a retired architect:
 
 - [ ] Plain-language Summary (about 150 words) and flow diagram first; every term of art defined on first use
 - [ ] Each technical choice explained in plain words before its detail
-- [ ] Near the target length; no pipeline reference, no paragraph that would not change an `lld`, no `lld`-depth content
+- [ ] Under the length cap (`wc -w`); no pipeline reference, no paragraph that would not change an `lld`, no `lld`-depth content
 - [ ] Every decision table has a real alternative, a bet line and a fallback line
 - [ ] Data and control flow diagram present; one diagram per new boundary
 - [ ] Every NFR is measurable; cost line stated

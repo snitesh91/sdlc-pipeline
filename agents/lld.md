@@ -24,7 +24,7 @@ First, read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`, `${CLAUDE_PLU
 3. **Declare collision safety.** Make each Task's `## Footprint` complete enough for safe parallel work.
 4. **Carve the Tasks.** Write one section per Task. Do not create issues; the orchestrator does that after `lld-review`.
 5. **Author the design, not the code.** Commit `lld.md` only. Never restate `architecture.md`; point to its section. A fenced snippet is only for a contract, at most 15 lines. Never edit `architecture.md` or `product.md`.
-6. **Keep it short.** Follow the length targets in `design-doc-rules.md`.
+6. **Keep it short.** Stay under the length caps in `design-doc-rules.md`: 400 words per Task section, 500 outside them. Run `wc -w` per section before you commit and put the counts in your handoff.
 
 ## First move: fits or deviates
 

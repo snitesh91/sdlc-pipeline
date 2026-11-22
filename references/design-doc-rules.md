@@ -11,9 +11,9 @@ A human reads each design doc. Write for that reader, not for the next agent.
 - Say nothing about the pipeline: no stage names, gates, fields, rounds, review history or revision deltas. Put process and deltas in the handoff comment.
 - State each fact once, in the section that owns it. Other sections refer to it by section name.
 - Never write a "changes to earlier documents" section. Link the earlier document in one line under Related or Constraints. Amend it only through `references/initiatives.md`, "Amending an approved `product.md`".
-- Keep each doc as short as its content allows. The targets below are guidance, not limits. A doc well over its target is a sign to cut detail or split the work; it never fails review for length alone.
+- **The lengths below are caps, not guidance.** Keep each doc as short as its content allows, and never over its cap. Count with `wc -w` before you commit and put the count in your handoff. Over the cap: cut detail, link a long analysis, or split the work. A review blocks a doc more than 1.5× its cap.
 
-| Doc | Target length (about) |
+| Doc | Length cap (words) |
 |---|---|
 | `product.md` | standing child 800; Initiative of one Epic 1,500; Initiative of several Epics 2,500 |
 | `architecture.md` | standing child 600; Epic 1,500 |
@@ -52,7 +52,7 @@ The reader approves the design at Gate B and may not be a specialist in this are
 - Write non-functional requirements as measurable scenarios. State the cost line, even when it is `$0`.
 - Write acceptance criteria as a flat checklist, one line each. Nothing else cites an AC by number.
 - Include Data model and Failure modes only when entities or invariants change, or a new failure path appears.
-- Include `## Footprint` and `## Implementation notes` only in a standing child's doc. Never in an Epic's doc. They do not count toward the target.
+- Include `## Footprint` and `## Implementation notes` only in a standing child's doc. Never in an Epic's doc. They do not count toward the cap.
 - No decisions-log section.
 
 ### `lld.md` is the developer's design
@@ -63,8 +63,8 @@ The reader is the developer who builds one Task.
 - Never restate `architecture.md`. Point to its section.
 - Never paste implementation code. A fenced snippet is allowed only for a contract (a signature, a type, a message shape) of at most 15 lines.
 - Paste proof-sweep output trimmed to the lines that settle the claim. Put a longer output in `.sdlc-scratch/` and quote its count.
-- Aim for about 500 words outside Task sections (the carving summary, `## Epic-close checks`, `## Sibling heads checked`).
-- A Task section far over about 400 words often means the Task is too big: consider splitting it.
+- Keep text outside Task sections (the carving summary, `## Epic-close checks`, `## Sibling heads checked`) under 500 words.
+- Keep each Task section under 400 words. A Task that needs more is too big: split it.
 
 ## Scope alignment before `product`
 

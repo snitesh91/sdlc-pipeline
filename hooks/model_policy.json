@@ -2,7 +2,7 @@
   "_comment": "The one home of model and fan-out policy; agent_guard.py enforces it. pipeline.models.<role> / pipeline.fanout.<role> in the driven repo's config override it (a role's entry replaces the default whole). A fanout role absent here may not fan out. `explore`: stage roles that may launch the read-only Explore agent for search (not a fan-out; its own model).",
   "orchestrator": {"model": "sonnet", "_comment": "Default; pipeline.orchestrator.model in the driven repo's config overrides it for bin/sdlc-run and the session-start check. skills/run/SKILL.md sets no model, so the session's model (bin/sdlc-run passes --model) drives the run."},
   "models": {
-    "product": "opus",
+    "product": "fable",
     "product-review": "opus",
     "architecture": "opus",
     "arch-review": "opus",
@@ -10,8 +10,13 @@
     "lld-review": "opus",
     "development": "sonnet",
     "pr-review": "opus",
-    "exploratory": "sonnet",
+    "exploratory": "opus",
     "initiative-close": "opus"
+  },
+  "efforts": {
+    "_comment": "Fixed effort per untiered role; a role absent here runs at its default effort. pipeline.efforts.<role> overrides it.",
+    "product": "medium",
+    "architecture": "high"
   },
   "tiers": {
     "_comment": "A tiered role's model and effort come from the Task size the orchestrator puts in the prompt header (`EFFORT: Low|Medium|High`, else Medium). `replacement` is the context-reset replacement's (`REPLACEMENT: 1`), always a higher model family. pipeline.tiers.<role> overrides a role whole.",

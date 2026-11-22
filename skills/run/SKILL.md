@@ -185,6 +185,12 @@ can move ("A cloud run").
 
 - **During `development` and `pr-review`, apply the recommended fix yourself.**
 - **How you ask** follows `pipeline.humanChannel` (`references/cloud-mode.md`, "Human channel").
+- **Ask crisply.** Each question stands alone: one line of context (unit, what it blocks), the
+  question in plain words, and 2–4 options with the recommended one first and its trade-off in
+  a few words. No command names, field names or internal ids unless the operator needs them to
+  act. One decision per question.
+- **Report crisply.** Lead with the outcome in one sentence. Then only what the operator must
+  act on or know. Link evidence; never paste it.
 - **Escalate exactly three things:** a product or scope call, an amendment to a gate-approved
   doc, a valve trip (`mark-needs-human`). With `pipeline.epicClose.auto` on, also an epic close
   blocked by a Blocker/Critical delta, an open manual-testing bug, or a verification that could
@@ -370,7 +376,7 @@ then hands over to a fresh one: `end-cloud-session <n> --outcome context-reset`,
 
 ## Step 4 — Report back to the user
 
-Summarise every unit touched, stages run, rework rounds and current state. For an Initiative run,
+Summarise every unit touched in one line each: stages run, rework rounds, current state. For an Initiative run,
 group by Epic (cut, run, parked, closed, blocked and on what) and end with the Initiative's own
 `none` reason. Above the fold: `needs-human` units with reasons; blocked units and their waits;
 rework findings; gate-pending units; merged PRs and closed issues; `warnings`, `uncovered_paths`

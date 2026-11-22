@@ -13,6 +13,9 @@ Every stage agent reads this file first; its agent file names the rest. The driv
 
 Write in STE-lite: one instruction or fact per sentence, active voice, present tense, one term per concept, no filler, no preamble, no recap.
 
+- **Research deep, write lean.** Read, search and verify as widely as the work needs. The doc, comment or handback carries only the conclusions the next reader acts on, not the research trail. Link a long analysis; never paste it.
+- **Every length limit is a hard cap.** Doc caps are in `references/design-doc-rules.md`; comment and handback caps are below. Count before you commit or post (`wc -w`, `wc -c`). Over a cap, cut; never argue for the extra length.
+
 ## Attribution is falsifiable
 
 Run this check before every handoff:

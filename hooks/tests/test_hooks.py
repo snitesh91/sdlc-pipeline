@@ -1038,6 +1038,16 @@ def test_agent_guard_development_tier_from_task_size(tmp_path, sdlc_repo, header
                           prompt=header + "\nBuild it")) == want
 
 
+@pytest.mark.parametrize("agent,header,want", [
+    ("sdlc:architecture", "ROLE: architecture ISSUE: 5", ("opus", "high")),
+    ("sdlc:product", "ROLE: product ISSUE: 5", ("fable", "medium")),
+    ("sdlc:exploratory", "ROLE: exploratory ISSUE: 5", ("opus", None)),
+])
+def test_agent_guard_fixed_model_and_effort(tmp_path, sdlc_repo, agent, header, want):
+    assert setting(launch(sdlc_repo, tmp_path, agent, model="haiku",
+                          prompt=header + "\nGo")) == want
+
+
 def test_agent_guard_replacement_must_move_up_a_family(tmp_path):
     repo = _policy_repo(tmp_path, {"tiers": {"development": {"Medium": {
         "model": "opus", "effort": "high", "replacement": {"model": "sonnet", "effort": "max"}}}}})
