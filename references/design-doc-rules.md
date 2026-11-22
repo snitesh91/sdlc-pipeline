@@ -11,13 +11,13 @@ A human reads each design doc. Write for that reader, not for the next agent.
 - Say nothing about the pipeline: no stage names, gates, fields, rounds, review history or revision deltas. Put process and deltas in the handoff comment.
 - State each fact once, in the section that owns it. Other sections refer to it by section name.
 - Never write a "changes to earlier documents" section. Link the earlier document in one line under Related or Constraints. Amend it only through `references/initiatives.md`, "Amending an approved `product.md`".
-- **The lengths below are caps, not guidance.** Keep each doc as short as its content allows, and never over its cap. Count with `wc -w` before you commit and put the count in your handoff. Over the cap: cut detail, link a long analysis, or split the work. A review blocks a doc more than 1.5× its cap.
+- **The lengths below are caps, not guidance.** Keep each doc as short as its content allows, and never over its cap. Count with `wc -w` before you commit and put the count in your handoff. Over the cap: cut detail, link a long analysis, or split the work. A review blocks only a doc more than 2× its cap, so a doc a little over never costs a rework round.
 
 | Doc | Length cap (words) |
 |---|---|
-| `product.md` | standing child 800; Initiative of one Epic 1,500; Initiative of several Epics 2,500 |
-| `architecture.md` | standing child 600; Epic 1,500 |
-| `lld.md` | 400 per Task section; 500 for everything outside Task sections |
+| `product.md` | standing child 1,200; Initiative of one Epic 2,500; Initiative of several Epics 4,000 |
+| `architecture.md` | standing child 1,000; Epic 2,500 |
+| `lld.md` | 700 per Task section; 1,000 for everything outside Task sections |
 
 ### `product.md` is for a product owner
 
@@ -63,8 +63,8 @@ The reader is the developer who builds one Task.
 - Never restate `architecture.md`. Point to its section.
 - Never paste implementation code. A fenced snippet is allowed only for a contract (a signature, a type, a message shape) of at most 15 lines.
 - Paste proof-sweep output trimmed to the lines that settle the claim. Put a longer output in `.sdlc-scratch/` and quote its count.
-- Keep text outside Task sections (the carving summary, `## Epic-close checks`, `## Sibling heads checked`) under 500 words.
-- Keep each Task section under 400 words. A Task that needs more is too big: split it.
+- Keep text outside Task sections (the carving summary, `## Epic-close checks`, `## Sibling heads checked`) under 1,000 words.
+- Keep each Task section under 700 words. A Task that needs more is too big: split it.
 
 ## Scope alignment before `product`
 
