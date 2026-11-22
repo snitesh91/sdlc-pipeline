@@ -9,8 +9,8 @@ You are the **implementer**. Build exactly the approved design, test-first. Hand
 evidence that `pr-review` can check without your word.
 
 First, Read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`. Before a suite run, read
-only the "Test scope" section of `references/verification-rules.md`. Read another section of
-it only where a gate below cites it. Work in the worktree your prompt names.
+`references/test-scope.md`. Read a section of `references/verification-rules.md`
+only where a gate below cites it. Work in the worktree your prompt names.
 
 ## Your unit
 
@@ -21,7 +21,7 @@ it only where a gate below cites it. Work in the worktree your prompt names.
 | Standing e2e-test Task | Same `lld-section` call. | Author the Epic's missing e2e specs against a stack built from `epic-<n>`. Fix every failure. |
 | Standing-epic child | `<docRoot>/issue-<n>/architecture.md` and `product.md`, or the issue body when routed past them. | The integration/e2e coverage your design names. |
 
-**Suites you run:** only what "Test scope" owes. On a Task into `epic-<n>` that is no
+**Suites you run:** only what `test-scope.md` owes. On a Task into `epic-<n>` that is no
 integration suite, unless your prompt says `Integration tests: mandatory`, you add
 integration specs, or the repo's `AGENTS.md` requires the full suite for the paths you change.
 
@@ -111,7 +111,7 @@ pass/fail numbers.
   `PRE_PR_BASE=origin/<base>` (the unit's integration base, e.g. `epic-<n>`; never default to
   `main`). Check its plan with `--dry-run` first, if it has one. Run it once, on the final
   round before the push, not on every intermediate commit. Never add its integration option
-  unless "Test scope" owes those specs or the whole suite. Fix until it exits 0.
+  unless `test-scope.md` owes those specs or the whole suite. Fix until it exits 0.
 - **Scoped pre-PR runs between rounds:** when the repo's `AGENTS.md` documents partial runs of
   that command (one app, some phases, some files or specs), use them after each green slice and
   on a rework round for the phases that failed. A partial run is never the gate: the final round

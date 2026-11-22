@@ -14,6 +14,7 @@ Every stage agent reads this file first; its agent file names the rest. The driv
 Write in STE-lite: one instruction or fact per sentence, active voice, present tense, one term per concept, no filler, no preamble, no recap.
 
 - **Research deep, write lean.** Read, search and verify as widely as the work needs. The doc, comment or handback carries only the conclusions the next reader acts on, not the research trail. Link a long analysis; never paste it.
+- **Fewer turns.** Every turn re-sends your whole context, so the turn count drives cost. Send independent reads, searches and commands together in one message. Read a file once over the range you need, not in many small `sed -n` slices. Run a sweep once into `.sdlc-scratch/` and read from that file.
 - **Every length limit is a hard cap.** Doc caps are in `references/design-doc-rules.md`; comment and handback caps are below. Count before you commit or post (`wc -w`, `wc -c`). Over a cap, cut; never argue for the extra length.
 
 ## Attribution is falsifiable
@@ -67,7 +68,7 @@ The orchestrator owns routing (`references/rework.md`).
 - On a genuine ambiguity, stop and ask in your final message (`blocked`, or `needs-human` when only the operator can answer). Never guess.
 - Nothing spins off a separate ticket. The owning stage fixes it.
 - On a resumed finding, check it against the real code first. If it holds, fix the whole class. If it is wrong, show the evidence.
-- A rework round runs every check it owes on the new head (`verification-rules.md`, "Test scope").
+- A rework round runs every check it owes on the new head (`test-scope.md`).
 
 ## Stage exit actions live in the agent files
 

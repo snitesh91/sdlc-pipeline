@@ -13,7 +13,7 @@ First, read `${CLAUDE_PLUGIN_ROOT}/references/stage-playbooks.md`, `${CLAUDE_PLU
 |---|---|
 | Before you carve | `references/epics.md`, "How to size the Tasks" |
 | A proof sweep or a completeness claim | `references/verification-rules.md`, "Establish a number by running the thing" and "A completeness claim over a footprint is a sweep, not a list" |
-| A standing test Task | `references/verification-rules.md`, "Test scope" |
+| A standing test Task | `references/test-scope.md` |
 | A piece that may deviate | `references/epics.md`, "Architecture deviation escalation" |
 | A `Placement: local` Task | `references/cloud-mode.md`, "Cloud-first runs" |
 
@@ -41,7 +41,7 @@ For each Task:
 - Check `package.json` before you name a dependency.
 - Check the other Task sections for the same work.
 
-Send one `Explore` brief with the symbols to map before your first code read. Then Read by symbol or line range. Never `cat` a whole file. Use absolute worktree paths.
+Send one `Explore` brief with the symbols to map before your first code read. Hand each later codebase sweep (footprint, sibling heads, prior art, call sites) to `Explore` too, and keep only its conclusion: your own reads are for the lines you cite. Then Read by symbol or line range. Never `cat` a whole file. Use absolute worktree paths.
 
 Use `Bash` only for proof sweeps. Paste into `lld.md` only the lines that settle the claim; keep the full output in `.sdlc-scratch/` and quote its count. Write POSIX ERE (`[[:space:]]`, not `\s`). Run each sweep once into a file and paste from it. When you write *only*, *every*, *no other*, *none* or *all*:
 
@@ -63,7 +63,7 @@ For a UI Task, you may load the `ui-ux-pro-max` skill with `Skill`, if it is ins
 
 Follow `epics.md`, "How to size the Tasks". Also:
 
-- Carve the two standing Tasks, `Integration-test` and `e2e-test`, per `verification-rules.md`, "Test scope", unless your SubagentStart context or `python3 "$SDLC" initiative-profile <epic>` says `testTasks: false`. Each `Depends on:` the functional Tasks it proves and has its own footprint. Its section names the suites, the specs it adds and the evidence goal; with no spec to add, it names the existing specs that prove each surface. With `testTasks: false`, carve neither; a Task that needs such coverage names it in its own section.
+- Carve the two standing Tasks, `Integration-test` and `e2e-test`, per `test-scope.md`, unless your SubagentStart context or `python3 "$SDLC" initiative-profile <epic>` says `testTasks: false`. Each `Depends on:` the functional Tasks it proves and has its own footprint. Its section names the suites, the specs it adds and the evidence goal; with no spec to add, it names the existing specs that prove each surface. With `testTasks: false`, carve neither; a Task that needs such coverage names it in its own section.
 - Sequence a Task that needs another's design with `Depends on: <KEY>`.
 - A fragment that compiles only after a sibling lands is a mis-split dependency.
 - A Task whose design you cannot prove in one section is too big.

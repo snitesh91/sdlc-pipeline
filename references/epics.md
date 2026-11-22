@@ -106,7 +106,7 @@ drives an unlinked issue. Unlink closed sub-issues, or rotate a standing epic be
   pre-existing issue goes to `realises_failed`; an already-closed one is listed in `realises`
   (`blocked: false`, `reason: "already closed"`).
 - **Two standing Tasks per Epic, Integration-test and e2e-test**, run after the functional
-  Tasks and run only the specs they add (`references/verification-rules.md`, "Test scope").
+  Tasks and run only the specs they add (`references/test-scope.md`).
   None under `testTasks: false` ("Initiative branch").
 - **`Priority:`** is optional, else `pipeline.issueDefaults`. **`Effort:`** is always written;
   it sets `development`'s model tier (`hooks/model_policy.json`, `tiers`).
@@ -242,8 +242,7 @@ the doc). An Epic with no phase-Tasks and no `epic:architected` goes to `needs_p
    `carried_forward_files` and `evidence_breaks`).
 2. Run the exploratory pass and record it. Run each `unattested_suites` suite whose workflow
    does not run on the epic PR with a fresh `sdlc:development` agent and a run-only brief.
-   Every other suite waits for the epic PR's check (`references/verification-rules.md`,
-   "Test scope").
+   Every other suite waits for the epic PR's check (`references/test-scope.md`).
 3. Second call: refuses on `missing_verification` or a `missing` suite (`checks:
    missing-checks`) or `version_collisions` (a `pipeline.epicClose.versionedFiles` entry whose
    `textPaths` differ from the base's while its `versionFile`'s version equals the base's:

@@ -114,7 +114,7 @@ This is a standing exception to any draft-PR rule in the operator's global `CLAU
 ## Local-CI attestation
 
 - A required suite (`requiredWorkflows`, in step with the workflows' `name:`) applies to a PR only when the PR changes a file its entry covers.
-- **One rule** wherever a suite is checked (`transition` into `pr-review`, `pr-checks`, `merge-pr`, `close-epic`): a passing GHA check for its workflow on the PR head **or** a `record-local-ci` attestation for that head. Which suites a stage runs at all: `references/verification-rules.md`, "Test scope".
+- **One rule** wherever a suite is checked (`transition` into `pr-review`, `pr-checks`, `merge-pr`, `close-epic`): a passing GHA check for its workflow on the PR head **or** a `record-local-ci` attestation for that head. Which suites a stage runs at all: `references/test-scope.md`.
 - Attest with `record-local-ci --pr <pr> --suite <suite> --sha <HEAD> --command "..." --output <file>`, only for a suite actually run and passed. Its refusals name the fix.
 - An attestation counts only while `<sha>` is the PR head. A push makes it stale, unless the push only merged files outside the suite's coverage (`carried_attestation_forward`). Re-run and re-attest only when neither an attestation nor a passing check holds.
 - `transition --expect-stage pr-review` applies the rule after sync. It returns `held` with a per-suite `check` (`pending` / `failing` / `skipped` / `missing`) and `reason`:
@@ -128,7 +128,7 @@ This is a standing exception to any draft-PR rule in the operator's global `CLAU
 
 **`pr-checks` status `missing-checks`** never means "still running". Never poll it. Act on its `hint` (also on `merge-pr`'s refusal), causes in likelihood order:
 
-- The workflow does not run on this PR and the suite is not attested: `development` runs it and `record-local-ci`, only where "Test scope" owes that run. On a Task PR into `epic-<n>`, an integration suite here is a config defect (`bases` missing).
+- The workflow does not run on this PR and the suite is not attested: `development` runs it and `record-local-ci`, only where `references/test-scope.md` owes that run. On a Task PR into `epic-<n>`, an integration suite here is a config defect (`bases` missing).
 - The workflow file is not on the PR branch: `sync-branch` and push.
 - A required workflow never reported (renamed, disabled, `paths:` mismatch): config defect. `pr-review` stops with `needs-human`; you run `mark-needs-human`.
 

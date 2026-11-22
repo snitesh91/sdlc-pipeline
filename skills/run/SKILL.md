@@ -26,8 +26,9 @@ All under `${CLAUDE_PLUGIN_ROOT}/references/`.
 | `rework.md` | A review finding, a reported ambiguity, a possible valve trip, a replacement agent |
 | `stage-playbooks.md` | Delegating any stage (every stage agent reads it) |
 | `design-doc-rules.md` | `product.md`/`architecture.md` content; scope alignment |
-| `verification-rules.md` | Writing a `development`/`pr-review` brief or a reconcile ("Test scope") |
-| `review-fanout.md` | Review fan-out |
+| `test-scope.md` | Writing a `development`/`pr-review` brief or a reconcile |
+| `verification-rules.md` | How a claim is proven (sweeps, positive controls, local stack only) |
+| `review-rules.md` / `review-fanout.md` | Shared review rules / review fan-out |
 | `epics.md` | Profiles, phase-Tasks, footprints, deviation, epic close, board status |
 | `operations.md` | Token/repo access, issue fields, auto-merge, local-CI attestation, auto-mode denials |
 | `continuous-mode.md` | Unattended looping |
@@ -72,7 +73,7 @@ task:       development -> pr-review -> auto-merge into epic-<n>
   **Legacy profile** (`driven: false`): skip it, Tasks included.
 - **Every Epic has two standing Tasks** (Integration-test, e2e-test) that run after every
   functional Task merges, unless its Initiative's profile sets `testTasks: false`.
-- **Test scope** (`references/verification-rules.md`, "Test scope"): the whole integration suite
+- **Test scope** (`references/test-scope.md`): the whole integration suite
   runs once, as the epic PR's CI into `main`. The pipeline never runs the full e2e suite. Epic
   close needs the exploratory pass (`references/epics.md`, "Epic closing").
 - **`product-review` follows every `product`** unless a standing child is routed past it. Clean
@@ -287,7 +288,7 @@ Give the agent (by `gh` command for anything large; in the cloud a `gh api` GET)
 3. For `lld`: `architecture.md` is the source of truth; fits-vs-deviates comes first.
 4. Its worktree, with "use absolute paths or a standalone `cd`; never chain `cd <path> && …`; never touch the main
    checkout". For `development`, the test-env helper and `Integration tests: mandatory` only per
-   "Test scope"; never brief a whole-suite run "Test scope" does not owe. For `pr-review` and `initiative-close`, the repo root.
+   `references/test-scope.md`; never brief a whole-suite run it does not owe. For `pr-review` and `initiative-close`, the repo root.
 5. For a review: diff against `origin/` refs after `git fetch origin`.
 6. Prior art only you can read: export it to `<worktree>/.sdlc-scratch/prior-art/` and name each file in the prompt.
 
