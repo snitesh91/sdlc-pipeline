@@ -3829,6 +3829,32 @@ def test_lane_caps_follow_the_sample_config():
     assert (DEV_LANE_PARALLELISM, PR_REVIEW_PARALLELISM, DESIGN_LANE_PARALLELISM) == (1, 1, 1)
 
 
+def test_show_config_key_prints_one_value(tmp_path):
+    cfg = json.loads((Path(__file__).resolve().parents[2] / "sdlc.config.sample.json").read_text())
+    cfg["parallelism"]["devLane"] = 3
+    cfg_path = tmp_path / "sdlc-pipeline.config.json"
+    cfg_path.write_text(json.dumps(cfg))
+    script = str(Path(__file__).resolve().parents[1] / "sdlc_next.py")
+    env = {**os.environ, "SDLC_CONFIG": str(cfg_path), "GITHUB_TOKEN": "x"}
+    run = lambda *a: subprocess.run([sys.executable, script, "show-config", *a],
+                                    env=env, text=True, capture_output=True)
+    ok = run("--key", "parallelism.devLane")
+    assert ok.returncode == 0 and json.loads(ok.stdout) == {"parallelism.devLane": 3}
+    bad = run("--key", "parallelism.nope")
+    assert bad.returncode == 1 and "no config key" in json.loads(bad.stdout)["error"]
+
+
+@pytest.mark.parametrize("command,fn", [("list-needs-human", "cmd_list_needs_human"),
+                                        ("check-epics-closeable", "cmd_check_epics_closeable")])
+def test_end_checks_accept_the_runs_issue_number(monkeypatch, capsys, command, fn):
+    import sdlc.cli as cli
+    monkeypatch.setenv("GITHUB_TOKEN", "x")
+    monkeypatch.setattr(cli, "get_work_item_provider", lambda: None)
+    monkeypatch.setattr(cli, fn, lambda gh: {"ran": True})
+    assert cli.main([command, "6718"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"ran": True}
+
+
 def test_show_config_lane_caps_default_to_one_when_absent(tmp_path):
     cfg = json.loads((Path(__file__).resolve().parents[2] / "sdlc.config.sample.json").read_text())
     for key in ("devLane", "prReview", "designLane"):

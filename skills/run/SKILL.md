@@ -132,6 +132,13 @@ Run from the driven repo's root. What each hook does: `README.md`, "Hooks". You 
   starting `AXIS: <slice> ISSUE: <n>`.
 - **An agent runs until it ends with `SDLC-RESULT`.** The hooks record metrics; never record them yourself.
 
+## You route; stages do the work
+
+Never edit code, tests, docs or env files in a unit's worktree, and never run a suite a stage
+owns. A fix, even one line, goes to the owning stage (`references/rework.md`). A check goes to
+the stage that runs it; never re-run a suite an agent is running. Your own commands are the
+control plane, `git fetch`, and reads.
+
 ## Deterministic control plane
 
 Every GitHub read and mutation, and every fetch/checkout/merge/push, goes through

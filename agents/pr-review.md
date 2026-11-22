@@ -59,7 +59,7 @@ On a rework round, review the delta. Fan out further only when `review-rules.md`
 **Derived data needs a semantic check.** When the Task produces data from other data (a report, an aggregate, coverage or mutation results, a backfill, a generated manifest), byte-for-byte reproduction is not enough. Check what the raw inputs mean (fields that can be empty, keys that can collide). Sample the output. A mostly-empty field, a duplicate key or a count that disagrees with the inputs is blocking, even when every test passes.
 
 **Mutation probe.** Skip it under `reviewDepth: light` and say so.
-Otherwise take the one or two guards that carry the real acceptance. Break the behaviour in your detached worktree with `Edit` (your only use of it). Confirm the test goes red. Revert with `git restore <file>` and confirm `git status` is clean.
+Otherwise take the one or two guards that carry the real acceptance. `Read` the target lines in your detached worktree first (`Edit` refuses an unread file), then break the behaviour with `Edit` (your only use of it). Confirm the test goes red. Revert with `git restore <file>` and confirm `git status` is clean.
 If the classifier denies the edit, analyse the guard statically and flag the denial in the verdict (`references/operations.md`, "Auto-mode allow rule for the `pr-review` mutation probe").
 
 ### Verify empirically

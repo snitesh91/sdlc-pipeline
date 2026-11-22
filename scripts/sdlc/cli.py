@@ -84,6 +84,18 @@ _CLOSED_WALK_BY_COMMAND = {"list-needs-human": "none", "check-epics-closeable": 
 _LISTING_BY_COMMAND = {"check-epics-closeable": lambda: [kind_filter("epic")]}
 
 
+
+def _config_key(config: dict, key):
+    """`show-config --key a.b`: only that value, as {key: value}; the whole config without a key."""
+    if not key:
+        return config
+    value = config
+    for part in key.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return {"ok": False, "error": f"no config key {key!r}"}
+        value = value[part]
+    return {key: value}
+
 def _focus_numbers(args) -> set:
     """The issue numbers a command names, for `GitHubRest.issue_list`'s closed-issue reads."""
     out: set = set()
@@ -503,13 +515,17 @@ def main(argv: Optional[list] = None) -> int:
                                                        a.classifier_denied, a.run_id))
     p = sub.add_parser("show-config",
                         help="Print the effective config and the running plugin version")
-    p.set_defaults(func=lambda a: cmd_show_config())
+    p.add_argument("--key", default=None,
+                   help="Print only this dotted key (e.g. parallelism.devLane, models)")
+    p.set_defaults(func=lambda a: _config_key(cmd_show_config(), a.key))
 
     p = sub.add_parser("pairing-counts",
                         help="Escalation-valve bounce counts for one issue")
     p.add_argument("issue", type=int)
     p.set_defaults(func=lambda a: cmd_pairing_counts(get_work_item_provider(), a.issue))
     p = sub.add_parser("list-needs-human")
+    # Callers pass the run's issue; the list is the same with or without it.
+    p.add_argument("issue", nargs="?", type=int, help="Ignored; accepted so the usual call shape works")
     p.set_defaults(func=lambda a: cmd_list_needs_human(get_work_item_provider()))
     p = sub.add_parser("audit-issues",
                         help="Open pipeline issues missing issueType/parent/Priority/Effort/Status, and Epics with no phase-Tasks")
@@ -579,6 +595,7 @@ def main(argv: Optional[list] = None) -> int:
     p.set_defaults(func=lambda a: cmd_record_epic_verification(
         get_work_item_provider(), a.epic, a.kind, a.summary, a.sha, repo_path=a.repo_path))
     p = sub.add_parser("check-epics-closeable")
+    p.add_argument("issue", nargs="?", type=int, help="Ignored; accepted so the usual call shape works")
     p.set_defaults(func=lambda a: cmd_check_epics_closeable(get_work_item_provider()))
     p = sub.add_parser("close-initiative",
                         help="Close the Initiative once its Epics are closed and verified")

@@ -14,6 +14,7 @@ Every stage agent reads this file first; its agent file names the rest. The driv
 Write in STE-lite: one instruction or fact per sentence, active voice, present tense, one term per concept, no filler, no preamble, no recap.
 
 - **Research deep, write lean.** Read, search and verify as widely as the work needs. The doc, comment or handback carries only the conclusions the next reader acts on, not the research trail. Link a long analysis; never paste it.
+- **Small outputs.** Run `git diff --stat` before a full diff, then diff only the paths you need. Read one config value with `show-config --key <dotted.key>`, never the whole dump.
 - **Fewer turns.** Every turn re-sends your whole context, so the turn count drives cost. Send independent reads, searches and commands together in one message. Read a file once over the range you need, not in many small `sed -n` slices. Run a sweep once into `.sdlc-scratch/` and read from that file.
 - **Every length limit is a hard cap.** Doc caps are in `references/design-doc-rules.md`; comment and handback caps are below. Count before you commit or post (`wc -w`, `wc -c`). Over a cap, cut; never argue for the extra length.
 
@@ -30,9 +31,12 @@ Run this check before every handoff:
 
 Nothing wakes you after your turn ends. Wait for a background command with Monitor, or use blocking calls. A final message that waits is a stall.
 
+- Never wait in a shell loop (`until grep …; sleep`, `while pgrep`): it runs into the Bash timeout. Use Monitor.
+- Before your handback, stop every background command and worker you started (`TaskStop`). Work after the handback races the orchestrator.
+
 ### The handback is terse
 
-Your final message is for routing; evidence lives in the PR, comment or doc. Send only: **HEAD / PR**; **BLOCKER** (one line, `blocked` / `needs-human` / `failed` only); **QUESTIONS** (`needs-human` only, up to 4 lines `Q: <question> — options: <a> | <b>`); **CONCERN** (`done-with-concerns` only, one line); **DETAIL** (the link to the evidence). The last line is `SDLC-RESULT: {"issue": <n>, "stage": "<role>", "outcome": "<outcome>"}`. A standing child may add `"next"` and `"why"` (≤ 120 chars); the orchestrator decides. The whole final message stays under 1,500 characters: the SubagentStop hook refuses a longer one once, and you re-send it terse. Never send an interim `SDLC-RESULT`.
+Your final message is for routing; evidence lives in the PR, comment or doc. Send only: **HEAD / PR**; **BLOCKER** (one line, `blocked` / `needs-human` / `failed` only); **QUESTIONS** (`needs-human` only, up to 4 lines `Q: <question> — options: <a> | <b>`); **CONCERN** (`done-with-concerns` only, one line); **DETAIL** (the link to the evidence). The last line is `SDLC-RESULT: {"issue": <n>, "stage": "<role>", "outcome": "<outcome>"}`. A standing child may add `"next"` and `"why"` (≤ 120 chars); the orchestrator decides. The whole final message stays under 1,500 characters: the SubagentStop hook refuses a longer one once, and you re-send it terse. Aim for 1,200 and check with `wc -c` on a draft file first: a refusal costs a full re-send. Never send an interim `SDLC-RESULT`.
 
 | `outcome` | Meaning |
 |---|---|
